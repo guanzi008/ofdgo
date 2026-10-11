@@ -16,7 +16,6 @@ package ofdgo
 
 import (
 	"fmt"
-	"io"
 )
 
 // U3D线集增量编码的算术编码上下文
@@ -94,9 +93,11 @@ func (d *u3dDecoder) primitiveDeclaration(r *u3dValues, name string, points bool
 			return fmt.Errorf("invalid U3D reserved primitive parameter")
 		}
 	}
-	if r.u32() != 0 {
-		return fmt.Errorf("unsupported U3D skeletal primitive set")
+	bones, err := d.skeleton(r)
+	if err != nil {
+		return err
 	}
+	decl.mesh.Bones = bones
 	if err := r.done(); err != nil {
 		return err
 	}
@@ -444,17 +445,8 @@ func (d *u3dDecoder) primitiveContinuation(r *u3dValues, name string, points boo
 		}
 	}
 	if b := reader.bits; b != nil {
-		if b.pos > uint64(len(b.data))*8 {
-			return io.ErrUnexpectedEOF
-		}
-		if b.u32() != 0 {
-			return fmt.Errorf("invalid U3D primitive compression flush")
-		}
-		if b.err != nil {
-			return b.err
-		}
-		if (b.pos-16+7)/8 != uint64(len(b.data)) {
-			return fmt.Errorf("unexpected U3D primitive compressed data")
+		if err := b.finish(); err != nil {
+			return err
 		}
 		r.pos = len(r.data)
 	}

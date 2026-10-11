@@ -30,6 +30,7 @@ type type2Font struct {
 	names        map[string]int
 	nominal, def float64
 	seed         uint64
+	cid          bool
 }
 
 // type2State 按Type2规范保存跨子程序共享的执行状态
@@ -489,6 +490,9 @@ func (s *type2State) run(data []byte, depth int) (bool, error) {
 // 入参: code 标准字符码, x 横向偏移, y 纵向偏移
 // 返回: error 组件或指令错误
 func (s *type2State) appendComponent(code, x, y float64) error {
+	if s.font.cid {
+		return fmt.Errorf("CID CFF cannot use StandardEncoding components")
+	}
 	if code < 0 || code > 255 || code != math.Trunc(code) || type1StandardNames[int(code)] == "" {
 		return fmt.Errorf("invalid Type2 component code")
 	}

@@ -174,42 +174,42 @@ func u3dTriangleNormal(points [3]u3dVector) u3dVector {
 	return normal.unit()
 }
 
-// instances 按拓扑顺序构建全部父路径实例，限制共享层级的指数展开
-// 入参: limit 最大实例数
-// 返回: error 结构、预算、实例上限或取消错误
-func (r *u3dRender) instances(limit int) error {
+// sceneGraph 校验父子关系并确定拓扑顺序，只有默认根的后代接入场景
+// 返回: []int 拓扑顺序, map[string]int 节点索引, error 结构、预算或取消错误
+func (r *u3dRender) sceneGraph() ([]int, map[string]int, error) {
 	nodes := r.model.Nodes
-	if err := r.reserve(uint64(len(nodes)), 160); err != nil {
-		return err
+	if err := r.reserve(uint64(len(nodes)), 161); err != nil {
+		return nil, nil, err
 	}
 	index := make(map[string]int, len(nodes))
 	for i, node := range nodes {
 		if i%256 == 0 {
 			if err := r.ctx.Err(); err != nil {
-				return err
+				return nil, nil, err
 			}
 		}
 		if _, exists := index[node.Name]; exists || node.Name == "" {
-			return fmt.Errorf("invalid U3D render node name")
+			return nil, nil, fmt.Errorf("invalid U3D render node name")
 		}
 		switch node.Kind {
 		case "Group", "Model", "Light", "View":
 		default:
-			return fmt.Errorf("unsupported U3D render node kind")
+			return nil, nil, fmt.Errorf("unsupported U3D render node kind")
 		}
 		index[node.Name] = i
 	}
 	counts := make([]int, len(nodes))
 	children := make([][]int, len(nodes))
 	r.byNode = make([][]int, len(nodes))
+	r.connected = make([]bool, len(nodes))
 	for i, node := range nodes {
 		if err := r.reserve(uint64(len(node.Parents)), 16); err != nil {
-			return err
+			return nil, nil, err
 		}
 		for k, parent := range node.Parents {
 			if k%256 == 0 {
 				if err := r.ctx.Err(); err != nil {
-					return err
+					return nil, nil, err
 				}
 			}
 			if j, ok := index[parent.Name]; ok {
@@ -222,7 +222,7 @@ func (r *u3dRender) instances(limit int) error {
 	for i, n := range counts {
 		if i%256 == 0 {
 			if err := r.ctx.Err(); err != nil {
-				return err
+				return nil, nil, err
 			}
 		}
 		if n == 0 {
@@ -231,9 +231,54 @@ func (r *u3dRender) instances(limit int) error {
 	}
 	for cursor := 0; cursor < len(queue); cursor++ {
 		if err := r.ctx.Err(); err != nil {
-			return err
+			return nil, nil, err
 		}
 		i := queue[cursor]
+		for j, parent := range nodes[i].Parents {
+			if j%256 == 0 {
+				if err := r.ctx.Err(); err != nil {
+					return nil, nil, err
+				}
+			}
+			if parent.Name == "" {
+				r.connected[i] = true
+				break
+			}
+			if p, exists := index[parent.Name]; exists && r.connected[p] {
+				r.connected[i] = true
+				break
+			}
+		}
+		for childIndex, child := range children[i] {
+			if childIndex%256 == 0 {
+				if err := r.ctx.Err(); err != nil {
+					return nil, nil, err
+				}
+			}
+			counts[child]--
+			if counts[child] == 0 {
+				queue = append(queue, child)
+			}
+		}
+	}
+	if len(queue) != len(nodes) {
+		return nil, nil, fmt.Errorf("cyclic U3D node parents")
+	}
+	return queue, index, nil
+}
+
+// instances 按拓扑顺序展开接入场景的父路径，不将未解析的父节点视为默认根
+// 入参: order 拓扑顺序, index 节点索引, limit 最大实例数
+// 返回: error 变换、预算、实例上限或取消错误
+func (r *u3dRender) instances(order []int, index map[string]int, limit int) error {
+	nodes := r.model.Nodes
+	for _, i := range order {
+		if err := r.ctx.Err(); err != nil {
+			return err
+		}
+		if !r.connected[i] {
+			continue
+		}
 		state := r.states[nodes[i].Name]
 		for parentIndex, parent := range nodes[i].Parents {
 			if parentIndex%256 == 0 {
@@ -241,19 +286,26 @@ func (r *u3dRender) instances(limit int) error {
 					return err
 				}
 			}
+			parents := []int{-1}
+			if parent.Name != "" {
+				j, exists := index[parent.Name]
+				if !exists || !r.connected[j] {
+					continue
+				}
+				parents = r.byNode[j]
+			}
 			var local u3dMatrix
 			for k, v := range parent.Transform {
 				local[k] = float64(v)
+			}
+			if animation, exists := r.animated[nodes[i].Name]; exists {
+				local = local.multiply(animation.matrix)
 			}
 			if state.Matrix != nil {
 				local = *state.Matrix
 			}
 			if !local.valid() {
 				return fmt.Errorf("unsupported U3D non-affine node transform")
-			}
-			parents := []int{-1}
-			if j, ok := index[parent.Name]; ok {
-				parents = r.byNode[j]
 			}
 			for _, p := range parents {
 				if len(r.scene) >= limit {
@@ -284,20 +336,6 @@ func (r *u3dRender) instances(limit int) error {
 				r.scene = append(r.scene, u3dInstance{node: i, parent: p, world: world, opacity: opacity, visibility: visibility})
 			}
 		}
-		for childIndex, child := range children[i] {
-			if childIndex%256 == 0 {
-				if err := r.ctx.Err(); err != nil {
-					return err
-				}
-			}
-			counts[child]--
-			if counts[child] == 0 {
-				queue = append(queue, child)
-			}
-		}
 	}
-	if len(queue) != len(nodes) {
-		return fmt.Errorf("cyclic U3D node parents")
-	}
-	return nil
+	return r.ctx.Err()
 }

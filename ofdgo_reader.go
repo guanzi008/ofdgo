@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -544,6 +545,31 @@ func (r *Reader) readFile(name string) ([]byte, error) {
 func (r *Reader) readFileView(name string) ([]byte, error) {
 	data, _, err := r.readFileData(name)
 	return data, err
+}
+
+// readFileViewContext 读取包内文件并响应取消，已加载数据直接借用
+// 入参: ctx 取消上下文, name 文件名
+// 返回: []byte 只读文件内容, error 读取或取消错误
+func (r *Reader) readFileViewContext(ctx context.Context, name string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if data, ok := r.files[cleanPackagePath(name)]; ok {
+		return data, nil
+	}
+	input, err := r.openFile(name)
+	if err != nil {
+		return nil, err
+	}
+	defer input.Close()
+	data, err := io.ReadAll(imageInput{ReadCloser: input, context: ctx})
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 // readFileData 统一解析包内路径并区分缓存借用与独立读取

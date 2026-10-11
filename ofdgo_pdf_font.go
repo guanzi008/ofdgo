@@ -16,11 +16,10 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
-	"maps"
-	"slices"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -40,6 +39,46 @@ type pdfImportedFont struct {
 type pdfFontRepair struct {
 	metricsLimit uint16
 	locations    bool
+}
+
+// shapePDFText 使用导入字体整形注释文字，将毫米坐标约定转换为PDF文字空间方向
+// 入参: ctx 取消上下文, source 源字体, text 单行原文, rightToLeft 段落方向
+// 返回: []pdfgo.ShapedGlyph 千分之一字号的定位字形, error 字体、整形或取消错误
+func (p *pdfImporter) shapePDFText(ctx context.Context, source *pdfgo.Font, text string, rightToLeft bool) ([]pdfgo.ShapedGlyph, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(source.Program) == 0 {
+		return nil, &pdfgo.UnsupportedError{Feature: "annotation shaping without embedded font"}
+	}
+	font, err := p.importedFont(source)
+	if err != nil {
+		return nil, err
+	}
+	shaper, ok := font.metrics.(FontShaperOptions)
+	if !ok {
+		return nil, &pdfgo.UnsupportedError{Feature: "annotation text shaping backend"}
+	}
+	options := TextShapeOptions{Bidi: true}
+	if rightToLeft {
+		options.Direction = "rtl"
+	}
+	glyphs, err := shaper.ShapeTextWithOptions(text, 1000, options)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]pdfgo.ShapedGlyph, len(glyphs))
+	units := float64(font.metrics.UnitsPerEm())
+	if units <= 0 {
+		return nil, fmt.Errorf("invalid annotation font units")
+	}
+	for i, glyph := range glyphs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		result[i] = pdfgo.ShapedGlyph{ID: glyph.Glyph, Cluster: glyph.Cluster, VisualOrder: glyph.VisualOrder, X: glyph.X, Y: -glyph.Y, Advance: glyph.Advance, Width: float64(font.metrics.GlyphAdvance(glyph.Glyph)) * 1000 / units}
+	}
+	return result, ctx.Err()
 }
 
 // embeddedTextFont 匹配同名内嵌字体，仅复用唯一且覆盖全部字符的字形程序
@@ -292,33 +331,13 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, pdfFontRep
 		}
 	}
 	if len(tables["cmap"]) == 0 || source.Subtype == "Type0" && invalidCmap || (source.Subtype == "Type0" || source.Subtype == "TrueType") && pdfCmapNeedsRebuild(tables["cmap"]) {
-		mapping := map[rune]uint16{}
-		var codes []string
-		if source.Subtype == "TrueType" {
-			codes = make([]string, 256)
-			for code := range codes {
-				codes[code] = string([]byte{byte(code)})
-			}
-		} else {
-			codes = slices.Sorted(maps.Keys(source.Unicode))
+		mapping, err := source.GlyphMap()
+		if err != nil {
+			return nil, repair, err
 		}
-		for _, code := range codes {
-			glyphs, err := source.Decode([]byte(code))
-			if err != nil {
-				return nil, repair, err
-			}
-			if len(glyphs) != 1 || !glyphs[0].HasID {
-				return nil, repair, &pdfgo.UnsupportedError{Feature: "font without explicit glyph mapping"}
-			}
-			glyph := glyphs[0]
-			if glyph.ID >= count {
-				return nil, repair, fmt.Errorf("PDF font glyph %d exceeds glyph count %d", glyph.ID, count)
-			}
-			if utf8.RuneCountInString(glyph.Text) == 1 {
-				char, _ := utf8.DecodeRuneInString(glyph.Text)
-				if _, exists := mapping[char]; !exists {
-					mapping[char] = glyph.ID
-				}
+		for _, glyph := range mapping {
+			if glyph >= count {
+				return nil, repair, fmt.Errorf("PDF font glyph %d exceeds glyph count %d", glyph, count)
 			}
 		}
 		addPackedGlyphMapping(mapping, count)

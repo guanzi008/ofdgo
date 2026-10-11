@@ -29,6 +29,9 @@ type U3DMesh struct {
 	Faces                                       []U3DFace
 	Lines                                       []U3DLine
 	Points                                      []U3DPoint
+	Bones                                       []U3DBone
+	BoneWeights                                 []U3DBoneWeights
+	Animations                                  []U3DAnimation
 	Quality                                     [3]uint32
 	InverseQuantization                         [5]float32
 	NormalCrease, NormalUpdate, NormalTolerance float32
@@ -76,7 +79,7 @@ type u3dMeshDeclaration struct {
 
 // primitive 访问三角面、线段或点的着色编号和角点，不复制属性数组
 // 入参: index 图元下标，依次为三角面、线段和点
-// 返回: uint32 着色编号, []U3DCorner 只读角点
+// 返回: uint32 着色编号, []U3DCorner 原数组中的角点切片
 func (m *U3DMesh) primitive(index int) (uint32, []U3DCorner) {
 	if index < len(m.Faces) {
 		return m.Faces[index].Shading, m.Faces[index].Corners[:]
@@ -116,16 +119,20 @@ func (d *u3dDecoder) meshDeclaration(r *u3dValues, name string) error {
 		decl.mesh.InverseQuantization[index] = r.f32()
 	}
 	decl.mesh.NormalCrease, decl.mesh.NormalUpdate, decl.mesh.NormalTolerance = r.f32(), r.f32(), r.f32()
-	bones := r.u32()
 	if r.err != nil {
 		return r.err
 	}
 	if minimum > maximum || maximum != decl.counts[1] {
 		return fmt.Errorf("invalid U3D mesh resolution")
 	}
-	if minimum != maximum || bones != 0 {
-		return fmt.Errorf("unsupported U3D progressive or skeletal mesh")
+	if minimum != maximum {
+		return fmt.Errorf("unsupported U3D progressive mesh")
 	}
+	bones, err := d.skeleton(r)
+	if err != nil {
+		return err
+	}
+	decl.mesh.Bones = bones
 	if minimum == 0 {
 		for _, count := range decl.counts[:6] {
 			if count != 0 {
@@ -247,10 +254,16 @@ func (d *u3dDecoder) baseMesh(r *u3dValues, name string) error {
 	var histogram u3dHistogram
 	var compressed *u3dBits
 	if !d.plain && counts[0] != 0 {
-		if err := d.reserve(1, 1<<20); err != nil {
-			return err
-		}
 		compressed = newU3DBits(r.data[r.pos:])
+		var charged uint64
+		compressed.reserve = func(count, size uint64) error {
+			if err := d.reserve(count, size); err != nil {
+				return err
+			}
+			charged += count * size
+			return nil
+		}
+		defer func() { d.remaining += charged }()
 	}
 	readIndex := func(count uint32) (uint32, error) {
 		var value uint32
@@ -321,17 +334,8 @@ func (d *u3dDecoder) baseMesh(r *u3dValues, name string) error {
 		}
 	}
 	if compressed != nil {
-		if compressed.pos > uint64(len(compressed.data))*8 {
-			return io.ErrUnexpectedEOF
-		}
-		if compressed.u32() != 0 {
-			return fmt.Errorf("invalid U3D compression flush")
-		}
-		if compressed.err != nil {
-			return compressed.err
-		}
-		if (compressed.pos-16+7)/8 != uint64(len(compressed.data)) {
-			return fmt.Errorf("unexpected U3D compressed block data: decoded %d bits, stored %d bytes", compressed.pos-16, len(compressed.data))
+		if err := compressed.finish(); err != nil {
+			return err
 		}
 		r.pos = len(r.data)
 	}

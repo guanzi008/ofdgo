@@ -16,15 +16,14 @@ package ofdgo
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"maps"
 )
 
-// subsetNamedCFFFont 裁剪非CID的CFF字体，保留字形编号、组合组件和度量
-// 入参: sfnt 已解析字体, glyphs 使用的字形
+// subsetCFFFont 裁剪CFF字体，保留组合组件和度量，按需重排字形
+// 入参: sfnt 已解析字体, glyphs 使用的字形, preserve 是否保留原字形编号
 // 返回: []byte 字体子集, error 裁剪错误
-func subsetNamedCFFFont(sfnt *sfntFont, glyphs []uint16) ([]byte, error) {
+func subsetCFFFont(sfnt *sfntFont, glyphs []uint16, preserve bool) ([]byte, error) {
 	keep := map[uint16]bool{0: true}
 	for _, gid := range glyphs {
 		if gid >= sfnt.NumGlyphs() {
@@ -35,6 +34,11 @@ func subsetNamedCFFFont(sfnt *sfntFont, glyphs []uint16) ([]byte, error) {
 	data, err := subsetCFFCharstrings(sfnt.Tables["CFF "], keep)
 	if err != nil {
 		return bytes.Clone(sfnt.Write()), nil
+	}
+	if !preserve {
+		if compact, ids, err := compactCFFGlyphs(data, keep); err == nil {
+			return compactCFFTables(sfnt, compact, ids)
+		}
 	}
 	tables := maps.Clone(sfnt.Tables)
 	tables["CFF "] = data
@@ -52,60 +56,106 @@ func subsetNamedCFFFont(sfnt *sfntFont, glyphs []uint16) ([]byte, error) {
 }
 
 // subsetCFFCharstrings 清空未引用的Type2轮廓及子程序，保留原字宽、提示和编号
-// 入参: data 非CID的CFF数据, keep 保留的字形，调用后包含组合组件
+// 入参: data CFF数据, keep 保留的字形，调用后包含组合组件
 // 返回: []byte 重建的CFF数据, error 结构或依赖错误
 func subsetCFFCharstrings(data []byte, keep map[uint16]bool) ([]byte, error) {
 	font, err := readType2Font(data)
 	if err != nil {
+		cid, err := readCIDSubsetFont(data)
+		if err != nil {
+			return nil, err
+		}
+		chars, err := subsetType2Programs(cid.fonts, cid.selects, keep)
+		if err != nil {
+			return nil, err
+		}
+		return cid.write(chars)
+	}
+	chars, err := subsetType2Programs([]*type2Font{font}, nil, keep)
+	if err != nil {
 		return nil, err
 	}
+	return rebuildNamedCFF(data, font, chars, nil)
+}
+
+// subsetType2Programs 按字形所属字典收集子程序依赖并清空未使用的轮廓
+// 入参: fonts 执行资源, selects 字形所属字典，单字典时可为空, keep 保留的字形
+// 返回: [][]byte 字形程序, error 执行或字宽错误
+func subsetType2Programs(fonts []*type2Font, selects []int, keep map[uint16]bool) ([][]byte, error) {
 	keep[0] = true
-	locals := make([]bool, len(font.locals))
-	globals := make([]bool, len(font.globals))
+	programs := fonts[0].chars
+	locals := make([][]bool, len(fonts))
+	empty := make([]map[float64][]byte, len(fonts))
+	for index, font := range fonts {
+		locals[index] = make([]bool, len(font.locals))
+		empty[index] = make(map[float64][]byte)
+	}
+	globals := make([]bool, len(fonts[0].globals))
 	var stack [48]float64
 	for gid := range keep {
-		if int(gid) >= len(font.chars) {
+		if int(gid) >= len(programs) {
 			return nil, fmt.Errorf("CFF glyph index out of range")
 		}
+		fd := 0
+		if selects != nil {
+			fd = selects[gid]
+		}
+		font := fonts[fd]
 		steps := 0
-		state := type2State{font: font, args: stack[:0], width: font.def, seed: font.seed + uint64(gid), steps: &steps, dependencies: keep, localUsage: locals, globalUsage: globals}
+		state := type2State{font: font, args: stack[:0], width: font.def, seed: font.seed + uint64(gid), steps: &steps, dependencies: keep, localUsage: locals[fd], globalUsage: globals}
 		if _, err := state.run(font.chars[gid], 0); err != nil {
 			return nil, err
 		}
 	}
-	chars := make([][]byte, len(font.chars))
-	empty := make(map[float64][]byte)
-	for gid, program := range font.chars {
+	chars := make([][]byte, len(programs))
+	for gid, program := range programs {
 		if keep[uint16(gid)] {
 			chars[gid] = program
 			continue
 		}
+		fd := 0
+		if selects != nil {
+			fd = selects[gid]
+		}
+		font := fonts[fd]
 		steps := 0
 		state := type2State{font: font, args: stack[:0], width: font.def, widthOnly: true, seed: font.seed + uint64(gid), steps: &steps, dependencies: keep}
 		if _, err := state.run(program, 0); err != nil {
 			return nil, err
 		}
-		if encoded, ok := empty[state.width]; ok {
+		if encoded, ok := empty[fd][state.width]; ok {
 			chars[gid] = encoded
 			continue
 		}
 		var encoded bytes.Buffer
 		if state.width != font.def {
 			value := state.width - font.nominal
-			if err := encodeType2Number(&encoded, value); err != nil {
-				return nil, err
+			divisor := 1
+			if value < -32768 || value >= 32768 {
+				divisor = 2
 			}
-			if parseNumberType2(encoded.Bytes(), 0) != value {
+			for range divisor {
+				if err := encodeType2Number(&encoded, value/float64(divisor)); err != nil {
+					return nil, err
+				}
+			}
+			if parseNumberType2(encoded.Bytes(), 0)*float64(divisor) != value {
 				return nil, fmt.Errorf("CFF width cannot be represented exactly")
+			}
+			if divisor == 2 {
+				encoded.Write([]byte{12, 10})
 			}
 		}
 		encoded.WriteByte(14)
 		chars[gid] = encoded.Bytes()
-		empty[state.width] = chars[gid]
+		empty[fd][state.width] = chars[gid]
 	}
-	font.locals = subsetCFFSubroutines(font.locals, locals)
-	font.globals = subsetCFFSubroutines(font.globals, globals)
-	return rebuildNamedCFF(data, font, chars)
+	globalPrograms := subsetCFFSubroutines(fonts[0].globals, globals)
+	for index, font := range fonts {
+		font.locals = subsetCFFSubroutines(font.locals, locals[index])
+		font.globals = globalPrograms
+	}
+	return chars, nil
 }
 
 // subsetCFFSubroutines 将未引用的子程序替换为空返回，保持调用编号及偏移基数
@@ -125,9 +175,9 @@ func subsetCFFSubroutines(programs [][]byte, used []bool) [][]byte {
 }
 
 // rebuildNamedCFF 重建非CID的CFF偏移，保留字符集、编码和私有提示参数
-// 入参: data 原始CFF数据, font 执行资源, chars 替换后的字形程序
+// 入参: data 原始CFF数据, font 执行资源, chars 替换后的字形程序, ids 字形重排顺序，nil时保留原编号
 // 返回: []byte 重建的CFF数据, error 不支持的结构
-func rebuildNamedCFF(data []byte, font *type2Font, chars [][]byte) ([]byte, error) {
+func rebuildNamedCFF(data []byte, font *type2Font, chars [][]byte, ids []uint16) ([]byte, error) {
 	names, end, err := readType2Index(data, int(data[2]))
 	if err != nil {
 		return nil, err
@@ -151,35 +201,39 @@ func rebuildNamedCFF(data []byte, font *type2Font, chars [][]byte) ([]byte, erro
 			return nil, fmt.Errorf("unsupported CFF top operator %d", op)
 		}
 	}
-	sids, _, _, _, ok := getCFFCharsetInfo(data, len(chars))
+	sids, _, _, _, ok := getCFFCharsetInfo(data, len(font.chars))
 	if !ok {
 		return nil, fmt.Errorf("invalid CFF charset")
-	}
-	charset := []byte{0}
-	for _, sid := range sids[1:] {
-		charset = binary.BigEndian.AppendUint16(charset, uint16(sid))
 	}
 	encoding, err := cffSubsetEncoding(data, dict)
 	if err != nil {
 		return nil, err
 	}
+	if ids != nil {
+		if encoding != nil {
+			codes, err := readCFFSubsetEncoding(encoding, sids)
+			if err != nil {
+				return nil, err
+			}
+			encoding, err = encodeCFFSubsetEncoding(codes, sids, ids)
+			if err != nil {
+				return nil, err
+			}
+		}
+		selected := make([]int, len(ids))
+		for index, gid := range ids {
+			selected[index] = sids[gid]
+		}
+		sids = selected
+	}
+	charset := encodeCFFSubsetCharset(sids)
 	private, err := readType2Private(data, dict[18], &type2Font{})
 	if err != nil {
 		return nil, err
 	}
-	for op := range private {
-		switch op {
-		case 6, 7, 8, 9, 10, 11, 19, 20, 21, 1209, 1210, 1211, 1212, 1213, 1214, 1217, 1218, 1219:
-		default:
-			return nil, fmt.Errorf("unsupported CFF private operator %d", op)
-		}
-	}
-	privateData := encodeCFFDict(private)
-	if _, ok := private[19]; ok {
-		for private[19][0] != float64(len(privateData)) {
-			private[19] = []float64{float64(len(privateData))}
-			privateData = encodeCFFDict(private)
-		}
+	privateData, err := encodeCFFSubsetPrivate(private)
+	if err != nil {
+		return nil, err
 	}
 	prefix := bytes.Clone(data[:int(data[2])])
 	prefix = append(prefix, encodeCFFIndex(names)...)
@@ -210,6 +264,28 @@ func rebuildNamedCFF(data []byte, font *type2Font, chars [][]byte) ([]byte, erro
 		dict = updated
 	}
 	return nil, fmt.Errorf("CFF dictionary offsets did not converge")
+}
+
+// encodeCFFSubsetPrivate 保留私有字典参数，将局部子程序安排在字典之后
+// 入参: private 私有字典
+// 返回: []byte 字典数据, error 不支持的参数或偏移错误
+func encodeCFFSubsetPrivate(private cffDict) ([]byte, error) {
+	for op := range private {
+		switch op {
+		case 6, 7, 8, 9, 10, 11, 19, 20, 21, 1209, 1210, 1211, 1212, 1213, 1214, 1217, 1218, 1219:
+		default:
+			return nil, fmt.Errorf("unsupported CFF private operator %d", op)
+		}
+	}
+	for range 16 {
+		data := encodeCFFDict(private)
+		value, ok := private[19]
+		if !ok || len(value) == 1 && value[0] == float64(len(data)) {
+			return data, nil
+		}
+		private[19] = []float64{float64(len(data))}
+	}
+	return nil, fmt.Errorf("CFF private offset did not converge")
 }
 
 // cffSubsetEncoding 读取自定义CFF编码及补充映射，预定义编码无需复制

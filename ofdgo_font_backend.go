@@ -86,8 +86,17 @@ type FontShaperOptions interface {
 	ShapeTextWithOptions(value string, size float64, options TextShapeOptions) ([]ShapedGlyph, error)
 }
 
+// FontShaperRun 保留完整单行原文的上下文，仅塑形指定区间，不执行字体回退
+// start和end为原文的符文索引，区间左闭右开，返回Cluster仍使用原文索引
+// 调用方负责方向和脚本分段，options.Bidi须为false；坐标相对当前区间的基线起点
+// value为已校验的原文符文序列，调用期间不得修改，返回结果不引用该切片
+type FontShaperRun interface {
+	FontShaperOptions
+	ShapeTextRun(value []rune, start, end int, size float64, options TextShapeOptions) ([]ShapedGlyph, error)
+}
+
 // ShapedGlyph 保存塑形后的字形、原文簇和基线定位
-// Bidi模式下VisualOrder为簇从左到右的零起始顺序，同簇字形共用顺序
+// VisualOrder为簇从左到右的零起始顺序，同簇字形共用顺序
 type ShapedGlyph struct {
 	Glyph         uint16
 	Cluster       int

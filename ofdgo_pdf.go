@@ -34,7 +34,7 @@ var ErrPDFPassword = pdfgo.ErrPassword
 // RendererOptions复用渲染器字体来源和后端配置，Backends优先于其中的后端设置
 // RasterDPI指定局部合成与三维绘制精度，0沿用渲染器DPI，默认300dpi，Strict禁用局部合成
 // OnProgress按open、pages、convert及write.*阶段报告进度，total为0表示总量未知
-// ResolveFile读取PDF引用的外部媒体、附件和页面，默认不访问网络或本地路径
+// ResolveFile读取PDF引用的外部媒体、附件、页面及三维纹理，默认不访问网络或本地路径
 // ResolveReference可提供已解密的引用页面，目标阅读器由调用方维护
 // Halftones提供只读设备命名网屏，所属阅读器由调用方维护，连续色调输出不网屏化
 // Compression配置转换输出，有损模式按图片实际尺寸降采样，原始及无损模式保持完整采样
@@ -156,7 +156,12 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 			return nil, PDFImportReport{}, err
 		}
 	}
-	readOptions := pdfgo.ReaderOptions{Password: options.Password, PasswordUTF8: options.PasswordUTF8}
+	editor := NewEditor()
+	editor.SetRenderBackends(renderer.Backends())
+	editor.fontDirs, editor.fontFS = renderer.FontSources()
+	editor.fontSourcesCache = renderer.fontSourcesCache
+	importer := pdfImporter{ctx: ctx, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, fontIDs: map[*pdfgo.Font]string{}, fonts: map[*pdfgo.Font]*pdfImportedFont{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
+	readOptions := pdfgo.ReaderOptions{Password: options.Password, PasswordUTF8: options.PasswordUTF8, ShapeText: importer.shapePDFText}
 	var diagnostics []pdfgo.Diagnostic
 	var readWarning func(pdfgo.Diagnostic)
 	if !options.Strict {
@@ -168,11 +173,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		return nil, PDFImportReport{}, err
 	}
 	defer reader.Close()
-	editor := NewEditor()
-	editor.SetRenderBackends(renderer.Backends())
-	editor.fontDirs, editor.fontFS = renderer.FontSources()
-	editor.fontSourcesCache = renderer.fontSourcesCache
-	importer := pdfImporter{ctx: ctx, reader: reader, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, fontIDs: map[*pdfgo.Font]string{}, fonts: map[*pdfgo.Font]*pdfImportedFont{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
+	importer.reader = reader
 	importer.report.Warnings = diagnostics
 	importer.pageIndexes = make(map[pdfgo.Reference]int)
 	importer.resolveFile = options.ResolveFile

@@ -7,9 +7,9 @@ require (
 	github.com/emmansun/gmsm v0.45.0
 	github.com/go-text/typesetting v0.3.5
 	github.com/tdewolff/canvas v0.0.0-20260923214215-09804640d00c
-	github.com/xiaoqidun/j2kgo v0.0.0-20261009063910-4865a21ef893
+	github.com/xiaoqidun/j2kgo v0.0.0-20261011021706-cedb3037ff6e
 	github.com/xiaoqidun/jbig2 v1.1.4
-	github.com/xiaoqidun/pdfgo v0.0.0-20261010065159-b32618b0bdd7
+	github.com/xiaoqidun/pdfgo v0.0.0-20261011021850-35fe3f96d36f
 	golang.org/x/crypto v0.58.0
 	golang.org/x/image v0.47.0
 	golang.org/x/text v0.43.0

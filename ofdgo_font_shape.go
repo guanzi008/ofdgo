@@ -35,6 +35,9 @@ import (
 	xlanguage "golang.org/x/text/language"
 )
 
+// fontShapingBufferLimit 限制字体实例长期保留的字形缓冲容量
+const fontShapingBufferLimit = 4096
+
 // fontShaper 使用字体度量和原始数据提供可配置塑形，不依赖绘图后端
 type fontShaper struct {
 	metrics     FontMetrics
@@ -61,8 +64,32 @@ func (f *fontShaper) ShapeTextWithOptions(value string, size float64, options Te
 	if !rasterPositive(size) || !utf8.ValidString(value) {
 		return nil, fmt.Errorf("invalid shaping text or size")
 	}
-	for _, char := range value {
-		if unicode.IsControl(char) || char == '\u2028' || char == '\u2029' {
+	runes := []rune(value)
+	return f.shapeTextRun(runes, 0, len(runes), size, options)
+}
+
+// ShapeTextRun 利用原文上下文塑形指定区间，保留原文簇索引
+// 入参: value 已校验的原文符文, start 起始符文索引, end 结束符文索引, size 毫米字号, options 已分段的塑形选项
+// 返回: []ShapedGlyph 原文簇索引及区间内定位字形, error 区间、字符或选项错误
+func (f *fontShaper) ShapeTextRun(value []rune, start, end int, size float64, options TextShapeOptions) ([]ShapedGlyph, error) {
+	if options.Bidi {
+		return nil, fmt.Errorf("bidirectional segmentation is not valid for an individual shaping run")
+	}
+	return f.shapeTextRun(value, start, end, size, options)
+}
+
+// shapeTextRun 共用完整行与局部区间的选项校验、字体初始化及字形塑形
+// 入参: runes 原文符文, start 起始符文索引, end 结束符文索引, size 毫米字号, options 塑形选项
+// 返回: []ShapedGlyph 定位字形, error 字体、区间或选项错误
+func (f *fontShaper) shapeTextRun(runes []rune, start, end int, size float64, options TextShapeOptions) ([]ShapedGlyph, error) {
+	if !rasterPositive(size) {
+		return nil, fmt.Errorf("invalid shaping size")
+	}
+	if start < 0 || end < start || end > len(runes) {
+		return nil, fmt.Errorf("invalid shaping text range")
+	}
+	for _, char := range runes[start:end] {
+		if !utf8.ValidRune(char) || unicode.IsControl(char) || char == '\u2028' || char == '\u2029' {
 			return nil, fmt.Errorf("shaping requires a single text line")
 		}
 	}
@@ -113,6 +140,9 @@ func (f *fontShaper) ShapeTextWithOptions(value string, size float64, options Te
 			features = append(features, feature)
 		}
 	}
+	if start == end {
+		return nil, nil
+	}
 	f.shapeMu.Lock()
 	defer f.shapeMu.Unlock()
 	if f.shapeFont == nil {
@@ -125,24 +155,32 @@ func (f *fontShaper) ShapeTextWithOptions(value string, size float64, options Te
 		f.shapeBuffer = harfbuzz.NewBuffer()
 	}
 	if options.Bidi {
-		return f.shapeBidiText([]rune(value), size, props, features)
+		return f.shapeBidiText(runes, size, props, features)
 	}
 	buffer := f.shapeBuffer
 	buffer.Clear()
+	defer f.releaseShapeBuffer()
 	buffer.Props = props
-	runes := []rune(value)
-	buffer.AddRunes(runes, 0, len(runes))
+	buffer.AddRunes(runes, start, end-start)
 	buffer.GuessSegmentProperties()
 	buffer.Shape(f.shapeFont, features)
 	unit := size / float64(f.metrics.UnitsPerEm())
 	result := make([]ShapedGlyph, len(buffer.Info))
 	var x, y float64
+	previous, order := -1, -1
 	for i, info := range buffer.Info {
 		if info.Glyph >= typefont.GID(f.metrics.NumGlyphs()) {
 			return nil, fmt.Errorf("invalid shaped glyph index %d", info.Glyph)
 		}
+		if info.Cluster < start || info.Cluster >= end {
+			return nil, fmt.Errorf("invalid shaped cluster index %d", info.Cluster)
+		}
+		if info.Cluster != previous {
+			previous = info.Cluster
+			order++
+		}
 		position := buffer.Pos[i]
-		result[i] = ShapedGlyph{Glyph: uint16(info.Glyph), Cluster: info.Cluster,
+		result[i] = ShapedGlyph{Glyph: uint16(info.Glyph), Cluster: info.Cluster, VisualOrder: order,
 			X: (x + float64(position.XOffset)) * unit, Y: -(y + float64(position.YOffset)) * unit,
 			Advance: float64(position.XAdvance) * unit}
 		if !finite(result[i].X) || !finite(result[i].Y) || !finite(result[i].Advance) {
@@ -153,6 +191,17 @@ func (f *fontShaper) ShapeTextWithOptions(value string, size float64, options Te
 	}
 	slices.SortStableFunc(result, func(a, b ShapedGlyph) int { return cmp.Compare(a.Cluster, b.Cluster) })
 	return result, nil
+}
+
+// releaseShapeBuffer 释放原文上下文和超限缓冲，普通文本继续复用已有容量
+func (f *fontShaper) releaseShapeBuffer() {
+	buffer := f.shapeBuffer
+	if cap(buffer.Info) > fontShapingBufferLimit || cap(buffer.Pos) > fontShapingBufferLimit {
+		f.shapeBuffer = harfbuzz.NewBuffer()
+		return
+	}
+	buffer.Clear()
+	buffer.AddRunes(nil, 0, 0)
 }
 
 // ResolveFace 返回指定字体
@@ -211,12 +260,19 @@ func (f *fontShaper) shapeBidiText(runes []rune, size float64, props harfbuzz.Se
 				return nil, fmt.Errorf("invalid shaped glyph index %d", glyph.GlyphID)
 			}
 			cluster := glyph.TextIndex()
+			if cluster < 0 || cluster >= len(runes) {
+				return nil, fmt.Errorf("invalid shaped cluster index %d", cluster)
+			}
 			order, exists := visual[cluster]
 			if !exists {
 				order = len(visual)
 				visual[cluster] = order
 			}
-			result = append(result, ShapedGlyph{Glyph: uint16(glyph.GlyphID), Cluster: cluster, VisualOrder: order, X: (x + float64(glyph.XOffset)) * unit, Y: -float64(glyph.YOffset) * unit, Advance: float64(glyph.Advance) * unit})
+			shaped := ShapedGlyph{Glyph: uint16(glyph.GlyphID), Cluster: cluster, VisualOrder: order, X: (x + float64(glyph.XOffset)) * unit, Y: -float64(glyph.YOffset) * unit, Advance: float64(glyph.Advance) * unit}
+			if !finite(shaped.X) || !finite(shaped.Y) || !finite(shaped.Advance) {
+				return nil, fmt.Errorf("shaped position exceeds finite range")
+			}
+			result = append(result, shaped)
 			x += float64(glyph.Advance)
 		}
 	}

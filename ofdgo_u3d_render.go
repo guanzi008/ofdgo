@@ -36,9 +36,12 @@ type U3DCamera struct {
 // Camera为空时使用View指定的节点或首个视图节点，Instance指定其父路径实例
 // Lighting为空时沿用模型灯光，非空时替换全部模型灯光
 // Opacity为空时沿用着色器混合，非空时叠加面片、着色边点及包围盒轮廓的透明度
+// 纹理合成后先应用节点透明度，再应用Opacity
 // Mode控制绘制方式，AuxiliaryColor用于固定颜色的边点，FaceColor用于包围盒面及插图面，空值分别使用黑色和背景色
 // CreaseAngle为轮廓夹角，单位为度，空值使用45；着色插图以漫反射色的1/4补充自发光
 // Nodes按名称覆盖节点，重复名称使用最后一项，每次绘制均从原场景开始
+// Time以秒指定动画采样时刻，零值为初始时刻，不随实际时钟推进
+// ResolveTexture提供外部纹理，空值不访问外部资源；回调自身的内存与超时由调用方控制
 // Background为空时使用白色；缓存与实例上限为0时分别使用256MiB和65536，不含输入及运行时开销
 type U3DRenderOptions struct {
 	Width, Height  int
@@ -53,7 +56,9 @@ type U3DRenderOptions struct {
 	FaceColor      *[3]float64
 	CreaseAngle    *float64
 	Nodes          []U3DNodeState
+	Time           float64
 	Sections       []U3DCrossSection
+	ResolveTexture U3DTextureResolver
 	MaxMemoryBytes int64
 	MaxInstances   int
 }
@@ -87,8 +92,15 @@ type u3dRender struct {
 	toCamera                               u3dMatrix
 	scene                                  []u3dInstance
 	byNode                                 [][]int
+	connected                              []bool
 	members                                []bool
 	meshes, shaders, materials, lightIndex map[string]int
+	textureIndex                           map[string]int
+	viewIndex, motionIndex                 map[string]int
+	textures                               map[string]*image.NRGBA64
+	textureSets                            map[[8]*U3DTextureLayer]*u3dTextureSet
+	resolveTexture                         U3DTextureResolver
+	view                                   *U3DView
 	lights                                 []u3dRenderLight
 	lighting                               *U3DLighting
 	opacity                                float64
@@ -97,7 +109,10 @@ type u3dRender struct {
 	auxiliaryColor, faceColor              [3]float64
 	depthOnly                              bool
 	primitives                             map[u3dPrimitiveKey]struct{}
+	texturedPrimitives                     map[u3dTexturedPrimitiveKey]struct{}
 	states                                 map[string]U3DNodeState
+	posed                                  map[string]*U3DMesh
+	animated                               map[string]u3dAnimationState
 	sections                               []u3dSection
 	sectionScratch                         [2][]u3dVertex
 	chunks                                 [][]u3dFragment
@@ -106,8 +121,16 @@ type u3dRender struct {
 	order                                  uint64
 }
 
-// RenderU3D 绘制静态无纹理网格、线集、点集及包围盒，返回不透明图像，不执行脚本或动画
-// 采用逐顶点光照及逐像素深度混合，缺失资源回退为空网格、灰色材质或无光源
+// RenderU3D 绘制几何及视图纹理层，返回指定时刻的不透明图像，不执行脚本
+// 可通过节点覆盖指定动作轨道与采样时间，逐次生成独立姿态，不修改原模型
+// 显式骨骼姿态按权重变换位置和法线，暂不生成骨骼链接或推导缺失权重
+// 动画修饰器支持单动作的节点和骨骼求值，尚未实现的动作衔接返回明确错误
+// 几何纹理支持模型坐标与程序化映射，参考形状约定见U3DTextureLayer
+// 纹理按需解码并复用，不自动访问外部图像
+// 采用逐顶点光照及逐像素深度混合，空名称引用标准默认资源
+// 缺失几何、材质和着色器采用默认资源，缺失的非空光源引用不产生光照
+// 缺失纹理返回错误，空纹理名称使用标准默认图像
+// 仅绘制默认根的后代，非空父节点引用缺失时不展开该父路径
 // 入参: ctx 取消上下文, model 场景, options 视图、输出与资源限制
 // 返回: *image.RGBA 图像, error 参数、能力、预算或取消错误
 func RenderU3D(ctx context.Context, model *U3DModel, options U3DRenderOptions) (*image.RGBA, error) {
@@ -123,17 +146,17 @@ func RenderU3D(ctx context.Context, model *U3DModel, options U3DRenderOptions) (
 }
 
 // newU3DRender 建立有预算限制的场景实例与资源索引
-// 入参: ctx 取消上下文, model 场景, options 输出与资源限制
+// 入参: ctx 取消上下文, model 场景, options 输出与资源限制, states 后续节点覆盖分组
 // 返回: *u3dRender 绘制状态, error 参数、场景、预算或取消错误
-func newU3DRender(ctx context.Context, model *U3DModel, options U3DRenderOptions) (*u3dRender, error) {
-	if ctx == nil || model == nil || options.Width <= 0 || options.Height <= 0 || options.MaxMemoryBytes < 0 || options.MaxInstances < 0 || options.Instance < 0 {
+func newU3DRender(ctx context.Context, model *U3DModel, options U3DRenderOptions, states ...[]U3DNodeState) (*u3dRender, error) {
+	if ctx == nil || model == nil || options.Width <= 0 || options.Height <= 0 || options.MaxMemoryBytes < 0 || options.MaxInstances < 0 || options.Instance < 0 || !finite(options.Time) {
 		return nil, fmt.Errorf("invalid U3D render options")
 	}
 	limit := options.MaxMemoryBytes
 	if limit == 0 {
 		limit = u3dDefaultBytes
 	}
-	r := &u3dRender{ctx: ctx, model: model, remaining: uint64(limit), opacity: -1, mode: options.Mode, creaseAngle: 45}
+	r := &u3dRender{ctx: ctx, model: model, remaining: uint64(limit), opacity: -1, mode: options.Mode, creaseAngle: 45, resolveTexture: options.ResolveTexture}
 	if options.Mode > U3DRenderShadedIllustration {
 		return nil, fmt.Errorf("unsupported U3D render mode")
 	}
@@ -157,23 +180,37 @@ func newU3DRender(ctx context.Context, model *U3DModel, options U3DRenderOptions
 	if err := r.reserve(pixels, 60); err != nil {
 		return nil, err
 	}
+	if err := r.resources(); err != nil {
+		return nil, err
+	}
+	order, index, err := r.sceneGraph()
+	if err != nil {
+		return nil, err
+	}
+	if err := r.checkAnimations(); err != nil {
+		return nil, err
+	}
 	maxInstances := options.MaxInstances
 	if maxInstances == 0 {
 		maxInstances = 65536
 	}
-	if err := r.nodeStates(options.Nodes); err != nil {
+	groups := append([][]U3DNodeState{options.Nodes}, states...)
+	if err := r.nodeStates(groups...); err != nil {
 		return nil, err
 	}
-	if err := r.instances(maxInstances); err != nil {
+	if err := r.prepareAnimations(options.Time); err != nil {
+		return nil, err
+	}
+	if err := r.instances(order, index, maxInstances); err != nil {
+		return nil, err
+	}
+	if err := r.poseNodes(); err != nil {
 		return nil, err
 	}
 	if err := r.reserve(uint64(len(r.scene)), 1); err != nil {
 		return nil, err
 	}
 	r.members = make([]bool, len(r.scene))
-	if err := r.resources(); err != nil {
-		return nil, err
-	}
 	return r, nil
 }
 
@@ -223,8 +260,18 @@ func (r *u3dRender) render(options U3DRenderOptions, passes []U3DViewPass) (*ima
 		}
 		r.frame[i].color = background
 	}
+	if r.view != nil {
+		if err := r.viewLayers(r.view.Backdrops); err != nil {
+			return nil, err
+		}
+	}
 	for passIndex, pass := range passes {
 		if err := r.renderPass(pass, passIndex, passIndex == len(passes)-1); err != nil {
+			return nil, err
+		}
+	}
+	if r.view != nil {
+		if err := r.viewLayers(r.view.Overlays); err != nil {
 			return nil, err
 		}
 	}
@@ -263,6 +310,7 @@ func (r *u3dRender) reserve(count, size uint64) error {
 // 入参: options 绘制选项
 // 返回: []U3DViewPass 绘制轮次, error 视图或投影错误
 func (r *u3dRender) selectView(options U3DRenderOptions) ([]U3DViewPass, error) {
+	r.view = nil
 	r.viewport = [4]float64{0, 0, float64(options.Width), float64(options.Height)}
 	selected := -1
 	for i, node := range r.model.Nodes {
@@ -286,23 +334,12 @@ func (r *u3dRender) selectView(options U3DRenderOptions) ([]U3DViewPass, error) 
 			return nil, fmt.Errorf("invalid U3D view node")
 		}
 		view := node.View
-		if len(view.Backdrops) != 0 || len(view.Overlays) != 0 {
-			return nil, fmt.Errorf("unsupported U3D textured view layers")
+		if view.Attributes & ^uint32(7) != 0 {
+			return nil, fmt.Errorf("invalid U3D view attributes")
 		}
-		found := false
-		for i, resource := range r.model.Views {
-			if i%256 == 0 {
-				if err := r.ctx.Err(); err != nil {
-					return nil, err
-				}
-			}
-			if resource.Name == node.Resource {
-				if found {
-					return nil, fmt.Errorf("duplicate U3D view resource")
-				}
-				passes = resource.Passes
-				found = true
-			}
+		r.view = view
+		if i, exists := r.viewIndex[node.Resource]; exists {
+			passes = r.model.Views[i].Passes
 		}
 		if options.Camera == nil {
 			if options.Instance >= len(r.byNode[selected]) {
@@ -374,10 +411,10 @@ func (r *u3dRender) selectView(options U3DRenderOptions) ([]U3DViewPass, error) 
 	return passes, nil
 }
 
-// resources 建立只读资源索引，不按名称反复扫描场景
-// 返回: error 重名或预算错误
+// resources 建立只读资源索引，空名称保留给标准默认资源
+// 返回: error 名称、预算或取消错误
 func (r *u3dRender) resources() error {
-	count := uint64(len(r.model.Meshes)) + uint64(len(r.model.Shaders)) + uint64(len(r.model.Materials)) + uint64(len(r.model.Lights))
+	count := uint64(len(r.model.Meshes)) + uint64(len(r.model.Shaders)) + uint64(len(r.model.Materials)) + uint64(len(r.model.Lights)) + uint64(len(r.model.Textures)) + uint64(len(r.model.Views)) + uint64(len(r.model.Motions))
 	if err := r.reserve(count, 96); err != nil {
 		return err
 	}
@@ -385,11 +422,17 @@ func (r *u3dRender) resources() error {
 	r.shaders = make(map[string]int, len(r.model.Shaders))
 	r.materials = make(map[string]int, len(r.model.Materials))
 	r.lightIndex = make(map[string]int, len(r.model.Lights))
+	r.textureIndex = make(map[string]int, len(r.model.Textures))
+	r.viewIndex = make(map[string]int, len(r.model.Views))
+	r.motionIndex = make(map[string]int, len(r.model.Motions))
 	add := func(index map[string]int, name string, i int) error {
 		if i%256 == 0 {
 			if err := r.ctx.Err(); err != nil {
 				return err
 			}
+		}
+		if name == "" {
+			return fmt.Errorf("cannot redefine U3D default resource")
 		}
 		if _, ok := index[name]; ok {
 			return fmt.Errorf("duplicate U3D render resource %q", name)
@@ -414,6 +457,21 @@ func (r *u3dRender) resources() error {
 	}
 	for i, v := range r.model.Lights {
 		if err := add(r.lightIndex, v.Name, i); err != nil {
+			return err
+		}
+	}
+	for i, v := range r.model.Textures {
+		if err := add(r.textureIndex, v.Name, i); err != nil {
+			return err
+		}
+	}
+	for i, v := range r.model.Views {
+		if err := add(r.viewIndex, v.Name, i); err != nil {
+			return err
+		}
+	}
+	for i, v := range r.model.Motions {
+		if err := add(r.motionIndex, v.Name, i); err != nil {
 			return err
 		}
 	}
@@ -494,11 +552,11 @@ func (r *u3dRender) drawScene(pass U3DViewPass, passIndex int) error {
 		if node.Visibility > 3 {
 			return fmt.Errorf("invalid U3D model visibility")
 		}
-		mesh, ok := r.meshes[node.Resource]
-		if !ok {
+		mesh := r.nodeMesh(node)
+		if mesh == nil {
 			continue
 		}
-		if err := r.drawMesh(instance, node, &r.model.Meshes[mesh], pass, passIndex); err != nil {
+		if err := r.drawMesh(instance, node, mesh, pass, passIndex); err != nil {
 			return err
 		}
 	}

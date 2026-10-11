@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"maps"
 	"math"
 
 	"github.com/go-text/typesetting/font/cff"
@@ -172,10 +171,11 @@ func staticCIDFont(table map[string][]byte, chars [][]byte) ([]byte, error) {
 	}
 	names := encodeCFFIndex([][]byte{[]byte(name)})
 	strings := encodeCFFIndex([][]byte{[]byte("Adobe"), []byte("Identity")})
-	charset := []byte{0}
+	cids := make([]int, len(chars))
 	for gid := 1; gid < len(chars); gid++ {
-		charset = binary.BigEndian.AppendUint16(charset, uint16(gid))
+		cids[gid] = gid
 	}
+	charset := encodeCFFSubsetCharset(cids)
 	selects := []byte{3, 0, 1, 0, 0, 0}
 	selects = binary.BigEndian.AppendUint16(selects, uint16(len(chars)))
 	fonts := encodeCFFIndex([][]byte{encodeCFFDict(cffDict{18: {0, 0}})})
@@ -202,110 +202,4 @@ func staticCIDFont(table map[string][]byte, chars [][]byte) ([]byte, error) {
 		dict[17][0] = float64(offset + len(charset) + len(selects) + len(fonts))
 	}
 	return nil, fmt.Errorf("CFF offsets did not converge")
-}
-
-// staticCFFPrograms 读取无子程序和私有字典的CID字形，其他CFF保留原有保存策略
-// 入参: sfnt 已解析字体
-// 返回: [][]byte 独立字形程序，不符合条件时为空
-func staticCFFPrograms(sfnt *sfntFont) [][]byte {
-	data := sfnt.Tables["CFF "]
-	if len(data) < 4 {
-		return nil
-	}
-	_, end, err := readType2Index(data, int(data[2]))
-	if err != nil {
-		return nil
-	}
-	tops, end, err := readType2Index(data, end)
-	if err != nil || len(tops) != 1 {
-		return nil
-	}
-	_, end, err = readType2Index(data, end)
-	if err != nil {
-		return nil
-	}
-	globals, _, err := readType2Index(data, end)
-	if err != nil || len(globals) != 0 {
-		return nil
-	}
-	dict, err := readCFFDict(tops[0])
-	if err != nil || len(dict[1230]) != 3 {
-		return nil
-	}
-	matrix, err := readCFFMatrix(dict, [6]float64{.001, 0, 0, .001, 0, 0})
-	if err != nil || matrix[0] != matrix[3] || matrix[1] != 0 || matrix[2] != 0 || matrix[4] != 0 || matrix[5] != 0 || math.Abs(matrix[0]*float64(sfnt.UnitsPerEm())-1) > 1e-6 {
-		return nil
-	}
-	offset, err := cffDictOffset(data, dict, 1236)
-	if err != nil {
-		return nil
-	}
-	fds, _, err := readType2Index(data, offset)
-	if err != nil || len(fds) != 1 {
-		return nil
-	}
-	fd, err := readCFFDict(fds[0])
-	if err != nil || len(fd) != 1 || len(fd[18]) != 2 || fd[18][0] != 0 {
-		return nil
-	}
-	offset, err = cffDictOffset(data, dict, 17)
-	if err != nil {
-		return nil
-	}
-	chars, _, err := readType2Index(data, offset)
-	if err != nil || len(chars) != int(sfnt.NumGlyphs()) {
-		return nil
-	}
-	return chars
-}
-
-// subsetStaticCFFFont 裁剪静态CID字形并保留原编号、字符映射和度量
-// 入参: sfnt 已解析字体, glyphs 使用的字形
-// 返回: []byte 字体子集, error 裁剪错误
-func subsetStaticCFFFont(sfnt *sfntFont, glyphs []uint16) ([]byte, error) {
-	chars := staticCFFPrograms(sfnt)
-	if chars == nil {
-		return nil, fmt.Errorf("CFF font cannot be subset safely")
-	}
-	keep := make(map[uint16]bool, len(glyphs)+1)
-	keep[0] = true
-	for _, gid := range glyphs {
-		if int(gid) >= len(chars) {
-			return nil, fmt.Errorf("CFF glyph index out of range")
-		}
-		keep[gid] = true
-	}
-	empty := make(map[uint16][]byte)
-	for gid := range chars {
-		if !keep[uint16(gid)] {
-			width := sfnt.GlyphAdvance(uint16(gid))
-			program := empty[width]
-			if program == nil {
-				var err error
-				program, err = cffOutlineProgram(nil, width)
-				if err != nil {
-					return nil, err
-				}
-				empty[width] = program
-			}
-			chars[gid] = program
-		}
-	}
-	table := maps.Clone(sfnt.Tables)
-	var err error
-	table["CFF "], err = staticCIDFont(table, chars)
-	if err != nil {
-		return nil, err
-	}
-	mapping := make(map[rune]uint16)
-	for gid := range keep {
-		for _, char := range sfnt.glyphCharacters(gid) {
-			mapping[char] = gid
-		}
-	}
-	table["cmap"] = buildCmapTable(sfnt.NumGlyphs(), mapping)
-	for _, tag := range []string{"DSIG", "GSUB", "GPOS", "GDEF"} {
-		delete(table, tag)
-	}
-	return serializeOTF(table)
 }

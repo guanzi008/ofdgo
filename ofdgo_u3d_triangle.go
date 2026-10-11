@@ -20,10 +20,13 @@ import (
 	"slices"
 )
 
-// u3dVertex 保存裁剪前后的相机坐标及未预乘颜色
+// u3dVertex 保存裁剪前后的相机坐标、未预乘颜色及纹理插值输入
 type u3dVertex struct {
-	point u3dVector
-	color [4]float64
+	point           u3dVector
+	color           [4]float64
+	texture         [8][3]float64
+	textureMask     uint8
+	opacityOverride bool
 }
 
 // drawMesh 按实例复用顶点变换，着色列表按指定顺序绘制
@@ -51,8 +54,9 @@ func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh,
 		}
 		r.primitives = make(map[u3dPrimitiveKey]struct{})
 		defer func() {
-			r.remaining += 1024 + uint64(len(r.primitives))*512
+			r.remaining += 1024 + uint64(len(r.primitives))*512 + uint64(len(r.texturedPrimitives))*1024
 			r.primitives = nil
+			r.texturedPrimitives = nil
 		}()
 	}
 	normalCount := 0
@@ -161,15 +165,13 @@ func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh,
 					return err
 				}
 			}
-			style := u3dRenderStyle{shader: U3DShader{Blend: 0x606, RenderPass: math.MaxUint32}}
+			style := u3dRenderStyle{shader: U3DShader{Blend: 0x606, RenderPass: r.shaderPass(name)}}
 			var err error
 			if shaded {
 				style, err = r.style(name)
 				if err != nil {
 					return err
 				}
-			} else if index, ok := r.shaders[name]; ok {
-				style.shader.RenderPass = r.model.Shaders[index].RenderPass
 			}
 			if style.shader.RenderPass&(1<<passIndex) == 0 {
 				continue
@@ -177,7 +179,23 @@ func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh,
 			if instance.opacity >= 0 || r.opacity >= 0 {
 				style.shader.Blend = 0x606
 			}
+			textures, err := r.shaderTextures(style.shader)
+			if err != nil {
+				return err
+			}
 			for i, corner := range face.Corners {
+				normal := faceNormal
+				if shaded && !mesh.ExcludeNormals && invertible {
+					normal = normals[corner.Normal]
+				}
+				if !front {
+					for j := range normal {
+						normal[j] = -normal[j]
+					}
+				}
+				if err := textures.coordinates(&vertices[i], mesh, shading, corner, normal); err != nil {
+					return err
+				}
 				if !shaded {
 					vertices[i].color = [4]float64{r.auxiliaryColor[0], r.auxiliaryColor[1], r.auxiliaryColor[2], 1}
 					if r.mode == U3DRenderIllustration {
@@ -192,15 +210,6 @@ func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh,
 					}
 					continue
 				}
-				normal := faceNormal
-				if !mesh.ExcludeNormals && invertible {
-					normal = normals[corner.Normal]
-				}
-				if !front {
-					for j := range normal {
-						normal[j] = -normal[j]
-					}
-				}
 				var diffuse, specular *[4]float32
 				if shading.Attributes&1 != 0 {
 					diffuse = &mesh.Diffuse[corner.Diffuse]
@@ -214,8 +223,9 @@ func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh,
 				}
 				if instance.opacity >= 0 {
 					vertices[i].color[3] = instance.opacity
+					vertices[i].opacityOverride = true
 				}
-				if r.opacity >= 0 {
+				if r.opacity >= 0 && textures == nil {
 					vertices[i].color[3] *= r.opacity
 				}
 			}
@@ -235,7 +245,7 @@ func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh,
 // 入参: triangle 三角面, shader 着色器, pass 绘制轮次
 // 返回: error 数值、资源或取消错误
 func (r *u3dRender) clipTriangle(triangle [3]u3dVertex, shader U3DShader, pass U3DViewPass) error {
-	if shader.Blend == 0x606 && triangle[0].color[3] == 0 && triangle[1].color[3] == 0 && triangle[2].color[3] == 0 {
+	if shader.Textures == ([8]*U3DTextureLayer{}) && shader.Blend == 0x606 && triangle[0].color[3] == 0 && triangle[1].color[3] == 0 && triangle[2].color[3] == 0 {
 		return r.ctx.Err()
 	}
 	var storage [2][12]u3dVertex
@@ -259,13 +269,7 @@ func (r *u3dRender) clipTriangle(triangle [3]u3dVertex, shader U3DShader, pass U
 			}
 			if (d >= 0) != (previousDistance >= 0) {
 				t := u3dClipFraction(previousDistance, d)
-				var intersection u3dVertex
-				for i := range intersection.point {
-					intersection.point[i] = previous.point[i]*(1-t) + vertex.point[i]*t
-				}
-				for i := range intersection.color {
-					intersection.color[i] = previous.color[i]*(1-t) + vertex.color[i]*t
-				}
+				intersection := u3dInterpolate(previous, vertex, t)
 				if output == len(storage[next]) {
 					return fmt.Errorf("invalid U3D clipped polygon")
 				}
@@ -298,6 +302,10 @@ func (r *u3dRender) clipTriangle(triangle [3]u3dVertex, shader U3DShader, pass U
 // 入参: triangle 已裁剪三角面, shader 着色器, pass 绘制轮次
 // 返回: error 数值、预算或取消错误
 func (r *u3dRender) rasterTriangle(triangle [3]u3dVertex, shader U3DShader, pass U3DViewPass) error {
+	textures, err := r.shaderTextures(shader)
+	if err != nil {
+		return err
+	}
 	var x, y, reciprocal [3]float64
 	for i, v := range triangle {
 		reciprocal[i] = 1
@@ -385,11 +393,25 @@ func (r *u3dRender) rasterTriangle(triangle [3]u3dVertex, shader U3DShader, pass
 				color[c] = triangle[0].color[c] + w1*(triangle[1].color[c]-triangle[0].color[c]) + w2*(triangle[2].color[c]-triangle[0].color[c])
 			}
 			position := u3dVector{}
-			if pass.Attributes&1 != 0 {
+			if pass.Attributes&1 != 0 || textures != nil && textures.reflection {
 				position = u3dVector{(px - r.viewport[0] - r.viewport[2]/2 - r.camera.ShiftX) / r.camera.ScaleX, (r.viewport[1] + r.viewport[3]/2 + r.camera.ShiftY - py) / r.camera.ScaleY, depth}
 				if r.camera.Perspective {
 					position[0] *= depth
 					position[1] *= depth
+				}
+			}
+			if textures != nil {
+				var uv [8][3]float64
+				for layer := range textures.layers {
+					if textures.mask&(1<<layer) == 0 {
+						continue
+					}
+					for c := range uv[layer] {
+						uv[layer][c] = triangle[0].texture[layer][c] + w1*(triangle[1].texture[layer][c]-triangle[0].texture[layer][c]) + w2*(triangle[2].texture[layer][c]-triangle[0].texture[layer][c])
+					}
+				}
+				if err := r.textureColor(textures, &color, &uv, position, triangle[0].opacityOverride); err != nil {
+					return err
 				}
 			}
 			visible, err := u3dFragmentColor(&color, position, &shader, &pass)

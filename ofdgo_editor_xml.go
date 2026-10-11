@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -42,10 +43,26 @@ type editorXMLPatch struct {
 // 入参: data XML原文
 // 返回: *editorXML 根节点, error 错误信息
 func parseEditorXML(data []byte) (*editorXML, error) {
-	d := xml.NewDecoder(bytes.NewReader(data))
+	return parseEditorXMLContext(nil, data)
+}
+
+// parseEditorXMLContext 解析XML节点位置并响应取消
+// 入参: ctx 取消上下文，可为nil, data XML原文
+// 返回: *editorXML 根节点, error 解析或取消错误
+func parseEditorXMLContext(ctx context.Context, data []byte) (*editorXML, error) {
+	var input io.Reader = bytes.NewReader(data)
+	if ctx != nil {
+		input = imageInput{ReadCloser: io.NopCloser(input), context: ctx}
+	}
+	d := xml.NewDecoder(input)
 	var root *editorXML
 	var stack []*editorXML
 	for {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		start := int(d.InputOffset())
 		token, err := d.Token()
 		if err == io.EOF {
@@ -131,7 +148,12 @@ func editorPatchXML(data []byte, patches []editorXMLPatch) []byte {
 		}
 		return a.end - b.end
 	})
+	size := len(data)
+	for _, patch := range patches {
+		size += len(patch.data) - (patch.end - patch.start)
+	}
 	var result bytes.Buffer
+	result.Grow(size)
 	position := 0
 	for _, patch := range patches {
 		result.Write(data[position:patch.start])

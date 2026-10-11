@@ -102,7 +102,11 @@ func sfntSubsettable(sfnt *sfntFont) bool {
 			return false
 		}
 		font, err := readType2Font(sfnt.Tables["CFF "])
-		return err == nil && len(font.chars) == int(sfnt.NumGlyphs()) || staticCFFPrograms(sfnt) != nil
+		if err == nil {
+			return len(font.chars) == int(sfnt.NumGlyphs())
+		}
+		cid, err := readCIDSubsetFont(sfnt.Tables["CFF "])
+		return err == nil && len(cid.fonts[0].chars) == int(sfnt.NumGlyphs())
 	}
 	return sfnt.IsTrueType && (sfnt.Tables["fvar"] == nil || variableSFNTSubsettable(sfnt))
 }
@@ -166,13 +170,14 @@ func subsetSFNTFont(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 		return bytes.Clone(data), nil
 	}
 	if sfnt.IsCFF {
-		if font, err := readType2Font(sfnt.Tables["CFF "]); err == nil {
-			if len(font.chars) != int(sfnt.NumGlyphs()) {
-				return nil, fmt.Errorf("CFF glyph count does not match maxp")
-			}
-			return subsetNamedCFFFont(sfnt, glyphs)
+		count, err := parseCFFAndCountGlyphs(sfnt.Tables["CFF "])
+		if err != nil {
+			return nil, err
 		}
-		return subsetStaticCFFFont(sfnt, glyphs)
+		if count != int(sfnt.NumGlyphs()) {
+			return nil, fmt.Errorf("CFF glyph count does not match maxp")
+		}
+		return subsetCFFFont(sfnt, glyphs, mapped)
 	}
 	if sfnt.Tables["fvar"] != nil {
 		return subsetVariableSFNTFont(sfnt, glyphs)
@@ -203,7 +208,7 @@ func subsetSFNTFont(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 	return subsetCompactSFNTFont(sfnt, glyphs)
 }
 
-// subsetSourceSFNTFont 裁剪静态TrueType或非CID的CFF原有字体，保留字形编号、组合依赖、度量和提示指令
+// subsetSourceSFNTFont 裁剪静态TrueType或CFF原有字体，保留字形编号、组合依赖、度量和提示指令
 // 集合、字形替换、可变、彩色和未知表保持原样，不对不完整的引用或异常字体猜测修复
 // 入参: data 字体数据, usage 全包用字记录
 // 返回: []byte 更小的字体子集，无确定收益时为空
@@ -217,7 +222,7 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 	}
 	for tag := range sfnt.Tables {
 		switch tag {
-		case "cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "CFF ", "cvt ", "fpgm", "prep", "gasp", "kern", "vhea", "vmtx", "hdmx", "LTSH", "VDMX", "GDEF", "GPOS", "DSIG", "FFTM":
+		case "cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "CFF ", "cvt ", "fpgm", "prep", "gasp", "kern", "vhea", "vmtx", "VORG", "hdmx", "LTSH", "VDMX", "GDEF", "GPOS", "DSIG", "FFTM":
 		default:
 			return nil
 		}
@@ -250,8 +255,8 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 		}
 	}
 	if sfnt.IsCFF {
-		font, err := readType2Font(sfnt.Tables["CFF "])
-		if err != nil || len(font.chars) != int(sfnt.NumGlyphs()) {
+		count, err := parseCFFAndCountGlyphs(sfnt.Tables["CFF "])
+		if err != nil || count != int(sfnt.NumGlyphs()) {
 			return nil
 		}
 		cff, err := subsetCFFCharstrings(sfnt.Tables["CFF "], glyphs)

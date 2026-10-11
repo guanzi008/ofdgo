@@ -441,8 +441,8 @@ func (e *Editor) writePartsWithPages(write func(string, []byte, bool) error, pro
 	return nil
 }
 
-// usedResources 筛选当前引用的新增资源及需要跨页复用的原资源文件，不修改资源池
-// 返回: []editorResource 新增字体, []editorResource 新增图片, []ColorSpace 新增颜色空间, []string 原资源文件
+// usedResources 沿图层、对象及资源依赖筛选新增资源和共享文件，不修改资源池
+// 返回: []editorResource 新增字体, []editorResource 新增图片, []ColorSpace 新增颜色空间, []string 独立资源文件
 func (e *Editor) usedResources() (fonts, images []editorResource, spaces []ColorSpace, sourceFiles []string) {
 	used := make(map[string]bool)
 	promoted := make(map[string]bool)
@@ -487,10 +487,13 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 	for _, page := range e.pages {
 		collectActionReferences(page.Actions, used)
 		var original map[string]GraphicObject
+		var originalLayers map[string]string
 		if e.source != nil {
 			original = make(map[string]GraphicObject)
+			originalLayers = make(map[string]string)
 			if source := e.source.pages[page.ID]; source != nil && source.original != nil {
 				for _, layer := range source.original.Content.Layer {
+					originalLayers[layer.ID] = layer.DrawParam
 					for _, object := range layer.Objects {
 						original[editorObjectID(object)] = object
 					}
@@ -498,6 +501,12 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 			}
 		}
 		for _, layer := range page.Content.Layer {
+			if layer.DrawParam != "" {
+				used[layer.DrawParam] = true
+				if e.source != nil && originalLayers[layer.ID] != layer.DrawParam {
+					promoted[layer.DrawParam] = true
+				}
+			}
 			for _, object := range layer.Objects {
 				before, exists := original[editorObjectID(object)]
 				collectObjectReferences(object, used)
@@ -514,14 +523,31 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 	}
 	normalizeResourceReferences(used)
 	normalizeResourceReferences(promoted)
-	for i := len(e.resources) - 1; i >= 0; i-- {
-		resource := e.resources[i]
-		if resource.definition() != "" && used[resource.definition()] {
-			for _, id := range resource.references {
-				used[id] = true
-				if e.source != nil {
-					promoted[id] = true
-				}
+	definitions := make(map[string]int)
+	var pending []string
+	for index, resource := range e.resources {
+		if id := resource.definition(); id != "" {
+			definitions[id] = index
+			if used[id] {
+				pending = append(pending, id)
+			}
+		}
+	}
+	for len(pending) != 0 {
+		id := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		index, ok := definitions[id]
+		if !ok {
+			continue
+		}
+		delete(definitions, id)
+		for _, reference := range e.resources[index].references {
+			used[reference] = true
+			if e.source != nil {
+				promoted[reference] = true
+			}
+			if _, ok := definitions[reference]; ok {
+				pending = append(pending, reference)
 			}
 		}
 	}

@@ -63,10 +63,13 @@ func (r *u3dRender) collectLights() error {
 			continue
 		}
 		j, ok := r.lightIndex[node.Resource]
-		if !ok {
+		if !ok && node.Resource != "" {
 			continue
 		}
-		light := r.model.Lights[j]
+		light := U3DLight{Attributes: 1, Color: [3]float32{.75, .75, .75}}
+		if ok {
+			light = r.model.Lights[j]
+		}
 		if light.Attributes&1 == 0 {
 			continue
 		}
@@ -152,11 +155,21 @@ func (r *u3dRender) overrideLighting(lighting *U3DLighting) error {
 	return nil
 }
 
-// style 解析着色器与材质，未启用的材质项使用固定默认值
+// shaderPass 返回着色器的绘制轮次位图，默认着色器仅参与第一轮
+// 入参: name 着色器名
+// 返回: uint32 绘制轮次位图
+func (r *u3dRender) shaderPass(name string) uint32 {
+	if index, exists := r.shaders[name]; exists {
+		return r.model.Shaders[index].RenderPass
+	}
+	return 1
+}
+
+// style 解析着色器与材质，缺失资源采用ECMA-363第8.4节的默认资源
 // 入参: name 着色器名
 // 返回: u3dRenderStyle 有效绘制参数, error 参数错误
 func (r *u3dRender) style(name string) (u3dRenderStyle, error) {
-	style := u3dRenderStyle{shader: U3DShader{Blend: 0x606, AlphaFunction: 0x617, RenderPass: math.MaxUint32}, ambient: [3]float64{.2, .2, .2}, diffuse: [3]float64{.8, .8, .8}, opacity: 1}
+	style := u3dRenderStyle{shader: U3DShader{Attributes: 1, Blend: 0x606, AlphaFunction: 0x617, RenderPass: 1}, ambient: [3]float64{.75, .75, .75}, opacity: 1}
 	if index, ok := r.shaders[name]; ok {
 		style.shader = r.model.Shaders[index]
 	}
@@ -166,6 +179,7 @@ func (r *u3dRender) style(name string) (u3dRenderStyle, error) {
 	}
 	if index, ok := r.materials[shader.Material]; ok {
 		material := r.model.Materials[index]
+		style.ambient, style.diffuse = [3]float64{.2, .2, .2}, [3]float64{.8, .8, .8}
 		if material.Attributes > 63 {
 			return style, fmt.Errorf("invalid U3D render material")
 		}

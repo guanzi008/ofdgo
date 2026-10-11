@@ -46,6 +46,27 @@ type u3dHistogram struct {
 	total  uint32
 }
 
+// finish 校验压缩块的冲刷字段及结束位置
+// 返回: error 截断、冲刷或多余数据错误
+func (r *u3dBits) finish() error {
+	if r.err != nil {
+		return r.err
+	}
+	if r.pos > uint64(len(r.data))*8 {
+		return io.ErrUnexpectedEOF
+	}
+	if r.u32() != 0 {
+		return fmt.Errorf("invalid U3D compression flush")
+	}
+	if r.err != nil {
+		return r.err
+	}
+	if (r.pos-16+7)/8 != uint64(len(r.data)) {
+		return fmt.Errorf("unexpected U3D compressed block data")
+	}
+	return nil
+}
+
 // take 读取定长字段，失败后不继续推进位置
 // 入参: size 字节数
 // 返回: []byte 字段数据，失败时为空

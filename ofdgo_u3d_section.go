@@ -44,10 +44,10 @@ func (r *u3dRender) prepareSections(sections []U3DCrossSection) error {
 	if len(sections) == 0 {
 		return nil
 	}
-	if err := r.reserve(uint64(len(sections)), 352); err != nil {
+	if err := r.reserve(uint64(len(sections)), 1152); err != nil {
 		return err
 	}
-	if err := r.reserve(uint64(len(sections))+3, 112); err != nil {
+	if err := r.reserve(uint64(len(sections))+3, 512); err != nil {
 		return err
 	}
 	r.sections = make([]u3dSection, len(sections))
@@ -140,11 +140,10 @@ func (r *u3dRender) sceneDiagonal() (float64, error) {
 			return 0, err
 		}
 		node := r.model.Nodes[instance.node]
-		index, exists := r.meshes[node.Resource]
-		if node.Kind != "Model" || !exists {
+		mesh := r.nodeMesh(&node)
+		if node.Kind != "Model" || mesh == nil {
 			continue
 		}
-		mesh := &r.model.Meshes[index]
 		for i := range len(mesh.Faces) + len(mesh.Lines) + len(mesh.Points) {
 			_, corners := mesh.primitive(i)
 			if i%256 == 0 {

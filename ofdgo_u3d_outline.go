@@ -47,8 +47,7 @@ func (r *u3dRender) outlineFace(outline *u3dOutline, world [3]u3dVector, vertice
 				return err
 			}
 		}
-		index, ok := r.shaders[name]
-		if !ok || r.model.Shaders[index].RenderPass&(1<<passIndex) != 0 {
+		if r.shaderPass(name)&(1<<passIndex) != 0 {
 			active = true
 			break
 		}

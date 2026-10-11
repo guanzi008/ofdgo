@@ -68,15 +68,13 @@ func (r *u3dRender) drawPrimitives(instance u3dInstance, node *U3DNode, mesh *U3
 			if err := r.ctx.Err(); err != nil {
 				return err
 			}
-			style := u3dRenderStyle{shader: U3DShader{Blend: 0x606, RenderPass: math.MaxUint32}}
+			style := u3dRenderStyle{shader: U3DShader{Blend: 0x606, RenderPass: r.shaderPass(name)}}
 			var err error
 			if shaded {
 				style, err = r.style(name)
 				if err != nil {
 					return err
 				}
-			} else if index, ok := r.shaders[name]; ok {
-				style.shader.RenderPass = r.model.Shaders[index].RenderPass
 			}
 			if style.shader.RenderPass&(1<<passIndex) == 0 {
 				continue
@@ -84,14 +82,21 @@ func (r *u3dRender) drawPrimitives(instance u3dInstance, node *U3DNode, mesh *U3
 			if instance.opacity >= 0 || r.opacity >= 0 {
 				style.shader.Blend = 0x606
 			}
+			textures, err := r.shaderTextures(style.shader)
+			if err != nil {
+				return err
+			}
 			for i, corner := range corners {
+				var normal u3dVector
+				if shaded && !mesh.ExcludeNormals {
+					normal = normals[corner.Normal]
+				}
+				if err := textures.coordinates(&vertices[i], mesh, shading, corner, normal); err != nil {
+					return err
+				}
 				vertices[i].color = [4]float64{r.auxiliaryColor[0], r.auxiliaryColor[1], r.auxiliaryColor[2], 1}
 				if !shaded {
 					continue
-				}
-				var normal u3dVector
-				if !mesh.ExcludeNormals {
-					normal = normals[corner.Normal]
 				}
 				var diffuse, specular *[4]float32
 				if shading.Attributes&1 != 0 {
@@ -106,8 +111,9 @@ func (r *u3dRender) drawPrimitives(instance u3dInstance, node *U3DNode, mesh *U3
 				}
 				if instance.opacity >= 0 {
 					vertices[i].color[3] = instance.opacity
+					vertices[i].opacityOverride = true
 				}
-				if r.opacity >= 0 {
+				if r.opacity >= 0 && textures == nil {
 					vertices[i].color[3] *= r.opacity
 				}
 			}
@@ -226,7 +232,7 @@ func u3dClipFraction(a, b float64) float64 {
 	return a / (a + b)
 }
 
-// u3dInterpolate 在相机空间插值坐标与未预乘颜色
+// u3dInterpolate 在相机空间插值位置、颜色与纹理输入
 // 入参: a 起点, b 终点, t 比例
 // 返回: u3dVertex 插值顶点
 func u3dInterpolate(a, b u3dVertex, t float64) u3dVertex {
@@ -236,6 +242,18 @@ func u3dInterpolate(a, b u3dVertex, t float64) u3dVertex {
 	}
 	for i := range result.color {
 		result.color[i] = a.color[i]*(1-t) + b.color[i]*t
+	}
+	result.textureMask = a.textureMask | b.textureMask
+	result.opacityOverride = a.opacityOverride
+	if result.textureMask != 0 {
+		for layer := range result.texture {
+			if result.textureMask&(1<<layer) == 0 {
+				continue
+			}
+			for c := range result.texture[layer] {
+				result.texture[layer][c] = a.texture[layer][c]*(1-t) + b.texture[layer][c]*t
+			}
+		}
 	}
 	return result
 }
@@ -344,6 +362,10 @@ func (r *u3dRender) rasterSectionLine(a, b u3dVertex, rgb [3]float64, normal, or
 // 入参: a 已裁剪起点, b 已裁剪终点, normal 面法线, origin 面上点, shader 着色器, pass 绘制轮次
 // 返回: error 数值、资源或取消错误
 func (r *u3dRender) rasterLine(a, b u3dVertex, normal, origin u3dVector, shader U3DShader, pass U3DViewPass) error {
+	textures, err := r.shaderTextures(shader)
+	if err != nil {
+		return err
+	}
 	cx := r.viewport[0] + r.viewport[2]/2 + r.camera.ShiftX
 	cy := r.viewport[1] + r.viewport[3]/2 + r.camera.ShiftY
 	planes := [4][4]float64{{r.camera.ScaleX, 0, 0, cx}, {-r.camera.ScaleX, 0, 0, float64(r.output.Rect.Dx()) - cx}, {0, -r.camera.ScaleY, 0, cy}, {0, r.camera.ScaleY, 0, float64(r.output.Rect.Dy()) - cy}}
@@ -413,6 +435,9 @@ func (r *u3dRender) rasterLine(a, b u3dVertex, normal, origin u3dVector, shader 
 		depth -= 8 * math.Abs(depth-math.Nextafter(depth, math.Inf(-1)))
 		if depth <= r.frame[pixel].depth {
 			vertex := u3dInterpolate(a, b, weight)
+			if err := r.textureColor(textures, &vertex.color, &vertex.texture, vertex.point, vertex.opacityOverride); err != nil {
+				return err
+			}
 			visible, err := u3dFragmentColor(&vertex.color, vertex.point, &shader, &pass)
 			if err != nil {
 				return err

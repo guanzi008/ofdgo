@@ -30,10 +30,16 @@ const pdfModelAttachmentLimit = 1024
 
 // PDFThreeDRenderOptions 控制PDF三维视口的静态绘制，不改变注解激活状态
 // 缓存与实例上限为0时采用U3DRenderOptions的默认值
+// ResolveTexture按原始URL提供外部纹理，空值不访问外部资源
+// Nodes按名称替换PDF视图中的节点状态，可指定动作轨道与采样时间，不改变原始注解
+// Time以秒指定模型动画的采样时刻，零值为初始时刻
 type PDFThreeDRenderOptions struct {
 	Width, Height  int
 	MaxMemoryBytes int64
 	MaxInstances   int
+	ResolveTexture U3DTextureResolver
+	Nodes          []U3DNodeState
+	Time           float64
 }
 
 // threeDAnnotation 按非交互呈现规则处理激活状态，保留原始模型与附件动作
@@ -147,7 +153,13 @@ func (p *pdfImporter) threeDPainter(ctx context.Context, page *pdfgo.Page, sourc
 		if !finite(w) || !finite(h) || w <= 0 || h <= 0 || w > 1<<30 || h > 1<<30 {
 			return nil, fmt.Errorf("invalid PDF 3D raster dimensions")
 		}
-		img, err := RenderPDFThreeD(ctx, model, source, PDFThreeDRenderOptions{Width: int(w), Height: int(h)})
+		options := PDFThreeDRenderOptions{Width: int(w), Height: int(h)}
+		if p.resolveFile != nil {
+			options.ResolveTexture = func(ctx context.Context, address string) ([]byte, error) {
+				return p.resolveFile(ctx, pdfgo.FileSpecification{Name: address, FileSystem: "URL"})
+			}
+		}
+		img, err := RenderPDFThreeD(ctx, model, source, options)
 		if err != nil {
 			return nil, err
 		}
@@ -166,7 +178,7 @@ func (p *pdfImporter) threeDPainter(ctx context.Context, page *pdfgo.Page, sourc
 	}, nil
 }
 
-// RenderPDFThreeD 按PDF相机、投影、背景与灯光绘制3DB区域，不执行脚本或动画
+// RenderPDFThreeD 按PDF相机、投影、背景与灯光绘制指定时刻的3DB区域，不执行脚本
 // 返回图像不含3DB以外的注解背景，未支持的视图效果返回明确错误
 // 每次从传入场景建立独立节点状态，不继承此前绘制的运行时状态
 // 入参: ctx 取消上下文, model 解码后的U3D模型, source PDF三维参数, options 输出与资源限制
@@ -200,7 +212,7 @@ func RenderPDFThreeD(ctx context.Context, model *U3DModel, source pdfgo.ThreeD, 
 	if source.Projection != nil {
 		projection = *source.Projection
 	}
-	render := U3DRenderOptions{Width: options.Width, Height: options.Height, MaxMemoryBytes: options.MaxMemoryBytes, MaxInstances: options.MaxInstances, Background: source.Background.RGB}
+	render := U3DRenderOptions{Width: options.Width, Height: options.Height, MaxMemoryBytes: options.MaxMemoryBytes, MaxInstances: options.MaxInstances, Background: source.Background.RGB, ResolveTexture: options.ResolveTexture, Time: options.Time}
 	if err := pdfThreeDRenderMode(source, &render); err != nil {
 		return nil, err
 	}
@@ -210,7 +222,7 @@ func RenderPDFThreeD(ctx context.Context, model *U3DModel, source pdfgo.ThreeD, 
 	if err := pdfThreeDSections(ctx, presentation.CrossSections, &render); err != nil {
 		return nil, err
 	}
-	r, err := newU3DRender(ctx, model, render)
+	r, err := newU3DRender(ctx, model, render, options.Nodes)
 	if err != nil {
 		return nil, err
 	}

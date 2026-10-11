@@ -31,7 +31,7 @@ type U3DOptions struct {
 	MaxDecodedBytes int64
 }
 
-// U3DModel 保存独立于PDF的静态U3D场景，不执行动作或读取外部文件
+// U3DModel 保存独立于PDF的U3D场景及动作数据，不执行动作或读取外部文件
 type U3DModel struct {
 	Major, Minor int16
 	DefinedUnits bool
@@ -42,6 +42,8 @@ type U3DModel struct {
 	Shaders      []U3DShader
 	Lights       []U3DLight
 	Views        []U3DViewResource
+	Textures     []U3DTexture
+	Motions      []U3DMotion
 	Metadata     []U3DMetadata
 }
 
@@ -61,6 +63,8 @@ type U3DNode struct {
 	LineShaders          [][]string
 	PointShaders         [][]string
 	View                 *U3DView
+	BoneWeights          []U3DBoneWeights
+	Animations           []U3DAnimation
 }
 
 // U3DParent 保存父节点名称及局部到父节点的变换，空名称引用默认节点
@@ -77,12 +81,13 @@ type U3DMaterial struct {
 	Reflectivity, Opacity                float32
 }
 
-// U3DShader 保存无纹理着色器参数，不提前应用混合、透明测试或光照
+// U3DShader 保存材质与八个纹理通道，Textures中的空项表示未启用
 type U3DShader struct {
 	Name, Material                   string
 	Attributes, AlphaFunction, Blend uint32
 	RenderPass                       uint32
 	AlphaReference                   float32
+	Textures                         [8]*U3DTextureLayer
 }
 
 // U3DLight 保存环境、方向、点或聚光资源，Kind依次为0至3
@@ -110,10 +115,12 @@ type u3dDecoder struct {
 	meshOrder []string
 	nodes     map[string]int
 	palettes  map[uint32]map[string]bool
+	textures  map[string]int
 }
 
-// DecodeU3D 按ECMA-363解码静态基础网格、线集、点集、组、材质、着色器和光源
-// 暂不支持渐进网格、纹理和动画，遇到未支持内容返回错误而非部分场景
+// DecodeU3D 按ECMA-363解码静态几何、骨架、场景节点及材质、纹理图像等资源
+// 保留动作轨道和动画修饰器，不在解码时求值；绘制能力由RenderU3D另行校验
+// 渐进网格尚未支持
 // 点集球面预测暂限不超过两个非对跖方向，不推测多方向合并次序
 // 入参: ctx 取消上下文, data U3D数据, options 解码限制
 // 返回: *U3DModel 独立场景数据, error 格式、能力、预算或取消错误
@@ -177,7 +184,7 @@ func DecodeU3D(ctx context.Context, data []byte, options U3DOptions) (*U3DModel,
 		if err != nil {
 			return nil, fmt.Errorf("U3D block at %d: %w", offset, err)
 		}
-		continuation := block.kind == 0xffffff15 || block.kind == 0xffffff3b || block.kind == 0xffffff3c || block.kind == 0xffffff3e || block.kind == 0xffffff3f
+		continuation := block.kind == 0xffffff15 || block.kind == 0xffffff3b || block.kind == 0xffffff3c || block.kind == 0xffffff3e || block.kind == 0xffffff3f || block.kind == 0xffffff5c
 		if uint64(offset) < declarationEnd && (uint64(end) > declarationEnd || continuation) || uint64(offset) >= declarationEnd && !continuation {
 			return nil, fmt.Errorf("invalid U3D declaration boundary at %d", offset)
 		}
@@ -209,7 +216,13 @@ func DecodeU3D(ctx context.Context, data []byte, options U3DOptions) (*U3DModel,
 		}
 		d.model.Meshes = append(d.model.Meshes, mesh.mesh)
 	}
+	if err := d.checkTextures(); err != nil {
+		return nil, err
+	}
 	if err := d.checkParents(); err != nil {
+		return nil, err
+	}
+	if err := d.checkBoneWeights(); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -307,6 +320,12 @@ func (d *u3dDecoder) chain(block u3dBlock) error {
 	}
 	r := u3dValues{data: block.data}
 	name, kind, flags := r.text(), r.u32(), r.u32()
+	if r.err != nil {
+		return r.err
+	}
+	if name == "" {
+		return fmt.Errorf("cannot redefine U3D default resource")
+	}
 	if kind > 2 || flags & ^uint32(3) != 0 {
 		return fmt.Errorf("invalid U3D modifier chain")
 	}
@@ -367,6 +386,12 @@ func (d *u3dDecoder) block(block u3dBlock, owner string, chain int, index uint32
 	}
 	r := u3dValues{data: block.data}
 	name := r.text()
+	if r.err != nil {
+		return "", r.err
+	}
+	if name == "" {
+		return "", fmt.Errorf("cannot redefine U3D default resource")
+	}
 	var err error
 	switch block.kind {
 	case 0xffffff21, 0xffffff22, 0xffffff23, 0xffffff24:
@@ -394,16 +419,38 @@ func (d *u3dDecoder) block(block u3dBlock, owner string, chain int, index uint32
 			return name, fmt.Errorf("invalid U3D primitive continuation location")
 		}
 		err = d.primitiveContinuation(&r, name, block.kind == 0xffffff3e)
+	case 0xffffff43, 0xffffff44:
+		if (chain != 0 && chain != 1) || index == 0 || owner != name || r.u32() != index {
+			return name, fmt.Errorf("invalid U3D animation or bone weight modifier chain")
+		}
+		if _, exists := d.nodes[name]; chain == 0 && !exists || chain == 1 && d.meshes[name] == nil {
+			return name, fmt.Errorf("missing U3D animation or bone weight modifier target")
+		}
+		if block.kind == 0xffffff43 {
+			err = d.animation(&r, name, chain, index)
+		} else {
+			err = d.boneWeights(&r, name, chain, index)
+		}
 	case 0xffffff45:
 		if chain != 0 || index == 0 || owner != name || r.u32() != index {
 			return name, fmt.Errorf("invalid U3D shading modifier chain")
 		}
 		err = d.shading(&r, name)
-	case 0xffffff51, 0xffffff52, 0xffffff53, 0xffffff54:
+	case 0xffffff51, 0xffffff52, 0xffffff53, 0xffffff54, 0xffffff56:
 		if chain >= 0 {
 			return name, fmt.Errorf("invalid U3D palette resource location")
 		}
 		err = d.resource(&r, block.kind, name)
+	case 0xffffff55:
+		if chain >= 0 && (chain != 2 || index != 0) {
+			return name, fmt.Errorf("invalid U3D texture chain")
+		}
+		err = d.textureDeclaration(&r, name)
+	case 0xffffff5c:
+		if chain >= 0 {
+			return name, fmt.Errorf("invalid U3D texture continuation location")
+		}
+		err = d.textureContinuation(&r, name)
 	default:
 		return name, fmt.Errorf("unsupported U3D block %#x", block.kind)
 	}
@@ -513,7 +560,7 @@ func (d *u3dDecoder) shading(r *u3dValues, name string) error {
 	return r.err
 }
 
-// resource 读取独立材质、着色器、光源和视图资源
+// resource 读取独立材质、着色器、光源、视图和动作资源
 // 入参: r 字段读取器, kind 资源类型, name 资源名
 // 返回: error 结构或能力错误
 func (d *u3dDecoder) resource(r *u3dValues, kind uint32, name string) error {
@@ -527,6 +574,8 @@ func (d *u3dDecoder) resource(r *u3dValues, kind uint32, name string) error {
 	}
 	palette[name] = true
 	switch kind {
+	case 0xffffff56:
+		return d.motion(r, name)
 	case 0xffffff52:
 		return d.viewResource(r, name)
 	case 0xffffff54:
@@ -548,8 +597,28 @@ func (d *u3dDecoder) resource(r *u3dValues, kind uint32, name string) error {
 		if shader.Attributes & ^uint32(7) != 0 || shader.AlphaFunction < 0x610 || shader.AlphaFunction > 0x617 || shader.Blend < 0x604 || shader.Blend > 0x607 || channels & ^uint32(255) != 0 || alpha & ^channels != 0 {
 			return fmt.Errorf("invalid U3D shader parameters")
 		}
-		if channels != 0 {
-			return fmt.Errorf("unsupported U3D textured shader")
+		for channel := range shader.Textures {
+			if channels&(1<<channel) == 0 {
+				continue
+			}
+			if err := d.reserve(1, 192); err != nil {
+				return err
+			}
+			layer := &U3DTextureLayer{Texture: r.text(), Intensity: r.f32(), Blend: r.u8(), BlendSource: r.u8(), BlendConstant: r.f32(), Mode: r.u8(), Alpha: alpha&(1<<channel) != 0}
+			for i := range layer.Transform {
+				layer.Transform[i] = r.f32()
+			}
+			for i := range layer.WrapTransform {
+				layer.WrapTransform[i] = r.f32()
+			}
+			layer.Repeat = r.u8()
+			if r.err != nil {
+				return r.err
+			}
+			if layer.Blend > 3 || layer.BlendSource > 1 || layer.Mode > 4 || layer.Repeat > 3 {
+				return fmt.Errorf("invalid U3D texture layer")
+			}
+			shader.Textures[channel] = layer
 		}
 		d.model.Shaders = append(d.model.Shaders, shader)
 	case 0xffffff51:

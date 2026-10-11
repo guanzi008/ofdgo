@@ -151,6 +151,30 @@ func (u *editorFontUsage) merge(other *editorFontUsage, unsafe bool) {
 	}
 }
 
+// editorObjectFontScan 判断对象是否需要扫描嵌套文字或复合资源
+// 入参: object 图形对象
+// 返回: bool 是否需要完整引用扫描
+func editorObjectFontScan(object GraphicObject) bool {
+	var clips *Clips
+	var fill, stroke *FillColor
+	switch object.Type {
+	case "CompositeObject", "CompositeGraphicUnit":
+		return true
+	case "TextObject", "Text":
+		clips = object.TextObject.Clips
+		fill, stroke = object.TextObject.FillColor, (*FillColor)(object.TextObject.StrokeColor)
+	case "PathObject", "Path":
+		clips = object.PathObject.Clips
+		fill, stroke = object.PathObject.FillColor, (*FillColor)(object.PathObject.StrokeColor)
+	case "ImageObject":
+		clips = object.ImageObject.Clips
+		if object.ImageObject.Border != nil {
+			stroke = (*FillColor)(object.ImageObject.Border.BorderColor)
+		}
+	}
+	return clips != nil || fill != nil && fill.Pattern != nil || stroke != nil && stroke.Pattern != nil
+}
+
 // subsetFonts 收集新增字体实际使用的字形，仅裁剪保存结果，保留完整编辑字体
 // 入参: progress 保存进度回调
 // 返回: map[string][]byte 包内字体子集, error 错误信息
@@ -181,11 +205,17 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 		return nil, progress.report("fonts", 0, 0)
 	}
 	refs := editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool)}
-	composite := false
+	nested := false
+	for _, resource := range e.resources {
+		if resource.draw != nil {
+			nested = true
+			break
+		}
+	}
 	if e.source != nil {
 		for _, name := range e.annotationFiles() {
 			if data, changed := e.source.reader.files[name]; changed {
-				composite = true
+				nested = true
 				if _, safe := refs.scan(bytes.NewReader(data), name); !safe {
 					return nil, nil
 				}
@@ -199,8 +229,8 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 		}
 		for _, layer := range page.Content.Layer {
 			for _, object := range layer.Objects {
-				if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
-					composite = true
+				if editorObjectFontScan(object) {
+					nested = true
 					origin := e.objectOrigin(editorObjectID(object))
 					var data []byte
 					var err error
@@ -218,6 +248,7 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 					if _, safe := refs.scan(bytes.NewReader(data), "Page.xml"); !safe {
 						return nil, nil
 					}
+					continue
 				}
 				if object.Type != "TextObject" {
 					continue
@@ -246,10 +277,10 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 			}
 		}
 	}
-	if composite {
+	if nested {
 		_, _, _, files := e.usedResources()
 		for i, resource := range e.resources {
-			if resource.composite == "" || !slices.Contains(files, resource.name) {
+			if resource.definition() == "" || !slices.Contains(files, resource.name) {
 				continue
 			}
 			if err := progress.report("fonts", len(e.pages)+i, total); err != nil {

@@ -40,10 +40,18 @@ const (
 
 // u3dPrimitiveKey 区分共享点线的颜色及混合状态，避免透明边点重复叠加
 type u3dPrimitiveKey struct {
-	a, b      u3dVertex
+	a, b      [7]float64
 	blend     uint32
 	function  uint32
 	reference float32
+}
+
+// u3dTexturedPrimitiveKey 额外区分纹理坐标及纹理层，不扩大普通边点缓存
+type u3dTexturedPrimitiveKey struct {
+	base            u3dPrimitiveKey
+	coordinates     [2][8][3]float64
+	layers          [8]*U3DTextureLayer
+	opacityOverride bool
 }
 
 // uniquePrimitive 在当前网格内去重着色边点，缓存按条目计入绘制预算
@@ -59,13 +67,28 @@ func (r *u3dRender) uniquePrimitive(a, b u3dVertex, shader U3DShader) (bool, err
 		if left[i] != right[i] {
 			if left[i] > right[i] {
 				a, b = b, a
+				left, right = right, left
 			}
 			break
 		}
 	}
-	key := u3dPrimitiveKey{a: a, b: b, blend: shader.Blend}
+	key := u3dPrimitiveKey{a: left, b: right, blend: shader.Blend}
 	if shader.Attributes&2 != 0 {
 		key.function, key.reference = shader.AlphaFunction, shader.AlphaReference
+	}
+	if shader.Textures != ([8]*U3DTextureLayer{}) {
+		textured := u3dTexturedPrimitiveKey{base: key, coordinates: [2][8][3]float64{a.texture, b.texture}, layers: shader.Textures, opacityOverride: a.opacityOverride}
+		if _, ok := r.texturedPrimitives[textured]; ok {
+			return false, nil
+		}
+		if err := r.reserve(1, 1024); err != nil {
+			return false, err
+		}
+		if r.texturedPrimitives == nil {
+			r.texturedPrimitives = make(map[u3dTexturedPrimitiveKey]struct{})
+		}
+		r.texturedPrimitives[textured] = struct{}{}
+		return true, nil
 	}
 	if _, ok := r.primitives[key]; ok {
 		return false, nil
@@ -221,6 +244,13 @@ func (r *u3dRender) modePoint(vertex u3dVertex, shader U3DShader, pass U3DViewPa
 	if vertex.point[2] > r.frame[pixel].depth {
 		return nil
 	}
+	textures, err := r.shaderTextures(shader)
+	if err != nil {
+		return err
+	}
+	if err := r.textureColor(textures, &vertex.color, &vertex.texture, vertex.point, vertex.opacityOverride); err != nil {
+		return err
+	}
 	visible, err := u3dFragmentColor(&vertex.color, vertex.point, &shader, &pass)
 	if err != nil || !visible {
 		return err
@@ -251,11 +281,10 @@ func (r *u3dRender) drawBounds(instance u3dInstance, node *U3DNode, mesh *U3DMes
 			}
 		}
 		if uint64(shading) >= uint64(len(shaders)) {
-			visible = true
+			visible = visible || passIndex == 0
 		} else if !visible {
 			for _, name := range shaders[shading] {
-				index, ok := r.shaders[name]
-				if !ok || r.model.Shaders[index].RenderPass&(1<<passIndex) != 0 {
+				if r.shaderPass(name)&(1<<passIndex) != 0 {
 					visible = true
 					break
 				}

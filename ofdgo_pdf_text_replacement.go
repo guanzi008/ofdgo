@@ -25,11 +25,13 @@ import (
 
 // pdfTextReplacement 记录一个完整替换区段的文字数量与转换状态
 type pdfTextReplacement struct {
-	text    *pdfgo.ReplacementText
-	count   int
-	offset  int64
-	blocked bool
-	applied bool
+	text     *pdfgo.ReplacementText
+	count    int
+	matched  int
+	offset   int64
+	blocked  bool
+	applied  bool
+	identity bool
 }
 
 // pdfTextReplacements 按绘制顺序收集替换区段，避免拆分或重复写入原文
@@ -104,21 +106,26 @@ func (r *pdfTextReplacements) markedContent(mark pdfgo.MarkedContentMark) error 
 	return nil
 }
 
-// apply 将完整且样式一致的区段合并为标准OFD文字对象
+// apply 合并可等价表示的替换区段，原文相同但样式不同的区段保留原图元
 // 入参: nodes 原始图元
 // 返回: []pdfCompositeNode 转换图元, error 取消或语义转换错误
 func (r *pdfTextReplacements) apply(nodes []pdfCompositeNode) ([]pdfCompositeNode, error) {
 	if len(r.order) == 0 {
 		return nodes, nil
 	}
-	r.count(nodes, false)
+	if err := r.count(nodes, false); err != nil {
+		return nil, err
+	}
+	for _, span := range r.order {
+		span.identity = !span.blocked && span.count > 0 && span.matched == len(span.text.Text)
+	}
 	var err error
 	nodes, err = r.merge(nodes)
 	if err != nil {
 		return nil, err
 	}
 	for _, span := range r.order {
-		if span.applied || !span.blocked && span.count == 0 && span.text.Text == "" {
+		if span.applied || span.identity || !span.blocked && span.count == 0 && span.text.Text == "" {
 			continue
 		}
 		if r.importer.warning == nil {
@@ -130,14 +137,33 @@ func (r *pdfTextReplacements) apply(nodes []pdfCompositeNode) ([]pdfCompositeNod
 	return nodes, nil
 }
 
-// count 统计完整区段中的文字图元，排除需要组级合成的内容
+// count 统计区段文字并逐字核对原文，排除需要组级合成的内容
 // 入参: nodes 图元, blocked 上层组是否阻止直接转换
-func (r *pdfTextReplacements) count(nodes []pdfCompositeNode, blocked bool) {
+// 返回: error 取消错误
+func (r *pdfTextReplacements) count(nodes []pdfCompositeNode, blocked bool) error {
 	for _, node := range nodes {
+		if err := r.importer.ctx.Err(); err != nil {
+			return err
+		}
 		if node.text != nil {
 			if span := r.span(node.text.Replacement); span != nil {
 				span.count++
 				span.blocked = span.blocked || blocked
+				for i, glyph := range node.text.Glyphs {
+					if span.matched < 0 {
+						break
+					}
+					if i%256 == 0 {
+						if err := r.importer.ctx.Err(); err != nil {
+							return err
+						}
+					}
+					if glyph.Text == "" || !strings.HasPrefix(span.text.Text[span.matched:], glyph.Text) {
+						span.matched = -1
+						break
+					}
+					span.matched += len(glyph.Text)
+				}
 			}
 		}
 		childBlocked := blocked
@@ -145,8 +171,11 @@ func (r *pdfTextReplacements) count(nodes []pdfCompositeNode, blocked bool) {
 			opaque, err := node.opaque(group.ColorSpace)
 			childBlocked = childBlocked || !opaque || err != nil || group.ColorSpace != nil && !group.ColorSpace.SRGBEquivalent()
 		}
-		r.count(node.children, childBlocked)
+		if err := r.count(node.children, childBlocked); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // merge 合并同层连续图元，保留原始绘制顺序与字形坐标
@@ -171,7 +200,7 @@ func (r *pdfTextReplacements) merge(nodes []pdfCompositeNode) ([]pdfCompositeNod
 			first = node.children[0].text
 		}
 		if first != nil {
-			if span := r.span(first.Replacement); span != nil && !span.applied && !span.blocked && span.text.Text != "" {
+			if span := r.span(first.Replacement); span != nil && !span.applied && !span.blocked && span.text.Text != "" && !(span.identity && span.count == 1) {
 				var marks []pdfCompositeNode
 				for end = i; end < len(nodes); end++ {
 					current := nodes[end]
@@ -221,7 +250,7 @@ func (r *pdfTextReplacements) merge(nodes []pdfCompositeNode) ([]pdfCompositeNod
 	return result, nil
 }
 
-// clear 清除未转换的区段引用，防止局部绘制重复使用整段原文
+// clear 清除无需替换及未转换的区段引用，防止局部绘制重复使用整段原文
 // 入参: nodes 图元
 func (r *pdfTextReplacements) clear(nodes []pdfCompositeNode) {
 	for _, node := range nodes {
