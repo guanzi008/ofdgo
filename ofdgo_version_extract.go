@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"archive/zip"
+	"context"
 	"fmt"
 )
 
@@ -25,12 +26,23 @@ import (
 // 入参: id 版本标识，空值选择唯一的Current版本，没有默认版本或存在歧义时返回错误
 // 返回: *Reader 版本阅读器, error 选择、读取或文件缺失错误
 func (r *Reader) ExtractVersion(id string) (*Reader, error) {
-	entries, err := r.documentVersionEntries()
+	return r.ExtractVersionContext(context.Background(), id)
+}
+
+// ExtractVersionContext 将指定版本提取为独立阅读器，扫描、读取和解析时响应取消
+// 文件保留范围、入口选择和输入文件生命周期与ExtractVersion相同，取消或失败不改变原包
+// 入参: ctx 取消上下文, id 版本标识，空值选择唯一的Current版本
+// 返回: *Reader 版本阅读器, error 选择、读取或取消错误
+func (r *Reader) ExtractVersionContext(ctx context.Context, id string) (*Reader, error) {
+	entries, err := r.documentVersionEntriesContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var selected *DocumentVersionInfo
 	for i := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		entry := &entries[i]
 		if id != "" && entry.ID == id || id == "" && entry.Current {
 			if selected != nil {
@@ -45,23 +57,29 @@ func (r *Reader) ExtractVersion(id string) (*Reader, error) {
 		}
 		return nil, fmt.Errorf("document version not found: %s", id)
 	}
-	version, err := r.readDocumentVersion(selected.ID, selected.Location)
+	version, err := r.readDocumentVersionContext(ctx, selected.ID, selected.Location)
 	if err != nil {
 		return nil, fmt.Errorf("version %s: %w", selected.ID, err)
 	}
 	files := make(map[string]bool, len(version.Files))
 	for _, file := range version.Files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !r.fileNames[file.Location] {
 			return nil, fmt.Errorf("version %s file not found: %s", selected.ID, file.Location)
 		}
 		files[file.Location] = true
 	}
-	root, err := r.extractedVersionRoot(version, files)
+	root, err := r.extractedVersionRoot(ctx, version, files)
 	if err != nil {
 		return nil, err
 	}
 	next := &Reader{Path: r.Path, files: map[string][]byte{"OFD.xml": root}, encryption: r.encryption}
 	for name := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if name != "OFD.xml" {
 			if data, ok := r.files[name]; ok {
 				next.files[name] = data
@@ -71,30 +89,33 @@ func (r *Reader) ExtractVersion(id string) (*Reader, error) {
 	if r.Zip != nil {
 		next.Zip = &zip.Reader{Comment: r.Zip.Comment}
 		for _, file := range r.Zip.File {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			name := cleanPackagePath(file.Name)
 			if name != "OFD.xml" && files[name] && !file.FileInfo().IsDir() {
 				next.Zip.File = append(next.Zip.File, file)
 			}
 		}
 	}
-	if err := next.initRoot(); err != nil {
+	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}
-	if _, err := next.docStructure(); err != nil {
+	if _, err := next.docStructureContext(ctx); err != nil {
 		return nil, err
 	}
 	return next, nil
 }
 
 // extractedVersionRoot 重建版本副本入口，保留元数据及命名空间，移除其他文档与版本列表
-// 入参: version 版本描述, files 版本包含的文件
-// 返回: []byte 主入口XML, error 读取或结构错误
-func (r *Reader) extractedVersionRoot(version DocumentVersionInfo, files map[string]bool) ([]byte, error) {
-	data, err := r.readFile("OFD.xml")
+// 入参: ctx 取消上下文, version 版本描述, files 版本包含的文件
+// 返回: []byte 主入口XML, error 读取、结构或取消错误
+func (r *Reader) extractedVersionRoot(ctx context.Context, version DocumentVersionInfo, files map[string]bool) ([]byte, error) {
+	data, err := r.readFileViewContext(ctx, "OFD.xml")
 	if err != nil {
 		return nil, err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -104,6 +125,9 @@ func (r *Reader) extractedVersionRoot(version DocumentVersionInfo, files map[str
 	}
 	var patches []editorXMLPatch
 	for _, child := range root.children {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if child.matchesOFD("DocBody") && child != body {
 			patches = append(patches, editorXMLPatch{start: child.start, end: child.end})
 		}
@@ -130,11 +154,14 @@ func (r *Reader) extractedVersionRoot(version DocumentVersionInfo, files map[str
 	}
 	data = editorPatchXML(data, patches)
 	if version.Version != "" {
-		root, err = parseEditorXML(data)
+		root, err = parseEditorXMLContext(ctx, data)
 		if err != nil {
 			return nil, err
 		}
 		data, err = editorXMLAttribute(data, root, "Version", version.Version)
+	}
+	if err == nil {
+		err = ctx.Err()
 	}
 	return data, err
 }

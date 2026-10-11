@@ -114,13 +114,6 @@ func (r *Reader) DocumentVersion(id string) (*Reader, error) {
 	return next, nil
 }
 
-// documentEntry 获取指定文档的阅读入口，当前文档保留显式选择，其他文档使用默认版本
-// 入参: index 文档索引
-// 返回: string 包内路径, error 选择错误
-func (r *Reader) documentEntry(index int) (string, error) {
-	return r.documentEntryContext(context.Background(), index)
-}
-
 // documentEntryContext 解析指定文档的阅读入口，当前文档保留显式选择
 // 入参: ctx 取消上下文, index 文档索引
 // 返回: string 包内路径, error 选择、读取或取消错误

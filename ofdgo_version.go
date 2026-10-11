@@ -166,13 +166,6 @@ func parseVersionEntries(ctx context.Context, body *editorXML) ([]DocumentVersio
 	return result, nil
 }
 
-// readDocumentVersion 读取版本描述，按描述文件位置解析文件清单和文档入口
-// 入参: id 入口中的版本标识, location 描述文件路径
-// 返回: DocumentVersionInfo 版本信息, error 读取或描述错误
-func (r *Reader) readDocumentVersion(id, location string) (DocumentVersionInfo, error) {
-	return r.readDocumentVersionContext(context.Background(), id, location)
-}
-
 // readDocumentVersionContext 读取版本描述，按描述文件位置解析清单和文档入口
 // 入参: ctx 取消上下文, id 入口中的版本标识, location 描述文件路径
 // 返回: DocumentVersionInfo 版本信息, error 读取、描述或取消错误

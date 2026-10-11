@@ -21,6 +21,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"maps"
 	"path"
 	"slices"
 	"strings"
@@ -91,17 +92,28 @@ func (r *Reader) DocumentIndex() int {
 // 入参: index 文档索引，从0开始
 // 返回: int 页数, error 错误信息
 func (r *Reader) DocumentPageCount(index int) (int, error) {
+	return r.DocumentPageCountContext(context.Background(), index)
+}
+
+// DocumentPageCountContext 获取指定文档页数，读取和解析时响应取消，不加载关联资源
+// 入参: ctx 取消上下文, index 文档索引，从0开始
+// 返回: int 页数, error 选择、读取或取消错误
+func (r *Reader) DocumentPageCountContext(ctx context.Context, index int) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if index < 0 || index >= r.DocumentCount() {
 		return 0, fmt.Errorf("document index %d out of range", index)
 	}
 	if index == r.documentIndex && r.doc != nil {
 		return len(r.doc.Pages.Page), nil
 	}
-	root, err := r.documentEntry(index)
+	view := *r
+	root, err := view.documentEntryContext(ctx, index)
 	if err != nil {
 		return 0, err
 	}
-	data, err := r.readFile(root)
+	data, err := r.readFileViewContext(ctx, root)
 	if err != nil {
 		return 0, err
 	}
@@ -109,8 +121,15 @@ func (r *Reader) DocumentPageCount(index int) (int, error) {
 		XMLName xml.Name `xml:"Document"`
 		Pages   Pages    `xml:"Pages"`
 	}
-	if err := xml.Unmarshal(data, &doc); err != nil {
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	if err := decoder.Decode(&doc); err != nil {
 		return 0, fmt.Errorf("failed to unmarshal document.xml: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if index == r.documentIndex {
+		r.documentRoot, r.versionInfo = view.documentRoot, view.versionInfo
 	}
 	return len(doc.Pages.Page), nil
 }
@@ -151,6 +170,16 @@ func (r *Reader) Doc() (*Document, error) {
 // docStructure 读取文档及资源索引，关联注解和签名由Doc按需解析
 // 返回: *Document 文档结构, error 错误信息
 func (r *Reader) docStructure() (*Document, error) {
+	return r.docStructureContext(context.Background())
+}
+
+// docStructureContext 读取文档及资源索引，取消或失败时保留原阅读状态
+// 入参: ctx 取消上下文
+// 返回: *Document 文档结构, error 读取、解析或取消错误
+func (r *Reader) docStructureContext(ctx context.Context) (*Document, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if r.doc != nil {
 		return r.doc, nil
 	}
@@ -158,30 +187,55 @@ func (r *Reader) docStructure() (*Document, error) {
 		return nil, fmt.Errorf("no docbody found")
 	}
 	docAttr := r.OFD.DocBody[r.documentIndex]
-	docRootPath, err := r.DocumentRoot()
+	view := *r
+	docRootPath, err := view.DocumentRootContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	r.RootDir = path.Dir(docRootPath)
-	data, err := r.readFile(docRootPath)
+	view.RootDir = path.Dir(docRootPath)
+	data, err := view.readFileViewContext(ctx, docRootPath)
 	if err != nil {
 		return nil, err
 	}
 	var doc Document
-	if err := xml.Unmarshal(data, &doc); err != nil {
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	if err := decoder.Decode(&doc); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal document.xml: %w", err)
 	}
 	if doc.Signatures == "" {
-		doc.Signatures = r.versionSignatures(docAttr.Signatures)
+		doc.Signatures = view.versionSignatures(docAttr.Signatures)
 	}
+	view.resourcesRead = maps.Clone(r.resourcesRead)
+	view.resourceFiles = maps.Clone(r.resourceFiles)
+	view.ResMap = maps.Clone(r.ResMap)
+	view.mediaCache = maps.Clone(r.mediaCache)
+	view.fontCache = maps.Clone(r.fontCache)
+	view.colorSpaceCache = maps.Clone(r.colorSpaceCache)
+	view.drawParamCache = maps.Clone(r.drawParamCache)
+	view.compositeGraphicUnitCache = maps.Clone(r.compositeGraphicUnitCache)
 	for _, res := range doc.CommonData.DocumentRes {
-		r.loadRes(res)
+		if err := view.loadResContext(ctx, res); err != nil {
+			return nil, err
+		}
 	}
 	for _, res := range doc.CommonData.PublicRes {
-		r.loadRes(res)
+		if err := view.loadResContext(ctx, res); err != nil {
+			return nil, err
+		}
 	}
-	r.doc = &doc
-	r.relatedPending = true
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	maps.Copy(r.resourcesRead, view.resourcesRead)
+	maps.Copy(r.resourceFiles, view.resourceFiles)
+	maps.Copy(r.ResMap, view.ResMap)
+	maps.Copy(r.mediaCache, view.mediaCache)
+	maps.Copy(r.fontCache, view.fontCache)
+	maps.Copy(r.colorSpaceCache, view.colorSpaceCache)
+	maps.Copy(r.drawParamCache, view.drawParamCache)
+	maps.Copy(r.compositeGraphicUnitCache, view.compositeGraphicUnitCache)
+	r.documentRoot, r.versionInfo, r.RootDir = view.documentRoot, view.versionInfo, view.RootDir
+	r.doc, r.relatedPending = &doc, true
 	return r.doc, nil
 }
 
@@ -666,23 +720,37 @@ func readZipFile(f *zip.File) ([]byte, error) {
 // loadRes 加载资源文件
 // 入参: resPath 资源路径
 func (r *Reader) loadRes(resPath string) {
+	_ = r.loadResContext(context.Background(), resPath)
+}
+
+// loadResContext 加载可读资源的索引，读取、解析和遍历时响应取消
+// 入参: ctx 取消上下文, resPath 资源路径
+// 返回: error 取消错误
+func (r *Reader) loadResContext(ctx context.Context, resPath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if resPath == "" {
-		return
+		return nil
 	}
 	fullPath := r.ResPath(resPath)
 	if r.resourcesRead[fullPath] {
-		return
+		return nil
 	}
-	data, err := r.readFile(fullPath)
+	data, err := r.readFileViewContext(ctx, fullPath)
 	if err != nil {
-		return
+		return ctx.Err()
 	}
 	var res Res
-	if err := xml.Unmarshal(data, &res); err != nil {
-		return
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	if err := decoder.Decode(&res); err != nil {
+		return ctx.Err()
 	}
 	baseLoc := res.BaseLoc
 	for i := range res.ColorSpaces.ColorSpace {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		cs := &res.ColorSpaces.ColorSpace[i]
 		if cs.Profile != "" {
 			cs.Profile = r.resourceLocation(fullPath, baseLoc, cs.Profile)
@@ -691,6 +759,9 @@ func (r *Reader) loadRes(resPath string) {
 		r.resourceFiles[cs.ID] = fullPath
 	}
 	for _, mm := range res.MultiMedias.MultiMedia {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if mm.MediaFile != "" {
 			if finalPath := r.resourceLocation(fullPath, baseLoc, mm.MediaFile); finalPath != "" {
 				mm.MediaFile = finalPath
@@ -704,6 +775,9 @@ func (r *Reader) loadRes(resPath string) {
 		}
 	}
 	for i := range res.Fonts.Font {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		f := &res.Fonts.Font[i]
 		if f.FontFile != "" {
 			f.FontFile = r.resourceLocation(fullPath, baseLoc, f.FontFile)
@@ -712,16 +786,23 @@ func (r *Reader) loadRes(resPath string) {
 		r.resourceFiles[f.ID] = fullPath
 	}
 	for i := range res.DrawParams.DrawParam {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		dp := &res.DrawParams.DrawParam[i]
 		r.drawParamCache[dp.ID] = dp
 		r.resourceFiles[dp.ID] = fullPath
 	}
 	for i := range res.CompositeGraphicUnits.CompositeGraphicUnit {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		cgu := &res.CompositeGraphicUnits.CompositeGraphicUnit[i]
 		r.compositeGraphicUnitCache[cgu.ID] = cgu
 		r.resourceFiles[cgu.ID] = fullPath
 	}
 	r.resourcesRead[fullPath] = true
+	return ctx.Err()
 }
 
 // resourceLocation 按资源XML所在位置解析文件，文档目录外的共享文件保留绝对路径
