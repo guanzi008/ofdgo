@@ -235,6 +235,13 @@ func (r *Reader) documentDependencies(ctx context.Context, indexes ...int) (map[
 // 入参: ctx 取消上下文, name 文件路径, rejectUnknown 是否拒绝无法识别的扩展节点, add 接收引用路径及类别
 // 返回: error 读取或结构错误
 func (r *Reader) documentFileReferences(ctx context.Context, name string, rejectUnknown bool, add func(string, int)) error {
+	return r.scanDocumentFileReferences(ctx, name, rejectUnknown, add, nil)
+}
+
+// scanDocumentFileReferences 流式扫描文件依赖，按需记录引用节点位置，不构建完整节点树
+// 入参: ctx 取消上下文, name 文件路径, rejectUnknown 是否拒绝未知扩展, add 接收依赖, record 接收引用位置，可为nil
+// 返回: error 读取、结构或取消错误
+func (r *Reader) scanDocumentFileReferences(ctx context.Context, name string, rejectUnknown bool, add func(string, int), record func(*editorXML, string, string)) error {
 	input, err := r.openFile(name)
 	if err != nil {
 		return err
@@ -242,12 +249,14 @@ func (r *Reader) documentFileReferences(ctx context.Context, name string, reject
 	defer input.Close()
 	decoder := xml.NewDecoder(imageInput{ReadCloser: input, context: ctx})
 	var stack []xml.Name
+	var positions []*editorXML
 	root, base := "", ""
 	var text strings.Builder
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		start := int(decoder.InputOffset())
 		token, err := decoder.Token()
 		if err == io.EOF {
 			if root == "" {
@@ -285,6 +294,7 @@ func (r *Reader) documentFileReferences(ctx context.Context, name string, reject
 				}
 				continue
 			}
+			var position *editorXML
 			for _, attr := range node.Attr {
 				if attr.Name.Space != "" || strings.TrimSpace(attr.Value) == "" {
 					continue
@@ -292,8 +302,21 @@ func (r *Reader) documentFileReferences(ctx context.Context, name string, reject
 				if len(stack) == 0 && root == "Res" && attr.Name.Local == "BaseLoc" {
 					base = attr.Value
 				} else if kind := packageReference(root, parent, node.Name.Local, attr.Name.Local); kind != packageReferenceNone {
-					add(resolveResourcePath(name, base, attr.Value), kind)
+					target := resolveResourcePath(name, base, attr.Value)
+					add(target, kind)
+					if record != nil {
+						if position == nil {
+							position = &editorXML{name: node.Name, attrs: node.Attr, start: start, open: int(decoder.InputOffset())}
+						}
+						record(position, attr.Name.Local, target)
+					}
 				}
+			}
+			if record != nil {
+				if position == nil && packageReference(root, parent, node.Name.Local, "") != packageReferenceNone {
+					position = &editorXML{name: node.Name, attrs: node.Attr, start: start, open: int(decoder.InputOffset())}
+				}
+				positions = append(positions, position)
 			}
 			stack = append(stack, node.Name)
 			text.Reset()
@@ -302,10 +325,22 @@ func (r *Reader) documentFileReferences(ctx context.Context, name string, reject
 				text.Write(node)
 			}
 		case xml.EndElement:
+			var position *editorXML
+			if record != nil {
+				position = positions[len(positions)-1]
+				if position != nil {
+					position.close, position.end = start, int(decoder.InputOffset())
+				}
+				positions = positions[:len(positions)-1]
+			}
 			if len(stack) >= 2 {
 				kind := packageReference(root, stack[len(stack)-2].Local, node.Name.Local, "")
 				if value := strings.TrimSpace(text.String()); kind != packageReferenceNone && value != "" {
-					add(resolveResourcePath(name, base, value), kind)
+					target := resolveResourcePath(name, base, value)
+					add(target, kind)
+					if record != nil {
+						record(position, "", target)
+					}
 				}
 			}
 			stack = stack[:len(stack)-1]

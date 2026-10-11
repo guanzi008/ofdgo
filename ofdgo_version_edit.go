@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
-	"fmt"
 	"io"
 	"maps"
 	"slices"
@@ -26,10 +25,12 @@ import (
 	"strings"
 )
 
-// versionEditFile 保存版本内容XML及标准文件引用，不解析字体、图片或附件数据
+// versionEditFile 保存结构文件及引用位置，仅在改写时读取尚未加载的原文
 type versionEditFile struct {
-	data  []byte
-	links []versionEditLink
+	reader *Reader
+	name   string
+	data   []byte
+	links  []versionEditLink
 }
 
 // versionEditLink 记录文件引用的位置与包内目标
@@ -83,10 +84,18 @@ func (r *Reader) versionFileDependencies(ctx context.Context, entry string, part
 	return used, ctx.Err()
 }
 
-// versionEditGraph 沿标准文件引用建立版本依赖图，二进制资源只记录路径
+// versionEditGraph 流式建立标准文件依赖图，不保留完整XML节点树或解压后的原包文件
 // 入参: ctx 取消上下文, entry 文档入口, parts 待修改条目, generated 本次自产页面及引用
 // 返回: *versionEditGraph 依赖图, error 读取、结构或取消错误
 func (r *Reader) versionEditGraph(ctx context.Context, entry string, parts map[string][]byte, generated map[string]editorGeneratedReferences) (*versionEditGraph, error) {
+	view := *r
+	if len(parts) != 0 {
+		view.files = maps.Clone(r.files)
+		if view.files == nil {
+			view.files = make(map[string][]byte, len(parts))
+		}
+		maps.Copy(view.files, parts)
+	}
 	graph := &versionEditGraph{files: make(map[string]*versionEditFile), used: make(map[string]bool)}
 	queue := []string{entry}
 	queued := map[string]bool{entry: true}
@@ -101,69 +110,19 @@ func (r *Reader) versionEditGraph(ctx context.Context, entry string, parts map[s
 			graph.files[name], graph.used[name] = &versionEditFile{}, true
 			continue
 		}
-		if !ok {
-			var err error
-			data, err = r.readFileViewContext(ctx, name)
-			if err != nil {
-				return nil, err
-			}
-		}
-		root, err := parseEditorXMLContext(ctx, data)
-		if err != nil {
-			return nil, fmt.Errorf("version file %s: %w", name, err)
-		}
-		file := &versionEditFile{data: data}
+		file := &versionEditFile{reader: &view, name: name, data: view.files[name]}
 		graph.files[name], graph.used[name] = file, true
-		base := ""
-		if root.name.Local == "Res" {
-			base = root.attr("BaseLoc")
+		add := func(target string, kind int) {
+			graph.used[target] = true
+			if kind == packageReferenceXML && !queued[target] {
+				queued[target] = true
+				queue = append(queue, target)
+			}
 		}
-		var visit func(*editorXML) error
-		visit = func(node *editorXML) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if node != root && !node.matchesOFD(node.name.Local) {
-				return nil
-			}
-			parent := ""
-			if node.parent != nil {
-				parent = node.parent.name.Local
-			}
-			if parent == "Extension" && node.name.Local == "Data" {
-				return nil
-			}
-			add := func(attribute, value string, kind int) {
-				if strings.TrimSpace(value) == "" {
-					return
-				}
-				target := resolveResourcePath(name, base, value)
-				file.links = append(file.links, versionEditLink{node: node, attribute: attribute, target: target})
-				graph.used[target] = true
-				if kind == packageReferenceXML && !queued[target] {
-					queued[target] = true
-					queue = append(queue, target)
-				}
-			}
-			if kind := packageReference(root.name.Local, parent, node.name.Local, ""); kind != packageReferenceNone {
-				add("", editorImportText(data, node), kind)
-			}
-			for _, attr := range node.attrs {
-				if attr.Name.Space != "" {
-					continue
-				}
-				if kind := packageReference(root.name.Local, parent, node.name.Local, attr.Name.Local); kind != packageReferenceNone {
-					add(attr.Name.Local, attr.Value, kind)
-				}
-			}
-			for _, child := range node.children {
-				if err := visit(child); err != nil {
-					return err
-				}
-			}
-			return nil
+		record := func(node *editorXML, attribute, target string) {
+			file.links = append(file.links, versionEditLink{node: node, attribute: attribute, target: target})
 		}
-		if err := visit(root); err != nil {
+		if err := view.scanDocumentFileReferences(ctx, name, false, add, record); err != nil {
 			return nil, err
 		}
 	}
@@ -484,15 +443,33 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 	return parts, nil
 }
 
-// rewrite 更新已隔离文件的引用，保留其余XML及相对路径基准
+// rewrite 按需读取并更新已隔离文件的引用，保留其余XML及相对路径基准
 // 入参: ctx 取消上下文, paths 原路径到新路径的映射
-// 返回: []byte 更新后的XML，未改动时借用原文, error 属性编码错误
+// 返回: []byte 更新后的XML，未改动时返回已加载原文或nil, error 读取或属性编码错误
 func (file *versionEditFile) rewrite(ctx context.Context, paths map[string]string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if len(paths) == 0 {
+	needed := false
+	for _, link := range file.links {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if paths[link.target] != "" {
+			needed = true
+			break
+		}
+	}
+	if !needed {
 		return file.data, nil
+	}
+	source := file.data
+	if source == nil {
+		var err error
+		source, err = file.reader.readFileViewContext(ctx, file.name)
+		if err != nil {
+			return nil, err
+		}
 	}
 	var patches []editorXMLPatch
 	headers := make(map[*editorXML][]versionEditLink)
@@ -504,13 +481,13 @@ func (file *versionEditFile) rewrite(ctx context.Context, paths map[string]strin
 			continue
 		}
 		if link.attribute == "" {
-			patches = append(patches, editorXMLContent(file.data, link.node, editorFontXMLText("/"+paths[link.target])))
+			patches = append(patches, editorXMLContent(source, link.node, editorFontXMLText("/"+paths[link.target])))
 		} else {
 			headers[link.node] = append(headers[link.node], link)
 		}
 	}
 	for node, links := range headers {
-		data := file.data[node.start:node.end]
+		data := source[node.start:node.end]
 		for _, link := range links {
 			root, err := parseEditorXMLContext(ctx, data)
 			if err != nil {
@@ -534,7 +511,7 @@ func (file *versionEditFile) rewrite(ctx context.Context, paths map[string]strin
 	if len(patches) == 0 {
 		return file.data, nil
 	}
-	return editorPatchXML(file.data, patches), nil
+	return editorPatchXML(source, patches), ctx.Err()
 }
 
 // versionManifest 更新所选版本的入口与文件清单，保留已有文件标识及扩展字段
