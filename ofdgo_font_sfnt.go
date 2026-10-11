@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"encoding/binary"
 	"fmt"
+	"maps"
 	"sort"
 	"sync"
 
@@ -47,11 +48,18 @@ func parseSFNTFont(data []byte) (*sfntFont, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseSFNTTables(table)
+}
+
+// parseSFNTTables 校验字体表并解析度量和字符映射，借用表数据且不修改其内容
+// 入参: table 字体表
+// 返回: *sfntFont 字体, error 格式错误
+func parseSFNTTables(table map[string][]byte) (*sfntFont, error) {
 	head, maxp, hhea := table["head"], table["maxp"], table["hhea"]
 	if len(head) != 54 || len(maxp) < 6 || len(hhea) < 36 {
 		return nil, fmt.Errorf("missing or truncated font metrics")
 	}
-	f := &sfntFont{Tables: table, IsTrueType: table["glyf"] != nil, IsCFF: table["CFF "] != nil}
+	f := &sfntFont{Tables: maps.Clone(table), IsTrueType: table["glyf"] != nil, IsCFF: table["CFF "] != nil}
 	f.units, f.count = binary.BigEndian.Uint16(head[18:]), binary.BigEndian.Uint16(maxp[4:])
 	f.horizontal = binary.BigEndian.Uint16(hhea[34:])
 	if f.units < 16 || f.units > 16384 || f.count == 0 || f.IsTrueType == f.IsCFF || !validSFNTMetrics(table["hmtx"], f.count, f.horizontal) {
@@ -72,10 +80,11 @@ func parseSFNTFont(data []byte) (*sfntFont, error) {
 			return nil, fmt.Errorf("invalid glyph location table")
 		}
 	}
-	f.cmaps, err = readSFNTCmaps(table["cmap"])
+	cmaps, err := readSFNTCmaps(table["cmap"])
 	if err != nil {
 		return nil, err
 	}
+	f.cmaps = cmaps
 	for _, cmap := range f.cmaps {
 		for _, glyph := range cmap.mapping {
 			if glyph >= f.count {

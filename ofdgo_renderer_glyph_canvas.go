@@ -103,12 +103,24 @@ func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (
 	}
 	outlines := r.canvasState().fontOutlines[face.Font]
 	if outlines == nil {
-		metrics, err := parseSFNTFont(fontSFNTData(face.Font.Tables))
-		if err != nil {
-			r.renderError = err
-			return &canvas.Path{}, 0
+		cache := r.canvasFontOutlines()
+		outlines, _ = cache.get(face.Font)
+		if outlines == nil {
+			metrics, err := parseSFNTTables(face.Font.Tables)
+			if err != nil {
+				r.renderError = err
+				return &canvas.Path{}, 0
+			}
+			outlines = &sfntOutliner{font: metrics}
+			cost := uint64(512)
+			for _, data := range metrics.Tables {
+				cost += uint64(len(data)) * 8
+			}
+			for _, cmap := range metrics.cmaps {
+				cost += uint64(len(cmap.mapping)) * 48
+			}
+			cache.put(face.Font, outlines, int(min(cost, uint64(cache.limit)+1)))
 		}
-		outlines = &sfntOutliner{font: metrics}
 		r.canvasState().fontOutlines[face.Font] = outlines
 	}
 	path, width, err := textGlyphPath(face, glyph, outlines)

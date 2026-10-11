@@ -36,6 +36,9 @@ type canvasPathCacheKey struct{}
 // canvasFillCacheKey 区分按填充规则规范化的共享路径缓存
 type canvasFillCacheKey struct{}
 
+// canvasOutlineCacheKey 区分子渲染器共享的字体轮廓解析缓存
+type canvasOutlineCacheKey struct{}
+
 // canvasFillKey 保存完整几何摘要及填充规则
 type canvasFillKey struct {
 	digest [32]byte
@@ -110,6 +113,18 @@ func (r *Renderer) canvasFontFamilies() *renderCache[canvasFontKey, *canvas.Font
 		return state.(*renderCache[canvasFontKey, *canvas.FontFamily])
 	}
 	cache := &renderCache[canvasFontKey, *canvas.FontFamily]{limit: 32 << 20}
+	r.sharedBackendStates[key] = cache
+	return cache
+}
+
+// canvasFontOutlines 获取子渲染器共享的字体轮廓解析缓存，限制字体及解析数据保留量
+// 返回: *renderCache[*canvas.Font, *sfntOutliner] 字体轮廓缓存
+func (r *Renderer) canvasFontOutlines() *renderCache[*canvas.Font, *sfntOutliner] {
+	key := canvasOutlineCacheKey{}
+	if state, ok := r.sharedBackendStates[key]; ok {
+		return state.(*renderCache[*canvas.Font, *sfntOutliner])
+	}
+	cache := &renderCache[*canvas.Font, *sfntOutliner]{limit: 32 << 20}
 	r.sharedBackendStates[key] = cache
 	return cache
 }
