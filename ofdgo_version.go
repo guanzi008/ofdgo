@@ -109,6 +109,16 @@ func (r *Reader) documentVersionEntriesContext(ctx context.Context) ([]DocumentV
 	if body == nil {
 		return nil, fmt.Errorf("document body not found: %d", r.documentIndex)
 	}
+	return parseVersionEntries(ctx, body)
+}
+
+// parseVersionEntries 校验一个文档的版本列表，复用已解析的主入口节点
+// 入参: ctx 取消上下文, body 文档入口节点
+// 返回: []DocumentVersionInfo 版本入口属性, error 结构或取消错误
+func parseVersionEntries(ctx context.Context, body *editorXML) ([]DocumentVersionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	versions := body.child("Versions")
 	if versions == nil {
 		return nil, nil

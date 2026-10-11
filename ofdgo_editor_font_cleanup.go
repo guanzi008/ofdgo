@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"maps"
 	"slices"
@@ -46,14 +47,31 @@ func (e *Editor) compactVersionFonts(ctx context.Context, parts map[string][]byt
 	if err := view.initRootContext(ctx); err != nil {
 		return err
 	}
+	data, err := view.readFileViewContext(ctx, "OFD.xml")
+	if err != nil {
+		return err
+	}
+	root, err := parseEditorXMLContext(ctx, data)
+	if err != nil {
+		return err
+	}
 	candidates, seen := make(map[string]bool), make(map[string]bool)
-	for index := range view.DocumentCount() {
-		view.documentIndex = index
-		versions, err := view.DocumentVersionsContext(ctx)
+	for _, body := range root.children {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !body.matchesOFD("DocBody") {
+			continue
+		}
+		versions, err := parseVersionEntries(ctx, body)
 		if err != nil {
 			return err
 		}
-		for _, version := range versions {
+		for _, entry := range versions {
+			version, err := view.readDocumentVersionContext(ctx, entry.ID, entry.Location)
+			if err != nil {
+				return fmt.Errorf("version %s: %w", entry.ID, err)
+			}
 			for _, file := range version.Files {
 				if err := ctx.Err(); err != nil {
 					return err

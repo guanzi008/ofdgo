@@ -546,17 +546,19 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 	if len(removed) == 0 {
 		return nil
 	}
-	files, structures := make(map[string]bool), map[string]bool{"OFD.xml": true}
-	for i := range reader.DocumentCount() {
-		_, xmlFiles, err := reader.documentDependencies(ctx, i)
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return nil
+	indexes := make([]int, reader.DocumentCount())
+	for index := range indexes {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		maps.Copy(structures, xmlFiles)
+		indexes[index] = index
 	}
+	_, structures, err := reader.documentDependencies(ctx, indexes...)
+	if err != nil {
+		return ctx.Err()
+	}
+	structures["OFD.xml"] = true
+	files := make(map[string]bool)
 	versions := make(map[string]*editorFontXML)
 	names := slices.Sorted(maps.Keys(structures))
 	for _, name := range slices.Sorted(maps.Keys(reader.fileNames)) {
