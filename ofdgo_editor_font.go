@@ -16,7 +16,9 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"maps"
 	"slices"
@@ -36,6 +38,56 @@ type editorFontSubset struct {
 	glyphs []uint16
 	data   []byte
 	mapped bool
+}
+
+// editorSourceFontKey 区分原字体内容及完整用字集合
+type editorSourceFontKey struct {
+	source [32]byte
+	usage  [32]byte
+}
+
+// editorSourceFontCache 在单次资源处理中复用裁剪结果，空值表示无体积收益
+type editorSourceFontCache map[editorSourceFontKey][]byte
+
+// subset 按原字体和用字复用安全子集，不缓存错误、取消结果或原始字体
+// 入参: ctx 取消上下文, backend 字体资源后端, data 原字体, usage 用字记录
+// 返回: []byte 更小的字体子集，无收益时为nil, error 裁剪或取消错误
+func (c *editorSourceFontCache) subset(ctx context.Context, backend FontResourceBackend, data []byte, usage *editorFontUsage) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if usage == nil || usage.unsafe || backend == nil {
+		return nil, nil
+	}
+	characters, glyphs := slices.Sorted(maps.Keys(usage.chars)), slices.Sorted(maps.Keys(usage.glyphs))
+	encoded := make([]byte, 0, 8+4*len(characters)+2*len(glyphs))
+	encoded = binary.LittleEndian.AppendUint32(encoded, uint32(len(characters)))
+	for _, char := range characters {
+		encoded = binary.LittleEndian.AppendUint32(encoded, uint32(char))
+	}
+	encoded = binary.LittleEndian.AppendUint32(encoded, uint32(len(glyphs)))
+	for _, glyph := range glyphs {
+		encoded = binary.LittleEndian.AppendUint16(encoded, glyph)
+	}
+	key := editorSourceFontKey{source: sha256.Sum256(data), usage: sha256.Sum256(encoded)}
+	if result, ok := (*c)[key]; ok {
+		return result, ctx.Err()
+	}
+	result, err := backend.SubsetSourceFont(data, FontUsage{Characters: characters, Glyphs: glyphs})
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(result) == 0 || len(result) >= len(data) {
+		result = nil
+	}
+	if *c == nil {
+		*c = make(editorSourceFontCache)
+	}
+	(*c)[key] = result
+	return result, nil
 }
 
 // AddFont 注册OpenType字体，集合字体按索引提取，重复资源复用标识，引用后写入文档

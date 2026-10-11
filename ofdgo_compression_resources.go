@@ -72,10 +72,13 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		names[name] = true
 	}
 	read := func(name string) ([]byte, error) {
+		if err := e.output.ctx.Err(); err != nil {
+			return nil, err
+		}
 		if data, ok := parts[name]; ok {
 			return data, nil
 		}
-		return reader.readFileView(name)
+		return reader.readFileViewContext(e.output.ctx, name)
 	}
 	actual := make(map[string]string)
 	for _, name := range slices.Sorted(maps.Keys(names)) {
@@ -108,13 +111,16 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		if err != nil {
 			return err
 		}
-		root, err := parseEditorXML(data)
+		root, err := parseEditorXMLContext(e.output.ctx, data)
 		if err != nil {
 			return err
 		}
 		preserved := refs.versions[cleanPackagePath(name)]
 		for _, group := range root.children {
 			for _, node := range group.children {
+				if err := e.output.ctx.Err(); err != nil {
+					return err
+				}
 				field := ""
 				if group.name.Local == "Fonts" && node.name.Local == "Font" {
 					field = "FontFile"
@@ -189,6 +195,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 	if err := e.prepareOutputImages(imageKeys, load, imageResults, imageSources); err != nil {
 		return err
 	}
+	var fontCache editorSourceFontCache
 	for _, key := range ordered {
 		if refs.files[key] || files[resourceFile{key, "FontFile"}] && files[resourceFile{key, "MediaFile"}] {
 			continue
@@ -197,7 +204,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 			if !files[resourceFile{key, role}] {
 				continue
 			}
-			if err := editorProgress(e.OnWriteProgress).report("compress", e.output.completed, 0); err != nil {
+			if err := editorProgress(e.OnWriteProgress).withContext(e.output.ctx).report("compress", e.output.completed, 0); err != nil {
 				return err
 			}
 			source, prefetched := imageSources[key]
@@ -214,9 +221,12 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 				source.key.hash = sha256.Sum256(data)
 			}
 			if usage := fontUsage[key]; role == "FontFile" && usage != nil && !usage.unsafe {
-				candidate, err := e.backends.FontResources.SubsetSourceFont(data, FontUsage{Characters: slices.Sorted(maps.Keys(usage.chars)), Glyphs: slices.Sorted(maps.Keys(usage.glyphs))})
+				candidate, err := fontCache.subset(e.output.ctx, e.backends.FontResources, data, usage)
 				if err != nil {
 					return fmt.Errorf("subset font %s: %w", key, err)
+				}
+				if err := e.output.ctx.Err(); err != nil {
+					return err
 				}
 				if len(candidate) != 0 && len(candidate) < len(data) {
 					data = candidate
@@ -302,13 +312,16 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		if err != nil {
 			return err
 		}
-		root, err := parseEditorXML(data)
+		root, err := parseEditorXMLContext(e.output.ctx, data)
 		if err != nil {
 			return err
 		}
 		var patches []editorXMLPatch
 		for _, group := range root.children {
 			for _, node := range group.children {
+				if err := e.output.ctx.Err(); err != nil {
+					return err
+				}
 				for _, field := range []string{"FontFile", "MediaFile"} {
 					file := node.child(field)
 					if file == nil {
@@ -319,7 +332,6 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 						return err
 					}
 					key := editorResourceLocation(name, root.attr("BaseLoc"), value)
-					fragment := data[node.start:node.end]
 					location := locations[key]
 					if first, ok := aliases[key]; ok {
 						location = locations[first]
@@ -327,23 +339,14 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 					if location != "" && location != actual[key] {
 						var escaped bytes.Buffer
 						xml.EscapeText(&escaped, []byte("/"+location))
-						patch := editorXMLContent(data, file, escaped.Bytes())
-						patch.start -= node.start
-						patch.end -= node.start
-						fragment = editorPatchXML(fragment, []editorXMLPatch{patch})
+						patches = append(patches, editorXMLContent(data, file, escaped.Bytes()))
 					}
 					if field == "MediaFile" && formats[key] != "" && node.attr("Format") != formats[key] {
-						parsed, err := parseEditorXML(fragment)
+						patch, err := editorXMLAttributePatch(data, node, "Format", formats[key])
 						if err != nil {
 							return err
 						}
-						fragment, err = editorXMLAttribute(fragment, parsed, "Format", formats[key])
-						if err != nil {
-							return err
-						}
-					}
-					if !bytes.Equal(fragment, data[node.start:node.end]) {
-						patches = append(patches, editorXMLPatch{start: node.start, end: node.end, data: fragment})
+						patches = append(patches, patch)
 					}
 				}
 			}

@@ -653,7 +653,8 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 		if transform && node.object.Type == "ImageObject" && bounds.Bounds.W > 0 && bounds.Bounds.H > 0 {
 			clips := node.object.ImageObject.Clips
 			_, capability.CropImage = node.matrix(clips.usesObjectMatrix()).Invert()
-			capability.FitImage = capability.CropImage && axisAlignedMatrix(NewMatrix(node.object.ImageObject.CTM))
+			_, fitErr := imageFitBasis(node.object.ImageObject.CTM)
+			capability.FitImage = capability.CropImage && fitErr == nil
 			capability.ResetCrop = node.states[editorObjectID(node.object)].crop != nil
 		}
 		_, ctm := editorGeometry(node.object)

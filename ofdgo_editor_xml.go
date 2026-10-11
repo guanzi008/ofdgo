@@ -697,6 +697,54 @@ func editorXMLEncodedFragment(data []byte, node *editorXML, namespace string) ([
 	return editorXMLGenerated(fragment, namespace)
 }
 
+// editorXMLAttributePatch 生成标准属性的起始标签补丁，不复制子树
+// 入参: data 原文, node 节点, name 属性名, value 新值
+// 返回: editorXMLPatch 标签补丁, error 编码错误
+func editorXMLAttributePatch(data []byte, node *editorXML, name, value string) (editorXMLPatch, error) {
+	patch := editorXMLPatch{start: node.start, end: node.open, data: data[node.start:node.open]}
+	if node.hasAttr(name) && node.attr(name) == value {
+		return patch, nil
+	}
+	d := xml.NewDecoder(bytes.NewReader(patch.data))
+	token, err := d.RawToken()
+	if err != nil {
+		return editorXMLPatch{}, err
+	}
+	start := token.(xml.StartElement)
+	found := false
+	for i := range start.Attr {
+		if attr := &start.Attr[i]; attr.Name.Space == "" && attr.Name.Local == name {
+			attr.Value, found = value, true
+		}
+	}
+	if !found {
+		start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Local: name}, Value: value})
+	}
+	if start.Name.Space != "" {
+		start.Name.Local = start.Name.Space + ":" + start.Name.Local
+		start.Name.Space = ""
+	}
+	for i := range start.Attr {
+		if attr := &start.Attr[i]; attr.Name.Space != "" {
+			attr.Name.Local = attr.Name.Space + ":" + attr.Name.Local
+			attr.Name.Space = ""
+		}
+	}
+	var output bytes.Buffer
+	encoder := xml.NewEncoder(&output)
+	if err := encoder.EncodeToken(start); err != nil {
+		return editorXMLPatch{}, err
+	}
+	if err := encoder.Flush(); err != nil {
+		return editorXMLPatch{}, err
+	}
+	patch.data = output.Bytes()
+	if node.open == node.end {
+		patch.data = append(patch.data[:len(patch.data)-1], '/', '>')
+	}
+	return patch, nil
+}
+
 // editorXMLAttribute 修改单个标准属性，保留节点其余原文
 // 入参: data 原文, node 节点, name 属性名, value 新值
 // 返回: []byte 修改后的节点, error 错误信息

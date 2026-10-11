@@ -254,6 +254,9 @@ func (e *Editor) copyCompositeNodes(renderer *Renderer, nodes []*editorComposite
 // 入参: object 修改后的对象
 // 返回: error 错误信息
 func (n *editorCompositeNode) update(object GraphicObject) error {
+	if err := validateEditorGeometry(object); err != nil {
+		return err
+	}
 	data, err := editorXMLObject(n.data, n.node, n.object, object)
 	if err != nil || bytes.Equal(data, n.data) {
 		return err

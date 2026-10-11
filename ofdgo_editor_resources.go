@@ -72,6 +72,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 	if e.output != nil {
 		ctx = e.output.ctx
 	}
+	progress = progress.withContext(ctx)
 	scope, err := reader.versionResourceFiles(ctx, parts, generated)
 	if err != nil {
 		return nil, err
@@ -172,14 +173,14 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 		data, ok := parts[name]
 		if !ok {
 			var err error
-			data, err = reader.readFile(name)
+			data, err = reader.readFileViewContext(ctx, name)
 			if err != nil {
 				return nil, err
 			}
 		}
-		root, err := parseEditorXML(data)
+		root, err := parseEditorXMLContext(ctx, data)
 		if err != nil {
-			return nil, nil
+			return nil, ctx.Err()
 		}
 		usageRefs := refs
 		if multiple || prune {
@@ -190,6 +191,9 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 		for _, group := range root.children {
 			var members []editorXMLPatch
 			for _, node := range group.children {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
 				field := ""
 				if group.name.Local == "Fonts" && node.name.Local == "Font" {
 					field = "FontFile"
@@ -264,6 +268,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 	for name := range usedFiles {
 		delete(removed, name)
 	}
+	var fontCache editorSourceFontCache
 	for i, name := range ordered {
 		if err := progress.report("fonts", i, len(ordered)); err != nil {
 			return nil, err
@@ -277,9 +282,15 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 		if err != nil {
 			return nil, err
 		}
-		subset, err := e.backends.FontResources.SubsetSourceFont(data, FontUsage{Characters: slices.Sorted(maps.Keys(usage.chars)), Glyphs: slices.Sorted(maps.Keys(usage.glyphs)), Unsafe: usage.unsafe})
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		subset, err := fontCache.subset(ctx, e.backends.FontResources, data, usage)
 		if err != nil {
 			return nil, fmt.Errorf("subset font %s: %w", name, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		if subset != nil {
 			updates[name] = subset

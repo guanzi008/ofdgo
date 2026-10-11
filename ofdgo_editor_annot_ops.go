@@ -188,7 +188,7 @@ func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, 
 // 入参: page 页面索引, ids 注解标识, matrix 可逆页面变换
 // 返回: error 错误信息
 func (e *Editor) TransformAnnotations(page int, ids []string, matrix Matrix) error {
-	if _, ok := matrix.Invert(); !ok || !finite(matrix.a) || !finite(matrix.b) || !finite(matrix.c) || !finite(matrix.d) || !finite(matrix.e) || !finite(matrix.f) {
+	if _, ok := matrix.Invert(); !ok {
 		return fmt.Errorf("annotation transform must be finite and invertible")
 	}
 	return e.Transaction(func(edit *Editor) error {
@@ -210,6 +210,9 @@ func (e *Editor) TransformAnnotations(page int, ids []string, matrix Matrix) err
 				return err
 			}
 			bounds := matrix.TransformBox(box)
+			if !finite(bounds.X) || !finite(bounds.Y) || !finite(bounds.W) || !finite(bounds.H) || bounds.W < 0 || bounds.H < 0 {
+				return fmt.Errorf("annotation transform exceeds finite range")
+			}
 			path := ObjectPath{Annotation: id}
 			reader, _, _, members, err := edit.compositeScope(page, path)
 			if err != nil {

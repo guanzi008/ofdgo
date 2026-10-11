@@ -84,7 +84,7 @@ func (e *Editor) AddAttachment(name string, data []byte) (string, error) {
 	}
 	node := doc.child("Attachments")
 	parts := map[string][]byte{file: bytes.Clone(data)}
-	if base.document.Attachments.Path != "" {
+	if strings.TrimSpace(base.document.Attachments.Path) != "" {
 		name := base.reader.ResPath(base.document.Attachments.Path)
 		existing, err := base.reader.readFile(name)
 		if err != nil {
@@ -203,7 +203,7 @@ func (e *Editor) ReplaceAttachment(id string, data []byte) error {
 	return nil
 }
 
-// DeleteAttachment 删除附件声明，保存时清理可确认无引用的内容，支持撤销和重做
+// DeleteAttachment 删除附件声明，输出时清理相关动作及可确认无引用的内容，支持撤销和重做
 // 入参: id 附件标识
 // 返回: error 附件结构或提交错误
 func (e *Editor) DeleteAttachment(id string) error {
@@ -269,6 +269,14 @@ func (e *Editor) editAttachment(id string, change func([]byte, *editorXML, map[s
 	parts[name] = editorPatchXML(data, []editorXMLPatch{{found.start, found.end, updated}})
 	if err := e.commitAnnotationParts(base, parts); err != nil {
 		return err
+	}
+	if len(updated) == 0 {
+		removed := maps.Clone(base.removedAttachments)
+		if removed == nil {
+			removed = make(map[string]bool)
+		}
+		removed[id] = true
+		e.source.removedAttachments = removed
 	}
 	if file := node.child("FileLoc"); file != nil {
 		location := strings.TrimSpace(editorImportText(fragment, file))

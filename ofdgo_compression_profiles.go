@@ -95,7 +95,7 @@ func compactResourceProfiles(ctx context.Context, reader *Reader, parts map[stri
 				return fmt.Errorf("file not found: %s", name)
 			}
 			var err error
-			data, err = reader.readFile(name)
+			data, err = reader.readFileViewContext(ctx, name)
 			if err != nil {
 				return err
 			}
@@ -110,15 +110,18 @@ func compactResourceProfiles(ctx context.Context, reader *Reader, parts map[stri
 				continue
 			}
 			for _, node := range group.children {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				location := indexes[name][editorResourceID(node.attr("ID"))]
 				if !node.matchesOFD("ColorSpace") || location == "" {
 					continue
 				}
-				fragment, err := editorXMLAttribute(data, node, "Profile", "/"+location)
+				patch, err := editorXMLAttributePatch(data, node, "Profile", "/"+location)
 				if err != nil {
 					return err
 				}
-				patches = append(patches, editorXMLPatch{start: node.start, end: node.end, data: fragment})
+				patches = append(patches, patch)
 			}
 		}
 		updates[name] = editorPatchXML(data, patches)

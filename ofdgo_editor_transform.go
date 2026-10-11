@@ -26,7 +26,7 @@ import (
 // 入参: page 页面索引, ids 对象标识, matrix 页面变换
 // 返回: error 错误信息
 func (e *Editor) TransformObjectsMatrix(page int, ids []string, matrix Matrix) error {
-	if _, ok := matrix.Invert(); !ok || !finite(matrix.a) || !finite(matrix.b) || !finite(matrix.c) || !finite(matrix.d) || !finite(matrix.e) || !finite(matrix.f) {
+	if _, ok := matrix.Invert(); !ok {
 		return fmt.Errorf("object transform must be finite and invertible")
 	}
 	objects, _, err := e.selectedObjects(page, ids)
@@ -149,7 +149,7 @@ func (e *Editor) CropImage(page int, id string, box Box) error {
 	return e.UpdateObject(page, id, object)
 }
 
-// FitImage 按原始像素比例居中适应或填充当前Boundary，保留直角旋转及镜像方向
+// FitImage 按原始像素比例居中适应或填充当前Boundary，保留旋转、镜像及斜切方向
 // 保留原始图片，不重采样；重设裁剪，一次撤销恢复原布局
 // 入参: page 页面索引, id 图片对象标识, mode 为contain（完整显示）或cover（填满裁剪）
 // 返回: error 错误信息
@@ -185,7 +185,11 @@ func (obj TextObject) TextFrame() (Box, error) {
 	if !ok {
 		return Box{}, fmt.Errorf("text transform is not invertible")
 	}
-	return m.TransformBox(Box{W: box.W, H: box.H}), nil
+	frame := m.TransformBox(Box{W: box.W, H: box.H})
+	if !finite(frame.X) || !finite(frame.Y) || !finite(frame.W) || !finite(frame.H) || frame.W <= 0 || frame.H <= 0 {
+		return Box{}, fmt.Errorf("text frame exceeds finite range")
+	}
+	return frame, nil
 }
 
 // ResizeTextFrame 调整文字本地坐标的左侧偏移及宽度，保留页面方向；重新排版后通过UpdateObject提交
@@ -208,7 +212,13 @@ func (obj TextObject) ResizeTextFrame(offset, width float64) (TextObject, error)
 	frame.X += offset
 	frame.W = width
 	box := m.TransformBox(frame)
+	if !finite(box.X) || !finite(box.Y) || !finite(box.W) || !finite(box.H) || box.W <= 0 || box.H <= 0 {
+		return TextObject{}, fmt.Errorf("resized text frame exceeds finite range")
+	}
 	obj.CTM = TranslationMatrix(-box.X, -box.Y).Multiply(m).Multiply(TranslationMatrix(offset, 0)).String()
+	if _, err := creationNumbers(obj.CTM, 6); err != nil {
+		return TextObject{}, err
+	}
 	obj.Boundary = editorBoxString(box)
 	return obj, nil
 }
@@ -536,7 +546,29 @@ func cropImageObject(image *ImageObject, box Box) error {
 	return nil
 }
 
-// fitImage 将原始像素比例应用到当前图片框，适应时保留空白，填充时裁掉超出部分
+// imageFitBasis 提取图片变换的单位轴方向，保留旋转、镜像和斜切夹角
+// 入参: ctm 原始变换，空值使用默认方向
+// 返回: Matrix 单位轴矩阵, error 无效或退化变换
+func imageFitBasis(ctm string) (Matrix, error) {
+	if ctm != "" {
+		if _, err := creationNumbers(ctm, 6); err != nil {
+			return Matrix{}, err
+		}
+	}
+	m := NewMatrix(ctm)
+	x, y := math.Hypot(m.a, m.b), math.Hypot(m.c, m.d)
+	if x == 0 || y == 0 || !finite(x) || !finite(y) {
+		return Matrix{}, fmt.Errorf("image fitting requires nonzero finite axes")
+	}
+	m.a, m.b, m.c, m.d = m.a/x, m.b/x, m.c/y, m.d/y
+	m.e, m.f = 0, 0
+	if _, ok := m.Invert(); !ok {
+		return Matrix{}, fmt.Errorf("image fitting requires an invertible transform")
+	}
+	return m, nil
+}
+
+// fitImage 按原像素比例和轴方向布局，适应使用变换后边界，填充使用逆变换后的框范围
 // 入参: obj 图片对象副本, mode 为contain或cover
 // 返回: error 错误信息
 func (e *Editor) fitImage(obj *ImageObject, mode string) error {
@@ -547,34 +579,38 @@ func (e *Editor) fitImage(obj *ImageObject, mode string) error {
 	if err != nil {
 		return err
 	}
-	m := NewMatrix(obj.CTM)
-	if obj.CTM == "" {
-		m = Matrix{a: box.W, d: box.H}
-	}
-	if !axisAlignedMatrix(m) {
-		return fmt.Errorf("image fitting requires an axis-aligned transform")
+	m, err := imageFitBasis(obj.CTM)
+	if err != nil {
+		return err
 	}
 	size, err := e.editorImage(obj.ResourceID)
 	if err != nil {
 		return err
 	}
 	w, h := float64(size.X), float64(size.Y)
-	if m.a == 0 {
-		w, h = h, w
-	}
-	scale := math.Min(box.W/w, box.H/h)
-	if mode == "cover" {
-		scale = math.Max(box.W/w, box.H/h)
-	}
-	if m.a == 0 {
-		m.b, m.c = math.Copysign(float64(size.X)*scale, m.b), math.Copysign(float64(size.Y)*scale, m.c)
-	} else {
-		m.a, m.d = math.Copysign(w*scale, m.a), math.Copysign(h*scale, m.d)
-	}
-	m.e, m.f = 0, 0
+	m.a, m.b, m.c, m.d = m.a*w, m.b*w, m.c*h, m.d*h
 	full := m.TransformBox(Box{W: 1, H: 1})
+	scale := math.Min(box.W/full.W, box.H/full.H)
+	if mode == "cover" {
+		inverse, _ := m.Invert()
+		frame := inverse.TransformBox(Box{W: box.W, H: box.H})
+		scale = math.Max(frame.W, frame.H)
+	}
+	m.a, m.b, m.c, m.d = m.a*scale, m.b*scale, m.c*scale, m.d*scale
+	full = m.TransformBox(Box{W: 1, H: 1})
 	m.e, m.f = (box.W-full.W)/2-full.X, (box.H-full.H)/2-full.Y
-	obj.CTM, obj.Clips = m.String(), nil
+	values, original := m.Values(), NewMatrix(obj.CTM).Values()
+	for _, value := range values {
+		if !finite(value) {
+			return fmt.Errorf("image fit exceeds finite range")
+		}
+	}
+	if obj.CTM == "" || !slices.EqualFunc(values[:], original[:], func(a, b float64) bool {
+		return math.Abs(a-b) <= 1e-12*max(box.W, box.H, math.Abs(a), math.Abs(b))
+	}) {
+		obj.CTM = m.String()
+	}
+	obj.Clips = nil
 	if mode == "cover" {
 		return cropImageObject(obj, box)
 	}

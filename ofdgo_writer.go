@@ -346,11 +346,15 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error, progress edi
 // 返回: error 写入错误
 func (e *Editor) writePartsWithPages(write func(string, []byte, bool) error, progress editorProgress, includePages bool) error {
 	if len(e.removedPages) != 0 {
+		ctx := context.Background()
+		if e.output != nil {
+			ctx = e.output.ctx
+		}
 		output := write
 		write = func(name string, data []byte, binary bool) error {
 			if !binary && strings.EqualFold(path.Ext(name), ".xml") {
 				var err error
-				data, err = pruneCreatedPageReferences(data, e.removedPages)
+				data, err = pruneCreatedPageReferences(ctx, data, e.removedPages)
 				if err != nil {
 					return err
 				}

@@ -42,7 +42,7 @@ func (e *Editor) SelectionBounds(page int, objects, annotations []string) (Box, 
 // 入参: page 页面索引, objects 正文标识, annotations 注解标识, matrix 有限可逆变换
 // 返回: error 标识、变换或编辑错误
 func (e *Editor) TransformSelection(page int, objects, annotations []string, matrix Matrix) error {
-	if _, ok := matrix.Invert(); !ok || !finite(matrix.a) || !finite(matrix.b) || !finite(matrix.c) || !finite(matrix.d) || !finite(matrix.e) || !finite(matrix.f) {
+	if _, ok := matrix.Invert(); !ok {
 		return fmt.Errorf("selection transform must be finite and invertible")
 	}
 	if matrix == IdentityMatrix {

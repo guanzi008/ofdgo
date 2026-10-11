@@ -133,21 +133,78 @@ func (m Matrix) String() string {
 	return fmt.Sprintf("%s %s %s %s %s %s", ofdNumber(m.a), ofdNumber(m.b), ofdNumber(m.c), ofdNumber(m.d), ofdNumber(m.e), ofdNumber(m.f))
 }
 
-// Invert 求逆矩阵
-// 返回: Matrix 逆矩阵, bool 是否可逆
+// Invert 求仿射矩阵的逆变换
+// 返回: Matrix 逆矩阵，失败时返回单位矩阵, bool 是否存在有限逆矩阵
 func (m Matrix) Invert() (Matrix, bool) {
-	det := m.a*m.d - m.b*m.c
-	if math.Abs(det) < 1e-9 {
+	for _, value := range m.Values() {
+		if !finite(value) {
+			return IdentityMatrix, false
+		}
+	}
+	det, ds := matrixProductDifference(m.a, m.d, m.b, m.c)
+	x, xs := matrixProductDifference(m.c, m.f, m.d, m.e)
+	y, ys := matrixProductDifference(m.b, m.e, m.a, m.f)
+	if det != 0 && ds && xs && ys {
+		n := Matrix{a: m.d / det, b: -m.b / det, c: -m.c / det, d: m.a / det, e: x / det, f: y / det}
+		valid := true
+		for _, value := range n.Values() {
+			valid = valid && finite(value)
+		}
+		if valid {
+			return n, true
+		}
+	}
+	determinant, exponent := matrixProductSum(m.a, m.d, -m.b, m.c)
+	if determinant == 0 {
 		return IdentityMatrix, false
 	}
-	return Matrix{
-		a: m.d / det,
-		b: -m.b / det,
-		c: -m.c / det,
-		d: m.a / det,
-		e: (m.c*m.f - m.d*m.e) / det,
-		f: (m.b*m.e - m.a*m.f) / det,
-	}, true
+	divide := func(value float64, power int) float64 {
+		mantissa, shift := math.Frexp(value)
+		return math.Ldexp(mantissa/determinant, power+shift-exponent)
+	}
+	x, xe := matrixProductSum(m.c, m.f, -m.d, m.e)
+	y, ye := matrixProductSum(m.b, m.e, -m.a, m.f)
+	n := Matrix{a: divide(m.d, 0), b: divide(-m.b, 0), c: divide(-m.c, 0), d: divide(m.a, 0), e: divide(x, xe), f: divide(y, ye)}
+	for _, value := range n.Values() {
+		if !finite(value) {
+			return IdentityMatrix, false
+		}
+	}
+	return n, true
+}
+
+// matrixProductDifference 计算两个乘积之差，检查溢出、下溢及相消造成的精度损失
+// 入参: a 第一个乘数, b 第二个乘数, c 第三个乘数, d 第四个乘数
+// 返回: float64 乘积之差, bool 是否可直接用于求逆
+func matrixProductDifference(a, b, c, d float64) (float64, bool) {
+	x, y := a*b, c*d
+	value := x - y
+	if !finite(value) || x == 0 && a != 0 && b != 0 || y == 0 && c != 0 && d != 0 {
+		return value, false
+	}
+	return value, x == 0 && y == 0 || math.Abs(value) >= 0x1p-1022 && math.Abs(value) >= 0x1p-48*math.Max(math.Abs(x), math.Abs(y))
+}
+
+// matrixProductSum 以尾数及指数累加两个乘积，保留乘法舍入残差
+// 入参: a 第一个乘数, b 第二个乘数, c 第三个乘数, d 第四个乘数
+// 返回: float64 结果尾数, int 二进制指数
+func matrixProductSum(a, b, c, d float64) (float64, int) {
+	a, ae := math.Frexp(a)
+	b, be := math.Frexp(b)
+	c, ce := math.Frexp(c)
+	d, de := math.Frexp(d)
+	x, y := a*b, c*d
+	xe, ye := ae+be, ce+de
+	power := max(xe, ye)
+	if x == 0 {
+		power = ye
+	} else if y == 0 {
+		power = xe
+	}
+	value := math.Ldexp(x, xe-power) + math.Ldexp(y, ye-power)
+	value += math.Ldexp(math.FMA(a, b, -x), xe-power) + math.Ldexp(math.FMA(c, d, -y), ye-power)
+	value, shift := math.Frexp(value)
+	return value, power + shift
 }
 
 // TranslationMatrix 构造平移矩阵

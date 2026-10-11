@@ -108,7 +108,7 @@ func (e *Editor) ResetImageCrop(page int, id string) error {
 	return e.updateObjectOrigins(page, []GraphicObject{node.object}, true, map[string]*editorObjectOrigin{id: next})
 }
 
-// FitCompositeImage 按原像素比例适应或填充内部图片框，保留原始裁剪和蒙版
+// FitCompositeImage 按原像素比例适应或填充内部图片框，保留轴方向、原始裁剪和蒙版
 // 入参: page 页面索引, path 父路径, index 图片序号, mode 为contain或cover
 // 返回: error 错误信息
 func (e *Editor) FitCompositeImage(page int, path ObjectPath, index int, mode string) error {
@@ -117,6 +117,14 @@ func (e *Editor) FitCompositeImage(page int, path ObjectPath, index int, mode st
 		if !members[0].Capabilities.FitImage {
 			return fmt.Errorf("composite image fitting is not supported")
 		}
+		before, changed := node.data, node.changed
+		id := editorObjectID(node.object)
+		state := node.states[id]
+		defer func() {
+			if bytes.Equal(before, node.data) && reflect.DeepEqual(state, node.states[id]) {
+				node.changed = changed
+			}
+		}()
 		if err := resetCompositeImageCrop(node); err != nil {
 			return err
 		}
@@ -143,7 +151,10 @@ func (e *Editor) FitCompositeImage(page int, path ObjectPath, index int, mode st
 			frame = TranslationMatrix(box.X, box.Y).Multiply(node.parent)
 		}
 		clips := object.ImageObject.Clips
-		inverse, _ := node.matrix(clips.usesObjectMatrix()).Invert()
+		inverse, ok := node.matrix(clips.usesObjectMatrix()).Invert()
+		if !ok {
+			return fmt.Errorf("fitted image transform is not invertible")
+		}
 		return appendCompositeClip(node, shape, inverse.Multiply(frame), true)
 	})
 }
@@ -174,6 +185,11 @@ func (n *editorCompositeNode) matrix(transform bool) Matrix {
 // 入参: node 对象节点, shape 裁剪路径, matrix 路径到裁剪坐标的变换, track 是否记录还原序号
 // 返回: error 错误信息
 func appendCompositeClip(node *editorCompositeNode, shape PathObject, matrix Matrix, track bool) error {
+	for _, value := range matrix.Values() {
+		if !finite(value) {
+			return fmt.Errorf("clip transform exceeds finite range")
+		}
+	}
 	clip := Clip{Area: []ClipArea{{CTM: matrix.String(), Path: []PathObject{shape}}}}
 	if clips := *editorObjectClips(&node.object); clips != nil && slices.ContainsFunc(clips.Clip, func(previous Clip) bool { return reflect.DeepEqual(previous, clip) }) {
 		return nil

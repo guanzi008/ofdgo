@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"slices"
@@ -146,7 +147,11 @@ func (e *Editor) UpdateOutline(path []int, title string, page int) error {
 				}
 				content = append(content, standalone...)
 			}
-			patches = append(patches, editorXMLContent(data, actions, content))
+			if page < 0 && len(removals) == len(actions.children) {
+				patches = append(patches, editorXMLPatch{actions.start, actions.end, nil})
+			} else {
+				patches = append(patches, editorXMLContent(data, actions, content))
+			}
 		} else if page >= 0 {
 			content, err := editorXMLGenerated(e.outlineAction(page), node.name.Space)
 			if err != nil {
@@ -167,11 +172,11 @@ func (e *Editor) UpdateOutline(path []int, title string, page int) error {
 	if err != nil {
 		return err
 	}
-	value, err := editorXMLAttribute(updated, node, "Title", title)
+	patch, err := editorXMLAttributePatch(updated, node, "Title", title)
 	if err != nil {
 		return err
 	}
-	return e.setOutlineXML(editorPatchXML(updated, []editorXMLPatch{{node.start, node.end, value}}))
+	return e.setOutlineXML(editorPatchXML(updated, []editorXMLPatch{patch}))
 }
 
 // SetOutlineActions 替换目录节点的动作序列，空列表清除动作，不改变子目录
@@ -391,50 +396,34 @@ func (e *Editor) setOutlineXML(data []byte) error {
 		return err
 	}
 	var patches []editorXMLPatch
-	var leaves func(*editorXML) int
-	leaves = func(node *editorXML) int {
-		children := editorOutlineChildren(node)
-		if len(children) == 0 {
-			return 1
-		}
+	var walk func(*editorXML) (int, error)
+	walk = func(node *editorXML) (int, error) {
 		count := 0
-		for _, child := range children {
-			count += leaves(child)
-		}
-		return count
-	}
-	var walk func(*editorXML) error
-	walk = func(node *editorXML) error {
-		if node.attr("Count") != "" {
-			count := 0
-			for _, child := range editorOutlineChildren(node) {
-				count += leaves(child)
+		for _, child := range node.children {
+			if !child.matchesOFD("OutlineElem") {
+				continue
 			}
-			value, err := editorXMLAttribute(data, node, "Count", strconv.Itoa(count))
+			leaves, err := walk(child)
 			if err != nil {
-				return err
+				return 0, err
 			}
-			updated, err := parseEditorXML(value)
+			count += leaves
+		}
+		if value := strconv.Itoa(count); node.attr("Count") != "" && node.attr("Count") != value {
+			patch, err := editorXMLAttributePatch(data, node, "Count", value)
 			if err != nil {
-				return err
+				return 0, err
 			}
-			if node.open != node.end {
-				patches = append(patches, editorXMLPatch{node.start, node.open, value[:updated.open]})
-			} else {
-				patches = append(patches, editorXMLPatch{node.start, node.end, value})
-			}
+			patches = append(patches, patch)
 		}
-		for _, child := range editorOutlineChildren(node) {
-			if err := walk(child); err != nil {
-				return err
-			}
-		}
-		return nil
+		return max(1, count), nil
 	}
-	if err := walk(root); err != nil {
+	if _, err := walk(root); err != nil {
 		return err
 	}
-	data = editorPatchXML(data, patches)
+	if len(patches) > 0 {
+		data = editorPatchXML(data, patches)
+	}
 	current, err := e.outlineXML()
 	if err != nil {
 		return err
@@ -453,52 +442,93 @@ func (e *Editor) setOutlineXML(data []byte) error {
 
 // withOutlines 将修改后的目录写入文档，清除指向已删除页面的新增跳转
 // 入参: data 文档原文
-// 返回: []byte 更新文档, error 错误信息
+// 返回: []byte 更新文档, error 解析或取消错误
 func (e *Editor) withOutlines(data []byte) ([]byte, error) {
 	if e.outlines == nil {
 		return data, nil
 	}
-	outline, err := parseEditorXML(e.outlines)
+	ctx := context.Background()
+	if e.output != nil {
+		ctx = e.output.ctx
+	}
+	outline, err := parseEditorXMLContext(ctx, e.outlines)
 	if err != nil {
 		return nil, err
 	}
-	valid := make(map[string]int, len(e.pages))
-	for i, page := range e.pages {
-		valid[page.ID] = i
+	valid := make(map[string]bool, len(e.pages))
+	for _, page := range e.pages {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if id := editorResourceID(page.ID); id != "" {
+			valid[id] = true
+		}
 	}
 	var removals []editorXMLPatch
-	var walk func(*editorXML)
-	walk = func(node *editorXML) {
+	var walk func(*editorXML) error
+	walk = func(node *editorXML) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if actions := node.child("Actions"); actions != nil {
+			start := len(removals)
 			for _, action := range actions.children {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				if !action.matchesOFD("Action") {
 					continue
 				}
 				if target := action.child("Goto"); target != nil {
 					if dest := target.child("Dest"); dest != nil {
-						if _, ok := resourceValue(valid, dest.attr("PageID")); !ok {
+						if !valid[editorResourceID(dest.attr("PageID"))] {
 							removals = append(removals, editorXMLPatch{action.start, action.end, nil})
 						}
 					}
 				}
 			}
+			if len(removals) > start && len(removals)-start == len(actions.children) {
+				removals = append(removals[:start], editorXMLPatch{actions.start, actions.end, nil})
+			}
 		}
 		for _, child := range editorOutlineChildren(node) {
-			walk(child)
+			if err := walk(child); err != nil {
+				return err
+			}
 		}
+		return nil
 	}
-	walk(outline)
-	value := editorPatchXML(e.outlines, removals)
-	root, err := parseEditorXML(data)
+	if err := walk(outline); err != nil {
+		return nil, err
+	}
+	value := e.outlines
+	if len(outline.children) == 0 {
+		value = nil
+	} else if len(removals) > 0 {
+		value = editorPatchXML(value, removals)
+	}
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return nil, err
 	}
+	var patch editorXMLPatch
 	if node := root.child("Outlines"); node != nil {
-		return editorPatchXML(data, []editorXMLPatch{{node.start, node.end, value}}), nil
+		patch = editorXMLPatch{node.start, node.end, value}
+	} else if len(value) > 0 {
+		pages := root.child("Pages")
+		if pages == nil {
+			return nil, fmt.Errorf("document has no Pages")
+		}
+		patch = editorXMLPatch{pages.end, pages.end, value}
+	} else {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return data, nil
 	}
-	pages := root.child("Pages")
-	if pages == nil {
-		return nil, fmt.Errorf("document has no Pages")
+	data = editorPatchXML(data, []editorXMLPatch{patch})
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	return editorPatchXML(data, []editorXMLPatch{{pages.end, pages.end, value}}), nil
+	return data, nil
 }

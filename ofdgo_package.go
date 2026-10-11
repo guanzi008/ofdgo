@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"path"
 	"slices"
 	"strconv"
@@ -78,9 +79,12 @@ func packageAvailableName(reader *Reader, files map[string][]byte, name string) 
 }
 
 // mergePackageResources 合并新增资源定义，保留原索引、路径基准与未知字段
-// 入参: reader 原包, parts 待写入条目, doc 文档, directory 文档目录, added 新增资源XML，文件引用使用绝对包路径
-// 返回: string 资源索引路径, bool 是否需要新增文档引用, error 错误信息
-func mergePackageResources(reader *Reader, parts map[string][]byte, doc *Document, directory string, added []byte) (string, bool, error) {
+// 入参: ctx 取消上下文, reader 原包, parts 待写入条目, doc 文档, directory 文档目录, added 新增资源XML，文件引用使用绝对包路径
+// 返回: string 资源索引路径, bool 是否需要新增文档引用, error 读取、解析或取消错误
+func mergePackageResources(ctx context.Context, reader *Reader, parts map[string][]byte, doc *Document, directory string, added []byte) (string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
 	if len(doc.CommonData.DocumentRes) == 0 {
 		name := packageAvailableName(reader, parts, path.Join(directory, "DocumentRes.xml"))
 		parts[name] = added
@@ -93,42 +97,54 @@ func mergePackageResources(reader *Reader, parts map[string][]byte, doc *Documen
 	data, ok := parts[name]
 	if !ok {
 		var err error
-		data, err = reader.readFile(name)
+		data, err = reader.readFileViewContext(ctx, name)
 		if err != nil {
 			return "", false, err
 		}
 	}
-	addition, err := parseEditorXML(added)
+	addition, err := parseEditorXMLContext(ctx, added)
 	if err != nil {
 		return "", false, err
 	}
 	order := []string{"ColorSpaces", "DrawParams", "Fonts", "MultiMedias", "CompositeGraphicUnits"}
 	for _, group := range addition.children {
-		root, err := parseEditorXML(data)
+		root, err := parseEditorXMLContext(ctx, data)
 		if err != nil {
 			return "", false, err
 		}
 		target := root.child(group.name.Local)
-		context := root
+		scope := root
+		used := make(map[[2]string]bool)
 		if target != nil {
-			context = target
+			scope = target
+			for _, old := range target.children {
+				if err := ctx.Err(); err != nil {
+					return "", false, err
+				}
+				if old.matchesOFD(old.name.Local) {
+					used[[2]string{old.name.Local, editorImportKey(old.attr("ID"))}] = true
+				}
+			}
 		}
 		var content []byte
 		for _, node := range group.children {
-			if target != nil && slices.ContainsFunc(target.children, func(old *editorXML) bool {
-				return old.matchesOFD(node.name.Local) && old.attr("ID") == node.attr("ID")
-			}) {
+			if err := ctx.Err(); err != nil {
+				return "", false, err
+			}
+			key := [2]string{node.name.Local, editorImportKey(node.attr("ID"))}
+			if used[key] {
 				continue
 			}
 			entry, err := editorXMLStandalone(added[node.start:node.end], node)
 			if err != nil {
 				return "", false, err
 			}
-			entry, err = editorXMLGenerated(entry, context.name.Space)
+			entry, err = editorXMLGenerated(entry, scope.name.Space)
 			if err != nil {
 				return "", false, err
 			}
 			content = append(content, entry...)
+			used[key] = true
 		}
 		if len(content) == 0 {
 			continue
@@ -154,6 +170,9 @@ func mergePackageResources(reader *Reader, parts map[string][]byte, doc *Documen
 		} else {
 			data = editorPatchXML(data, []editorXMLPatch{{position, position, content}})
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", false, err
 	}
 	parts[name] = data
 	return name, false, nil

@@ -28,7 +28,7 @@ import (
 	"strings"
 )
 
-// sourceParts 生成编辑快照的XML和新增资源，删页时同步清理标准引用
+// sourceParts 生成编辑快照的XML和新增资源，同步清理已删除页面及附件的引用
 // 入参: ctx 取消上下文, progress 保存进度回调，预览时为nil
 // 返回: map[string][]byte 替换及新增条目, error 错误信息
 func (e *Editor) sourceParts(ctx context.Context, progress editorProgress) (map[string][]byte, error) {
@@ -135,7 +135,11 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 		if err != nil {
 			return nil, err
 		}
-		resourcePath, added, err := mergePackageResources(reader, parts, source.document, source.directory, data)
+		ctx := context.Background()
+		if e.output != nil {
+			ctx = e.output.ctx
+		}
+		resourcePath, added, err := mergePackageResources(ctx, reader, parts, source.document, source.directory, data)
 		if err != nil {
 			return nil, err
 		}
@@ -263,8 +267,8 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 		}
 		parts[name] = updated
 	}
-	if originalCount != len(source.pages) || len(source.annotationPages) != 0 || len(e.removedPages) != 0 {
-		if err := e.prunePageReferences(parts, generated); err != nil {
+	if originalCount != len(source.pages) || len(source.annotationPages) != 0 || len(e.removedPages) != 0 || len(source.removedAttachments) != 0 {
+		if err := e.pruneDocumentReferences(parts, generated); err != nil {
 			return nil, err
 		}
 	}

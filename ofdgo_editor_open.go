@@ -43,6 +43,7 @@ type editorSource struct {
 	annotationStates   map[string]map[string]editorCompositeState
 	annotationPages    map[string]bool
 	retiredAttachments map[string]bool
+	removedAttachments map[string]bool
 }
 
 // editorObjectOrigin 保留原对象的XML语义，供复制和局部更新复用
@@ -540,7 +541,10 @@ func (e *Editor) objectCapabilities(object GraphicObject, orderable map[*editorX
 		all.Stretch = object.Type == "ImageObject"
 		all.ReplaceImage = object.Type == "ImageObject"
 		all.CropImage = all.ReplaceImage
-		all.FitImage = all.ReplaceImage && axisAlignedMatrix(NewMatrix(object.ImageObject.CTM))
+		if all.ReplaceImage {
+			_, err := imageFitBasis(object.ImageObject.CTM)
+			all.FitImage = err == nil
+		}
 		return all
 	}
 	node := origin.node
@@ -578,7 +582,10 @@ func (e *Editor) objectCapabilities(object GraphicObject, orderable map[*editorX
 	all.Paint = all.Paint && e.editorPaintable(object)
 	all.ReplaceImage = all.Update && object.Type == "ImageObject"
 	all.CropImage = all.ReplaceImage
-	all.FitImage = all.ReplaceImage && axisAlignedMatrix(NewMatrix(object.ImageObject.CTM))
+	if all.ReplaceImage {
+		_, err := imageFitBasis(object.ImageObject.CTM)
+		all.FitImage = err == nil
+	}
 	if object.Type == "TextObject" {
 		all.TextContent = all.Update && object.TextObject.ReadDirection == 0 && object.TextObject.CharDirection == 0 && (all.LayoutKnown || len(object.TextObject.CGTransform) == 0)
 		all.Reflow = all.Reflow && (all.LayoutKnown || len(object.TextObject.CGTransform) == 0)
@@ -947,6 +954,17 @@ func validateEditorGeometry(object GraphicObject) error {
 	if ctm != "" {
 		if _, err := creationNumbers(ctm, 6); err != nil {
 			return err
+		}
+	}
+	if clips := *editorObjectClips(&object); clips != nil {
+		for _, clip := range clips.Clip {
+			for _, area := range clip.Area {
+				if area.CTM != "" {
+					if _, err := creationNumbers(area.CTM, 6); err != nil {
+						return fmt.Errorf("invalid clip transform: %w", err)
+					}
+				}
+			}
 		}
 	}
 	var alpha *int

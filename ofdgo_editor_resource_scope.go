@@ -20,7 +20,13 @@ import (
 	"slices"
 )
 
-// resourceReferenceScopes 复用结构依赖归集文档引用，同文档索引共用只读结果，跨文档索引独立合并
+// editorResourceScope 记录资源索引的文档归属链，引用集合只读
+type editorResourceScope struct {
+	parent int
+	refs   *editorResourceRefs
+}
+
+// resourceReferenceScopes 按文档归集引用，归属相同的资源索引复用只读结果
 // 入参: ctx 取消上下文, documents 文档入口, resources 资源索引, references 文件引用, selected 限定的文档入口，空值统计全部文档
 // 返回: map[string]*editorResourceRefs 各资源索引的引用，依赖不完整或引用无法归属时为空, error 取消错误
 func resourceReferenceScopes(ctx context.Context, documents map[string]bool, resources []string, references map[string]*editorResourceRefs, selected string) (map[string]*editorResourceRefs, error) {
@@ -29,8 +35,9 @@ func resourceReferenceScopes(ctx context.Context, documents map[string]bool, res
 		indexes[name] = true
 	}
 	used := make(map[string]bool)
-	result := make(map[string]*editorResourceRefs)
-	shared := make(map[string]bool)
+	owners := make(map[string]int)
+	groups := []editorResourceScope{{}}
+	groupIDs := make(map[editorResourceScope]int)
 	for _, entry := range slices.Sorted(maps.Keys(documents)) {
 		scope := map[string]bool{entry: true}
 		queue := []string{entry}
@@ -89,23 +96,42 @@ func resourceReferenceScopes(ctx context.Context, documents map[string]bool, res
 			if !indexes[name] {
 				continue
 			}
-			if result[name] == nil {
-				result[name] = refs
-				continue
+			key := editorResourceScope{parent: owners[name], refs: refs}
+			id := groupIDs[key]
+			if id == 0 {
+				id = len(groups)
+				groups = append(groups, key)
+				groupIDs[key] = id
 			}
-			if !shared[name] {
-				merged := &editorResourceRefs{ids: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
-				merged.merge(result[name])
-				result[name] = merged
-				shared[name] = true
-			}
-			result[name].merge(refs)
+			owners[name] = id
 		}
 	}
 	for name, refs := range references {
 		if !used[name] && (len(refs.ids) != 0 || len(refs.fonts) != 0 || indexes[name]) {
 			return nil, nil
 		}
+	}
+	result := make(map[string]*editorResourceRefs, len(owners))
+	merged := make(map[int]*editorResourceRefs)
+	for name, id := range owners {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		refs := merged[id]
+		if refs == nil {
+			refs = groups[id].refs
+			if groups[id].parent != 0 {
+				refs = &editorResourceRefs{ids: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
+				for next := id; next != 0; next = groups[next].parent {
+					if err := ctx.Err(); err != nil {
+						return nil, err
+					}
+					refs.merge(groups[next].refs)
+				}
+			}
+			merged[id] = refs
+		}
+		result[name] = refs
 	}
 	return result, ctx.Err()
 }
