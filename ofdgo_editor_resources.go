@@ -35,14 +35,15 @@ const (
 	editorReferenceFile
 )
 
-// editorResourceRefs 保存全包资源标识和直接文件引用，不以页面是否加载判断资源存活
+// editorResourceRefs 记录资源标识、文件引用及声明依赖，不以页面是否加载判断资源存活
 type editorResourceRefs struct {
-	ids       map[string]bool
-	files     map[string]bool
-	fonts     map[string]*editorFontUsage
-	versions  map[string]bool
-	documents map[string]bool
-	roles     map[string]int
+	ids         map[string]bool
+	files       map[string]bool
+	fonts       map[string]*editorFontUsage
+	versions    map[string]bool
+	documents   map[string]bool
+	roles       map[string]int
+	definitions map[string]*editorResourceRefs
 }
 
 // compactSourceReferences 合并自产页面引用，版本文档按当前版本范围扫描
@@ -51,7 +52,15 @@ type editorResourceRefs struct {
 // 入参: parts 输出条目, progress 保存进度回调, generated 自产页面及引用
 // 返回: map[string]bool 可移除条目, error 读取或取消错误
 func (e *Editor) compactSourceReferences(parts map[string][]byte, progress editorProgress, generated map[string]editorGeneratedReferences) (map[string]bool, error) {
-	multiple := e.source.reader.DocumentCount() > 1
+	return e.compactResourceReferences(parts, e.source.reader, progress, generated, e.source.retiredAttachments)
+}
+
+// compactResourceReferences 按文档引用清理输出副本，兼顾新建文档与已有包
+// 入参: parts 输出条目, reader 原包，可为空, progress 保存进度回调, generated 自产引用, retired 待移除附件
+// 返回: map[string]bool 可移除条目, error 读取或取消错误
+func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Reader, progress editorProgress, generated map[string]editorGeneratedReferences, retired map[string]bool) (map[string]bool, error) {
+	multiple := reader != nil && reader.DocumentCount() > 1
+	prune := e.output != nil && e.output.options.Mode != CompressionUnchanged
 	if e.output != nil && e.output.protected || multiple && (e.output == nil || e.output.options.Mode == CompressionUnchanged) {
 		return nil, nil
 	}
@@ -59,7 +68,6 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 		return nil, nil
 	}
 	generated = e.generatedVectorReferences(parts, generated)
-	reader := e.source.reader
 	ctx := context.Background()
 	if e.output != nil {
 		ctx = e.output.ctx
@@ -69,11 +77,13 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 		return nil, err
 	}
 	names := make(map[string]bool)
-	for name := range reader.fileIndex {
-		names[name] = true
-	}
-	for name := range reader.files {
-		names[name] = true
+	if reader != nil {
+		for name := range reader.fileIndex {
+			names[name] = true
+		}
+		for name := range reader.files {
+			names[name] = true
+		}
 	}
 	for name := range parts {
 		names[name] = true
@@ -85,7 +95,7 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 			}
 		}
 	}
-	refs, resources, references, safe, err := scanEditorResources(ctx, reader, parts, generated, names, progress, multiple)
+	refs, resources, references, safe, err := scanEditorResources(ctx, reader, parts, generated, names, progress, multiple || prune)
 	if err != nil {
 		return nil, err
 	}
@@ -93,9 +103,25 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 		return nil, nil
 	}
 	var scoped map[string]*editorResourceRefs
-	if multiple {
+	if prune {
+		for _, name := range resources {
+			data, ok := parts[name]
+			if !ok {
+				data, err = reader.readFile(name)
+				if err != nil {
+					return nil, err
+				}
+			}
+			indexed, err := editorResourceDefinitions(ctx, data, name, references[name], refs.versions[cleanPackagePath(name)])
+			if err != nil || indexed == nil {
+				return nil, err
+			}
+			references[name] = indexed
+		}
+	}
+	if multiple || prune {
 		selected := ""
-		if reader.OFD.DocBody[reader.documentIndex].versioned {
+		if reader != nil && reader.OFD.DocBody[reader.documentIndex].versioned {
 			selected, err = reader.DocumentRoot()
 			if err != nil {
 				return nil, err
@@ -107,11 +133,36 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 		}
 	}
 	ordered := slices.Sorted(maps.Keys(names))
-	removed := maps.Clone(e.source.retiredAttachments)
+	removed := maps.Clone(retired)
 	if removed == nil {
 		removed = make(map[string]bool)
 	}
-	usedFiles := maps.Clone(refs.files)
+	var usedFiles map[string]bool
+	var protectedProfiles map[string]bool
+	var profiles map[string][]editorProfileReference
+	if prune {
+		usedFiles = make(map[string]bool)
+		protectedProfiles = make(map[string]bool)
+		profiles = make(map[string][]editorProfileReference)
+		for name, source := range references {
+			if source.definitions == nil {
+				maps.Copy(usedFiles, source.files)
+				maps.Copy(protectedProfiles, source.files)
+				continue
+			}
+			usage := scoped[name]
+			for id, definition := range source.definitions {
+				if refs.versions[cleanPackagePath(name)] || usage == nil || usage.ids[id] {
+					maps.Copy(usedFiles, definition.files)
+					if refs.versions[cleanPackagePath(name)] || usage == nil {
+						maps.Copy(protectedProfiles, definition.files)
+					}
+				}
+			}
+		}
+	} else {
+		usedFiles = maps.Clone(refs.files)
+	}
 	updates := make(map[string][]byte)
 	fontFiles := make(map[string]*editorFontUsage)
 	for i, name := range resources {
@@ -131,7 +182,7 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 			return nil, nil
 		}
 		usageRefs := refs
-		if multiple {
+		if multiple || prune {
 			usageRefs = scoped[name]
 		}
 		preserved := refs.versions[cleanPackagePath(name)] || usageRefs == nil
@@ -145,35 +196,52 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 				} else if group.name.Local == "MultiMedias" && node.name.Local == "MultiMedia" {
 					field = "MediaFile"
 				}
-				if field == "" {
+				if field == "" && (!prune || node.name.Local != editorResourceElement(group.name.Local)) {
 					continue
 				}
 				id := editorResourceID(node.attr("ID"))
 				keep := preserved || id == "" || usageRefs.ids[id] || field == "MediaFile" && node.attr("Type") != "Image"
+				profile := prune && group.name.Local == "ColorSpaces" && node.name.Local == "ColorSpace"
+				if prune && keep && !profile {
+					maps.Copy(protectedProfiles, references[name].definitions[id].files)
+				}
+				var value string
 				if file := node.child(field); file != nil {
-					var value string
 					if err := xml.Unmarshal(data[file.start:file.end], &value); err != nil {
 						return nil, nil
 					}
-					if location := editorResourceLocation(name, root.attr("BaseLoc"), value); location != "" {
-						alternate := cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))
-						if field == "FontFile" && !multiple {
-							usage := usageRefs.fonts[id]
-							charset := node.attr("Charset")
-							unsafe := preserved || id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != alternate
-							for _, file := range []string{location, alternate} {
-								if fontFiles[file] == nil {
-									fontFiles[file] = newEditorFontUsage()
-								}
-								fontFiles[file].merge(usage, unsafe || keep && usage == nil)
+				} else if profile {
+					value = node.attr("Profile")
+				}
+				if location := editorResourceLocation(name, root.attr("BaseLoc"), value); location != "" {
+					alternate := cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))
+					if field == "FontFile" && !multiple && keep {
+						var usage *editorFontUsage
+						if usageRefs != nil {
+							usage = usageRefs.fonts[id]
+						}
+						charset := node.attr("Charset")
+						unsafe := preserved || id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != alternate
+						for _, file := range []string{location, alternate} {
+							if fontFiles[file] == nil {
+								fontFiles[file] = newEditorFontUsage()
+							}
+							fontFiles[file].merge(usage, unsafe || keep && usage == nil)
+						}
+					}
+					if keep {
+						usedFiles[location] = true
+						usedFiles[alternate] = true
+						if prune {
+							if profile && !preserved && location == alternate {
+								profiles[location] = append(profiles[location], editorProfileReference{index: name, id: id})
+							} else {
+								protectedProfiles[location] = true
+								protectedProfiles[alternate] = true
 							}
 						}
-						if keep {
-							usedFiles[location] = true
-							usedFiles[alternate] = true
-						} else {
-							removed[location] = true
-						}
+					} else {
+						removed[location] = true
 					}
 				}
 				if !keep {
@@ -225,6 +293,9 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 		if removed[cleanPackagePath(name)] {
 			delete(parts, name)
 		}
+	}
+	if err := compactResourceProfiles(ctx, reader, parts, profiles, protectedProfiles, removed); err != nil {
+		return nil, err
 	}
 	return removed, nil
 }

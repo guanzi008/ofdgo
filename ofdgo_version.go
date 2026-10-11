@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -54,17 +55,28 @@ func (r *Reader) DocumentVersionCount() (int, error) {
 // 返回独立副本；没有版本列表时返回nil，不以版本号推测默认版本
 // 返回: []DocumentVersionInfo 版本信息, error 读取或描述错误
 func (r *Reader) DocumentVersions() ([]DocumentVersionInfo, error) {
-	entries, err := r.documentVersionEntries()
+	return r.DocumentVersionsContext(context.Background())
+}
+
+// DocumentVersionsContext 按入口顺序读取版本信息，支持取消描述文件和文件清单的解析
+// 返回独立副本，不切换当前版本，也不读取文件清单中的内容
+// 入参: ctx 取消上下文
+// 返回: []DocumentVersionInfo 版本信息, error 读取、描述或取消错误
+func (r *Reader) DocumentVersionsContext(ctx context.Context) ([]DocumentVersionInfo, error) {
+	entries, err := r.documentVersionEntriesContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	for i, entry := range entries {
-		info, err := r.readDocumentVersion(entry.ID, entry.Location)
+		info, err := r.readDocumentVersionContext(ctx, entry.ID, entry.Location)
 		if err != nil {
 			return nil, fmt.Errorf("version %s: %w", entry.ID, err)
 		}
 		info.Index, info.Current = entry.Index, entry.Current
 		entries[i] = info
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return entries, nil
 }
@@ -72,14 +84,24 @@ func (r *Reader) DocumentVersions() ([]DocumentVersionInfo, error) {
 // documentVersionEntries 读取当前文档的版本入口，不提前加载各版本描述
 // 返回: []DocumentVersionInfo 入口属性, error 读取或描述错误
 func (r *Reader) documentVersionEntries() ([]DocumentVersionInfo, error) {
+	return r.documentVersionEntriesContext(context.Background())
+}
+
+// documentVersionEntriesContext 读取版本入口，在读取和解析过程中检查取消状态
+// 入参: ctx 取消上下文
+// 返回: []DocumentVersionInfo 入口属性, error 读取、描述或取消错误
+func (r *Reader) documentVersionEntriesContext(ctx context.Context) ([]DocumentVersionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if r.documentIndex < 0 || r.documentIndex >= r.DocumentCount() {
 		return nil, fmt.Errorf("no docbody found")
 	}
-	data, err := r.readFile("OFD.xml")
+	data, err := r.readFileViewContext(ctx, "OFD.xml")
 	if err != nil {
 		return nil, err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -97,6 +119,9 @@ func (r *Reader) documentVersionEntries() ([]DocumentVersionInfo, error) {
 	var result []DocumentVersionInfo
 	ids := make(map[string]bool)
 	for _, node := range versions.children {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !node.matchesOFD("Version") {
 			continue
 		}
@@ -135,12 +160,19 @@ func (r *Reader) documentVersionEntries() ([]DocumentVersionInfo, error) {
 // 入参: id 入口中的版本标识, location 描述文件路径
 // 返回: DocumentVersionInfo 版本信息, error 读取或描述错误
 func (r *Reader) readDocumentVersion(id, location string) (DocumentVersionInfo, error) {
+	return r.readDocumentVersionContext(context.Background(), id, location)
+}
+
+// readDocumentVersionContext 读取版本描述，按描述文件位置解析清单和文档入口
+// 入参: ctx 取消上下文, id 入口中的版本标识, location 描述文件路径
+// 返回: DocumentVersionInfo 版本信息, error 读取、描述或取消错误
+func (r *Reader) readDocumentVersionContext(ctx context.Context, id, location string) (DocumentVersionInfo, error) {
 	var info DocumentVersionInfo
-	data, err := r.readFile(location)
+	data, err := r.readFileViewContext(ctx, location)
 	if err != nil {
 		return info, err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return info, err
 	}
@@ -162,6 +194,9 @@ func (r *Reader) readDocumentVersion(id, location string) (DocumentVersionInfo, 
 	ids := map[string]bool{id: true}
 	found := false
 	for _, node := range list.children {
+		if err := ctx.Err(); err != nil {
+			return DocumentVersionInfo{}, err
+		}
 		if !node.matchesOFD("File") {
 			continue
 		}

@@ -101,14 +101,19 @@ func (e *Editor) WriteToWithOptions(ctx context.Context, writer io.Writer, optio
 	return snapshot.WriteTo(convertWriter{context: ctx, writer: writer, count: &count})
 }
 
-// WritePagesToWithOptions 按指定顺序另存页面并应用输出压缩
+// WritePagesToWithOptions 按指定顺序另存页面，仅为所选页面准备资源和压缩计划
 // 入参: ctx 取消上下文, writer 输出流, indexes 零基页码, options 输出配置
 // 返回: int64 已写入字节数, error 错误信息
 func (e *Editor) WritePagesToWithOptions(ctx context.Context, writer io.Writer, indexes []int, options WriteOptions) (int64, error) {
-	snapshot, err := e.outputSnapshot(ctx, options)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
+	if err := options.Compression.Validate(); err != nil {
+		return 0, err
+	}
+	snapshot := *e
+	snapshot.OnWriteProgress = editorProgress(e.OnWriteProgress).withContext(ctx)
+	snapshot.output = &outputOptimization{ctx: ctx, options: options.Compression}
 	var count int64
 	return snapshot.WritePagesTo(convertWriter{context: ctx, writer: writer, count: &count}, indexes)
 }
@@ -130,14 +135,9 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 		}
 		return editorProgress(e.OnWriteProgress).report(stage, completed, total)
 	}
-	snapshot.output = &outputOptimization{ctx: ctx, options: options.Compression, images: map[string]bool{}}
+	snapshot.output = &outputOptimization{ctx: ctx, options: options.Compression}
 	if options.Compression.Mode == CompressionUnchanged {
 		return &snapshot, nil
-	}
-	for _, resource := range e.resources {
-		if resource.image != nil {
-			snapshot.output.images[cleanPackagePath(resource.name)] = true
-		}
 	}
 	if e.source != nil {
 		protected, err := e.source.reader.hasOutputSignatures()
@@ -146,19 +146,11 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 		}
 		snapshot.output.protected = protected
 		if protected {
-			snapshot.output.images = nil
 			return &snapshot, nil
-		}
-		images, err := e.source.reader.Images(ctx)
-		if err != nil {
-			return nil, err
-		}
-		for _, img := range images {
-			snapshot.output.images[cleanPackagePath(img.Location)] = true
 		}
 	}
 	if options.Compression.Mode == CompressionLossy {
-		reader, err := e.reader(editorProgress(snapshot.OnWriteProgress))
+		reader, err := e.readerContext(ctx, editorProgress(snapshot.OnWriteProgress))
 		if err != nil {
 			return nil, err
 		}
@@ -174,7 +166,7 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 	return &snapshot, nil
 }
 
-// compressionImageSafety 保护蒙版及其原图和替换图像，识别不能可靠降采样的图案及隐藏内容
+// compressionImageSafety 保护蒙版及其原图和替换图像，不完整的文档结构不参与降采样
 // 入参: ctx 取消上下文, images 图片资源
 // 返回: map[string]bool 只能无损处理的资源路径, bool 是否可分析尺寸, error 读取或取消错误
 func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo) (map[string]bool, bool, error) {
@@ -205,7 +197,6 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 		}
 	}
 	masks := make(map[string]bool)
-	geometry := true
 	for _, name := range slices.Sorted(maps.Keys(names)) {
 		if !safe {
 			break
@@ -248,16 +239,10 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 						break
 					}
 					stack = append(stack, element.Name)
-					if element.Name.Local == "Pattern" {
-						geometry = false
-					}
 					resource, substitution, masked := "", "", false
 					for _, attr := range element.Attr {
 						if attr.Name.Space != "" {
 							continue
-						}
-						if attr.Name.Local == "Visible" && (attr.Value == "false" || attr.Value == "0") {
-							geometry = false
 						}
 						if attr.Name.Local == "ResourceID" {
 							resource = editorResourceID(attr.Value)
@@ -278,6 +263,8 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 					}
 				case xml.EndElement:
 					stack = stack[:len(stack)-1]
+				case xml.Directive:
+					safe = false
 				}
 				if !safe {
 					break
@@ -295,7 +282,7 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 			paths[cleanPackagePath(img.Location)] = true
 		}
 	}
-	return paths, safe && geometry, ctx.Err()
+	return paths, safe, ctx.Err()
 }
 
 // hasOutputSignatures 检查包中各文档，避免改写其他文档签名保护的共享资源

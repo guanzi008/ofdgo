@@ -78,14 +78,25 @@ func (e *Editor) SelectVersion(id string) error {
 // 入参: name 版本名称，可为空
 // 返回: string 新版本标识, error 创建错误
 func (e *Editor) AddVersion(name string) (string, error) {
+	return e.AddVersionContext(context.Background(), name)
+}
+
+// AddVersionContext 以当前内容创建并选中默认版本，取消或失败时不改变文档和撤销历史
+// 初始共享文件，后续修改按需隔离，不自动写入创建日期
+// 入参: ctx 取消上下文, name 版本名称，可为空
+// 返回: string 新版本标识, error 创建或取消错误
+func (e *Editor) AddVersionContext(ctx context.Context, name string) (string, error) {
 	var id string
-	err := e.editDocuments(func(reader *Reader, data []byte, root *editorXML) (int, error) {
-		versions, err := reader.documentVersionEntries()
+	err := e.editDocumentsContext(ctx, func(reader *Reader, data []byte, root *editorXML) (int, error) {
+		versions, err := reader.documentVersionEntriesContext(ctx)
 		if err != nil {
 			return 0, err
 		}
 		index := int32(0)
 		for _, version := range versions {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
 			index = max(index, version.Index)
 		}
 		if index == math.MaxInt32 {
@@ -93,15 +104,26 @@ func (e *Editor) AddVersion(name string) (string, error) {
 		}
 		index++
 		ids := make(map[string]bool)
-		var collect func(*editorXML)
-		collect = func(node *editorXML) {
+		var collect func(*editorXML) error
+		collect = func(node *editorXML) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			ids[node.attr("ID")] = true
 			for _, child := range node.children {
-				collect(child)
+				if err := collect(child); err != nil {
+					return err
+				}
 			}
+			return nil
 		}
-		collect(root)
+		if err := collect(root); err != nil {
+			return 0, err
+		}
 		for serial := int64(index); ; serial++ {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
 			id = "v" + strconv.FormatInt(serial, 10)
 			if !ids[id] {
 				break
@@ -111,7 +133,7 @@ func (e *Editor) AddVersion(name string) (string, error) {
 		if err != nil {
 			return 0, err
 		}
-		files, err := reader.versionSnapshotFiles(context.Background())
+		files, err := reader.versionSnapshotFiles(ctx)
 		if err != nil {
 			return 0, err
 		}
@@ -130,6 +152,10 @@ func (e *Editor) AddVersion(name string) (string, error) {
 			x.root("DocVersion", attrs)
 			x.start("FileList", nil)
 			for serial, file := range slices.Sorted(maps.Keys(files)) {
+				if err := ctx.Err(); err != nil {
+					x.err = err
+					return
+				}
 				x.start("File", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: "file" + strconv.Itoa(serial+1)}})
 				x.token(xml.CharData("/" + file))
 				x.end("File")
@@ -158,7 +184,7 @@ func (e *Editor) AddVersion(name string) (string, error) {
 		if err != nil {
 			return 0, err
 		}
-		root, err = parseEditorXML(data)
+		root, err = parseEditorXMLContext(ctx, data)
 		if err != nil {
 			return 0, err
 		}
@@ -262,7 +288,7 @@ func (e *Editor) RenameVersion(id, name string) error {
 			}
 		}
 		reader.files[location] = updated
-		if err := reader.retireVersionFiles(map[string]bool{version.Location: true}); err != nil {
+		if err := reader.retireVersionFiles(context.Background(), map[string]bool{version.Location: true}); err != nil {
 			return 0, err
 		}
 		return reader.documentIndex, nil
@@ -274,8 +300,16 @@ func (e *Editor) RenameVersion(id, name string) error {
 // 入参: id 版本标识，不能为空
 // 返回: error 删除错误
 func (e *Editor) DeleteVersion(id string) error {
-	return e.editDocuments(func(reader *Reader, data []byte, root *editorXML) (int, error) {
-		versions, err := reader.DocumentVersions()
+	return e.DeleteVersionContext(context.Background(), id)
+}
+
+// DeleteVersionContext 删除版本及其独占文件，取消或失败时保留当前状态和撤销历史
+// 文档主入口及其他版本仍在使用的文件不删除
+// 入参: ctx 取消上下文, id 版本标识，不能为空
+// 返回: error 删除或取消错误
+func (e *Editor) DeleteVersionContext(ctx context.Context, id string) error {
+	return e.editDocumentsContext(ctx, func(reader *Reader, data []byte, root *editorXML) (int, error) {
+		versions, err := reader.DocumentVersionsContext(ctx)
 		if err != nil {
 			return 0, err
 		}
@@ -289,6 +323,9 @@ func (e *Editor) DeleteVersion(id string) error {
 		}
 		list := root.childAt("DocBody", reader.documentIndex).child("Versions")
 		for _, node := range list.children {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
 			if node.matchesOFD("Version") && node.attr("ID") == id {
 				if len(versions) == 1 {
 					node = list
@@ -302,9 +339,12 @@ func (e *Editor) DeleteVersion(id string) error {
 		}
 		removed := map[string]bool{versions[index].Location: true}
 		for _, file := range versions[index].Files {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
 			removed[file.Location] = true
 		}
-		if err := reader.retireVersionFiles(removed); err != nil {
+		if err := reader.retireVersionFiles(ctx, removed); err != nil {
 			return 0, err
 		}
 		return reader.documentIndex, nil
@@ -341,6 +381,9 @@ func editorVersionDefault(data []byte, body *editorXML, id string) ([]byte, erro
 // 入参: ctx 取消上下文
 // 返回: map[string]bool 快照文件, error 引用或读取错误
 func (r *Reader) versionSnapshotFiles(ctx context.Context) (map[string]bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	entry, err := r.DocumentRoot()
 	if err != nil {
 		return nil, err
@@ -351,15 +394,18 @@ func (r *Reader) versionSnapshotFiles(ctx context.Context) (map[string]bool, err
 	}
 	if r.versionInfo != nil {
 		for _, file := range r.versionInfo.Files {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			files[file.Location] = true
 		}
 	}
 	body := r.OFD.DocBody[r.documentIndex]
-	data, err := r.readFile("OFD.xml")
+	data, err := r.readFileViewContext(ctx, "OFD.xml")
 	if err != nil {
 		return nil, err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -380,6 +426,9 @@ func (r *Reader) versionSnapshotFiles(ctx context.Context) (map[string]bool, err
 		maps.Copy(files, signed)
 	}
 	for name := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !r.fileNames[name] {
 			return nil, fmt.Errorf("version file not found: %s", name)
 		}
@@ -388,24 +437,35 @@ func (r *Reader) versionSnapshotFiles(ctx context.Context) (map[string]bool, err
 }
 
 // retireVersionFiles 清理修改入口后不再被任何文档或版本引用的候选文件
-// 入参: candidates 待清理路径，OFD.xml始终保留
-// 返回: error 依赖读取错误
-func (r *Reader) retireVersionFiles(candidates map[string]bool) error {
+// 入参: ctx 取消上下文, candidates 待清理路径，OFD.xml始终保留
+// 返回: error 依赖读取或取消错误
+func (r *Reader) retireVersionFiles(ctx context.Context, candidates map[string]bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	view := *r
 	if err := view.initRoot(); err != nil {
 		return err
 	}
-	for index := range view.DocumentCount() {
-		files, err := view.documentFiles(context.Background(), index)
-		if err != nil {
+	indexes := make([]int, view.DocumentCount())
+	for index := range indexes {
+		indexes[index] = index
+	}
+	files, err := view.documentFiles(ctx, indexes...)
+	if err != nil {
+		return err
+	}
+	for name := range files {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		for name := range files {
-			delete(candidates, name)
-		}
+		delete(candidates, name)
 	}
 	delete(candidates, "OFD.xml")
 	for name := range candidates {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		delete(r.files, name)
 	}
 	if r.Zip != nil {

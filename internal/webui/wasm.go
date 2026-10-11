@@ -25,7 +25,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"image"
 	"image/color"
 	"io"
 	"io/fs"
@@ -1570,11 +1569,11 @@ func writeAnnotation(args []js.Value) (any, error) {
 			if err != nil {
 				return err
 			}
-			config, _, err := image.DecodeConfig(bytes.NewReader(data))
+			size, err := currentEditor.ImageSize(resource)
 			if err != nil {
 				return err
 			}
-			options.Height = options.Width * float64(config.Height) / float64(config.Width)
+			options.Height = options.Width * float64(size.Y) / float64(size.X)
 		}
 		if options.Kind == "replace" {
 			style := ofdgo.TextStyle{Font: font}
@@ -3297,15 +3296,16 @@ func importPages(args []js.Value) (any, error) {
 	}
 	at := args[1].Int()
 	options := ofdgo.PageImportOptions{Outlines: len(args) > 2 && args[2].Bool()}
+	ctx := context.Background()
 	progressIndex := 3
 	if len(args) > 3 && args[3].Type() == js.TypeBoolean {
 		options.AllowDecrypted = args[3].Bool()
 		progressIndex = 4
 	}
 	if len(args) > progressIndex {
-		options.OnProgress = editorOperationProgress(args[progressIndex])
+		ctx, options.OnProgress = newEditorOperationContext(args[progressIndex])
 	}
-	if _, err := currentEditor.ImportPagesWithOptions(pendingImport, indexes, at, options); err != nil {
+	if _, err := currentEditor.ImportPagesContext(ctx, pendingImport, indexes, at, options); err != nil {
 		return nil, err
 	}
 	clearImport()
@@ -4103,12 +4103,12 @@ func insertImage(args []js.Value) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	config, _, err := image.DecodeConfig(bytes.NewReader(data))
+	size, err := currentEditor.ImageSize(resourceID)
 	if err != nil {
 		return nil, err
 	}
 	width := args[4].Float()
-	box := ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: width, H: width * float64(config.Height) / float64(config.Width)}
+	box := ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: width, H: width * float64(size.Y) / float64(size.X)}
 	content, err := currentSession.pageContent(args[0].Int())
 	if err != nil {
 		return nil, err
@@ -4593,11 +4593,11 @@ func compressionFromJS(value js.Value, options *ofdgo.CompressionOptions) error 
 	return options.Validate()
 }
 
-// outputContext 定期让出浏览器线程，将取消请求传入库层压缩循环
+// outputContext 定期让出浏览器线程，将取消请求传入库层长操作
 type outputContext struct {
 	context.Context
 	cancel     context.CancelFunc
-	checkpoint js.Value
+	checkpoint func() error
 	checked    time.Time
 }
 
@@ -4606,7 +4606,21 @@ type outputContext struct {
 // 返回: context.Context 导出上下文
 func newOutputContext(checkpoint js.Value) context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &outputContext{Context: ctx, cancel: cancel, checkpoint: checkpoint}
+	return &outputContext{Context: ctx, cancel: cancel, checkpoint: func() error { return awaitExport(checkpoint) }}
+}
+
+// newEditorOperationContext 在底层取消检查时保持最近的进度，避免版本处理期间界面无响应
+// 入参: callback 浏览器进度及取消回调
+// 返回: context.Context 操作上下文, func(string, int, int) error 阶段进度回调
+func newEditorOperationContext(callback js.Value) (context.Context, func(string, int, int) error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stage, completed, total := "ids", 0, 0
+	progress := editorOperationProgress(callback)
+	operation := &outputContext{Context: ctx, cancel: cancel, checkpoint: func() error { return progress(stage, completed, total) }}
+	return operation, func(next string, done, count int) error {
+		stage, completed, total = next, done, count
+		return progress(stage, completed, total)
+	}
 }
 
 // Err 在取消检查间隙处理浏览器消息，不为每个像素触发跨语言回调
@@ -4617,7 +4631,7 @@ func (c *outputContext) Err() error {
 	}
 	if time.Since(c.checked) >= 50*time.Millisecond {
 		c.checked = time.Now()
-		if err := awaitExport(c.checkpoint); err != nil {
+		if err := c.checkpoint(); err != nil {
 			c.cancel()
 		}
 	}

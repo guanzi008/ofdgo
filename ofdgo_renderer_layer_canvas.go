@@ -27,6 +27,9 @@ type canvasPageVisitor struct {
 // 入参: object 源对象, state 继承状态
 // 返回: error 绘制错误
 func (v *canvasPageVisitor) DrawObject(object *GraphicObject, state RenderState) error {
+	if state.Hidden {
+		return nil
+	}
 	clip, err := geometryToCanvasPath(state.Clip)
 	if err != nil {
 		return err

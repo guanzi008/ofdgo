@@ -127,27 +127,34 @@ func packageReference(root, parent, name, attribute string) int {
 	return packageReferenceNone
 }
 
-// documentFiles 遍历独立文档及版本依赖，只解析结构文件，不读取附件等原始数据
-// 入参: ctx 取消上下文, index 文档索引
+// documentFiles 汇总指定文档及版本依赖，共享结构只解析一次，不读取附件等原始数据
+// 入参: ctx 取消上下文, indexes 文档索引，为空时不扫描任何文档
 // 返回: map[string]bool 包内文件路径, error 读取或取消错误
-func (r *Reader) documentFiles(ctx context.Context, index int) (map[string]bool, error) {
-	files, _, err := r.documentDependencies(ctx, index)
+func (r *Reader) documentFiles(ctx context.Context, indexes ...int) (map[string]bool, error) {
+	files, _, err := r.documentDependencies(ctx, indexes...)
 	return files, err
 }
 
-// documentDependencies 区分文档全部依赖与需要解析的结构文件，避免重复读取原始数据
-// 入参: ctx 取消上下文, index 文档索引
+// documentDependencies 合并指定入口的依赖图，区分结构文件与原始数据
+// 入参: ctx 取消上下文, indexes 文档索引，为空时返回空集合
 // 返回: map[string]bool 全部依赖, map[string]bool 结构文件, error 读取或取消错误
-func (r *Reader) documentDependencies(ctx context.Context, index int) (map[string]bool, map[string]bool, error) {
+func (r *Reader) documentDependencies(ctx context.Context, indexes ...int) (map[string]bool, map[string]bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	if index < 0 || index >= r.DocumentCount() {
-		return nil, nil, fmt.Errorf("document index out of range: %d", index)
+	selected := make(map[int]bool, len(indexes))
+	for _, index := range indexes {
+		if index < 0 || index >= r.DocumentCount() {
+			return nil, nil, fmt.Errorf("document index out of range: %d", index)
+		}
+		selected[index] = true
 	}
 	var queue []string
 	seen := make(map[string]bool)
 	queued := make(map[string]bool)
+	if len(selected) == 0 {
+		return seen, queued, ctx.Err()
+	}
 	add := func(name string, kind int) {
 		seen[name] = true
 		if kind == packageReferenceXML && !queued[name] {
@@ -155,22 +162,21 @@ func (r *Reader) documentDependencies(ctx context.Context, index int) (map[strin
 			queue = append(queue, name)
 		}
 	}
-	data, err := r.readFile("OFD.xml")
+	data, err := r.readFileViewContext(ctx, "OFD.xml")
 	if err != nil {
 		return nil, nil, err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return nil, nil, err
 	}
-	body := root.childAt("DocBody", index)
-	if body == nil {
-		return nil, nil, fmt.Errorf("document body not found: %d", index)
-	}
-	var collect func(*editorXML)
-	collect = func(node *editorXML) {
+	var collect func(*editorXML) error
+	collect = func(node *editorXML) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !node.matchesOFD(node.name.Local) {
-			return
+			return nil
 		}
 		parent := node.parent.name.Local
 		if kind := packageReference("OFD", parent, node.name.Local, ""); kind != packageReferenceNone {
@@ -187,10 +193,28 @@ func (r *Reader) documentDependencies(ctx context.Context, index int) (map[strin
 			}
 		}
 		for _, child := range node.children {
-			collect(child)
+			if err := collect(child); err != nil {
+				return err
+			}
 		}
+		return nil
 	}
-	collect(body)
+	index := 0
+	for _, body := range root.children {
+		if !body.matchesOFD("DocBody") {
+			continue
+		}
+		if selected[index] {
+			if err := collect(body); err != nil {
+				return nil, nil, err
+			}
+			delete(selected, index)
+		}
+		index++
+	}
+	if len(selected) != 0 {
+		return nil, nil, fmt.Errorf("document body not found")
+	}
 	for len(queue) > 0 {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err

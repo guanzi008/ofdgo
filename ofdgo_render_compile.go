@@ -44,6 +44,9 @@ type semanticStyle struct {
 // 入参: object 源对象, state 继承状态
 // 返回: error 编译错误
 func (c *semanticCompiler) DrawObject(object *GraphicObject, state RenderState) error {
+	if state.Hidden {
+		return nil
+	}
 	switch object.Type {
 	case "TextObject":
 		return c.textObject(object.TextObject, state)

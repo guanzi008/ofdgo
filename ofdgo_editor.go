@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -256,6 +257,16 @@ func (e *Editor) CopyPage(index int) (int, error) {
 // 入参: indexes 不重复的原页面索引
 // 返回: []int 副本页面索引, error 错误信息
 func (e *Editor) CopyPages(indexes []int) ([]int, error) {
+	return e.CopyPagesContext(context.Background(), indexes)
+}
+
+// CopyPagesContext 复制页面并响应取消，准备期间不提交页面或撤销记录
+// 入参: ctx 取消上下文, indexes 不重复的原页面索引
+// 返回: []int 副本页面索引, error 校验、复制或取消错误
+func (e *Editor) CopyPagesContext(ctx context.Context, indexes []int) ([]int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := e.validatePageIndexes(indexes); err != nil {
 		return nil, err
 	}
@@ -263,11 +274,12 @@ func (e *Editor) CopyPages(indexes []int) ([]int, error) {
 		return nil, nil
 	}
 	at := len(e.pages)
-	source, err := e.Reader()
+	source, err := e.readerContext(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := e.importPages(source, indexes, at, true, PageImportOptions{}); err != nil {
+	defer source.Close()
+	if _, err := e.importPages(ctx, source, indexes, at, true, PageImportOptions{}); err != nil {
 		return nil, err
 	}
 	result := make([]int, len(indexes))
@@ -456,7 +468,7 @@ func (e *Editor) ResizePages(indexes []int, width, height float64) error {
 	return nil
 }
 
-// AddImage 注册PNG、JPEG或JBIG2图片，重复资源复用标识，引用后写入文档
+// AddImage 注册PNG、JPEG、BMP、单页TIFF或JBIG2图片，重复资源复用标识，引用后写入文档
 // 不透明纯黑白PNG仅在无损JBIG2编码更小时转换，其他图片保留原始编码
 // 入参: data 图片数据
 // 返回: string 图片资源标识, error 错误信息
@@ -464,11 +476,18 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 	return e.addDecodedImage(data, nil)
 }
 
+// ImageSize 获取图片资源的像素尺寸，优先复用注册结果，不解码像素
+// 入参: id 图片资源标识
+// 返回: image.Point 像素宽高, error 资源或格式错误
+func (e *Editor) ImageSize(id string) (image.Point, error) {
+	return e.editorImage(id)
+}
+
 // addDecodedImage 注册图片并复用与编码数据一致的像素
 // 入参: data 图片数据, decoded 已解码像素，为nil时按需解码
 // 返回: string 资源标识, error 注册错误
 func (e *Editor) addDecodedImage(data []byte, decoded image.Image) (string, error) {
-	config, format, err := image.DecodeConfig(bytes.NewReader(data))
+	config, format, err := decodeImageConfigData(data)
 	if err != nil {
 		return "", err
 	}
@@ -479,8 +498,8 @@ func (e *Editor) addDecodedImage(data []byte, decoded image.Image) (string, erro
 // 入参: data 图片编码数据, config 图片配置, format 图片格式, decoded 已解码图像，可为nil
 // 返回: string 资源标识, error 格式或资源错误
 func (e *Editor) addImage(data []byte, config image.Config, format string, decoded image.Image) (string, error) {
-	if (format != "png" && format != "jpeg" && format != "jbig2") || config.Width <= 0 || config.Height <= 0 {
-		return "", fmt.Errorf("only PNG, JPEG and JBIG2 images are supported")
+	if (format != "png" && format != "jpeg" && format != "bmp" && format != "tiff" && format != "jbig2") || config.Width <= 0 || config.Height <= 0 {
+		return "", fmt.Errorf("only PNG, JPEG, BMP, single-page TIFF and JBIG2 images are supported")
 	}
 	key := editorResourceKey{checksum: sha256.Sum256(data), index: -1}
 	if id, ok := e.resourceID[key]; ok {

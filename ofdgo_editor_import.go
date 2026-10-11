@@ -32,15 +32,19 @@ type editorImportEntry struct {
 	name, base, group string
 	data              []byte
 	node              *editorXML
+	template          bool
+	ids               map[string]string
 }
 
 // editorPageImport 一次插页操作的独立资源图，提交前不修改目标文档
 type editorPageImport struct {
+	ctx           context.Context
 	reader        *Reader
 	doc           *Document
 	directory     string
 	target        *Reader
 	paths         map[string]string
+	templatePaths map[string]string
 	evidence      map[string]string
 	resourceXML   []byte
 	pageParts     []byte
@@ -95,6 +99,17 @@ type editorProgressReader struct {
 // 入参: source 来源编辑器, sourcePage 来源页, ids 对象标识, page 目标页, options 迁移选项
 // 返回: []string 新对象标识, error 错误信息
 func (e *Editor) ImportObjects(source *Editor, sourcePage int, ids []string, page int, options ObjectImportOptions) ([]string, error) {
+	return e.ImportObjectsContext(context.Background(), source, sourcePage, ids, page, options)
+}
+
+// ImportObjectsContext 迁移对象及资源，取消时不提交修改或撤销记录
+// 入参: ctx 取消上下文, source 来源编辑器, sourcePage 来源页, ids 对象标识, page 目标页, options 迁移选项
+// 返回: []string 新对象标识, error 校验、迁移或取消错误
+func (e *Editor) ImportObjectsContext(ctx context.Context, source *Editor, sourcePage int, ids []string, page int, options ObjectImportOptions) ([]string, error) {
+	progress := editorProgress(options.OnProgress).withContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !finite(options.DX) || !finite(options.DY) {
 		return nil, fmt.Errorf("import requires finite offsets")
 	}
@@ -110,19 +125,22 @@ func (e *Editor) ImportObjects(source *Editor, sourcePage int, ids []string, pag
 		return nil, err
 	}
 	if source == e {
-		return e.CopyObjects(page, objects, options.DX, options.DY)
+		if err := progress.report("commit", 0, 0); err != nil {
+			return nil, err
+		}
+		return e.CopyObjectsContext(ctx, page, objects, options.DX, options.DY)
 	}
-	reader, err := source.Reader()
+	reader, err := source.readerContext(ctx, progress)
 	if err != nil {
 		return nil, err
 	}
+	defer reader.Close()
 	doc, err := reader.Doc()
 	if err != nil {
 		return nil, err
 	}
 	ref := doc.Pages.Page[sourcePage]
-	progress := editorProgress(options.OnProgress)
-	base, migration, err := e.prepareImport(reader, doc, map[string]bool{ref.ID: true}, false, progress)
+	base, migration, err := e.prepareImport(ctx, reader, doc, map[string]bool{ref.ID: true}, false, progress)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +187,7 @@ func (e *Editor) ImportObjects(source *Editor, sourcePage int, ids []string, pag
 		if err != nil {
 			return nil, err
 		}
-		root, err := parseEditorXML(data)
+		root, err := parseEditorXMLContext(ctx, data)
 		if err != nil {
 			return nil, err
 		}
@@ -207,7 +225,7 @@ func (e *Editor) ImportObjects(source *Editor, sourcePage int, ids []string, pag
 				return err
 			}
 			layer := content.Layer[0]
-			root, err := parseEditorXML(data)
+			root, err := parseEditorXMLContext(ctx, data)
 			if err != nil {
 				return err
 			}
@@ -221,7 +239,7 @@ func (e *Editor) ImportObjects(source *Editor, sourcePage int, ids []string, pag
 			imported[i].CompositeGraphicUnit.states = remapCompositeStates(objects[i].CompositeGraphicUnit.states, migration.ids)
 			imported[i].origin = &editorObjectOrigin{editor: editor, document: editor.documentIdentity(), data: data, node: root.child("Layer").children[0], object: object}
 		}
-		copied, err = editor.CopyObjects(page, imported, options.DX, options.DY)
+		copied, err = editor.CopyObjectsContext(ctx, page, imported, options.DX, options.DY)
 		return err
 	})
 	return copied, err
@@ -244,10 +262,21 @@ func (e *Editor) ImportPages(source *Reader, indexes []int, at int) ([]string, e
 // 入参: source 来源阅读器, indexes 来源页面索引, at 目标插入位置, options 导入选项
 // 返回: []string 新页面标识, error 错误信息
 func (e *Editor) ImportPagesWithOptions(source *Reader, indexes []int, at int, options PageImportOptions) ([]string, error) {
+	return e.ImportPagesContext(context.Background(), source, indexes, at, options)
+}
+
+// ImportPagesContext 导入页面及关联资源，取消检查覆盖共享资源隔离和版本清单更新
+// 取消时不提交页面、目录或撤销记录，其他行为与ImportPagesWithOptions相同
+// 入参: ctx 取消上下文, source 来源阅读器, indexes 来源页索引, at 插入位置, options 导入选项
+// 返回: []string 新页面标识, error 校验、导入或取消错误
+func (e *Editor) ImportPagesContext(ctx context.Context, source *Reader, indexes []int, at int, options PageImportOptions) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if source.encryption != nil && e.encryption == nil && !options.AllowDecrypted {
 		return nil, ErrEncryptionPolicyRequired
 	}
-	return e.importPages(source, indexes, at, false, options)
+	return e.importPages(ctx, source, indexes, at, false, options)
 }
 
 // Read 读取数据并在下一块开始前检查取消
@@ -263,9 +292,12 @@ func (r *editorProgressReader) Read(data []byte) (int, error) {
 }
 
 // importPages 迁移页面，同文档复制时复用原资源并保留其他页面的跳转
-// 入参: source 来源阅读器, indexes 来源页索引, at 插入位置, copyPage 是否同文档复制, options 导入选项
+// 入参: ctx 取消上下文, source 来源阅读器, indexes 来源页索引, at 插入位置, copyPage 是否同文档复制, options 导入选项
 // 返回: []string 新页标识, error 错误信息
-func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage bool, options PageImportOptions) ([]string, error) {
+func (e *Editor) importPages(ctx context.Context, source *Reader, indexes []int, at int, copyPage bool, options PageImportOptions) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if at < 0 || at > len(e.pages) {
 		return nil, fmt.Errorf("page index %d out of range", at)
 	}
@@ -287,8 +319,8 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 	if len(indexes) == 0 {
 		return nil, nil
 	}
-	progress := editorProgress(options.OnProgress)
-	base, m, err := e.prepareImport(source, doc, selected, copyPage, progress)
+	progress := editorProgress(options.OnProgress).withContext(ctx)
+	base, m, err := e.prepareImport(ctx, source, doc, selected, copyPage, progress)
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +332,7 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 		}
 		page := doc.Pages.Page[index]
 		ids[i] = m.id(page.ID)
-		name, err := m.copyXML(source.ResPath(page.BaseLoc), packagePagePath(m.directory, ids[i]))
+		name, err := m.copyXML(source.ResPath(page.BaseLoc), packagePagePath(m.directory, ids[i]), false)
 		if err != nil {
 			return nil, err
 		}
@@ -328,7 +360,7 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 		if err != nil {
 			return nil, err
 		}
-		outlines, err = e.appendImportedOutlines(imported)
+		outlines, err = e.appendImportedOutlines(ctx, imported)
 		if err != nil {
 			return nil, err
 		}
@@ -353,6 +385,9 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 		preview := *e
 		preview.source, preview.pages = next, added
 		for i, index := range indexes {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			states := make(map[string]editorCompositeState)
 			groups := make(map[string]map[string]editorCompositeState)
 			for _, layer := range e.pages[index].Content.Layer {
@@ -433,9 +468,9 @@ func (e *Editor) bindImportResources() {
 }
 
 // prepareImport 建立页面和对象迁移共用的资源图，不修改目标编辑器
-// 入参: source 来源, doc 来源文档, selected 页面映射范围, copyPage 是否同文档, progress 进度
+// 入参: ctx 取消上下文, source 来源, doc 来源文档, selected 页面映射范围, copyPage 是否同文档, progress 进度
 // 返回: *editorSource 目标基础, *editorPageImport 资源图, error 错误信息
-func (e *Editor) prepareImport(source *Reader, doc *Document, selected map[string]bool, copyPage bool, progress editorProgress) (*editorSource, *editorPageImport, error) {
+func (e *Editor) prepareImport(ctx context.Context, source *Reader, doc *Document, selected map[string]bool, copyPage bool, progress editorProgress) (*editorSource, *editorPageImport, error) {
 	maximum, err := e.sourceMaxID(progress)
 	if err != nil {
 		return nil, nil, err
@@ -447,7 +482,7 @@ func (e *Editor) prepareImport(source *Reader, doc *Document, selected map[strin
 			return nil, nil, err
 		}
 	}
-	m := &editorPageImport{reader: source, doc: doc, directory: e.packageDirectory(), target: base.reader, maximum: maximum, copyPage: copyPage, progress: progress,
+	m := &editorPageImport{ctx: ctx, reader: source, doc: doc, directory: e.packageDirectory(), target: base.reader, maximum: maximum, copyPage: copyPage, progress: progress,
 		paths: make(map[string]string), evidence: make(map[string]string), ids: make(map[string]string), pages: make(map[string]bool, len(selected)),
 		files: make(map[string][]byte), resources: make(map[string]editorImportEntry), used: make(map[string][]byte),
 		templates: make(map[string]TemplatePage), templateParts: make(map[string][]byte), attachments: make(map[string][]byte)}
@@ -461,7 +496,7 @@ func (e *Editor) prepareImport(source *Reader, doc *Document, selected map[strin
 	if err != nil {
 		return nil, nil, err
 	}
-	m.documentRoot, err = parseEditorXML(m.documentXML)
+	m.documentRoot, err = parseEditorXMLContext(ctx, m.documentXML)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -501,6 +536,9 @@ func (m *editorPageImport) encodeResources() error {
 	for _, group := range []string{"ColorSpaces", "DrawParams", "Fonts", "MultiMedias", "CompositeGraphicUnits"} {
 		var entries []byte
 		for _, id := range ids {
+			if err := m.ctx.Err(); err != nil {
+				return err
+			}
 			if m.resources[id].group == group {
 				entries = append(entries, m.used[id]...)
 			}
@@ -542,7 +580,7 @@ func (m *editorPageImport) outlines() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(m.ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -591,7 +629,7 @@ func (m *editorPageImport) outlines() ([]byte, error) {
 		}
 	}
 	data = editorPatchXML(data, patches)
-	root, err = parseEditorXML(data)
+	root, err = parseEditorXMLContext(m.ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -624,13 +662,13 @@ func (m *editorPageImport) outlines() ([]byte, error) {
 }
 
 // appendImportedOutlines 将已迁移目录追加到目标根目录，规范计数且不修改当前编辑器
-// 入参: imported 已迁移目录片段
+// 入参: ctx 取消上下文, imported 已迁移目录片段
 // 返回: []byte 合并后的目录, error 错误信息
-func (e *Editor) appendImportedOutlines(imported []byte) ([]byte, error) {
+func (e *Editor) appendImportedOutlines(ctx context.Context, imported []byte) ([]byte, error) {
 	if len(imported) == 0 {
 		return e.outlines, nil
 	}
-	added, err := parseEditorXML(imported)
+	added, err := parseEditorXMLContext(ctx, imported)
 	if err != nil {
 		return nil, err
 	}
@@ -638,7 +676,7 @@ func (e *Editor) appendImportedOutlines(imported []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -647,6 +685,9 @@ func (e *Editor) appendImportedOutlines(imported []byte) ([]byte, error) {
 		content = bytes.Clone(data[root.open:root.close])
 	}
 	for _, child := range editorOutlineChildren(added) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		value, err := editorXMLStandalone(imported[child.start:child.end], child)
 		if err != nil {
 			return nil, err
@@ -732,7 +773,7 @@ func (m *editorPageImport) resourceIndex(name string) error {
 	if err != nil {
 		return err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(m.ctx, data)
 	if err != nil {
 		return err
 	}
@@ -773,7 +814,7 @@ func (m *editorPageImport) reference(value string) (string, error) {
 	if template, ok := m.templates[key]; ok {
 		if _, seen := m.templateParts[key]; !seen {
 			m.templateParts[key] = nil
-			name, err := m.copyXML(m.reader.ResPath(template.BaseLoc), path.Join(m.directory, "Templates", "Template_"+m.id(value), "Content.xml"))
+			name, err := m.copyXML(m.reader.ResPath(template.BaseLoc), path.Join(m.directory, "Templates", "Template_"+m.id(value), "Content.xml"), true)
 			if err != nil {
 				return "", err
 			}
@@ -801,7 +842,7 @@ func (m *editorPageImport) documentReference(group, kind, source, id, loc string
 				return nil, err
 			}
 			for _, attr := range [][2]string{{"ID", id}, {"BaseLoc", loc}} {
-				root, err := parseEditorXML(data)
+				root, err := parseEditorXMLContext(m.ctx, data)
 				if err != nil {
 					return nil, err
 				}
@@ -857,11 +898,18 @@ func (m *editorPageImport) copyData(name, relative string, evidence bool) (strin
 }
 
 // copyXML 复制页面或标准关联XML并重映射引用
-// 入参: name 来源路径, candidate 目标候选路径
+// 入参: name 来源路径, candidate 目标候选路径, template 是否按模板页复制
 // 返回: string 新路径, error 错误信息
-func (m *editorPageImport) copyXML(name, candidate string) (string, error) {
+func (m *editorPageImport) copyXML(name, candidate string, template bool) (string, error) {
+	paths := m.paths
+	if template {
+		if m.templatePaths == nil {
+			m.templatePaths = make(map[string]string)
+		}
+		paths = m.templatePaths
+	}
 	key := cleanPackagePath(name)
-	if target := m.paths[key]; target != "" {
+	if target := paths[key]; target != "" {
 		return "/" + target, nil
 	}
 	target := packageAvailableName(m.target, m.files, candidate)
@@ -869,11 +917,11 @@ func (m *editorPageImport) copyXML(name, candidate string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(m.ctx, data)
 	if err != nil {
 		return "", err
 	}
-	m.paths[key], m.files[target] = target, nil
+	paths[key], m.files[target] = target, nil
 	if root.name.Local == "Page" {
 		for _, child := range root.children {
 			if child.name.Local == "PageRes" {
@@ -887,12 +935,34 @@ func (m *editorPageImport) copyXML(name, candidate string) (string, error) {
 			}
 		}
 	}
-	encoded, err := m.encode(editorImportEntry{name: name, data: data}, root)
+	entry := editorImportEntry{name: name, data: data, template: template}
+	if template && slices.ContainsFunc(m.doc.Pages.Page, func(page Page) bool {
+		return cleanPackagePath(m.reader.ResPath(page.BaseLoc)) == key
+	}) {
+		entry.ids = make(map[string]string)
+		m.templateObjectIDs(root, entry.ids)
+	}
+	encoded, err := m.encode(entry, root)
 	if err != nil {
 		return "", err
 	}
 	m.files[target] = append([]byte(xml.Header), encoded...)
 	return "/" + target, nil
+}
+
+// templateObjectIDs 为兼作普通页的模板内容分配独立对象标识
+// 入参: node 当前节点, ids 模板副本的标识映射
+func (m *editorPageImport) templateObjectIDs(node *editorXML, ids map[string]string) {
+	if value := node.attr("ID"); value != "" {
+		key := editorImportKey(value)
+		if ids[key] == "" {
+			m.maximum++
+			ids[key] = strconv.Itoa(m.maximum)
+		}
+	}
+	for _, child := range node.children {
+		m.templateObjectIDs(child, ids)
+	}
 }
 
 // editorImportText 获取节点直接文本，解码XML实体
@@ -910,6 +980,11 @@ func editorImportText(data []byte, node *editorXML) string {
 // 入参: entry 来源上下文, node 当前节点
 // 返回: []byte 独立XML片段, error 错误信息
 func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]byte, error) {
+	if m.ctx != nil {
+		if err := m.ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	if classifyOFDNamespace(node.name.Space) == ofdXMLUnknown {
 		return nil, fmt.Errorf("cannot remap extension namespace %q", node.name.Space)
 	}
@@ -961,7 +1036,9 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 		var err error
 		switch key {
 		case "ID":
-			if name == "Attachment" {
+			if id := entry.ids[editorImportKey(value)]; id != "" {
+				value = id
+			} else if name == "Attachment" {
 				value, err = m.attachmentID(value)
 			} else if name == "Signature" || name == "StampAnnot" {
 				value, err = m.signatureID(entry.name, name, value)
@@ -992,7 +1069,7 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 					}
 					directory = path.Join("Signs", "Sign_"+id)
 				}
-				value, err = m.copyXML(loc, path.Join(m.directory, directory, path.Base(loc)))
+				value, err = m.copyXML(loc, path.Join(m.directory, directory, path.Base(loc)), false)
 			}
 		case "AttachID":
 			value, err = m.attachment(value)
@@ -1032,15 +1109,24 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 	var content []byte
 	pageContent := name == "Page" && node.parent == nil
 	if pageContent {
-		area := m.doc.CommonData.PageArea
 		local := node.child("Area")
-		var fields []byte
-		for _, field := range [][2]string{{"PhysicalBox", area.PhysicalBox}, {"ApplicationBox", area.ApplicationBox}, {"ContentBox", area.ContentBox}, {"BleedBox", area.BleedBox}} {
-			if field[1] != "" && (local == nil || local.child(field[0]) == nil) {
-				fields = append(fields, editorXMLText(field[0], field[1])...)
-			}
-		}
 		if local == nil {
+			var templates []Template
+			for _, child := range node.children {
+				if !entry.template && child.matchesOFD("Template") {
+					templates = append(templates, Template{TemplateID: child.attr("TemplateID")})
+				}
+			}
+			area, err := m.reader.resolvePageArea(PageArea{}, templates)
+			if err != nil {
+				return nil, err
+			}
+			var fields []byte
+			for _, field := range [][2]string{{"PhysicalBox", area.PhysicalBox}, {"ApplicationBox", area.ApplicationBox}, {"ContentBox", area.ContentBox}, {"BleedBox", area.BleedBox}} {
+				if field[1] != "" {
+					fields = append(fields, editorXMLText(field[0], field[1])...)
+				}
+			}
 			encoded, err := editorXMLContainer("Area", nil, fields)
 			if err != nil {
 				return nil, err
@@ -1051,17 +1137,13 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			if err != nil {
 				return nil, err
 			}
-			root, err := parseEditorXML(encoded)
-			if err != nil {
-				return nil, err
-			}
-			if root.open != root.end {
-				fields = append(bytes.Clone(encoded[root.open:root.close]), fields...)
-			}
-			content = editorPatchXML(encoded, []editorXMLPatch{editorXMLContent(encoded, root, fields)})
+			content = encoded
 		}
 	}
 	for _, child := range node.children {
+		if pageContent && entry.template && child.matchesOFD("Template") {
+			continue
+		}
 		if pageContent && child.name.Local == "Area" {
 			continue
 		}
@@ -1075,7 +1157,7 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 				if err != nil {
 					return nil, err
 				}
-				root, err := parseEditorXML(encoded)
+				root, err := parseEditorXMLContext(m.ctx, encoded)
 				if err != nil {
 					return nil, err
 				}
@@ -1133,7 +1215,7 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 				value, err = m.copyData(loc, path.Join("Attachments", path.Base(loc)), false)
 			} else {
 				candidate := path.Join(m.directory, "Annotations", "Page_"+m.id(node.parent.attr("PageID"))+".xml")
-				value, err = m.copyXML(loc, candidate)
+				value, err = m.copyXML(loc, candidate, false)
 			}
 		case "Font", "Substitution", "Thumbnail":
 			value, err = m.reference(strings.TrimSpace(value))
@@ -1162,7 +1244,7 @@ func (m *editorPageImport) annotations() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(m.ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -1198,7 +1280,7 @@ func (m *editorPageImport) attachment(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(m.ctx, data)
 	if err != nil {
 		return "", err
 	}
@@ -1261,7 +1343,7 @@ func (m *editorPageImport) signatureID(source, kind, id string) (string, error) 
 		}
 		if doc.Signatures != "" {
 			name := m.target.ResPath(doc.Signatures)
-			data, err := m.target.readFile(name)
+			data, err := m.target.readFileViewContext(m.ctx, name)
 			if err != nil {
 				return "", err
 			}
@@ -1272,7 +1354,7 @@ func (m *editorPageImport) signatureID(source, kind, id string) (string, error) 
 			sequence.observe(list.MaxSignID)
 			for _, ref := range list.List {
 				sequence.observe(ref.ID)
-				data, err := m.target.readFile(signatureRefPath(name, ref.BaseLoc))
+				data, err := m.target.readFileViewContext(m.ctx, signatureRefPath(name, ref.BaseLoc))
 				if err != nil {
 					return "", err
 				}
@@ -1306,7 +1388,7 @@ func (m *editorPageImport) signatures() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(m.ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -1347,6 +1429,9 @@ func (m *editorPageImport) signatures() ([]byte, error) {
 // 入参: base 目标基底, refs 插入页面, annotations 注释索引, signatures 签名索引
 // 返回: *editorSource 新基底, error 错误信息
 func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, signatures []byte) (*editorSource, error) {
+	if err := m.ctx.Err(); err != nil {
+		return nil, err
+	}
 	files := maps.Clone(base.reader.files)
 	if files == nil {
 		files = make(map[string][]byte)
@@ -1356,11 +1441,11 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 	if file, ok := base.reader.packageFile(name); ok {
 		name = cleanPackagePath(file.Name)
 	}
-	data, err := base.reader.readFile(name)
+	data, err := base.reader.readFileViewContext(m.ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(m.ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -1415,12 +1500,15 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 	}
 	data = editorPatchXML(data, patches)
 	if len(annotations) != 0 {
-		loc, err := mergeImportIndex(base.reader, files, base.document.Annotations, path.Join(m.directory, "Annotations.xml"), "Annotations", annotations)
+		loc, err := mergeImportIndex(m.ctx, base.reader, files, base.document.Annotations, path.Join(m.directory, "Annotations.xml"), "Annotations", annotations)
 		if err != nil {
 			return nil, err
 		}
 		if base.document.Annotations == "" {
-			root, _ = parseEditorXML(data)
+			root, err = parseEditorXMLContext(m.ctx, data)
+			if err != nil {
+				return nil, err
+			}
 			data, err = editorXMLSetText(data, root, [][2]string{{"Annotations", loc}})
 			if err != nil {
 				return nil, err
@@ -1432,7 +1520,10 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 		for _, id := range slices.Sorted(maps.Keys(m.attachments)) {
 			entries = append(entries, m.attachments[id]...)
 		}
-		root, _ = parseEditorXML(data)
+		root, err = parseEditorXMLContext(m.ctx, data)
+		if err != nil {
+			return nil, err
+		}
 		node := root.child("Attachments")
 		if node != nil && len(node.children) != 0 {
 			entries, err = editorXMLGenerated(entries, node.name.Space)
@@ -1442,7 +1533,7 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 			content := append(bytes.Clone(data[node.open:node.close]), entries...)
 			data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, node, content)})
 		} else {
-			loc, err := mergeImportIndex(base.reader, files, base.document.Attachments.Path, path.Join(m.directory, "Attachments.xml"), "Attachments", entries)
+			loc, err := mergeImportIndex(m.ctx, base.reader, files, base.document.Attachments.Path, path.Join(m.directory, "Attachments.xml"), "Attachments", entries)
 			if err != nil {
 				return nil, err
 			}
@@ -1459,13 +1550,13 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 		if base.reader.OFD.DocBody[base.reader.documentIndex].versioned {
 			return nil, fmt.Errorf("signature import into a versioned document is not supported")
 		}
-		loc, err := mergeImportIndex(base.reader, files, base.document.Signatures, path.Join(m.directory, "Signs", "Signatures.xml"), "Signatures", signatures)
+		loc, err := mergeImportIndex(m.ctx, base.reader, files, base.document.Signatures, path.Join(m.directory, "Signs", "Signatures.xml"), "Signatures", signatures)
 		if err != nil {
 			return nil, err
 		}
 		indexName := cleanPackagePath(loc)
 		indexData := files[indexName]
-		indexRoot, err := parseEditorXML(indexData)
+		indexRoot, err := parseEditorXMLContext(m.ctx, indexData)
 		if err != nil {
 			return nil, err
 		}
@@ -1477,11 +1568,11 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 		}
 		files[indexName] = editorPatchXML(indexData, []editorXMLPatch{patch})
 		if base.document.Signatures == "" {
-			ofd, err := base.reader.readFile("OFD.xml")
+			ofd, err := base.reader.readFileViewContext(m.ctx, "OFD.xml")
 			if err != nil {
 				return nil, err
 			}
-			root, err := parseEditorXML(ofd)
+			root, err := parseEditorXMLContext(m.ctx, ofd)
 			if err != nil {
 				return nil, err
 			}
@@ -1495,7 +1586,7 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 			}
 		}
 	}
-	parts, err := base.reader.versionChanges(context.Background(), files)
+	parts, err := base.reader.versionChanges(m.ctx, files)
 	if err != nil {
 		return nil, err
 	}
@@ -1528,9 +1619,9 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 }
 
 // mergeImportIndex 向原索引追加条目，不移动原条目的相对路径基准
-// 入参: reader 目标输入包, files 新条目, loc 原索引, fallback 新索引路径, rootName 根节点名称, entries 新条目
+// 入参: ctx 取消上下文, reader 目标输入包, files 新条目, loc 原索引, fallback 新索引路径, rootName 根节点名称, entries 新条目
 // 返回: string 索引绝对路径, error 错误信息
-func mergeImportIndex(reader *Reader, files map[string][]byte, loc, fallback, rootName string, entries []byte) (string, error) {
+func mergeImportIndex(ctx context.Context, reader *Reader, files map[string][]byte, loc, fallback, rootName string, entries []byte) (string, error) {
 	name := fallback
 	var data []byte
 	var err error
@@ -1545,12 +1636,12 @@ func mergeImportIndex(reader *Reader, files map[string][]byte, loc, fallback, ro
 		var exists bool
 		data, exists = files[name]
 		if !exists {
-			data, err = reader.readFile(name)
+			data, err = reader.readFileViewContext(ctx, name)
 		}
 		if err != nil {
 			return "", err
 		}
-		root, parseErr := parseEditorXML(data)
+		root, parseErr := parseEditorXMLContext(ctx, data)
 		if parseErr != nil {
 			return "", parseErr
 		}

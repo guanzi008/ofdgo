@@ -24,8 +24,6 @@ import (
 	"path"
 	"slices"
 	"strings"
-
-	"github.com/xiaoqidun/pdfgo"
 )
 
 // outputImageKey 区分相同图像的压缩配置和像素需求，不跨写出保留状态
@@ -39,6 +37,13 @@ type outputImageKey struct {
 // 入参: parts 输出改动, reader 原包，可为空, removed 已移除条目
 // 返回: error 读取或取消错误
 func (e *Editor) compressResourceParts(parts map[string][]byte, reader *Reader, removed map[string]bool) error {
+	if reader == nil && e.output != nil && e.output.options.Mode != CompressionUnchanged && !e.output.protected {
+		unused, err := e.compactResourceReferences(parts, nil, editorProgress(e.OnWriteProgress), nil, nil)
+		if err != nil {
+			return err
+		}
+		maps.Copy(removed, unused)
+	}
 	return e.compressResourceReferences(parts, reader, removed, nil)
 }
 
@@ -225,7 +230,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 				candidate, cached := imageResults[cacheKey]
 				var err error
 				if !cached {
-					candidate, err = pdfgo.OptimizeImageResource(e.output.ctx, data, options, demand)
+					candidate, err = optimizeImageResource(e.output.ctx, data, options, demand)
 					if err == nil {
 						imageResults[cacheKey] = nil
 						if len(candidate) < len(data) {
@@ -245,12 +250,16 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 					source.key.hash = sha256.Sum256(data)
 				}
 				if data != nil {
-					source.jpeg = bytes.HasPrefix(data, []byte{255, 216})
+					source.format = outputImageFormat(data)
 				}
-				if source.jpeg {
-					formats[key] = "JPEG"
+				if source.format != "" {
+					formats[key] = source.format
+					suffix := ".png"
+					if source.format == "JPEG" {
+						suffix = ".jpg"
+					}
 					ext := path.Ext(actual[key])
-					if !strings.EqualFold(ext, ".jpg") && !strings.EqualFold(ext, ".jpeg") {
+					if !strings.EqualFold(ext, suffix) && !(source.format == "JPEG" && strings.EqualFold(ext, ".jpeg")) {
 						if data == nil {
 							data, err = read(actual[key])
 							if err != nil {
@@ -258,9 +267,9 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 							}
 						}
 						stem := strings.TrimSuffix(actual[key], ext)
-						name := stem + ".jpg"
+						name := stem + suffix
 						for n := 1; reserved[name]; n++ {
-							name = fmt.Sprintf("%s-%d.jpg", stem, n)
+							name = fmt.Sprintf("%s-%d%s", stem, n, suffix)
 						}
 						reserved[name] = true
 						locations[key] = name

@@ -35,6 +35,7 @@ func resourceReferenceScopes(ctx context.Context, documents map[string]bool, res
 		scope := map[string]bool{entry: true}
 		queue := []string{entry}
 		refs := &editorResourceRefs{ids: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
+		definitions := make(map[string]*editorResourceRefs)
 		for position := 0; position < len(queue); position++ {
 			if err := ctx.Err(); err != nil {
 				return nil, err
@@ -47,6 +48,12 @@ func resourceReferenceScopes(ctx context.Context, documents map[string]bool, res
 			used[name] = true
 			if selected == "" || selected == entry {
 				refs.merge(&editorResourceRefs{ids: source.ids, fonts: source.fonts})
+				for id, definition := range source.definitions {
+					if definitions[id] != nil {
+						return nil, nil
+					}
+					definitions[id] = definition
+				}
 			}
 			for target, role := range source.roles {
 				if role&packageReferenceXML != 0 && !scope[target] {
@@ -57,6 +64,23 @@ func resourceReferenceScopes(ctx context.Context, documents map[string]bool, res
 		}
 		if selected != "" && selected != entry {
 			continue
+		}
+		var pending []string
+		if len(definitions) != 0 {
+			pending = slices.Collect(maps.Keys(refs.ids))
+		}
+		for position := 0; position < len(pending); position++ {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if definition := definitions[pending[position]]; definition != nil {
+				for id := range definition.ids {
+					if !refs.ids[id] {
+						pending = append(pending, id)
+					}
+				}
+				refs.merge(&editorResourceRefs{ids: definition.ids, fonts: definition.fonts})
+			}
 		}
 		for name := range scope {
 			if err := ctx.Err(); err != nil {

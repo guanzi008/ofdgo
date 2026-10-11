@@ -193,8 +193,6 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 				if token.Name.Local != "TextObject" && token.Name.Local != "Text" {
 					usage.unsafe = true
 				}
-			} else if attr.Name.Local == "Substitution" {
-				s.refs.fontUsage(attr.Value).unsafe = true
 			}
 		}
 		s.stack = append(s.stack, token.Name.Local)
@@ -230,7 +228,7 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 				s.objects[id] = true
 			}
 		}
-		if (token.Name.Local == "Substitution" || token.Name.Local == "Font") && strings.TrimSpace(s.text.String()) != "" {
+		if token.Name.Local == "Font" && strings.TrimSpace(s.text.String()) != "" {
 			s.refs.fontUsage(s.text.String()).unsafe = true
 		}
 		if usage := s.fonts[len(s.fonts)-1]; usage != nil {

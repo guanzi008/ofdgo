@@ -113,7 +113,7 @@ func (r *Renderer) PageTextByIndex(index int) (*PageText, error) {
 	if index < 0 || index >= len(doc.Pages.Page) {
 		return nil, fmt.Errorf("page index %d out of range", index)
 	}
-	page, err := r.Reader.readPageContent(doc.Pages.Page[index], true)
+	page, err := r.Reader.readPageContent(doc.Pages.Page[index], true, false)
 	if err != nil {
 		return nil, err
 	}

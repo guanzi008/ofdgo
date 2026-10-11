@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"maps"
 	"slices"
 	"strconv"
@@ -88,15 +89,13 @@ func (r *Reader) versionFileDependencies(ctx context.Context, entry string, part
 func (r *Reader) versionEditGraph(ctx context.Context, entry string, parts map[string][]byte, generated map[string]editorGeneratedReferences) (*versionEditGraph, error) {
 	graph := &versionEditGraph{files: make(map[string]*versionEditFile), used: make(map[string]bool)}
 	queue := []string{entry}
+	queued := map[string]bool{entry: true}
 	for len(queue) != 0 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		name := queue[0]
 		queue = queue[1:]
-		if graph.files[name] != nil {
-			continue
-		}
 		data, ok := parts[name]
 		if ok && generated[name].stagedLeaf(data) {
 			graph.files[name], graph.used[name] = &versionEditFile{}, true
@@ -141,7 +140,8 @@ func (r *Reader) versionEditGraph(ctx context.Context, entry string, parts map[s
 				target := resolveResourcePath(name, base, value)
 				file.links = append(file.links, versionEditLink{node: node, attribute: attribute, target: target})
 				graph.used[target] = true
-				if kind == packageReferenceXML {
+				if kind == packageReferenceXML && !queued[target] {
+					queued[target] = true
 					queue = append(queue, target)
 				}
 			}
@@ -178,11 +178,11 @@ func (r *Reader) versionEditGraph(ctx context.Context, entry string, parts map[s
 // 返回: map[string]bool 受保护路径, error 读取或结构错误
 func (r *Reader) versionSharedFiles(ctx context.Context) (map[string]bool, error) {
 	shared := make(map[string]bool)
-	data, err := r.readFile("OFD.xml")
+	data, err := r.readFileViewContext(ctx, "OFD.xml")
 	if err != nil {
 		return nil, err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -196,21 +196,25 @@ func (r *Reader) versionSharedFiles(ctx context.Context) (map[string]bool, error
 			shared[name] = true
 		}
 	}
+	var indexes []int
 	for index := range r.DocumentCount() {
-		if index == r.documentIndex {
-			continue
+		if index != r.documentIndex {
+			indexes = append(indexes, index)
 		}
-		files, err := r.documentFiles(ctx, index)
-		if err != nil {
-			return nil, err
-		}
-		maps.Copy(shared, files)
 	}
-	versions, err := r.DocumentVersions()
+	files, err := r.documentFiles(ctx, indexes...)
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(shared, files)
+	versions, err := r.DocumentVersionsContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	for _, version := range versions {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if r.versionInfo != nil && version.ID == r.versionInfo.ID {
 			continue
 		}
@@ -253,16 +257,17 @@ func (r *Reader) versionResourceFiles(ctx context.Context, parts map[string][]by
 			files[file.Location] = true
 		}
 	}
+	var indexes []int
 	for index := range r.DocumentCount() {
-		if index == r.documentIndex {
-			continue
+		if index != r.documentIndex {
+			indexes = append(indexes, index)
 		}
-		other, err := r.documentFiles(ctx, index)
-		if err != nil {
-			return nil, err
-		}
-		maps.Copy(files, other)
 	}
+	other, err := r.documentFiles(ctx, indexes...)
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(files, other)
 	return files, nil
 }
 
@@ -271,6 +276,54 @@ func (r *Reader) versionResourceFiles(ctx context.Context, parts map[string][]by
 // 返回: map[string][]byte 隔离后的修改集, error 读取、引用或结构错误
 func (r *Reader) versionChanges(ctx context.Context, changes map[string][]byte) (map[string][]byte, error) {
 	return r.versionOutputChanges(ctx, changes, nil, nil)
+}
+
+// versionFileUnchanged 分块比较原文件与待写入内容，读取失败时保留替换内容
+// 入参: ctx 取消上下文, name 包内路径, data 待写入内容, buffer 非空比较缓冲区
+// 返回: bool 内容相同, error 取消错误
+func (r *Reader) versionFileUnchanged(ctx context.Context, name string, data, buffer []byte) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	name = cleanPackagePath(name)
+	if original, ok := r.files[name]; ok {
+		if len(original) != len(data) {
+			return false, nil
+		}
+		for offset := 0; offset < len(data); {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+			end := offset + min(len(buffer), len(data)-offset)
+			if !bytes.Equal(original[offset:end], data[offset:end]) {
+				return false, nil
+			}
+			offset = end
+		}
+		return true, ctx.Err()
+	}
+	file, ok := r.packageFile(name)
+	if !ok || file.UncompressedSize64 != uint64(len(data)) {
+		return false, nil
+	}
+	input, err := file.Open()
+	if err != nil {
+		return false, nil
+	}
+	defer input.Close()
+	reader := imageInput{ReadCloser: input, context: ctx}
+	for len(data) != 0 {
+		block := buffer[:min(len(buffer), len(data))]
+		if _, err := io.ReadFull(&reader, block); err != nil {
+			return false, ctx.Err()
+		}
+		if !bytes.Equal(block, data[:len(block)]) {
+			return false, nil
+		}
+		data = data[len(block):]
+	}
+	n, err := reader.Read(buffer[:1])
+	return n == 0 && err == io.EOF, ctx.Err()
 }
 
 // versionOutputChanges 隔离文档或版本改动并同步删除清单，保留其他入口仍需使用的文件
@@ -291,11 +344,16 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 	if parts == nil {
 		parts = make(map[string][]byte)
 	}
+	buffer := make([]byte, 32*1024)
 	for name, data := range parts {
 		if generated[name].stagedLeaf(data) {
 			continue
 		}
-		if original, err := r.readFileView(name); err == nil && bytes.Equal(original, data) {
+		same, err := r.versionFileUnchanged(ctx, name, data, buffer)
+		if err != nil {
+			return nil, err
+		}
+		if same {
 			delete(parts, name)
 		}
 	}
@@ -344,17 +402,26 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 		pending = append(pending, name)
 	}
 	for _, name := range slices.Sorted(maps.Keys(parts)) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if name != "OFD.xml" && shared[name] && owned[name] {
 			allocate(name)
 		}
 	}
 	parents := make(map[string][]string)
 	for _, name := range slices.Sorted(maps.Keys(graph.files)) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		for _, link := range graph.files[name].links {
 			parents[link.target] = append(parents[link.target], name)
 		}
 	}
 	for i := 0; i < len(pending); i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		for _, name := range parents[pending[i]] {
 			if shared[name] && paths[name] == "" {
 				allocate(name)
@@ -362,7 +429,7 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 		}
 	}
 	for name, file := range graph.files {
-		data, err := file.rewrite(paths)
+		data, err := file.rewrite(ctx, paths)
 		if err != nil {
 			return nil, err
 		}
@@ -373,7 +440,7 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 	for source, target := range paths {
 		data, ok := parts[source]
 		if !ok {
-			data, err = r.readFile(source)
+			data, err = r.readFileViewContext(ctx, source)
 			if err != nil {
 				return nil, err
 			}
@@ -382,18 +449,18 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 		delete(parts, source)
 	}
 	if r.versionInfo != nil {
-		if err := r.versionManifest(parts, paths, graph.used, shared, removed); err != nil {
+		if err := r.versionManifest(ctx, parts, paths, graph.used, shared, removed); err != nil {
 			return nil, err
 		}
 	} else if target := paths[entry]; target != "" {
 		data, ok := parts["OFD.xml"]
 		if !ok {
-			data, err = r.readFile("OFD.xml")
+			data, err = r.readFileViewContext(ctx, "OFD.xml")
 			if err != nil {
 				return nil, err
 			}
 		}
-		root, err := parseEditorXML(data)
+		root, err := parseEditorXMLContext(ctx, data)
 		if err != nil {
 			return nil, err
 		}
@@ -418,12 +485,21 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 }
 
 // rewrite 更新已隔离文件的引用，保留其余XML及相对路径基准
-// 入参: paths 原路径到新路径的映射
+// 入参: ctx 取消上下文, paths 原路径到新路径的映射
 // 返回: []byte 更新后的XML，未改动时借用原文, error 属性编码错误
-func (file *versionEditFile) rewrite(paths map[string]string) ([]byte, error) {
+func (file *versionEditFile) rewrite(ctx context.Context, paths map[string]string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return file.data, nil
+	}
 	var patches []editorXMLPatch
 	headers := make(map[*editorXML][]versionEditLink)
 	for _, link := range file.links {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if paths[link.target] == "" {
 			continue
 		}
@@ -436,7 +512,7 @@ func (file *versionEditFile) rewrite(paths map[string]string) ([]byte, error) {
 	for node, links := range headers {
 		data := file.data[node.start:node.end]
 		for _, link := range links {
-			root, err := parseEditorXML(data)
+			root, err := parseEditorXMLContext(ctx, data)
 			if err != nil {
 				return nil, err
 			}
@@ -445,7 +521,7 @@ func (file *versionEditFile) rewrite(paths map[string]string) ([]byte, error) {
 				return nil, err
 			}
 		}
-		root, err := parseEditorXML(data)
+		root, err := parseEditorXMLContext(ctx, data)
 		if err != nil {
 			return nil, err
 		}
@@ -462,15 +538,15 @@ func (file *versionEditFile) rewrite(paths map[string]string) ([]byte, error) {
 }
 
 // versionManifest 更新所选版本的入口与文件清单，保留已有文件标识及扩展字段
-// 入参: parts 输出条目, paths 隔离路径, used 当前内容依赖, shared 其他入口依赖, removed 当前版本移除的文件
+// 入参: ctx 取消上下文, parts 输出条目, paths 隔离路径, used 当前内容依赖, shared 其他入口依赖, removed 当前版本移除的文件
 // 返回: error 描述读取或XML编码错误
-func (r *Reader) versionManifest(parts map[string][]byte, paths map[string]string, used, shared, removed map[string]bool) error {
+func (r *Reader) versionManifest(ctx context.Context, parts map[string][]byte, paths map[string]string, used, shared, removed map[string]bool) error {
 	version := r.versionInfo
-	data, err := r.readFile(version.Location)
+	data, err := r.readFileViewContext(ctx, version.Location)
 	if err != nil {
 		return err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return err
 	}
@@ -479,6 +555,9 @@ func (r *Reader) versionManifest(parts map[string][]byte, paths map[string]strin
 	listed := make(map[string]bool)
 	ids := map[string]bool{version.ID: true}
 	for _, node := range list.children {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !node.matchesOFD("File") {
 			continue
 		}
@@ -500,6 +579,9 @@ func (r *Reader) versionManifest(parts map[string][]byte, paths map[string]strin
 	var added []byte
 	serial := 0
 	for _, name := range slices.Sorted(maps.Keys(used)) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if target := paths[name]; target != "" {
 			name = target
 		}
@@ -533,12 +615,12 @@ func (r *Reader) versionManifest(parts map[string][]byte, paths map[string]strin
 		name = packageAvailableName(r, parts, name)
 		entry, ok := parts["OFD.xml"]
 		if !ok {
-			entry, err = r.readFile("OFD.xml")
+			entry, err = r.readFileViewContext(ctx, "OFD.xml")
 			if err != nil {
 				return err
 			}
 		}
-		root, err := parseEditorXML(entry)
+		root, err := parseEditorXMLContext(ctx, entry)
 		if err != nil {
 			return err
 		}

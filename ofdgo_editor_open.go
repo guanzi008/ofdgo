@@ -912,7 +912,14 @@ func (e *Editor) editorImage(id string) (image.Point, error) {
 		return image.Point{}, err
 	}
 	defer input.Close()
-	config, _, err := image.DecodeConfig(input)
+	config, _, err := decodeImageConfig(input)
+	if errors.Is(err, errTIFFRandomAccess) {
+		data, readErr := reader.readFileView(reader.ResPath(name))
+		if readErr != nil {
+			return image.Point{}, readErr
+		}
+		config, _, err = decodeImageConfigData(data)
+	}
 	if err != nil {
 		return image.Point{}, err
 	}

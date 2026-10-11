@@ -49,7 +49,7 @@ type glyphOutlineKey struct {
 func (r *Renderer) PositionText(object TextObject, state RenderState) (*PositionedText, error) {
 	result := &PositionedText{Run: TextRun{ID: object.ID, Text: object.Text()}}
 	result.Run.Boxes = make([]Box, len([]rune(result.Run.Text)))
-	if object.Visible != nil && !*object.Visible {
+	if state.Hidden || object.Visible != nil && !*object.Visible {
 		return result, nil
 	}
 	geometry, err := r.Geometry()

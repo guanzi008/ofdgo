@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"image"
@@ -27,7 +28,7 @@ import (
 	_ "github.com/xiaoqidun/jbig2"
 	_ "golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
-	_ "golang.org/x/image/tiff"
+	"golang.org/x/image/tiff"
 )
 
 // transparentEdgeImage 共享只读像素并按需计算透明边缘和采样边距
@@ -147,6 +148,14 @@ func decodeImageData(data []byte) (image.Image, string, error) {
 		}
 		return img, img.format, nil
 	}
+	if isTIFFData(data) {
+		layout, err := readTIFFLayout(bytes.NewReader(data))
+		if err != nil {
+			return nil, "tiff", err
+		}
+		img, err := decodeTIFFImage(nil, data, layout)
+		return img, "tiff", err
+	}
 	img, format, err := image.Decode(bytes.NewReader(data))
 	if err == nil {
 		return img, normalizeSealType(format), nil
@@ -175,6 +184,27 @@ func isPNGData(data []byte) bool {
 // 入参: data 图片数据
 // 返回: image.Config 图片尺寸, string 图片格式, error 错误信息
 func decodeImageConfigData(data []byte) (image.Config, string, error) {
+	if isTIFFData(data) {
+		layout, err := readTIFFLayout(bytes.NewReader(data))
+		if err != nil {
+			return image.Config{}, "tiff", err
+		}
+		if layout.planar && layout.samples > 1 || layout.samples == 1 && (layout.depth == 2 || layout.depth == 4) {
+			img, _, err := tiffPlaneDirectories(nil, data, layout)
+			if err != nil {
+				return image.Config{}, "tiff", err
+			}
+			size := layout.size()
+			return image.Config{ColorModel: img.ColorModel(), Width: size.X, Height: size.Y}, "tiff", nil
+		}
+		cfg, err := tiff.DecodeConfig(newTIFFDirectoryInput(data, layout.offset))
+		if err != nil {
+			return image.Config{}, "tiff", err
+		}
+		size := layout.size()
+		cfg.Width, cfg.Height = size.X, size.Y
+		return cfg, "tiff", nil
+	}
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
 	if err == nil {
 		return cfg, normalizeSealType(format), nil
@@ -193,11 +223,11 @@ func decodeBMPConfig(data []byte) (image.Config, error) {
 	if err != nil {
 		return image.Config{}, err
 	}
-	if offset <= 0 || width <= 0 || height == 0 || compression != 0 {
+	if offset <= 0 || width <= 0 || height == 0 {
 		return image.Config{}, fmt.Errorf("unsupported bmp")
 	}
-	if bpp != 16 && bpp != 24 && bpp != 32 {
-		return image.Config{}, fmt.Errorf("unsupported bmp")
+	if _, err := bmpColorMasks(data, offset, bpp, compression); err != nil {
+		return image.Config{}, err
 	}
 	if height < 0 {
 		height = -height
@@ -209,15 +239,26 @@ func decodeBMPConfig(data []byte) (image.Config, error) {
 // 入参: data 图片数据
 // 返回: image.Image 图片对象, error 错误信息
 func decodeBMPImage(data []byte) (image.Image, error) {
+	return decodeBMPImageContext(context.Background(), data)
+}
+
+// decodeBMPImageContext 解码BMP真彩色像素，逐行检查取消
+// 入参: ctx 取消上下文, data 图片数据
+// 返回: image.Image 图片对象, error 格式或取消错误
+func decodeBMPImageContext(ctx context.Context, data []byte) (image.Image, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	offset, width, height, bpp, compression, err := parseBMPHeader(data)
 	if err != nil {
 		return nil, err
 	}
-	if compression != 0 {
-		return nil, fmt.Errorf("unsupported bmp compression")
+	if offset > len(data) {
+		return nil, fmt.Errorf("invalid bmp pixel offset")
 	}
-	if bpp != 16 && bpp != 24 && bpp != 32 {
-		return nil, fmt.Errorf("unsupported bmp depth")
+	masks, err := bmpColorMasks(data, offset, bpp, compression)
+	if err != nil {
+		return nil, err
 	}
 	topDown := height < 0
 	if topDown {
@@ -230,9 +271,15 @@ func decodeBMPImage(data []byte) (image.Image, error) {
 	if stride > int64(len(data)-offset)/int64(height) {
 		return nil, fmt.Errorf("truncated bmp")
 	}
+	if width > int(^uint(0)>>1)/4/height {
+		return nil, fmt.Errorf("bmp dimensions exceed image capacity")
+	}
 	rowStride := int(stride)
 	img := image.NewNRGBA(image.Rect(0, 0, width, height))
 	for y := 0; y < height; y++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		srcY := y
 		if !topDown {
 			srcY = height - 1 - y
@@ -240,19 +287,19 @@ func decodeBMPImage(data []byte) (image.Image, error) {
 		row := data[offset+srcY*rowStride:]
 		for x := 0; x < width; x++ {
 			switch bpp {
-			case 16:
-				v := binary.LittleEndian.Uint16(row[x*2:])
-				img.SetNRGBA(x, y, color.NRGBA{
-					R: uint8(((v >> 10) & 0x1F) * 255 / 31),
-					G: uint8(((v >> 5) & 0x1F) * 255 / 31),
-					B: uint8((v & 0x1F) * 255 / 31),
-					A: 255,
-				})
+			case 16, 32:
+				var value uint32
+				if bpp == 16 {
+					value = uint32(binary.LittleEndian.Uint16(row[x*2:]))
+				} else {
+					value = binary.LittleEndian.Uint32(row[x*4:])
+				}
+				p := y*img.Stride + x*4
+				for i, mask := range masks {
+					img.Pix[p+i] = mask.sample(value)
+				}
 			case 24:
 				p := x * 3
-				img.SetNRGBA(x, y, color.NRGBA{R: row[p+2], G: row[p+1], B: row[p], A: 255})
-			case 32:
-				p := x * 4
 				img.SetNRGBA(x, y, color.NRGBA{R: row[p+2], G: row[p+1], B: row[p], A: 255})
 			}
 		}
@@ -272,7 +319,7 @@ func parseBMPHeader(data []byte) (int, int, int, uint16, uint32, error) {
 	if dibSize < 40 {
 		return 0, 0, 0, 0, 0, fmt.Errorf("unsupported bmp")
 	}
-	if uint64(dibSize)+14 > uint64(len(data)) || offset < 0 || uint64(offset) < uint64(dibSize)+14 || offset > len(data) {
+	if uint64(dibSize)+14 > uint64(len(data)) || offset < 0 || uint64(offset) < uint64(dibSize)+14 {
 		return 0, 0, 0, 0, 0, fmt.Errorf("invalid bmp pixel offset")
 	}
 	width := int(int32(binary.LittleEndian.Uint32(data[18:22])))
@@ -450,6 +497,9 @@ func imageNRGBA64At(img image.Image, x, y int) color.NRGBA64 {
 	switch src := img.(type) {
 	case interface{ NRGBA64At(int, int) color.NRGBA64 }:
 		return src.NRGBA64At(x, y)
+	case *image.NRGBA:
+		c := src.NRGBAAt(x, y)
+		return color.NRGBA64{R: uint16(c.R) * 257, G: uint16(c.G) * 257, B: uint16(c.B) * 257, A: uint16(c.A) * 257}
 	case *image.Gray16:
 		c := src.Gray16At(x, y)
 		return color.NRGBA64{R: c.Y, G: c.Y, B: c.Y, A: 0xffff}

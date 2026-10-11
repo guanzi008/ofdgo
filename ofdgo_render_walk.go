@@ -17,11 +17,13 @@ package ofdgo
 import "fmt"
 
 // RenderState 保存对象继承的样式、父变换和页面坐标裁剪，所有引用只读
-// Clip为nil表示未裁剪，空路径表示完全裁去，单位为毫米
+// Clip为nil表示未提供裁剪，空路径表示完全裁去，单位为毫米
+// Hidden表示当前对象或其上层容器不可见，不改变源对象的Visible属性
 type RenderState struct {
 	Defaults      *DrawParam
 	Parent        *Matrix
 	BoundaryInCTM bool
+	Hidden        bool
 	Clip          *GeometryPath
 }
 
@@ -40,6 +42,19 @@ type PageGroups interface {
 	BeginAnnotation(id string) bool
 	EndObject()
 	SkipObjects(count int)
+}
+
+// PageComposites 可选地接收展开前的复合图元及矢量资源，不替代成员遍历
+// 状态包含当前图元到页面的完整变换，源对象及状态只读
+type PageComposites interface {
+	VisitComposite(object *CompositeGraphicUnit, state RenderState) error
+}
+
+// PageAnalysis 控制WalkPage和WalkObject对隐藏内容及裁剪的处理，不影响已构建场景的重放
+// 跳过裁剪时RenderState.Clip为空，源对象的裁剪定义不变，叶对象仍由访问器解释
+type PageAnalysis interface {
+	IncludeHidden() bool
+	SkipClips() bool
 }
 
 // WalkPage 按模板、图层、注解和印章顺序访问页面，不依赖任何绘图库
@@ -79,7 +94,7 @@ func (r *Renderer) WalkPage(page *PageContent, visitor PageVisitor) error {
 	}
 	if r.RenderAnnotations {
 		for _, annotation := range r.Reader.Annots[page.ID] {
-			if annotation.Visible != nil && !*annotation.Visible {
+			if annotation.Visible != nil && !*annotation.Visible && !pageIncludesHidden(visitor) {
 				continue
 			}
 			if err := r.walkAnnotation(annotation, visitor); err != nil {
@@ -116,7 +131,7 @@ func (r *Renderer) walkAnnotation(annotation Annotation, visitor PageVisitor) er
 	}
 	box, _ := ParseBox(annotation.Appearance.Boundary)
 	matrix := TranslationMatrix(box.X, box.Y)
-	state := RenderState{Parent: &matrix, BoundaryInCTM: true}
+	state := RenderState{Parent: &matrix, BoundaryInCTM: true, Hidden: annotation.Visible != nil && !*annotation.Visible}
 	for i := range annotation.Appearance.Objects {
 		if err := r.WalkObject(&annotation.Appearance.Objects[i], state, visitor); err != nil {
 			return err
@@ -175,11 +190,21 @@ func (r *Renderer) walkObject(object *GraphicObject, state RenderState, visitor 
 			return err
 		}
 	}
+	if pageSkipsClips(visitor) {
+		state.Clip = nil
+	}
 	if groups, ok := visitor.(PageGroups); ok && groups.BeginObject(object) {
 		defer groups.EndObject()
 	}
 	switch object.Type {
-	case "TextObject", "PathObject", "ImageObject":
+	case "TextObject":
+		state.Hidden = state.Hidden || object.TextObject.Visible != nil && !*object.TextObject.Visible
+		return visitor.DrawObject(object, state)
+	case "PathObject":
+		state.Hidden = state.Hidden || object.PathObject.Visible != nil && !*object.PathObject.Visible
+		return visitor.DrawObject(object, state)
+	case "ImageObject":
+		state.Hidden = state.Hidden || object.ImageObject.Visible != nil && !*object.ImageObject.Visible
 		return visitor.DrawObject(object, state)
 	case "CompositeGraphicUnit", "CompositeObject":
 		return r.walkComposite(object.CompositeGraphicUnit, state, visitor, references)
@@ -192,7 +217,8 @@ func (r *Renderer) walkObject(object *GraphicObject, state RenderState, visitor 
 // 入参: object 复合图元, state 继承状态, visitor 页面访问器, references 当前资源引用链
 // 返回: error 几何或访问器错误
 func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState, visitor PageVisitor, references map[*CompositeGraphicUnit]bool) error {
-	if object.Visible != nil && !*object.Visible {
+	state.Hidden = state.Hidden || object.Visible != nil && !*object.Visible
+	if state.Hidden && !pageIncludesHidden(visitor) {
 		if groups, ok := visitor.(PageGroups); ok {
 			count, ref, seen := len(object.Objects), object.ResourceID, make(map[*CompositeGraphicUnit]bool)
 			for ref != "" {
@@ -213,33 +239,42 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 		boundary = state.Parent.Multiply(boundary)
 	}
 	matrix := boundary.Multiply(NewMatrix(object.CTM))
-	var err error
-	if object.Boundary != "" {
-		state.Clip, err = r.geometryExtentClip(box.W, box.H, boundary, state.Clip)
+	if pageSkipsClips(visitor) {
+		state.Clip = nil
+	} else {
+		var err error
+		if object.Boundary != "" {
+			state.Clip, err = r.geometryExtentClip(box.W, box.H, boundary, state.Clip)
+			if err != nil {
+				return err
+			}
+		}
+		state.Clip, err = r.compositeExtentClip(object, matrix, state.Clip)
 		if err != nil {
 			return err
 		}
-	}
-	state.Clip, err = r.compositeExtentClip(object, matrix, state.Clip)
-	if err != nil {
-		return err
-	}
-	clips, clipMatrix := object.Clips, matrix
-	if !clips.usesObjectMatrix() {
-		clipMatrix = boundary
-	}
-	if clips != nil {
-		geometry, err := r.Geometry()
-		if err != nil {
-			return err
+		clips, clipMatrix := object.Clips, matrix
+		if !clips.usesObjectMatrix() {
+			clipMatrix = boundary
 		}
-		state.Clip, err = geometry.Clip(r, clips, clipMatrix, state.Clip)
-		if err != nil {
-			return err
+		if clips != nil {
+			geometry, err := r.Geometry()
+			if err != nil {
+				return err
+			}
+			state.Clip, err = geometry.Clip(r, clips, clipMatrix, state.Clip)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	state.Defaults = r.drawParamDefaults(object.DrawParam, state.Defaults)
 	state.Parent = &matrix
+	if composites, ok := visitor.(PageComposites); ok {
+		if err := composites.VisitComposite(&object, state); err != nil {
+			return err
+		}
+	}
 	if object.ResourceID != "" {
 		if ref, _ := resourceValue(r.CompositeGraphicUnits, object.ResourceID); ref != nil {
 			if references[ref] {
@@ -267,6 +302,22 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 		}
 	}
 	return nil
+}
+
+// pageIncludesHidden 查询访问器是否需要分析隐藏内容，不改变渲染器配置
+// 入参: visitor 页面访问器
+// 返回: bool 是否访问隐藏内容
+func pageIncludesHidden(visitor PageVisitor) bool {
+	analysis, ok := visitor.(PageAnalysis)
+	return ok && analysis.IncludeHidden()
+}
+
+// pageSkipsClips 查询访问器是否只需资源和变换，不计算几何裁剪
+// 入参: visitor 页面访问器
+// 返回: bool 是否跳过裁剪
+func pageSkipsClips(visitor PageVisitor) bool {
+	analysis, ok := visitor.(PageAnalysis)
+	return ok && analysis.SkipClips()
 }
 
 // compositeExtentClip 按矢量资源尺寸裁剪内容，资源裁剪随实例变换

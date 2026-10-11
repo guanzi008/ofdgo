@@ -190,7 +190,7 @@ func (r *Reader) docStructure() (*Document, error) {
 // 入参: page 页面对象
 // 返回: *PageContent 页面内容, error 错误信息
 func (r *Reader) PageContent(page Page) (*PageContent, error) {
-	return r.readPageContent(page, false)
+	return r.readPageContent(page, false, false)
 }
 
 // PageCount 获取当前文档总页数
@@ -729,9 +729,9 @@ func resolveResourcePath(resPath, baseLoc, filePath string) string {
 }
 
 // readPageContent 读取页面，可跳过文字提取不使用的独立路径和图片
-// 入参: page 页面对象, textOnly 是否仅用于文字提取
+// 入参: page 页面对象, textOnly 是否仅用于文字提取, template 是否按模板页读取
 // 返回: *PageContent 页面内容, error 错误信息
-func (r *Reader) readPageContent(page Page, textOnly bool) (*PageContent, error) {
+func (r *Reader) readPageContent(page Page, textOnly, template bool) (*PageContent, error) {
 	fullPath := r.ResPath(page.BaseLoc)
 	data, err := r.readFile(fullPath)
 	if err != nil {
@@ -748,6 +748,9 @@ func (r *Reader) readPageContent(page Page, textOnly bool) (*PageContent, error)
 		return nil, fmt.Errorf("failed to unmarshal page content: %w", err)
 	}
 	content.ID = page.ID
+	if template {
+		content.Template = nil
+	}
 	for _, res := range content.PageRes {
 		r.loadRes(resolveResourcePath(page.BaseLoc, "", res))
 	}
@@ -836,7 +839,7 @@ func (r *Reader) resolvePageArea(area PageArea, templates []Template) (PageArea,
 	}
 	for _, ref := range templates {
 		for _, template := range r.doc.CommonData.TemplatePage {
-			if template.ID != ref.TemplateID {
+			if !sameResourceID(template.ID, ref.TemplateID) {
 				continue
 			}
 			content, err := r.readPageHeader(Page{BaseLoc: template.BaseLoc})

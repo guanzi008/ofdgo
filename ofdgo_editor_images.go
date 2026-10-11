@@ -40,7 +40,7 @@ type ImagePageOptions struct {
 	OnProgress    func(stage string, completed, total int) error
 }
 
-// ImportImages 将PNG、JPEG或JBIG2逐张建页并插入指定位置，一次操作计入一条撤销记录
+// ImportImages 将PNG、JPEG、BMP、单页TIFF或JBIG2逐张建页并插入指定位置，一次操作计入一条撤销记录
 // 保留像素及透明度，方向通过对象变换实现，不重新采样；图片压缩沿用AddImage规则
 // 失败或取消时不修改文档，读取期间仍需容纳单张图片的解码数据
 // 入参: ctx 取消上下文, sources 按页面顺序排列的图片, at 插入位置, options 建页选项
@@ -110,14 +110,19 @@ func (e *Editor) ImportImages(ctx context.Context, sources []ImagePageSource, at
 // 入参: data 图片数据, options 建页选项
 // 返回: int 从0开始的页面索引, error 错误信息
 func (e *Editor) addImagePage(data []byte, options ImagePageOptions) (int, error) {
-	config, format, err := image.DecodeConfig(bytes.NewReader(data))
+	config, format, err := decodeImageConfigData(data)
 	if err != nil {
 		return 0, err
 	}
-	if format != "png" && format != "jpeg" && format != "jbig2" {
-		return 0, fmt.Errorf("only PNG, JPEG and JBIG2 images are supported")
+	if format != "png" && format != "jpeg" && format != "bmp" && format != "tiff" && format != "jbig2" {
+		return 0, fmt.Errorf("only PNG, JPEG, BMP, single-page TIFF and JBIG2 images are supported")
 	}
-	decoded, _, err := image.Decode(bytes.NewReader(data))
+	var decoded image.Image
+	if format == "bmp" || format == "tiff" {
+		decoded, _, err = decodeImageData(data)
+	} else {
+		decoded, _, err = image.Decode(bytes.NewReader(data))
+	}
 	if err != nil {
 		return 0, err
 	}

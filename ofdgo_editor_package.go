@@ -29,14 +29,14 @@ import (
 )
 
 // sourceParts 生成编辑快照的XML和新增资源，删页时同步清理标准引用
-// 入参: progress 保存进度回调，预览时为nil
+// 入参: ctx 取消上下文, progress 保存进度回调，预览时为nil
 // 返回: map[string][]byte 替换及新增条目, error 错误信息
-func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error) {
+func (e *Editor) sourceParts(ctx context.Context, progress editorProgress) (map[string][]byte, error) {
 	parts, err := e.sourcePartsReferences(progress, nil)
 	if err != nil {
 		return nil, err
 	}
-	return e.source.reader.versionChanges(context.Background(), parts)
+	return e.source.reader.versionChanges(ctx, parts)
 }
 
 // sourcePartsReferences 生成保存快照，同步收集完全自产页面的实际编码引用
@@ -119,18 +119,17 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 	if err := progress.report("pages", len(e.pages), len(e.pages)); err != nil {
 		return nil, err
 	}
-	fonts, images, spaces, resourceFiles := e.usedResources()
+	fonts, images, spaces, usedFiles := e.usedResources()
 	for _, resource := range e.resources {
-		if resource.definition() != "" && slices.Contains(resourceFiles, resource.name) || resource.colorProfileUsed(spaces) {
+		if resource.definition() != "" && usedFiles[resource.name] || resource.colorProfileUsed(spaces) {
 			parts[resource.name] = resource.data
 		}
 	}
 	commonData := source.document.CommonData
 	for _, name := range append(slices.Clone(commonData.DocumentRes), commonData.PublicRes...) {
-		resourceFiles = slices.DeleteFunc(resourceFiles, func(file string) bool {
-			return file == reader.ResPath(name)
-		})
+		delete(usedFiles, reader.ResPath(name))
 	}
+	resourceFiles := slices.Sorted(maps.Keys(usedFiles))
 	if len(fonts)+len(images)+len(spaces) != 0 {
 		data, err := e.encodeXML(func(x *ofdXML) { x.resources(fonts, images, spaces) })
 		if err != nil {
@@ -720,10 +719,10 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 }
 
 // sourceReader 生成原包与修改条目组成的独立预览快照，不进行ZIP压缩
-// 入参: progress 准备进度回调
+// 入参: ctx 取消上下文, progress 准备进度回调
 // 返回: *Reader 阅读器, error 错误信息
-func (e *Editor) sourceReader(progress editorProgress) (*Reader, error) {
-	parts, err := e.sourceParts(progress)
+func (e *Editor) sourceReader(ctx context.Context, progress editorProgress) (*Reader, error) {
+	parts, err := e.sourceParts(ctx, progress)
 	if err != nil {
 		return nil, err
 	}

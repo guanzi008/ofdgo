@@ -15,13 +15,10 @@
 package ofdgo
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"image"
 	"runtime"
 	"sync"
-
-	"github.com/xiaoqidun/pdfgo"
 )
 
 // outputImageBatchLimit 限制并行批次持有的原始编码，超限图片单独处理
@@ -37,8 +34,8 @@ type outputImageJob struct {
 
 // outputImageSource 保存已读取资源的摘要和格式，不保留原始编码
 type outputImageSource struct {
-	key  outputImageKey
-	jpeg bool
+	key    outputImageKey
+	format string
 }
 
 // outputImageOptions 统一资源压缩及像素需求，受保护图片只进行无损编码
@@ -92,7 +89,7 @@ func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, e
 		options, demand := e.outputImageOptions(key)
 		cacheKey := outputImageKey{hash: sha256.Sum256(data), options: options, size: demand}
 		if sources != nil {
-			sources[key] = outputImageSource{key: cacheKey, jpeg: bytes.HasPrefix(data, []byte{255, 216})}
+			sources[key] = outputImageSource{key: cacheKey, format: outputImageFormat(data)}
 		}
 		if _, cached := results[cacheKey]; cached {
 			continue
@@ -126,7 +123,7 @@ func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, e
 func (e *Editor) runOutputImages(jobs []outputImageJob, results map[outputImageKey][]byte) error {
 	ctx := e.output.ctx
 	optimize := func(job *outputImageJob) {
-		job.candidate, job.err = pdfgo.OptimizeImageResource(ctx, job.data, job.key.options, job.key.size)
+		job.candidate, job.err = optimizeImageResource(ctx, job.data, job.key.options, job.key.size)
 	}
 	if len(jobs) == 1 {
 		optimize(&jobs[0])

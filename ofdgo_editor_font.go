@@ -175,17 +175,30 @@ func editorObjectFontScan(object GraphicObject) bool {
 	return clips != nil || fill != nil && fill.Pattern != nil || stroke != nil && stroke.Pattern != nil
 }
 
-// subsetFonts 收集新增字体实际使用的字形，仅裁剪保存结果，保留完整编辑字体
+// subsetFonts 仅解析实际引用的新增字体，按用字裁剪保存结果，保留完整编辑字体
 // 入参: progress 保存进度回调
 // 返回: map[string][]byte 包内字体子集, error 错误信息
 func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error) {
 	if e.backends.FontResources == nil {
 		return nil, nil
 	}
+	if err := progress.report("fonts", 0, 0); err != nil {
+		return nil, err
+	}
+	if !slices.ContainsFunc(e.resources, func(resource editorResource) bool {
+		return resource.font != nil && resource.font.FontFile != ""
+	}) {
+		return nil, nil
+	}
+	fonts, _, _, files := e.usedResources()
+	total := len(fonts) + len(e.pages) + 2*len(e.resources)
 	used := make(map[string]map[uint16]bool)
 	mapped := make(map[string]bool)
-	for _, resource := range e.resources {
-		if resource.font == nil || resource.font.FontFile == "" {
+	for i, resource := range fonts {
+		if err := progress.report("fonts", i, total); err != nil {
+			return nil, err
+		}
+		if resource.font.FontFile == "" {
 			continue
 		}
 		resourceFont := e.fonts[resource.font.ID]
@@ -202,7 +215,10 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 		}
 	}
 	if len(used) == 0 {
-		return nil, progress.report("fonts", 0, 0)
+		for i := range e.resources {
+			e.resources[i].subset = nil
+		}
+		return nil, progress.report("fonts", total, total)
 	}
 	refs := editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool)}
 	nested := false
@@ -222,9 +238,8 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 			}
 		}
 	}
-	total := len(e.pages) + len(e.resources)
 	for i, page := range e.pages {
-		if err := progress.report("fonts", i, total); err != nil {
+		if err := progress.report("fonts", len(fonts)+i, total); err != nil {
 			return nil, err
 		}
 		for _, layer := range page.Content.Layer {
@@ -278,12 +293,11 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 		}
 	}
 	if nested {
-		_, _, _, files := e.usedResources()
 		for i, resource := range e.resources {
-			if resource.definition() == "" || !slices.Contains(files, resource.name) {
+			if resource.definition() == "" || !files[resource.name] {
 				continue
 			}
-			if err := progress.report("fonts", len(e.pages)+i, total); err != nil {
+			if err := progress.report("fonts", len(fonts)+len(e.pages)+i, total); err != nil {
 				return nil, err
 			}
 			if resource.usage.matches(resource.name, resource.data) {
@@ -315,7 +329,7 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 	}
 	result := make(map[string][]byte)
 	for i := range e.resources {
-		if err := progress.report("fonts", len(e.pages)+i, total); err != nil {
+		if err := progress.report("fonts", len(fonts)+len(e.pages)+len(e.resources)+i, total); err != nil {
 			return nil, err
 		}
 		resource := &e.resources[i]

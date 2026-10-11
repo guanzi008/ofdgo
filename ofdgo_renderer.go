@@ -113,18 +113,21 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 	return renderer
 }
 
-// loadTemplate 加载模板页面并复用解析结果
+// loadTemplate 按标识数值加载模板页面，等价引用共用解析结果
 // 入参: templateID 模板ID
 // 返回: *PageContent 模板页面
 func (r *Renderer) loadTemplate(templateID string) *PageContent {
+	if key := editorResourceID(templateID); key != "" {
+		templateID = key
+	}
 	if page := r.templatePageCache[templateID]; page != nil {
 		return page
 	}
 	for _, tpl := range r.Reader.doc.CommonData.TemplatePage {
-		if tpl.ID != templateID {
+		if !sameResourceID(tpl.ID, templateID) {
 			continue
 		}
-		page, err := r.Reader.PageContent(Page{BaseLoc: tpl.BaseLoc})
+		page, err := r.Reader.readPageContent(Page{BaseLoc: tpl.BaseLoc}, false, true)
 		if err != nil {
 			return nil
 		}

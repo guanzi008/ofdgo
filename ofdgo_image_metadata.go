@@ -27,12 +27,28 @@ type imagePageInfo struct {
 	xdpi, ydpi  float64
 }
 
-// imagePageMetadata 读取PNG物理尺寸与JPEG的JFIF、EXIF信息，EXIF密度优先于JFIF
+// imagePageMetadata 读取图片方向与密度，TIFF方向由解码器处理，JPEG的EXIF密度优先于JFIF
 // 入参: data 图片数据, format 图像格式, dpi 缺少物理密度时使用的DPI
 // 返回: imagePageInfo 方向与横纵DPI, error 元数据错误
 func imagePageMetadata(data []byte, format string, dpi float64) (imagePageInfo, error) {
 	info := imagePageInfo{orientation: 1, xdpi: dpi, ydpi: dpi}
 	var exif []byte
+	var directory uint32
+	if format == "tiff" {
+		layout, err := readTIFFLayout(bytes.NewReader(data))
+		if err != nil {
+			return info, err
+		}
+		directory = layout.offset
+		exif = data
+	}
+	if format == "bmp" && len(data) >= 54 && binary.LittleEndian.Uint32(data[14:18]) >= 40 {
+		x := int32(binary.LittleEndian.Uint32(data[38:42]))
+		y := int32(binary.LittleEndian.Uint32(data[42:46]))
+		if x > 0 && y > 0 {
+			info.xdpi, info.ydpi = float64(x)*0.0254, float64(y)*0.0254
+		}
+	}
 	if format == "png" {
 		for offset := 8; offset+12 <= len(data); {
 			n := uint64(binary.BigEndian.Uint32(data[offset:]))
@@ -109,22 +125,28 @@ func imagePageMetadata(data []byte, format string, dpi float64) (imagePageInfo, 
 		}
 	}
 	if len(exif) != 0 {
-		orientation, x, y, err := imageExifMetadata(exif)
+		orientation, x, y, err := imageExifMetadata(exif, dpi, directory)
 		if err != nil {
 			return info, err
 		}
 		info.orientation = orientation
-		if format == "jpeg" && x > 0 && y > 0 {
+		if (format == "jpeg" || format == "tiff") && x > 0 && y > 0 {
 			info.xdpi, info.ydpi = x, y
+		}
+		if format == "tiff" {
+			if orientation >= 5 {
+				info.xdpi, info.ydpi = info.ydpi, info.xdpi
+			}
+			info.orientation = 1
 		}
 	}
 	return info, nil
 }
 
 // imageExifMetadata 只读取主图IFD中的方向和密度，不跟随缩略图与其他目录
-// 入参: data EXIF中的TIFF数据
+// 入参: data TIFF或EXIF数据, dpi 无绝对密度单位时的横向DPI，零值不换算, directory 目录偏移，零值使用首目录
 // 返回: int EXIF方向值，未声明时为1, float64 横向DPI, float64 纵向DPI, error 元数据错误
-func imageExifMetadata(data []byte) (int, float64, float64, error) {
+func imageExifMetadata(data []byte, dpi float64, directory uint32) (int, float64, float64, error) {
 	invalid := fmt.Errorf("invalid EXIF image metadata")
 	if len(data) < 8 {
 		return 0, 0, 0, invalid
@@ -142,6 +164,9 @@ func imageExifMetadata(data []byte) (int, float64, float64, error) {
 		return 0, 0, 0, invalid
 	}
 	offset := uint64(order.Uint32(data[4:]))
+	if directory != 0 {
+		offset = uint64(directory)
+	}
 	if offset < 8 || offset+2 > uint64(len(data)) {
 		return 0, 0, 0, invalid
 	}
@@ -185,6 +210,8 @@ func imageExifMetadata(data []byte) (int, float64, float64, error) {
 	}
 	if unit == 3 {
 		x, y = x*2.54, y*2.54
+	} else if unit == 1 && dpi > 0 && x > 0 && y > 0 {
+		x, y = dpi, dpi*y/x
 	} else if unit != 2 {
 		x, y = 0, 0
 	}

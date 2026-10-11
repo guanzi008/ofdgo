@@ -31,7 +31,7 @@ import (
 	"time"
 )
 
-// editorProgress 保存准备阶段的进度检查点，内存预览使用nil
+// editorProgress 编辑与保存阶段的进度回调，nil表示不回报进度
 type editorProgress func(stage string, completed, total int) error
 
 // ofdCountingWriter 记录实际输出字节数
@@ -70,18 +70,22 @@ func (e *Editor) WriteTo(writer io.Writer) (int64, error) {
 
 // WritePagesTo 按指定顺序将页面另存为独立OFD，不修改当前文档或撤销记录
 // 保留描述信息并生成新文档标识，迁移相关资源、目录、注释和签章外观，移除指向未选页面的跳转
-// 快照只准备所选页面，关联引用由页面导入流程统一筛选
+// 快照只准备所选页面，关联引用由页面导入流程统一筛选，沿用当前后端及字体来源
 // 签名凭据不代表另存文件验签有效；进度与取消复用OnWriteProgress，另含snapshot、ids和commit阶段
 // 入参: writer 输出流, indexes 从0开始的页面索引，不可重复或为空
 // 返回: int64 已写入字节数, error 错误信息
 func (e *Editor) WritePagesTo(writer io.Writer, indexes []int) (int64, error) {
+	ctx := context.Background()
+	if e.output != nil {
+		ctx = e.output.ctx
+	}
 	if len(indexes) == 0 {
 		return 0, fmt.Errorf("no pages selected")
 	}
 	if err := e.validatePageIndexes(indexes); err != nil {
 		return 0, err
 	}
-	progress := editorProgress(e.OnWriteProgress)
+	progress := editorProgress(e.OnWriteProgress).withContext(ctx)
 	if err := progress.report("snapshot", 0, 0); err != nil {
 		return 0, err
 	}
@@ -104,18 +108,24 @@ func (e *Editor) WritePagesTo(writer io.Writer, indexes []int) (int64, error) {
 		snapshot.pages[i] = e.pages[index]
 		positions[i] = i
 	}
+	if err := snapshot.compressPatternPaints(); err != nil {
+		return 0, err
+	}
 	reader, err := snapshot.reader(progress)
 	if err != nil {
 		return 0, err
 	}
 	defer reader.Close()
 	selected := NewEditor()
+	selected.SetRenderBackends(e.backends)
+	selected.SetFontDirs(e.fontDirs...)
+	selected.SetFontFS(e.fontFS...)
 	selected.encryption = e.encryption
 	id := selected.Info.DocID
 	selected.Info = cloneEditorData(e.Info)
 	selected.Info.DocID = id
 	selected.OnWriteProgress = e.OnWriteProgress
-	if _, err := selected.ImportPagesWithOptions(reader, positions, 0, PageImportOptions{Outlines: true, OnProgress: e.OnWriteProgress}); err != nil {
+	if _, err := selected.ImportPagesContext(ctx, reader, positions, 0, PageImportOptions{Outlines: true, OnProgress: e.OnWriteProgress}); err != nil {
 		return 0, err
 	}
 	if e.output != nil {
@@ -151,6 +161,21 @@ func (progress editorProgress) report(stage string, completed, total int) error 
 		return progress(stage, completed, total)
 	}
 	return nil
+}
+
+// withContext 在进度回调前后检查取消，保留回调的原始错误
+// 入参: ctx 取消上下文
+// 返回: editorProgress 可取消的进度回调
+func (progress editorProgress) withContext(ctx context.Context) editorProgress {
+	return func(stage string, completed, total int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := progress.report(stage, completed, total); err != nil {
+			return err
+		}
+		return ctx.Err()
+	}
 }
 
 // writePlaintext 写出未加密包，供显式明文输出与加密封装共用
@@ -220,11 +245,26 @@ func (e *Editor) writePlaintext(writer io.Writer) (int64, error) {
 // 入参: progress 准备进度回调
 // 返回: *Reader 阅读器, error 错误信息
 func (e *Editor) reader(progress editorProgress) (*Reader, error) {
+	ctx := context.Background()
+	if e.output != nil {
+		ctx = e.output.ctx
+	}
+	return e.readerContext(ctx, progress)
+}
+
+// readerContext 准备可取消的内存快照，版本隔离沿用调用方上下文
+// 入参: ctx 取消上下文, progress 准备进度回调
+// 返回: *Reader 独立快照, error 准备或取消错误
+func (e *Editor) readerContext(ctx context.Context, progress editorProgress) (*Reader, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	progress = progress.withContext(ctx)
 	if err := e.validate(); err != nil {
 		return nil, err
 	}
 	if e.source != nil {
-		return e.sourceReader(progress)
+		return e.sourceReader(ctx, progress)
 	}
 	r := &Reader{files: make(map[string][]byte), encryption: e.encryption}
 	if err := e.writeParts(func(name string, data []byte, _ bool) error {
@@ -373,7 +413,7 @@ func (e *Editor) writePartsWithPages(write func(string, []byte, bool) error, pro
 		if len(fonts)+len(images)+len(spaces) != 0 {
 			x.text("DocumentRes", "DocumentRes.xml")
 		}
-		for _, name := range definitions {
+		for _, name := range slices.Sorted(maps.Keys(definitions)) {
 			x.text("DocumentRes", "/"+name)
 		}
 		x.end("CommonData")
@@ -432,7 +472,7 @@ func (e *Editor) writePartsWithPages(write func(string, []byte, bool) error, pro
 		}
 	}
 	for _, resource := range e.resources {
-		if resource.definition() != "" && slices.Contains(definitions, resource.name) || resource.colorProfileUsed(spaces) {
+		if resource.definition() != "" && definitions[resource.name] || resource.colorProfileUsed(spaces) {
 			if err := write(resource.name, resource.data, false); err != nil {
 				return err
 			}
@@ -442,8 +482,8 @@ func (e *Editor) writePartsWithPages(write func(string, []byte, bool) error, pro
 }
 
 // usedResources 沿图层、对象及资源依赖筛选新增资源和共享文件，不修改资源池
-// 返回: []editorResource 新增字体, []editorResource 新增图片, []ColorSpace 新增颜色空间, []string 独立资源文件
-func (e *Editor) usedResources() (fonts, images []editorResource, spaces []ColorSpace, sourceFiles []string) {
+// 返回: []editorResource 新增字体, []editorResource 新增图片, []ColorSpace 新增颜色空间, map[string]bool 独立资源文件集合
+func (e *Editor) usedResources() (fonts, images []editorResource, spaces []ColorSpace, sourceFiles map[string]bool) {
 	used := make(map[string]bool)
 	promoted := make(map[string]bool)
 	files := make(map[string]bool)
@@ -573,7 +613,7 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 			files[name] = true
 		}
 	}
-	return fonts, images, spaces, slices.Sorted(maps.Keys(files))
+	return fonts, images, spaces, files
 }
 
 // page 写出页面尺寸、图层和对象

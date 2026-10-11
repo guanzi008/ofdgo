@@ -75,6 +75,9 @@ func (r *Renderer) AnnotationGeometry(annotation Annotation) (Box, []ObjectConto
 // 入参: object 图形对象, state 绘制状态
 // 返回: error 度量错误
 func (m *annotationMeasurement) DrawObject(object *GraphicObject, state RenderState) error {
+	if state.Hidden {
+		return nil
+	}
 	result, err := m.renderer.MeasureObject(*object, MeasureOptions{Defaults: state.Defaults, Parent: state.Parent, BoundaryInCTM: state.BoundaryInCTM, Clip: state.Clip, Contours: true})
 	if err != nil {
 		return err

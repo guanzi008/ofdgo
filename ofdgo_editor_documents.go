@@ -113,17 +113,15 @@ func (e *Editor) AddDocument(title string, width, height float64, at int) (int, 
 		return 0, err
 	}
 	err := e.editDocuments(func(reader *Reader, data []byte, root *editorXML) (int, error) {
+		occupied := make(map[string]bool)
+		for name := range reader.fileNames {
+			directory, _, _ := strings.Cut(name, "/")
+			occupied[directory] = true
+		}
 		directory := ""
 		for number := 0; ; number++ {
 			candidate := fmt.Sprintf("Doc_%d", number)
-			occupied := false
-			for name := range reader.fileNames {
-				if name == candidate || strings.HasPrefix(name, candidate+"/") {
-					occupied = true
-					break
-				}
-			}
-			if !occupied {
+			if !occupied[candidate] {
 				directory = candidate
 				break
 			}
@@ -219,14 +217,25 @@ func (e *Editor) MoveDocument(from, to int) error {
 // 入参: index 文档索引，从0开始
 // 返回: error 删除错误
 func (e *Editor) DeleteDocument(index int) error {
+	return e.DeleteDocumentContext(context.Background(), index)
+}
+
+// DeleteDocumentContext 删除指定文档及其独占文件，取消或失败时保留当前状态和撤销历史
+// 包内至少保留一个文档，其他文档及版本仍在使用的文件不删除
+// 入参: ctx 取消上下文, index 文档索引，从0开始
+// 返回: error 删除或取消错误
+func (e *Editor) DeleteDocumentContext(ctx context.Context, index int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if index < 0 || index >= e.DocumentCount() {
 		return fmt.Errorf("document index %d out of range", index)
 	}
 	if e.DocumentCount() == 1 {
 		return fmt.Errorf("package must contain at least one document")
 	}
-	return e.editDocuments(func(reader *Reader, data []byte, root *editorXML) (int, error) {
-		removed, err := reader.documentFiles(context.Background(), index)
+	return e.editDocumentsContext(ctx, func(reader *Reader, data []byte, root *editorXML) (int, error) {
+		removed, err := reader.documentFiles(ctx, index)
 		if err != nil {
 			return 0, err
 		}
@@ -236,25 +245,35 @@ func (e *Editor) DeleteDocument(index int) error {
 			return name != cleanPackagePath(reader.OFD.DocBody[index].DocRoot) && strings.HasPrefix(name, directory+"/")
 		}) {
 			for name := range reader.fileNames {
+				if err := ctx.Err(); err != nil {
+					return 0, err
+				}
 				if strings.HasPrefix(name, directory+"/") {
 					removed[name] = true
 				}
 			}
 		}
+		var others []int
 		for other := range reader.OFD.DocBody {
-			if other == index {
-				continue
+			if other != index {
+				others = append(others, other)
 			}
-			kept, err := reader.documentFiles(context.Background(), other)
-			if err != nil {
+		}
+		kept, err := reader.documentFiles(ctx, others...)
+		if err != nil {
+			return 0, err
+		}
+		for name := range kept {
+			if err := ctx.Err(); err != nil {
 				return 0, err
 			}
-			for name := range kept {
-				delete(removed, name)
-			}
+			delete(removed, name)
 		}
 		delete(removed, "OFD.xml")
 		for name := range reader.files {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
 			if removed[name] {
 				delete(reader.files, name)
 			}
@@ -280,15 +299,26 @@ func (e *Editor) DeleteDocument(index int) error {
 // 入参: edit 修改包快照并返回新的当前文档索引
 // 返回: error 修改错误
 func (e *Editor) editDocuments(edit func(*Reader, []byte, *editorXML) (int, error)) error {
-	reader, err := e.Reader()
+	ctx := context.Background()
+	if e.output != nil {
+		ctx = e.output.ctx
+	}
+	return e.editDocumentsContext(ctx, edit)
+}
+
+// editDocumentsContext 在独立快照中修改文档入口，确认未取消后提交完整状态
+// 入参: ctx 取消上下文, edit 修改包快照并返回新的当前文档索引
+// 返回: error 修改或取消错误
+func (e *Editor) editDocumentsContext(ctx context.Context, edit func(*Reader, []byte, *editorXML) (int, error)) error {
+	reader, err := e.readerContext(ctx, nil)
 	if err != nil {
 		return err
 	}
-	data, err := reader.readFile("OFD.xml")
+	data, err := reader.readFileViewContext(ctx, "OFD.xml")
 	if err != nil {
 		return err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return err
 	}
@@ -296,6 +326,9 @@ func (e *Editor) editDocuments(edit func(*Reader, []byte, *editorXML) (int, erro
 	previous := reader.OFD.DocBody[reader.documentIndex]
 	index, err := edit(reader, data, root)
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	before := e.transactionSnapshot()
@@ -310,9 +343,14 @@ func (e *Editor) editDocuments(edit func(*Reader, []byte, *editorXML) (int, erro
 	if _, err := reader.Doc(); err != nil {
 		return err
 	}
-	if err := e.adoptDocumentReader(reader); err != nil {
+	next := *e
+	if err := next.adoptDocumentReader(reader); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	*e = next
 	e.recordTransaction(before)
 	return nil
 }
