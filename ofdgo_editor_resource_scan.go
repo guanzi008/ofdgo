@@ -24,8 +24,8 @@ import (
 )
 
 // scanEditorResources 优先扫描结构依赖，原始数据不按XML解析，孤立文件仍保留引用检查
-// 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 扫描范围, progress 扫描进度, collect 是否保留各文件的字体引用
-// 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 字体引用, bool 是否可安全优化, error 读取或取消错误
+// 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 扫描范围, progress 扫描进度, collect 是否保留各文件的资源引用
+// 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可安全优化, error 读取或取消错误
 func scanEditorResources(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names map[string]bool, progress editorProgress, collect bool) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
 	refs := &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage), roles: make(map[string]int), documents: make(map[string]bool), versions: make(map[string]bool)}
 	var resources []string
@@ -133,7 +133,7 @@ func scanEditorResources(ctx context.Context, reader *Reader, parts map[string][
 		if resource {
 			resources = append(resources, name)
 		}
-		if collect && (resource || len(local.fonts) != 0) {
+		if collect && (resource || len(local.ids) != 0 || len(local.fonts) != 0) {
 			references[name] = local
 		}
 	}

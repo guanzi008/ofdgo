@@ -17,17 +17,8 @@ package ofdgo
 import (
 	"context"
 	"encoding/xml"
-	"maps"
-	"slices"
 	"strings"
 )
-
-// compressionFontBinding 保存资源索引中的字体标识、文件路径及可裁剪状态
-type compressionFontBinding struct {
-	id     string
-	file   string
-	unsafe bool
-}
 
 // compressionFontUsage 按文档合并共享字体用字，版本编辑仅统计选中入口
 // 入参: ctx 取消上下文, parts 输出改动, generated 自产页面引用, documents 文档入口, resources 资源索引, references 各文件引用, read 输出文件读取方法
@@ -41,10 +32,18 @@ func (r *Reader) compressionFontUsage(ctx context.Context, parts map[string][]by
 			return nil, err
 		}
 	}
-	bindings := make(map[string][]compressionFontBinding)
+	scoped, err := r.resourceReferenceScopes(ctx, parts, generated, documents, resources, references, selected)
+	if err != nil || scoped == nil {
+		return nil, err
+	}
+	result := make(map[string]*editorFontUsage)
 	for _, name := range resources {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		refs := scoped[name]
+		if refs == nil {
+			continue
 		}
 		data, err := read(name)
 		if err != nil {
@@ -70,43 +69,10 @@ func (r *Reader) compressionFontUsage(ctx context.Context, parts map[string][]by
 			location := editorResourceLocation(name, root.attr("BaseLoc"), value)
 			id, charset := editorResourceID(font.attr("ID")), font.attr("Charset")
 			unsafe := id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))
-			bindings[name] = append(bindings[name], compressionFontBinding{id: id, file: location, unsafe: unsafe})
-		}
-	}
-	used := make(map[string]bool)
-	result := make(map[string]*editorFontUsage)
-	for _, entry := range slices.Sorted(maps.Keys(documents)) {
-		scope, err := r.versionFileDependencies(ctx, entry, parts, generated)
-		if err != nil {
-			return nil, err
-		}
-		refs := editorResourceRefs{fonts: make(map[string]*editorFontUsage)}
-		for name := range scope {
-			if source := references[name]; source != nil {
-				if selected == "" || selected == entry {
-					for id, usage := range source.fonts {
-						refs.fontUsage(id).merge(usage, false)
-					}
-				}
-				used[name] = true
+			if result[location] == nil {
+				result[location] = newEditorFontUsage()
 			}
-		}
-		if selected != "" && selected != entry {
-			continue
-		}
-		for name := range scope {
-			for _, binding := range bindings[name] {
-				usage := refs.fonts[binding.id]
-				if result[binding.file] == nil {
-					result[binding.file] = newEditorFontUsage()
-				}
-				result[binding.file].merge(usage, binding.unsafe)
-			}
-		}
-	}
-	for name, refs := range references {
-		if !used[name] && (len(refs.fonts) != 0 || len(bindings[name]) != 0) {
-			return nil, nil
+			result[location].merge(refs.fonts[id], unsafe)
 		}
 	}
 	return result, ctx.Err()

@@ -47,11 +47,12 @@ type editorResourceRefs struct {
 
 // compactSourceReferences 合并自产页面引用，版本文档按当前版本范围扫描
 // 按GB/T33190-2016附录A检查标识和路径引用，保留扫描范围内孤立XML中的引用
-// 多文档、未知扩展或无法解析的XML不清理资源，避免误删共享或无法确认用途的条目
+// 多文档压缩按文档归集引用，未知扩展或无法解析的XML不清理资源
 // 入参: parts 输出条目, progress 保存进度回调, generated 自产页面及引用
 // 返回: map[string]bool 可移除条目, error 读取或取消错误
 func (e *Editor) compactSourceReferences(parts map[string][]byte, progress editorProgress, generated map[string]editorGeneratedReferences) (map[string]bool, error) {
-	if e.source.reader.DocumentCount() > 1 || e.output != nil && e.output.protected {
+	multiple := e.source.reader.DocumentCount() > 1
+	if e.output != nil && e.output.protected || multiple && (e.output == nil || e.output.options.Mode == CompressionUnchanged) {
 		return nil, nil
 	}
 	if len(parts) == 0 && e.revision == 0 && (e.output == nil || e.output.options.Mode == CompressionUnchanged) {
@@ -84,12 +85,26 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 			}
 		}
 	}
-	refs, resources, _, safe, err := scanEditorResources(ctx, reader, parts, generated, names, progress, false)
+	refs, resources, references, safe, err := scanEditorResources(ctx, reader, parts, generated, names, progress, multiple)
 	if err != nil {
 		return nil, err
 	}
 	if !safe {
 		return nil, nil
+	}
+	var scoped map[string]*editorResourceRefs
+	if multiple {
+		selected := ""
+		if reader.OFD.DocBody[reader.documentIndex].versioned {
+			selected, err = reader.DocumentRoot()
+			if err != nil {
+				return nil, err
+			}
+		}
+		scoped, err = reader.resourceReferenceScopes(ctx, parts, generated, refs.documents, resources, references, selected)
+		if err != nil || scoped == nil {
+			return nil, err
+		}
 	}
 	ordered := slices.Sorted(maps.Keys(names))
 	removed := maps.Clone(e.source.retiredAttachments)
@@ -115,7 +130,11 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 		if err != nil {
 			return nil, nil
 		}
-		preserved := refs.versions[cleanPackagePath(name)]
+		usageRefs := refs
+		if multiple {
+			usageRefs = scoped[name]
+		}
+		preserved := refs.versions[cleanPackagePath(name)] || usageRefs == nil
 		var patches []editorXMLPatch
 		for _, group := range root.children {
 			var members []editorXMLPatch
@@ -130,7 +149,7 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 					continue
 				}
 				id := editorResourceID(node.attr("ID"))
-				keep := preserved || id == "" || refs.ids[id] || field == "MediaFile" && node.attr("Type") != "Image"
+				keep := preserved || id == "" || usageRefs.ids[id] || field == "MediaFile" && node.attr("Type") != "Image"
 				if file := node.child(field); file != nil {
 					var value string
 					if err := xml.Unmarshal(data[file.start:file.end], &value); err != nil {
@@ -138,8 +157,8 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 					}
 					if location := editorResourceLocation(name, root.attr("BaseLoc"), value); location != "" {
 						alternate := cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))
-						if field == "FontFile" {
-							usage := refs.fonts[id]
+						if field == "FontFile" && !multiple {
+							usage := usageRefs.fonts[id]
 							charset := node.attr("Charset")
 							unsafe := preserved || id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != alternate
 							for _, file := range []string{location, alternate} {
