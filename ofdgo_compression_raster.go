@@ -123,10 +123,10 @@ func optimizeBMPResource(ctx context.Context, data []byte, options CompressionOp
 }
 
 // optimizeRasterResource 编码已解码的资源图片，同步降采样后的像素密度，仅采用更小结果
+// 绝对密度在降采样后量化为PNG整数，避免原始有理数密度被二次舍入
 // 入参: ctx 取消上下文, data 原编码, pixels 像素, options 压缩选项, size 像素需求, density 像素密度
 // 返回: []byte 图片编码, error 编码或取消错误
 func optimizeRasterResource(ctx context.Context, data []byte, pixels image.Image, options CompressionOptions, size image.Point, density rasterDensity) ([]byte, error) {
-	width, height := pixels.Bounds().Dx(), pixels.Bounds().Dy()
 	var encoded bytes.Buffer
 	limit := &outputCompressionBuffer{buffer: &encoded, limit: outputOptimizationBufferLimit}
 	if err := pdfgo.EncodePNG(ctx, limit, pixels); err != nil {
@@ -135,43 +135,47 @@ func optimizeRasterResource(ctx context.Context, data []byte, pixels image.Image
 		}
 		return nil, err
 	}
-	var candidate []byte
-	var err error
-	if density.x == 0 && density.y == 0 {
-		candidate, err = pdfgo.OptimizeImageResource(ctx, encoded.Bytes(), options, size)
-	} else {
-		candidate, err = pdfgo.OptimizeImageSize(ctx, encoded.Bytes(), options, size)
-		if err == nil {
-			config, _, configErr := image.DecodeConfig(bytes.NewReader(candidate))
-			if configErr != nil {
-				return nil, configErr
-			}
-			x := density.x * float64(config.Width) / float64(width)
-			y := density.y * float64(config.Height) / float64(height)
-			if density.unit == 0 {
-				factor := float64(math.MaxUint32) / max(x, y)
-				x, y = x*factor, y*factor
-			}
-			x, y = math.Round(x), math.Round(y)
-			if x > math.MaxUint32 || y > math.MaxUint32 || density.x > 0 && x < 1 || density.y > 0 && y < 1 {
-				return data, ctx.Err()
-			}
-			chunk := make([]byte, 21)
-			binary.BigEndian.PutUint32(chunk, 9)
-			copy(chunk[4:], "pHYs")
-			binary.BigEndian.PutUint32(chunk[8:], uint32(x))
-			binary.BigEndian.PutUint32(chunk[12:], uint32(y))
-			chunk[16] = density.unit
-			binary.BigEndian.PutUint32(chunk[17:], crc32.ChecksumIEEE(chunk[4:17]))
-			var output bytes.Buffer
-			writer := imageMetadataWriter{writer: &output, skip: 33, data: chunk}
-			if _, err = writer.Write(candidate); err == nil {
-				candidate = output.Bytes()
-			}
+	input := encoded.Bytes()
+	hasDensity := density.x != 0 || density.y != 0
+	if hasDensity && density.unit == 1 {
+		var err error
+		input, err = pdfgo.OptimizeImageSize(ctx, input, options, size)
+		if err != nil {
+			return nil, err
 		}
+		config, _, err := image.DecodeConfig(bytes.NewReader(input))
+		if err != nil {
+			return nil, err
+		}
+		density.x *= float64(config.Width) / float64(pixels.Bounds().Dx())
+		density.y *= float64(config.Height) / float64(pixels.Bounds().Dy())
 	}
-	if err != nil {
-		return nil, err
+	if hasDensity {
+		x, y := math.Round(density.x), math.Round(density.y)
+		if x > math.MaxInt32 || y > math.MaxInt32 || density.x > 0 && x < 1 || density.y > 0 && y < 1 || len(input) > outputOptimizationBufferLimit-21 {
+			return data, ctx.Err()
+		}
+		chunk := make([]byte, 21)
+		binary.BigEndian.PutUint32(chunk, 9)
+		copy(chunk[4:], "pHYs")
+		binary.BigEndian.PutUint32(chunk[8:], uint32(x))
+		binary.BigEndian.PutUint32(chunk[12:], uint32(y))
+		chunk[16] = density.unit
+		binary.BigEndian.PutUint32(chunk[17:], crc32.ChecksumIEEE(chunk[4:17]))
+		var output bytes.Buffer
+		writer := imageMetadataWriter{writer: &output, skip: 33, data: chunk}
+		if _, err := writer.Write(input); err != nil {
+			return nil, err
+		}
+		input = output.Bytes()
+	}
+	candidate := input
+	if !hasDensity || density.unit == 0 {
+		var err error
+		candidate, err = pdfgo.OptimizeImageResource(ctx, input, options, size)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

@@ -157,7 +157,7 @@ func tiffCompressionDensity(data []byte, layout tiffImageLayout) (rasterDensity,
 		}
 		density = rasterDensity{x: float64(x[0]) / float64(x[1]) * factor, y: float64(y[0]) / float64(y[1]) * factor, unit: 1}
 	}
-	if math.Round(density.x) < 1 || math.Round(density.y) < 1 || math.Round(density.x) > math.MaxUint32 || math.Round(density.y) > math.MaxUint32 {
+	if math.Round(density.x) < 1 || math.Round(density.y) < 1 || math.Round(density.x) > math.MaxInt32 || math.Round(density.y) > math.MaxInt32 {
 		return density, false
 	}
 	if layout.orientation >= 5 {
