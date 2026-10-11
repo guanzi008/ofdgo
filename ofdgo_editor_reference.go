@@ -176,6 +176,11 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			if attr.Name.Local != "ID" {
 				s.refs.reference(s.name, s.base, attr.Name.Local, attr.Value, s.resource)
 			}
+			root, parent := token.Name.Local, ""
+			if len(s.stack) != 0 {
+				root, parent = s.stack[0], s.stack[len(s.stack)-1]
+			}
+			s.fileReference(root, parent, token.Name.Local, attr.Name.Local, attr.Value)
 			if s.objects != nil && editorObjectReference(attr.Name.Local) {
 				id := attr.Value
 				if key := editorResourceID(id); key != "" {
@@ -196,6 +201,9 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 		s.fonts = append(s.fonts, usage)
 		s.text.Reset()
 		s.capture = editorResourceReferenceKind(token.Name.Local, s.resource) != editorReferenceNone || usage != nil && (token.Name.Local == "TextCode" || token.Name.Local == "Glyphs")
+		if len(s.stack) >= 2 && packageReference(s.stack[0], s.stack[len(s.stack)-2], token.Name.Local, "") != packageReferenceNone {
+			s.capture = true
+		}
 	case xml.CharData:
 		if s.capture {
 			s.text.Write(token)
@@ -206,6 +214,9 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			return false
 		}
 		s.refs.reference(s.name, s.base, token.Name.Local, s.text.String(), s.resource)
+		if len(s.stack) >= 2 {
+			s.fileReference(s.stack[0], s.stack[len(s.stack)-2], token.Name.Local, "", s.text.String())
+		}
 		if len(s.stack) == 3 && s.stack[0] == "DocVersion" && s.stack[1] == "FileList" && token.Name.Local == "File" {
 			if name := editorResourceLocation(s.name, "", s.text.String()); name != "" {
 				if s.refs.versions == nil {
@@ -239,11 +250,35 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 	return s.safe
 }
 
+// fileReference 按节点位置记录结构文件与原始数据，版本清单不改变文件用途
+// 入参: root 根节点, parent 父节点, name 节点名称, attribute 属性名称, value 引用路径
+func (s *editorReferenceScan) fileReference(root, parent, name, attribute, value string) {
+	if root == "DocVersion" && parent == "FileList" && name == "File" || strings.TrimSpace(value) == "" {
+		return
+	}
+	kind := packageReference(root, parent, name, attribute)
+	if kind == packageReferenceNone {
+		return
+	}
+	if s.refs.roles == nil {
+		s.refs.roles = make(map[string]int)
+	}
+	s.refs.roles[resolveResourcePath(s.name, s.base, value)] |= kind
+}
+
 // merge 合并本次编码已确认的引用，不共享字体用字的可变集合
 // 入参: other 独立页面引用
 func (r *editorResourceRefs) merge(other *editorResourceRefs) {
 	maps.Copy(r.ids, other.ids)
 	maps.Copy(r.files, other.files)
+	if len(other.roles) != 0 {
+		if r.roles == nil {
+			r.roles = make(map[string]int)
+		}
+		for name, role := range other.roles {
+			r.roles[name] |= role
+		}
+	}
 	if len(other.documents) != 0 {
 		if r.documents == nil {
 			r.documents = make(map[string]bool)

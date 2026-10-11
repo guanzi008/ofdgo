@@ -42,6 +42,7 @@ type editorResourceRefs struct {
 	fonts     map[string]*editorFontUsage
 	versions  map[string]bool
 	documents map[string]bool
+	roles     map[string]int
 }
 
 // compactSourceReferences 合并自产页面引用，版本文档按当前版本范围扫描
@@ -83,53 +84,14 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 			}
 		}
 	}
-	refs := editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
-	var resources []string
-	ordered := slices.Sorted(maps.Keys(names))
-	for i, name := range ordered {
-		if err := progress.report("references", i, len(ordered)); err != nil {
-			return nil, err
-		}
-		if strings.HasSuffix(name, "/") {
-			continue
-		}
-		data, replaced := parts[name]
-		if known, ok := generated[name]; ok && replaced && known.refs != nil && known.matches(data) {
-			refs.merge(known.refs)
-			continue
-		}
-		var input io.ReadCloser
-		if replaced {
-			if known := generated[name]; data == nil && known.staged != nil {
-				input = known.staged.open()
-			} else {
-				input = io.NopCloser(bytes.NewReader(data))
-			}
-		} else {
-			var err error
-			input, err = reader.openFile(name)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if e.output != nil {
-			input = imageInput{ReadCloser: input, context: e.output.ctx}
-		}
-		resource, safe := refs.scan(input, name)
-		input.Close()
-		if e.output != nil && e.output.ctx.Err() != nil {
-			return nil, e.output.ctx.Err()
-		}
-		if !safe {
-			return nil, nil
-		}
-		if resource {
-			resources = append(resources, name)
-		}
-	}
-	if err := progress.report("references", len(ordered), len(ordered)); err != nil {
+	refs, resources, _, safe, err := scanEditorResources(ctx, reader, parts, generated, names, progress, false)
+	if err != nil {
 		return nil, err
 	}
+	if !safe {
+		return nil, nil
+	}
+	ordered := slices.Sorted(maps.Keys(names))
 	removed := maps.Clone(e.source.retiredAttachments)
 	if removed == nil {
 		removed = make(map[string]bool)

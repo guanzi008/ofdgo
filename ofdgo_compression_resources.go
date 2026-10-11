@@ -20,7 +20,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"image"
-	"io"
 	"maps"
 	"path"
 	"slices"
@@ -73,12 +72,6 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		}
 		return reader.readFileView(name)
 	}
-	refs := editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
-	var fontReferences map[string]*editorResourceRefs
-	if reader != nil && reader.DocumentCount() > 1 && e.backends.FontResources != nil {
-		fontReferences = make(map[string]*editorResourceRefs)
-	}
-	var resources []string
 	actual := make(map[string]string)
 	for _, name := range slices.Sorted(maps.Keys(names)) {
 		if err := e.output.ctx.Err(); err != nil {
@@ -86,6 +79,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		}
 		key := cleanPackagePath(name)
 		if removed[key] || strings.HasSuffix(name, "/") {
+			delete(names, name)
 			continue
 		}
 		if prior, ok := actual[key]; ok && prior != name {
@@ -93,51 +87,14 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		}
 		actual[key] = name
 		if scope != nil && !scope[key] {
+			delete(names, name)
 			continue
 		}
-		data, replaced := parts[name]
-		if known, ok := generated[name]; ok && replaced && known.refs != nil && known.matches(data) {
-			refs.merge(known.refs)
-			if fontReferences != nil && len(known.refs.fonts) != 0 {
-				fontReferences[name] = known.refs
-			}
-			continue
-		}
-		var input io.ReadCloser
-		if replaced {
-			if known := generated[name]; data == nil && known.staged != nil {
-				input = known.staged.open()
-			} else {
-				input = io.NopCloser(bytes.NewReader(data))
-			}
-		} else {
-			var err error
-			input, err = reader.openFile(name)
-			if err != nil {
-				return err
-			}
-		}
-		scanned := &refs
-		if fontReferences != nil {
-			scanned = &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
-		}
-		resource, safe := scanned.scan(imageInput{ReadCloser: input, context: e.output.ctx}, name)
-		input.Close()
-		if err := e.output.ctx.Err(); err != nil {
-			return err
-		}
-		if !safe {
-			return nil
-		}
-		if fontReferences != nil {
-			if resource || len(scanned.fonts) != 0 {
-				fontReferences[name] = scanned
-			}
-			refs.merge(scanned)
-		}
-		if resource {
-			resources = append(resources, name)
-		}
+	}
+	collect := reader != nil && reader.DocumentCount() > 1 && e.backends.FontResources != nil
+	refs, resources, fontReferences, safe, err := scanEditorResources(e.output.ctx, reader, parts, generated, names, nil, collect)
+	if err != nil || !safe {
+		return err
 	}
 	type resourceFile struct{ key, role string }
 	files := make(map[resourceFile]bool)
