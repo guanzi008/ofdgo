@@ -457,17 +457,30 @@ func (r *Reader) Extensions() ([]Extension, error) {
 // initRoot 读取根节点信息
 // 返回: error 错误信息
 func (r *Reader) initRoot() error {
-	if err := r.indexPackage(); err != nil {
+	return r.initRootContext(context.Background())
+}
+
+// initRootContext 重建包索引与主入口，取消或失败时保留原阅读状态
+// 入参: ctx 取消上下文
+// 返回: error 索引、读取、解析或取消错误
+func (r *Reader) initRootContext(ctx context.Context) error {
+	view := *r
+	if err := view.indexPackageContext(ctx); err != nil {
 		return err
 	}
-	data, err := r.readFile("OFD.xml")
+	data, err := view.readFileViewContext(ctx, "OFD.xml")
 	if err != nil {
 		return fmt.Errorf("failed to read ofd.xml: %w", err)
 	}
 	var ofd OFD
-	if err := xml.Unmarshal(data, &ofd); err != nil {
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	if err := decoder.Decode(&ofd); err != nil {
 		return fmt.Errorf("failed to unmarshal ofd.xml: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.fileIndex, r.fileNames = view.fileIndex, view.fileNames
 	r.OFD = &ofd
 	r.doc, r.versionInfo = nil, nil
 	r.documentRoot, r.RootDir = "", ""
@@ -490,14 +503,27 @@ func (r *Reader) initRoot() error {
 // indexPackage 按大小写敏感路径建立包索引，拒绝规范化后重复的ZIP条目
 // 返回: error 错误信息
 func (r *Reader) indexPackage() error {
+	return r.indexPackageContext(context.Background())
+}
+
+// indexPackageContext 建立大小写敏感的包索引，取消或路径校验失败时保留原索引
+// 入参: ctx 取消上下文
+// 返回: error 路径或取消错误
+func (r *Reader) indexPackageContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	count := 0
 	if r.Zip != nil {
 		count = len(r.Zip.File)
 	}
-	r.fileIndex = make(map[string]*zip.File, count)
-	r.fileNames = make(map[string]bool, count+len(r.files))
+	index := make(map[string]*zip.File, count)
+	names := make(map[string]bool, count+len(r.files))
 	if r.Zip != nil {
 		for _, f := range r.Zip.File {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if f.FileInfo().IsDir() {
 				continue
 			}
@@ -505,19 +531,26 @@ func (r *Reader) indexPackage() error {
 			if !validPackagePath(name) {
 				return fmt.Errorf("invalid package path: %q", f.Name)
 			}
-			if previous, ok := r.fileIndex[name]; ok {
+			if previous, ok := index[name]; ok {
 				return fmt.Errorf("ambiguous package paths: %q and %q", previous.Name, f.Name)
 			}
-			r.fileIndex[name] = f
-			r.fileNames[name] = true
+			index[name] = f
+			names[name] = true
 		}
 	}
 	for name := range r.files {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if name != cleanPackagePath(name) || !validPackagePath(name) {
 			return fmt.Errorf("invalid package path: %q", name)
 		}
-		r.fileNames[name] = true
+		names[name] = true
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.fileIndex, r.fileNames = index, names
 	return nil
 }
 

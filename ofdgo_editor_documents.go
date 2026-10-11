@@ -333,7 +333,7 @@ func (e *Editor) editDocumentsContext(ctx context.Context, edit func(*Reader, []
 	}
 	before := e.transactionSnapshot()
 	reader.documentIndex, reader.doc = index, nil
-	if err := reader.initRoot(); err != nil {
+	if err := reader.initRootContext(ctx); err != nil {
 		return err
 	}
 	current := reader.OFD.DocBody[index]

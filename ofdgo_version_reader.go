@@ -14,12 +14,26 @@
 
 package ofdgo
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // DocumentRoot 获取当前阅读入口的包内路径，不改写OFD中的主入口
 // 未显式选择时使用唯一的Current版本；没有默认版本时使用主入口，多个默认版本返回错误
 // 返回: string 阅读入口, error 版本选择或描述错误
 func (r *Reader) DocumentRoot() (string, error) {
+	return r.DocumentRootContext(context.Background())
+}
+
+// DocumentRootContext 获取当前阅读入口，解析版本列表和文件清单时响应取消
+// 取消或失败时不缓存本次选择结果，入口选择规则与DocumentRoot相同
+// 入参: ctx 取消上下文
+// 返回: string 阅读入口, error 版本选择、读取或取消错误
+func (r *Reader) DocumentRootContext(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if r.documentRoot != "" {
 		return r.documentRoot, nil
 	}
@@ -34,12 +48,15 @@ func (r *Reader) DocumentRoot() (string, error) {
 		}
 		return root, err
 	}
-	entries, err := r.documentVersionEntries()
+	entries, err := r.documentVersionEntriesContext(ctx)
 	if err != nil {
 		return "", err
 	}
 	var selected *DocumentVersionInfo
 	for i := range entries {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		entry := &entries[i]
 		if r.selectedVersion != nil && entry.ID == *r.selectedVersion || r.selectedVersion == nil && entry.Current {
 			if selected != nil {
@@ -58,11 +75,14 @@ func (r *Reader) DocumentRoot() (string, error) {
 		}
 		return root, err
 	}
-	info, err := r.readDocumentVersion(selected.ID, selected.Location)
+	info, err := r.readDocumentVersionContext(ctx, selected.ID, selected.Location)
 	if err != nil {
 		return "", fmt.Errorf("version %s: %w", selected.ID, err)
 	}
 	info.Index, info.Current = selected.Index, selected.Current
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	r.documentRoot, r.versionInfo = info.DocRoot, &info
 	return r.documentRoot, nil
 }
@@ -98,13 +118,20 @@ func (r *Reader) DocumentVersion(id string) (*Reader, error) {
 // 入参: index 文档索引
 // 返回: string 包内路径, error 选择错误
 func (r *Reader) documentEntry(index int) (string, error) {
+	return r.documentEntryContext(context.Background(), index)
+}
+
+// documentEntryContext 解析指定文档的阅读入口，当前文档保留显式选择
+// 入参: ctx 取消上下文, index 文档索引
+// 返回: string 包内路径, error 选择、读取或取消错误
+func (r *Reader) documentEntryContext(ctx context.Context, index int) (string, error) {
 	if index == r.documentIndex {
-		return r.DocumentRoot()
+		return r.DocumentRootContext(ctx)
 	}
 	view := *r
 	view.documentIndex, view.documentRoot = index, ""
 	view.selectedVersion, view.versionInfo = nil, nil
-	return view.DocumentRoot()
+	return view.DocumentRootContext(ctx)
 }
 
 // versionSignatures 按OFD入口解析包级签名路径，选中版本仅使用文件清单内的签名入口

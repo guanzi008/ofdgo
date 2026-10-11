@@ -761,7 +761,7 @@ func (e *Editor) sourceReader(ctx context.Context, progress editorProgress) (*Re
 	}
 	maps.Copy(files, parts)
 	reader := &Reader{Zip: e.source.reader.Zip, files: files, encryption: e.encryption, documentIndex: e.source.reader.documentIndex, selectedVersion: e.source.reader.selectedVersion}
-	if err := reader.initRoot(); err != nil {
+	if err := reader.initRootContext(ctx); err != nil {
 		return nil, err
 	}
 	if _, err := reader.Doc(); err != nil {

@@ -129,7 +129,7 @@ func (e *Editor) AddVersionContext(ctx context.Context, name string) (string, er
 				break
 			}
 		}
-		entry, err := reader.DocumentRoot()
+		entry, err := reader.DocumentRootContext(ctx)
 		if err != nil {
 			return 0, err
 		}
@@ -384,7 +384,7 @@ func (r *Reader) versionSnapshotFiles(ctx context.Context) (map[string]bool, err
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	entry, err := r.DocumentRoot()
+	entry, err := r.DocumentRootContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -444,7 +444,7 @@ func (r *Reader) retireVersionFiles(ctx context.Context, candidates map[string]b
 		return err
 	}
 	view := *r
-	if err := view.initRoot(); err != nil {
+	if err := view.initRootContext(ctx); err != nil {
 		return err
 	}
 	indexes := make([]int, view.DocumentCount())

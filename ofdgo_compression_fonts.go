@@ -27,7 +27,7 @@ func (r *Reader) compressionFontUsage(ctx context.Context, documents map[string]
 	selected := ""
 	if r.OFD.DocBody[r.documentIndex].versioned {
 		var err error
-		selected, err = r.DocumentRoot()
+		selected, err = r.DocumentRootContext(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -49,7 +49,7 @@ func (r *Reader) compressionFontUsage(ctx context.Context, documents map[string]
 		if err != nil {
 			return nil, err
 		}
-		root, err := parseEditorXML(data)
+		root, err := parseEditorXMLContext(ctx, data)
 		if err != nil {
 			return nil, err
 		}

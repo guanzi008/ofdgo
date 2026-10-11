@@ -273,7 +273,7 @@ func (e *Editor) readerContext(ctx context.Context, progress editorProgress) (*R
 	}, progress); err != nil {
 		return nil, err
 	}
-	if err := r.initRoot(); err != nil {
+	if err := r.initRootContext(ctx); err != nil {
 		return nil, err
 	}
 	if _, err := r.Doc(); err != nil {

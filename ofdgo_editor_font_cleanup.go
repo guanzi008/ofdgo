@@ -43,13 +43,13 @@ func (e *Editor) compactVersionFonts(ctx context.Context, parts map[string][]byt
 		view.files = make(map[string][]byte)
 	}
 	maps.Copy(view.files, parts)
-	if err := view.initRoot(); err != nil {
+	if err := view.initRootContext(ctx); err != nil {
 		return err
 	}
 	candidates, seen := make(map[string]bool), make(map[string]bool)
 	for index := range view.DocumentCount() {
 		view.documentIndex = index
-		versions, err := view.DocumentVersions()
+		versions, err := view.DocumentVersionsContext(ctx)
 		if err != nil {
 			return err
 		}

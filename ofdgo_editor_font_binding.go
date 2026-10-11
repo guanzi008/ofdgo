@@ -497,7 +497,7 @@ func (e *Editor) commitFontSnapshot(ctx context.Context, reader *Reader) error {
 		return err
 	}
 	clean := &Reader{Zip: reader.Zip, files: maps.Clone(reader.files), documentIndex: reader.DocumentIndex(), encryption: e.encryption, selectedVersion: reader.selectedVersion}
-	if err := clean.initRoot(); err != nil {
+	if err := clean.initRootContext(ctx); err != nil {
 		return err
 	}
 	next, err := clean.Editor()
@@ -571,13 +571,13 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 		if files[name] && !structures[name] {
 			continue
 		}
-		data, err := reader.readFile(name)
+		data, err := reader.readFileViewContext(ctx, name)
 		if err != nil {
 			return err
 		}
-		root, err := parseEditorXML(data)
+		root, err := parseEditorXMLContext(ctx, data)
 		if err != nil {
-			return nil
+			return ctx.Err()
 		}
 		base := ""
 		if root.matchesOFD("Res") {
@@ -588,6 +588,9 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 		}
 		var retains func(*editorXML) bool
 		retains = func(node *editorXML) bool {
+			if ctx.Err() != nil {
+				return true
+			}
 			if classifyOFDNamespace(node.name.Space) == ofdXMLUnknown || slices.Contains([]string{"CustomTags", "Extensions", "ExtendData", "Data"}, node.name.Local) {
 				return true
 			}
@@ -617,7 +620,7 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 			return slices.ContainsFunc(node.children, retains)
 		}
 		if retains(root) || len(removed) == 0 {
-			return nil
+			return ctx.Err()
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -625,9 +628,15 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 	}
 	updates := make(map[string][]byte)
 	for name, file := range versions {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var patches []editorXMLPatch
 		if list := file.root.child("FileList"); list != nil {
 			for _, node := range list.children {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				if node.matchesOFD("File") && removed[resolveResourcePath(name, "", strings.TrimSpace(editorImportText(file.data, node)))] {
 					patches = append(patches, editorXMLPatch{start: node.start, end: node.end})
 				}
@@ -640,17 +649,26 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if reader.files == nil {
-		reader.files = make(map[string][]byte)
+	view := *reader
+	view.files = maps.Clone(reader.files)
+	if view.files == nil {
+		view.files = make(map[string][]byte)
 	}
-	maps.Copy(reader.files, updates)
-	for name := range reader.files {
+	maps.Copy(view.files, updates)
+	for name := range view.files {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if removed[cleanPackagePath(name)] {
-			delete(reader.files, name)
+			delete(view.files, name)
 		}
 	}
-	if reader.Zip != nil {
-		reader.Zip = &zip.Reader{Comment: reader.Zip.Comment, File: slices.DeleteFunc(slices.Clone(reader.Zip.File), func(file *zip.File) bool { return removed[cleanPackagePath(file.Name)] })}
+	if view.Zip != nil {
+		view.Zip = &zip.Reader{Comment: view.Zip.Comment, File: slices.DeleteFunc(slices.Clone(view.Zip.File), func(file *zip.File) bool { return removed[cleanPackagePath(file.Name)] })}
 	}
-	return reader.initRoot()
+	if err := view.initRootContext(ctx); err != nil {
+		return err
+	}
+	*reader = view
+	return nil
 }

@@ -54,7 +54,7 @@ type editorFontDeclaration struct {
 // 返回: *editorFontDocument 字体引用, error 读取或结构错误
 func scanEditorFonts(ctx context.Context, reader *Reader, index int) (*editorFontDocument, error) {
 	scan := &editorFontDocument{reader: reader, index: index, files: make(map[string]*editorFontXML), fonts: make(map[string]*editorFontDeclaration)}
-	entry, err := reader.documentEntry(index)
+	entry, err := reader.documentEntryContext(ctx, index)
 	if err != nil {
 		return nil, err
 	}
@@ -68,11 +68,11 @@ func scanEditorFonts(ctx context.Context, reader *Reader, index int) (*editorFon
 		if scan.files[name] != nil {
 			continue
 		}
-		data, err := reader.readFile(name)
+		data, err := reader.readFileViewContext(ctx, name)
 		if err != nil {
 			return nil, err
 		}
-		root, err := parseEditorXML(data)
+		root, err := parseEditorXMLContext(ctx, data)
 		if err != nil {
 			return nil, err
 		}
@@ -84,6 +84,9 @@ func scanEditorFonts(ctx context.Context, reader *Reader, index int) (*editorFon
 		}
 		var visit func(*editorXML) error
 		visit = func(node *editorXML) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if classifyOFDNamespace(node.name.Space) == ofdXMLUnknown {
 				scan.unsafe = true
 				return nil
@@ -176,7 +179,7 @@ func (s *editorFontDocument) apply(ctx context.Context, changes map[string][]byt
 		next.files = make(map[string][]byte)
 	}
 	maps.Copy(next.files, parts)
-	if err := next.initRoot(); err != nil {
+	if err := next.initRootContext(ctx); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {

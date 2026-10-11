@@ -44,7 +44,7 @@ func scanEditorResources(ctx context.Context, reader *Reader, parts map[string][
 	}
 	queue := []string{"OFD.xml"}
 	if reader != nil && reader.OFD.DocBody[reader.documentIndex].versioned {
-		entry, err := reader.DocumentRoot()
+		entry, err := reader.DocumentRootContext(ctx)
 		if err != nil {
 			return nil, nil, nil, false, err
 		}

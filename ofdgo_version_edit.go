@@ -203,7 +203,7 @@ func (r *Reader) versionResourceFiles(ctx context.Context, parts map[string][]by
 	if r == nil || !r.OFD.DocBody[r.documentIndex].versioned {
 		return nil, nil
 	}
-	entry, err := r.DocumentRoot()
+	entry, err := r.DocumentRootContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +292,7 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	entry, err := r.DocumentRoot()
+	entry, err := r.DocumentRootContext(ctx)
 	if err != nil {
 		return nil, err
 	}

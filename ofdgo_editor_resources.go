@@ -107,7 +107,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 		for _, name := range resources {
 			data, ok := parts[name]
 			if !ok {
-				data, err = reader.readFile(name)
+				data, err = reader.readFileViewContext(ctx, name)
 				if err != nil {
 					return nil, err
 				}
@@ -122,7 +122,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 	if multiple || prune {
 		selected := ""
 		if reader != nil && reader.OFD.DocBody[reader.documentIndex].versioned {
-			selected, err = reader.DocumentRoot()
+			selected, err = reader.DocumentRootContext(ctx)
 			if err != nil {
 				return nil, err
 			}
