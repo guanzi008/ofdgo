@@ -9,7 +9,7 @@ const PAGE_CACHE_BYTES = 32 * 1024 * 1024;
 const SCROLL_SEGMENT_SIZE = 1000000;
 const OBJECT_CLIPBOARD_TYPE = "application/x-ofdgo-objects";
 const STATUS = {
-	ready: "选择 OFD 文件",
+	ready: "选择 OFD、PDF 文件",
 	opening: "正在打开文档",
 	engine: "正在准备引擎",
 	recovering: "正在恢复引擎",
@@ -3664,7 +3664,7 @@ async function boot() {
 		}
 		if (openSeq === state.openSeq) setProgress("引擎准备完成", 70);
 		await loadExportFormats();
-		if (openSeq === state.openSeq) setEmpty("选择 OFD 文件");
+		if (openSeq === state.openSeq) setEmpty("选择 OFD、PDF 文件");
 		updateFontSummary();
 		renderFontList();
 		updateControls();
@@ -3724,6 +3724,9 @@ async function prepareOffline() {
 		if (result.reload) {
 			location.reload();
 			return false;
+		}
+		if (navigator.storage?.persist) {
+			navigator.storage.persist().catch(() => false);
 		}
 		el.offlineStatus.textContent = "可离线";
 		watchApplicationUpdates(result.checksum);
@@ -4094,7 +4097,7 @@ async function openOFD(file, remote = null) {
 	}
 	if (!remote && !isDocumentFile(file)) {
 		el.ofdInput.value = "";
-		showError(new Error("选择 OFD 文件"), !state.doc);
+		showError(new Error("选择 OFD、PDF 文件"), !state.doc);
 		return;
 	}
 	if (!discardChanges()) {
