@@ -20,10 +20,10 @@ import (
 	"slices"
 )
 
-// resourceReferenceScopes 按文档归集资源标识和字体用字，同文档索引共用只读结果，跨文档索引独立合并
-// 入参: ctx 取消上下文, parts 输出改动, generated 自产页面引用, documents 文档入口, resources 资源索引, references 文件引用, selected 限定的文档入口，空值统计全部文档
-// 返回: map[string]*editorResourceRefs 各资源索引的引用，存在无法归属的引用时为空, error 读取或取消错误
-func (r *Reader) resourceReferenceScopes(ctx context.Context, parts map[string][]byte, generated map[string]editorGeneratedReferences, documents map[string]bool, resources []string, references map[string]*editorResourceRefs, selected string) (map[string]*editorResourceRefs, error) {
+// resourceReferenceScopes 复用结构依赖归集文档引用，同文档索引共用只读结果，跨文档索引独立合并
+// 入参: ctx 取消上下文, documents 文档入口, resources 资源索引, references 文件引用, selected 限定的文档入口，空值统计全部文档
+// 返回: map[string]*editorResourceRefs 各资源索引的引用，依赖不完整或引用无法归属时为空, error 取消错误
+func resourceReferenceScopes(ctx context.Context, documents map[string]bool, resources []string, references map[string]*editorResourceRefs, selected string) (map[string]*editorResourceRefs, error) {
 	indexes := make(map[string]bool, len(resources))
 	for _, name := range resources {
 		indexes[name] = true
@@ -32,19 +32,26 @@ func (r *Reader) resourceReferenceScopes(ctx context.Context, parts map[string][
 	result := make(map[string]*editorResourceRefs)
 	shared := make(map[string]bool)
 	for _, entry := range slices.Sorted(maps.Keys(documents)) {
-		scope, err := r.versionFileDependencies(ctx, entry, parts, generated)
-		if err != nil {
-			return nil, err
-		}
+		scope := map[string]bool{entry: true}
+		queue := []string{entry}
 		refs := &editorResourceRefs{ids: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
-		for name := range scope {
+		for position := 0; position < len(queue); position++ {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			if source := references[name]; source != nil {
-				used[name] = true
-				if selected == "" || selected == entry {
-					refs.merge(&editorResourceRefs{ids: source.ids, fonts: source.fonts})
+			name := queue[position]
+			source := references[name]
+			if source == nil {
+				return nil, ctx.Err()
+			}
+			used[name] = true
+			if selected == "" || selected == entry {
+				refs.merge(&editorResourceRefs{ids: source.ids, fonts: source.fonts})
+			}
+			for target, role := range source.roles {
+				if role&packageReferenceXML != 0 && !scope[target] {
+					scope[target] = true
+					queue = append(queue, target)
 				}
 			}
 		}

@@ -92,7 +92,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		}
 	}
 	collect := reader != nil && reader.DocumentCount() > 1 && e.backends.FontResources != nil
-	refs, resources, fontReferences, safe, err := scanEditorResources(e.output.ctx, reader, parts, generated, names, nil, collect)
+	refs, resources, references, safe, err := scanEditorResources(e.output.ctx, reader, parts, generated, names, nil, collect)
 	if err != nil || !safe {
 		return err
 	}
@@ -143,8 +143,8 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		}
 	}
 	var fontUsage map[string]*editorFontUsage
-	if fontReferences != nil {
-		fontUsage, err = reader.compressionFontUsage(e.output.ctx, parts, generated, refs.documents, resources, fontReferences, read)
+	if references != nil {
+		fontUsage, err = reader.compressionFontUsage(e.output.ctx, refs.documents, resources, references, read)
 		if err != nil {
 			return err
 		}

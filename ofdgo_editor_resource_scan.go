@@ -133,7 +133,7 @@ func scanEditorResources(ctx context.Context, reader *Reader, parts map[string][
 		if resource {
 			resources = append(resources, name)
 		}
-		if collect && (resource || len(local.ids) != 0 || len(local.fonts) != 0) {
+		if collect {
 			references[name] = local
 		}
 	}

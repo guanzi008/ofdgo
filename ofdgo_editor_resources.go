@@ -101,7 +101,7 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 				return nil, err
 			}
 		}
-		scoped, err = reader.resourceReferenceScopes(ctx, parts, generated, refs.documents, resources, references, selected)
+		scoped, err = resourceReferenceScopes(ctx, refs.documents, resources, references, selected)
 		if err != nil || scoped == nil {
 			return nil, err
 		}

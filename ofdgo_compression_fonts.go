@@ -21,9 +21,9 @@ import (
 )
 
 // compressionFontUsage 按文档合并共享字体用字，版本编辑仅统计选中入口
-// 入参: ctx 取消上下文, parts 输出改动, generated 自产页面引用, documents 文档入口, resources 资源索引, references 各文件引用, read 输出文件读取方法
+// 入参: ctx 取消上下文, documents 文档入口, resources 资源索引, references 各文件引用, read 输出文件读取方法
 // 返回: map[string]*editorFontUsage 各字体文件的用字，无法确定作用域时为空, error 读取或取消错误
-func (r *Reader) compressionFontUsage(ctx context.Context, parts map[string][]byte, generated map[string]editorGeneratedReferences, documents map[string]bool, resources []string, references map[string]*editorResourceRefs, read func(string) ([]byte, error)) (map[string]*editorFontUsage, error) {
+func (r *Reader) compressionFontUsage(ctx context.Context, documents map[string]bool, resources []string, references map[string]*editorResourceRefs, read func(string) ([]byte, error)) (map[string]*editorFontUsage, error) {
 	selected := ""
 	if r.OFD.DocBody[r.documentIndex].versioned {
 		var err error
@@ -32,7 +32,7 @@ func (r *Reader) compressionFontUsage(ctx context.Context, parts map[string][]by
 			return nil, err
 		}
 	}
-	scoped, err := r.resourceReferenceScopes(ctx, parts, generated, documents, resources, references, selected)
+	scoped, err := resourceReferenceScopes(ctx, documents, resources, references, selected)
 	if err != nil || scoped == nil {
 		return nil, err
 	}
