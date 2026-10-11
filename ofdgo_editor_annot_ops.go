@@ -63,7 +63,7 @@ func (e *Editor) CaptureAnnotations(page int, ids []string) (*AnnotationSelectio
 	if e.originalPage(page) {
 		origin := e.source.pages[e.pages[page].ID]
 		for _, name := range content.PageRes {
-			selection.resources = append(selection.resources, e.source.reader.ResPath(resolveResourcePath(origin.ref.BaseLoc, "", name)))
+			selection.resources = append(selection.resources, resolveResourcePath(e.source.reader.ResPath(origin.ref.BaseLoc), "", name))
 		}
 	}
 	return selection, nil

@@ -555,7 +555,7 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 				}
 				if origin := e.objectOrigin(editorObjectID(object)); origin != nil && origin.page != nil && (!exists || before.Type != object.Type || !reflect.DeepEqual(before.CompositeGraphicUnit, object.CompositeGraphicUnit)) {
 					for _, name := range origin.page.original.PageRes {
-						files[e.source.reader.ResPath(resolveResourcePath(origin.page.ref.BaseLoc, "", name))] = true
+						files[resolveResourcePath(e.source.reader.ResPath(origin.page.ref.BaseLoc), "", name)] = true
 					}
 				}
 			}

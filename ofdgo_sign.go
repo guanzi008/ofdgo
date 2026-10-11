@@ -200,13 +200,13 @@ func (r *Reader) parseSignatures(doc *Document) error {
 			var sealData []byte
 			if sigFile.SignedInfo.Seal.BaseLoc != "" {
 				sealPath := resolveResourcePath(sigPath, "", sigFile.SignedInfo.Seal.BaseLoc)
-				if data, err := r.ResData(sealPath); err == nil {
+				if data, err := r.readFile(sealPath); err == nil {
 					sealType, sealData = extractSeal(data)
 				}
 			}
 			if len(sealData) == 0 && sigFile.SignedValue != "" {
 				signedValuePath := resolveResourcePath(sigPath, "", sigFile.SignedValue)
-				if data, err := r.ResData(signedValuePath); err == nil {
+				if data, err := r.readFile(signedValuePath); err == nil {
 					if sig, err := parseSESSignature(data); err == nil {
 						sealType, sealData = sig.Seal.PicType, sig.Seal.PicData
 					} else {

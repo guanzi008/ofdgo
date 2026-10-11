@@ -857,17 +857,16 @@ func (m *editorPageImport) documentReference(group, kind, source, id, loc string
 	return nil, fmt.Errorf("missing %s reference %q", kind, source)
 }
 
-// resolve 按所在XML解析包内路径，兼容阅读器接受的文档相对路径
+// resolve 按所在XML和资源基准目录解析包内路径
 // 入参: name 所在XML, base 资源目录, value 路径值
 // 返回: string 包内路径, error 错误信息
 func (m *editorPageImport) resolve(name, base, value string) (string, error) {
-	for _, candidate := range []string{resolveResourcePath(name, base, value), m.reader.ResPath(value)} {
-		if m.reader.files[candidate] != nil {
-			return candidate, nil
-		}
-		if file, ok := m.reader.packageFile(candidate); ok {
-			return cleanPackagePath(file.Name), nil
-		}
+	candidate := resolveResourcePath(name, base, value)
+	if _, ok := m.reader.files[candidate]; ok {
+		return candidate, nil
+	}
+	if file, ok := m.reader.packageFile(candidate); ok {
+		return cleanPackagePath(file.Name), nil
 	}
 	return "", fmt.Errorf("import reference %q in %s not found", value, name)
 }

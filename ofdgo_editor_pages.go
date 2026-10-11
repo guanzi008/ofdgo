@@ -213,17 +213,19 @@ func pruneCreatedPageReferences(data []byte, removed map[string]bool) ([]byte, e
 	return editorPatchXML(data, patches), nil
 }
 
-// editorPageLocation 解析标准XML引用，优先使用所在文件的相对路径
+// editorPageLocation 按所在XML解析引用，绝对路径以包根目录为基准
 // 入参: reader 原包, parts 覆盖条目, name 所在XML, value 路径
 // 返回: string 包内路径, error 路径不存在
 func editorPageLocation(reader *Reader, parts map[string][]byte, name, value string) (string, error) {
-	for _, candidate := range []string{resolveResourcePath(name, "", value), reader.ResPath(value)} {
-		if _, ok := parts[candidate]; ok || reader.files[candidate] != nil {
-			return candidate, nil
-		}
-		if file, ok := reader.packageFile(candidate); ok {
-			return cleanPackagePath(file.Name), nil
-		}
+	candidate := resolveResourcePath(name, "", value)
+	if _, ok := parts[candidate]; ok {
+		return candidate, nil
+	}
+	if _, ok := reader.files[candidate]; ok {
+		return candidate, nil
+	}
+	if file, ok := reader.packageFile(candidate); ok {
+		return cleanPackagePath(file.Name), nil
 	}
 	return "", fmt.Errorf("page reference %q in %s not found", value, name)
 }

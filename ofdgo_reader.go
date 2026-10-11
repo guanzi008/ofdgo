@@ -282,7 +282,7 @@ func (r *Reader) PageArea(page Page) (PageArea, error) {
 	return r.resolvePageArea(content.Area, content.Template)
 }
 
-// ResPath 获取资源的完整路径
+// ResPath 按当前文档目录解析ST_Loc，包内绝对路径以根目录为基准
 // 入参: resLink 资源链接
 // 返回: string 完整路径
 func (r *Reader) ResPath(resLink string) string {
@@ -299,10 +299,7 @@ func (r *Reader) ResPath(resLink string) string {
 	}
 	resLink = path.Clean(resLink)
 	rootDir := strings.TrimPrefix(strings.ReplaceAll(r.RootDir, "\\", "/"), "/")
-	if rootDir != "" && (resLink == rootDir || strings.HasPrefix(resLink, rootDir+"/")) {
-		return resLink
-	}
-	return cleanPackagePath(path.Join(r.RootDir, resLink))
+	return cleanPackagePath(path.Join(rootDir, resLink))
 }
 
 // ResData 获取资源文件数据
@@ -443,6 +440,7 @@ func (r *Reader) AttachmentData(id string) ([]byte, error) {
 }
 
 // CustomTags 获取自定义标引
+// 返回的文件路径可直接传入ResData读取
 // 返回: []CustomTag 自定义标引列表, error 错误信息
 func (r *Reader) CustomTags() ([]CustomTag, error) {
 	doc, err := r.Doc()
@@ -457,8 +455,8 @@ func (r *Reader) CustomTags() ([]CustomTag, error) {
 		}
 		for i := range customTags.CustomTag {
 			tag := &customTags.CustomTag[i]
-			tag.SchemaLoc = resolveResourcePath(partPath, "", tag.SchemaLoc)
-			tag.FileLoc = resolveResourcePath(partPath, "", tag.FileLoc)
+			tag.SchemaLoc = r.resourceLocation(partPath, "", tag.SchemaLoc)
+			tag.FileLoc = r.resourceLocation(partPath, "", tag.FileLoc)
 		}
 		if customTags.CustomTag == nil {
 			customTags.CustomTag = []CustomTag{}
@@ -482,6 +480,7 @@ func (r *Reader) CustomDatas() ([]CustomData, error) {
 }
 
 // Extensions 获取扩展项
+// 返回的文件路径可直接传入ResData读取
 // 返回: []Extension 扩展项列表, error 错误信息
 func (r *Reader) Extensions() ([]Extension, error) {
 	doc, err := r.Doc()
@@ -497,7 +496,7 @@ func (r *Reader) Extensions() ([]Extension, error) {
 		for i := range extensions.Extension {
 			extension := &extensions.Extension[i]
 			for j := range extension.ExtendData {
-				extension.ExtendData[j] = resolveResourcePath(partPath, "", extension.ExtendData[j])
+				extension.ExtendData[j] = r.resourceLocation(partPath, "", extension.ExtendData[j])
 			}
 		}
 		if extensions.Extension == nil {
@@ -866,7 +865,7 @@ func (r *Reader) readPageContent(page Page, textOnly, template bool) (*PageConte
 		content.Template = nil
 	}
 	for _, res := range content.PageRes {
-		r.loadRes(resolveResourcePath(page.BaseLoc, "", res))
+		r.loadRes("/" + resolveResourcePath(fullPath, "", res))
 	}
 	content.Area, err = r.resolvePageArea(content.Area, content.Template)
 	if err != nil {
@@ -883,7 +882,7 @@ func (r *Reader) loadPageResources(page Page) {
 		return
 	}
 	for _, res := range header.PageRes {
-		r.loadRes(resolveResourcePath(page.BaseLoc, "", res))
+		r.loadRes("/" + resolveResourcePath(r.ResPath(page.BaseLoc), "", res))
 	}
 }
 
