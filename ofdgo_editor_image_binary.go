@@ -34,10 +34,13 @@ type pngBinaryProbe struct {
 	remaining int
 }
 
-// editorBinaryImage 尝试纯黑白无损编码，不二值化，不改变透明度，无体积收益时保留原图
+// editorBinaryImage 尝试纯黑白无损编码，不改变透明度，带附加信息或无体积收益时保留原图
 // 入参: data PNG图片数据, img 已解码像素，为nil时读取原图
 // 返回: []byte 更小的JBIG2数据，不适用时为nil
 func editorBinaryImage(data []byte, img image.Image) []byte {
+	if !pngBinarySource(data) {
+		return nil
+	}
 	if img == nil {
 		if pngNonBinaryImage(data) {
 			return nil
@@ -53,6 +56,33 @@ func editorBinaryImage(data []byte, img image.Image) []byte {
 		return nil
 	}
 	return output.Bytes()
+}
+
+// pngBinarySource 检查PNG是否仅含图像与透明度数据，避免转为JBIG2时丢失附加信息
+// 入参: data PNG编码数据
+// 返回: bool 是否无需保留附加信息
+func pngBinarySource(data []byte) bool {
+	if len(data) < 33 || string(data[:8]) != "\x89PNG\r\n\x1a\n" {
+		return false
+	}
+	for pos := 8; pos < len(data); {
+		if len(data)-pos < 12 {
+			return false
+		}
+		length := uint64(binary.BigEndian.Uint32(data[pos:])) + 12
+		if length > uint64(len(data)-pos) {
+			return false
+		}
+		switch string(data[pos+4 : pos+8]) {
+		case "IHDR", "PLTE", "IDAT", "tRNS":
+		case "IEND":
+			return length == 12 && pos+12 == len(data)
+		default:
+			return false
+		}
+		pos += int(length)
+	}
+	return false
 }
 
 // pngNonBinaryImage 检查PNG前部像素是否包含灰阶、彩色或透明度，仅用于排除黑白压缩

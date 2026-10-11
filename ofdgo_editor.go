@@ -469,7 +469,7 @@ func (e *Editor) ResizePages(indexes []int, width, height float64) error {
 }
 
 // AddImage 注册PNG、JPEG、BMP、单页TIFF或JBIG2图片，重复资源复用标识，引用后写入文档
-// 不透明纯黑白PNG仅在无损JBIG2编码更小时转换，其他图片保留原始编码
+// 不透明纯黑白PNG仅在不含附加信息且无损JBIG2编码更小时转换，其他图片保留原始编码
 // 入参: data 图片数据
 // 返回: string 图片资源标识, error 错误信息
 func (e *Editor) AddImage(data []byte) (string, error) {
