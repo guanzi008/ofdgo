@@ -530,7 +530,7 @@ func (e *Editor) restoreFontSnapshot(state Editor) {
 	*e = state
 }
 
-// pruneExternalFontFiles 清理全包不再引用的字体文件，遇到无法识别的扩展时保留资源
+// pruneExternalFontFiles 清理全包无引用字体并同步版本清单，保留附件及无法确认的扩展引用
 // 入参: ctx 取消上下文, reader 包快照, candidates 待清理的字体路径
 // 返回: error 取消或读取错误
 func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...string) error {
@@ -546,26 +546,29 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 	if len(removed) == 0 {
 		return nil
 	}
+	files, structures := make(map[string]bool), map[string]bool{"OFD.xml": true}
 	for i := range reader.DocumentCount() {
-		files, err := reader.documentFiles(ctx, i)
+		_, xmlFiles, err := reader.documentDependencies(ctx, i)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			return nil
 		}
-		for name := range files {
-			delete(removed, name)
-		}
-		if len(removed) == 0 {
-			return nil
+		maps.Copy(structures, xmlFiles)
+	}
+	versions := make(map[string]*editorFontXML)
+	names := slices.Sorted(maps.Keys(structures))
+	for _, name := range slices.Sorted(maps.Keys(reader.fileNames)) {
+		if !structures[name] && strings.HasSuffix(strings.ToLower(name), ".xml") {
+			names = append(names, name)
 		}
 	}
-	for name := range reader.fileNames {
+	for _, name := range names {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !strings.HasSuffix(strings.ToLower(name), ".xml") {
+		if files[name] && !structures[name] {
 			continue
 		}
 		data, err := reader.readFile(name)
@@ -580,19 +583,36 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 		if root.matchesOFD("Res") {
 			base = root.attr("BaseLoc")
 		}
+		if root.matchesOFD("DocVersion") {
+			versions[name] = &editorFontXML{name: name, data: data, root: root}
+		}
 		var retains func(*editorXML) bool
 		retains = func(node *editorXML) bool {
 			if classifyOFDNamespace(node.name.Space) == ofdXMLUnknown || slices.Contains([]string{"CustomTags", "Extensions", "ExtendData", "Data"}, node.name.Local) {
 				return true
 			}
+			parent := ""
+			if node.parent != nil {
+				parent = node.parent.name.Local
+			}
 			for _, attr := range node.attrs {
 				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != "http://www.w3.org/XML/1998/namespace" {
 					return true
 				}
+				if kind := packageReference(root.name.Local, parent, node.name.Local, attr.Name.Local); attr.Name.Space == "" && kind != packageReferenceNone {
+					location := cleanPackagePath(resolveResourcePath(name, base, attr.Value))
+					delete(removed, location)
+					if kind == packageReferenceData {
+						files[location] = true
+					}
+				}
 			}
-			if node.matchesOFD("FontFile") {
+			if kind := packageReference(root.name.Local, parent, node.name.Local, ""); kind != packageReferenceNone && !(root.matchesOFD("DocVersion") && parent == "FileList" && node.matchesOFD("File")) {
 				location := resolveResourcePath(name, base, strings.TrimSpace(editorImportText(data, node)))
 				delete(removed, cleanPackagePath(location))
+				if kind == packageReferenceData {
+					files[cleanPackagePath(location)] = true
+				}
 			}
 			return slices.ContainsFunc(node.children, retains)
 		}
@@ -603,6 +623,27 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	updates := make(map[string][]byte)
+	for name, file := range versions {
+		var patches []editorXMLPatch
+		if list := file.root.child("FileList"); list != nil {
+			for _, node := range list.children {
+				if node.matchesOFD("File") && removed[resolveResourcePath(name, "", strings.TrimSpace(editorImportText(file.data, node)))] {
+					patches = append(patches, editorXMLPatch{start: node.start, end: node.end})
+				}
+			}
+		}
+		if len(patches) != 0 {
+			updates[name] = editorPatchXML(file.data, patches)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if reader.files == nil {
+		reader.files = make(map[string][]byte)
+	}
+	maps.Copy(reader.files, updates)
 	for name := range reader.files {
 		if removed[cleanPackagePath(name)] {
 			delete(reader.files, name)

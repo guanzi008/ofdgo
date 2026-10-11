@@ -620,6 +620,9 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 			return 0, err
 		}
 	}
+	if err := e.compactVersionFonts(ctx, parts, removed); err != nil {
+		return 0, err
+	}
 	if len(parts) != 0 || len(removed) != 0 || e.output != nil && e.output.options.Mode != CompressionUnchanged && !e.output.protected {
 		name := "OFD.xml"
 		if file, ok := reader.packageFile(name); ok {
