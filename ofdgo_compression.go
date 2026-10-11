@@ -174,7 +174,7 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 	return &snapshot, nil
 }
 
-// compressionImageSafety 保护蒙版资源，识别不能可靠降采样的图案及隐藏内容
+// compressionImageSafety 保护蒙版及其原图和替换图像，识别不能可靠降采样的图案及隐藏内容
 // 入参: ctx 取消上下文, images 图片资源
 // 返回: map[string]bool 只能无损处理的资源路径, bool 是否可分析尺寸, error 读取或取消错误
 func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo) (map[string]bool, bool, error) {
@@ -251,7 +251,7 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 					if element.Name.Local == "Pattern" {
 						geometry = false
 					}
-					resource, masked := "", false
+					resource, substitution, masked := "", "", false
 					for _, attr := range element.Attr {
 						if attr.Name.Space != "" {
 							continue
@@ -262,6 +262,9 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 						if attr.Name.Local == "ResourceID" {
 							resource = editorResourceID(attr.Value)
 						}
+						if attr.Name.Local == "Substitution" {
+							substitution = editorResourceID(attr.Value)
+						}
 						if attr.Name.Local == "ImageMask" {
 							masks[editorResourceID(attr.Value)] = true
 							masked = true
@@ -269,6 +272,9 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 					}
 					if masked {
 						masks[resource] = true
+						if substitution != "" {
+							masks[substitution] = true
+						}
 					}
 				case xml.EndElement:
 					stack = stack[:len(stack)-1]

@@ -157,7 +157,7 @@ func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, 
 	return result, ctx.Err()
 }
 
-// DrawObject 收集图片的完整显示尺寸，不使用裁剪后的局部面积
+// DrawObject 汇总原图和替换图像的完整显示尺寸，不使用裁剪后的局部面积
 // 入参: object 图形对象, state 继承状态
 // 返回: error 取消或几何错误
 func (v *compressionImages) DrawObject(object *GraphicObject, state RenderState) error {
@@ -168,8 +168,8 @@ func (v *compressionImages) DrawObject(object *GraphicObject, state RenderState)
 		return nil
 	}
 	img := object.ImageObject
-	id := editorResourceID(img.ResourceID)
-	if id == "" {
+	ids := [2]string{editorResourceID(img.ResourceID), editorResourceID(img.Substitution)}
+	if ids[0] == "" || img.Substitution != "" && ids[1] == "" {
 		return fmt.Errorf("invalid image resource")
 	}
 	box, err := ParseBox(img.Boundary)
@@ -185,8 +185,13 @@ func (v *compressionImages) DrawObject(object *GraphicObject, state RenderState)
 	if size.X == 0 || size.Y == 0 {
 		return fmt.Errorf("invalid image placement")
 	}
-	old := v.sizes[id]
-	v.sizes[id] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		old := v.sizes[id]
+		v.sizes[id] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
+	}
 	return nil
 }
 
