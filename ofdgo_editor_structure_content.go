@@ -1,0 +1,431 @@
+// Copyright 2025-2026 肖其顿 (XIAO QI DUN)
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ofdgo
+
+import (
+	"bytes"
+	"context"
+	"encoding/xml"
+	"fmt"
+	"slices"
+	"strings"
+)
+
+// Structure 获取当前编辑状态的标引，包括页面和图元删除后的引用调整
+// 返回: []Structure 标引结构, error 快照或解析错误
+func (e *Editor) Structure() ([]Structure, error) {
+	r, err := e.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return r.Structure()
+}
+
+// AddStructure 添加独立标引及根节点，FileLoc由库分配，不接收外部内容路径
+// SchemaLoc仅允许引用包内已有文件，不访问网络或验证业务Schema
+// 入参: tag 类型、命名空间及可选Schema位置, root 根节点
+// 返回: int 从0开始的标引索引, error 校验或提交错误
+func (e *Editor) AddStructure(tag CustomTag, root StructureNode) (int, error) {
+	if strings.TrimSpace(tag.TypeID) == "" || tag.FileLoc != "" {
+		return 0, fmt.Errorf("custom tag requires TypeID and an automatically assigned FileLoc")
+	}
+	if !structureXMLText(tag.TypeID) || !structureXMLText(tag.NameSpace) || !structureXMLText(tag.SchemaLoc) {
+		return 0, fmt.Errorf("invalid custom tag metadata")
+	}
+	data, err := encodeStructureNode(root)
+	if err != nil {
+		return 0, err
+	}
+	tree, err := parseStructure(context.Background(), data, tag)
+	if err != nil {
+		return 0, err
+	}
+	if err := e.validateStructureReferences(tree, tag); err != nil {
+		return 0, err
+	}
+	base := e.source
+	if base == nil {
+		base, err = e.importBase()
+		if err != nil {
+			return 0, err
+		}
+	}
+	if tag.SchemaLoc != "" {
+		name := base.reader.ResPath(tag.SchemaLoc)
+		if _, err := base.reader.readFile(name); err != nil {
+			return 0, err
+		}
+		tag.SchemaLoc = "/" + name
+	}
+	name, index, container, entries, err := editorStructureIndex(base)
+	if err != nil {
+		return 0, err
+	}
+	tag.FileLoc = "/" + e.packageName("Tags/Tag.xml")
+	var attrs ofdAttrs
+	attrs.add("TypeID", tag.TypeID)
+	attrs.add("NameSpace", tag.NameSpace)
+	var content []byte
+	if tag.SchemaLoc != "" {
+		content = append(content, container.textXML("SchemaLoc", tag.SchemaLoc)...)
+	}
+	content = append(content, container.textXML("FileLoc", tag.FileLoc)...)
+	entry, err := container.containerXML("CustomTag", attrs, content)
+	if err != nil {
+		return 0, err
+	}
+	parts := map[string][]byte{strings.TrimPrefix(tag.FileLoc, "/"): data}
+	if container.open != container.end {
+		entry = append(bytes.Clone(index[container.open:container.close]), entry...)
+	}
+	parts[name] = editorPatchXML(index, []editorXMLPatch{editorXMLContent(index, container, entry)})
+	if base.document.CustomTags.Path == "" && name != base.reader.documentRoot {
+		docName := base.reader.documentRoot
+		docData, err := base.reader.readFile(docName)
+		if err != nil {
+			return 0, err
+		}
+		doc, err := parseEditorXML(docData)
+		if err != nil {
+			return 0, err
+		}
+		parts[docName], err = editorXMLSetText(docData, doc, [][2]string{{"CustomTags", "/" + name}})
+		if err != nil {
+			return 0, err
+		}
+	}
+	return len(entries), e.commitAnnotationParts(base, parts)
+}
+
+// DeleteStructure 删除标引入口，不删除正文或其他入口共享的资源
+// 入参: index 从0开始的标引索引
+// 返回: error 索引或提交错误
+func (e *Editor) DeleteStructure(index int) error {
+	if e.source == nil {
+		return fmt.Errorf("custom tag structure not found: %d", index)
+	}
+	name, data, _, entries, err := editorStructureIndex(e.source)
+	if err != nil {
+		return err
+	}
+	if index < 0 || index >= len(entries) {
+		return fmt.Errorf("custom tag structure not found: %d", index)
+	}
+	node := entries[index]
+	return e.commitAnnotationParts(e.source, map[string][]byte{name: editorPatchXML(data, []editorXMLPatch{{node.start, node.end, nil}})})
+}
+
+// AddStructureNode 在指定父节点末尾添加子树，空路径表示根节点
+// 入参: index 标引索引, parent 从0开始的节点路径, node 新节点及子树
+// 返回: []int 新节点路径, error 校验或提交错误
+func (e *Editor) AddStructureNode(index int, parent []int, node StructureNode) ([]int, error) {
+	encoded, err := encodeStructureNode(node)
+	if err != nil {
+		return nil, err
+	}
+	var result []int
+	err = e.editStructure(index, func(data []byte, root *editorXML, tag CustomTag) ([]byte, error) {
+		target, err := editorStructureNode(root, parent)
+		if err != nil {
+			return nil, err
+		}
+		if structureOfficial(tag, root.name.Space) && target.name.Space == root.name.Space && target.name.Local == "ObjectRef" {
+			return nil, fmt.Errorf("ObjectRef cannot contain child nodes")
+		}
+		content := bytes.Clone(encoded)
+		if target.open != target.end {
+			content = append(bytes.Clone(data[target.open:target.close]), content...)
+		}
+		result = append(slices.Clone(parent), len(target.children))
+		return editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, target, content)}), nil
+	})
+	return result, err
+}
+
+// UpdateStructureNode 修改节点名称、命名空间、属性和直接文本，保留子节点、注释及处理指令
+// node的Children和References必须为空，图元关联通过SetStructureReferences维护
+// 入参: index 标引索引, path 从0开始的节点路径, node 节点字段
+// 返回: error 校验或提交错误
+func (e *Editor) UpdateStructureNode(index int, path []int, node StructureNode) error {
+	if len(node.Children) != 0 || len(node.References) != 0 {
+		return fmt.Errorf("use node operations to edit children or references")
+	}
+	return e.editStructure(index, func(data []byte, root *editorXML, _ CustomTag) ([]byte, error) {
+		target, err := editorStructureNode(root, path)
+		if err != nil {
+			return nil, err
+		}
+		updated, err := updateStructureNodeXML(data, target, node)
+		if err != nil {
+			return nil, err
+		}
+		return editorPatchXML(data, []editorXMLPatch{{target.start, target.end, updated}}), nil
+	})
+}
+
+// DeleteStructureNode 删除节点及其子树，根节点须通过DeleteStructure删除
+// 入参: index 标引索引, path 从0开始的非空节点路径
+// 返回: error 路径或提交错误
+func (e *Editor) DeleteStructureNode(index int, path []int) error {
+	if len(path) == 0 {
+		return fmt.Errorf("delete the structure entry to remove its root")
+	}
+	return e.editStructure(index, func(data []byte, root *editorXML, _ CustomTag) ([]byte, error) {
+		node, err := editorStructureNode(root, path)
+		if err != nil {
+			return nil, err
+		}
+		return editorPatchXML(data, []editorXMLPatch{{node.start, node.end, nil}}), nil
+	})
+}
+
+// SetStructureReferences 替换公文节点的直接ObjectRef，保留其他子节点和原文
+// 按输入顺序绑定图元，允许跨页和重复引用；空列表解除绑定，不修改版式内容
+// 入参: index 标引索引, path 节点路径, references 页面标识和有序图元标识
+// 返回: error 类型、目标校验或提交错误
+func (e *Editor) SetStructureReferences(index int, path []int, references []StructureReference) error {
+	return e.editStructure(index, func(data []byte, root *editorXML, tag CustomTag) ([]byte, error) {
+		node, err := editorStructureNode(root, path)
+		if err != nil {
+			return nil, err
+		}
+		if !structureOfficial(tag, root.name.Space) || node.name.Local == "ObjectRef" {
+			return nil, fmt.Errorf("custom tag does not support ObjectRef binding")
+		}
+		for parent := node; parent != nil; parent = parent.parent {
+			if parent.name.Space != root.name.Space {
+				return nil, fmt.Errorf("cannot bind objects inside an extension namespace")
+			}
+		}
+		var added []byte
+		for _, ref := range references {
+			if editorResourceID(ref.PageID) == "" || len(ref.ObjectIDs) == 0 {
+				return nil, fmt.Errorf("ObjectRef requires a page and object identifiers")
+			}
+			for _, id := range ref.ObjectIDs {
+				if editorResourceID(id) == "" {
+					return nil, fmt.Errorf("invalid custom tag object identifier: %s", id)
+				}
+			}
+			encoded, err := encodeStructureNode(StructureNode{Name: "ObjectRef", Namespace: root.name.Space, Attributes: []StructureAttribute{{Name: "PageRef", Value: ref.PageID}}, Text: strings.Join(ref.ObjectIDs, ",")})
+			if err != nil {
+				return nil, err
+			}
+			added = append(added, encoded...)
+		}
+		var content []byte
+		if node.open != node.end {
+			var patches []editorXMLPatch
+			for _, child := range node.children {
+				if child.name.Space == root.name.Space && child.name.Local == "ObjectRef" {
+					patches = append(patches, editorXMLPatch{child.start - node.open, child.end - node.open, nil})
+				}
+			}
+			content = editorPatchXML(data[node.open:node.close], patches)
+		}
+		content = append(content, added...)
+		return editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, node, content)}), nil
+	})
+}
+
+// editorStructureIndex 读取或准备当前文档的标引索引，保留内联入口和未知扩展
+// 入参: base 编辑包快照
+// 返回: string 索引文件路径, []byte 原文, *editorXML 容器, []*editorXML 标引入口, error 读取错误
+func editorStructureIndex(base *editorSource) (string, []byte, *editorXML, []*editorXML, error) {
+	name := base.reader.documentRoot
+	if base.document.CustomTags.Path != "" {
+		name = base.reader.ResPath(base.document.CustomTags.Path)
+	}
+	data, err := base.reader.readFile(name)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	if base.document.CustomTags.Path == "" {
+		container := root.child("CustomTags")
+		if container == nil || len(container.children) == 0 {
+			name = packageAvailableName(base.reader, nil, base.reader.RootDir+"/CustomTags.xml")
+			data, err = root.containerXML("CustomTags", nil, nil)
+			if err == nil {
+				root, err = parseEditorXML(data)
+			}
+			if err != nil {
+				return "", nil, nil, nil, err
+			}
+		} else {
+			root = container
+		}
+	}
+	var entries []*editorXML
+	for _, child := range root.children {
+		if child.matchesOFD("CustomTag") {
+			entries = append(entries, child)
+		}
+	}
+	return name, data, root, entries, nil
+}
+
+// editorStructureNode 按完整XML子节点索引定位，与Reader.Structure的路径一致
+// 入参: root 根节点, path 从0开始的路径
+// 返回: *editorXML 节点, error 路径错误
+func editorStructureNode(root *editorXML, path []int) (*editorXML, error) {
+	for _, index := range path {
+		if index < 0 || index >= len(root.children) {
+			return nil, fmt.Errorf("custom tag node not found")
+		}
+		root = root.children[index]
+	}
+	return root, nil
+}
+
+// editStructure 验证完整标引后原子提交，隔离共享入口并保留未修改的XML
+// 入参: index 标引索引, edit 内容变换
+// 返回: error 校验、解析或提交错误
+func (e *Editor) editStructure(index int, edit func([]byte, *editorXML, CustomTag) ([]byte, error)) error {
+	if e.source == nil {
+		return fmt.Errorf("custom tag structure not found: %d", index)
+	}
+	tags, err := e.source.reader.CustomTags()
+	if err != nil {
+		return err
+	}
+	if index < 0 || index >= len(tags) {
+		return fmt.Errorf("custom tag structure not found: %d", index)
+	}
+	tag := tags[index]
+	name := e.source.reader.ResPath(tag.FileLoc)
+	snapshot, err := e.Reader()
+	if err != nil {
+		return err
+	}
+	defer snapshot.Close()
+	current, err := snapshot.CustomTags()
+	if err != nil {
+		return err
+	}
+	if index >= len(current) {
+		return fmt.Errorf("custom tag structure not found: %d", index)
+	}
+	data, err := snapshot.readFile(snapshot.ResPath(current[index].FileLoc))
+	if err != nil {
+		return err
+	}
+	if _, err := parseStructure(context.Background(), data, tag); err != nil {
+		return err
+	}
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return err
+	}
+	updated, err := edit(data, root, tag)
+	if err != nil || bytes.Equal(data, updated) {
+		return err
+	}
+	tree, err := parseStructure(context.Background(), updated, tag)
+	if err != nil {
+		return err
+	}
+	if err := e.validateStructureReferences(tree, tag); err != nil {
+		return err
+	}
+	parts := make(map[string][]byte)
+	for i, other := range tags {
+		if i != index && e.source.reader.ResPath(other.FileLoc) == name {
+			indexName, indexData, _, entries, err := editorStructureIndex(e.source)
+			if err != nil {
+				return err
+			}
+			name = e.packageName("Tags/Tag.xml")
+			loc := entries[index].child("FileLoc")
+			if loc == nil {
+				return fmt.Errorf("custom tag requires FileLoc")
+			}
+			var value bytes.Buffer
+			_ = xml.EscapeText(&value, []byte("/"+name))
+			parts[indexName] = editorPatchXML(indexData, []editorXMLPatch{editorXMLContent(indexData, loc, value.Bytes())})
+			break
+		}
+	}
+	parts[name] = updated
+	return e.commitAnnotationParts(e.source, parts)
+}
+
+// validateStructureReferences 检查标引目标是否位于当前文档和版本，不依赖字体或图像解码
+// 入参: root 待提交标引树, tag 标引入口
+// 返回: error 页面或图元缺失错误
+func (e *Editor) validateStructureReferences(root *StructureNode, tag CustomTag) error {
+	var refs []StructureReference
+	var collect func(*StructureNode, bool) error
+	collect = func(node *StructureNode, official bool) error {
+		official = official && node.Namespace == root.Namespace
+		if official && node.Name == "ObjectRef" && len(node.Children) != 0 {
+			return fmt.Errorf("ObjectRef cannot contain child nodes")
+		}
+		refs = append(refs, node.References...)
+		for i := range node.Children {
+			if err := collect(&node.Children[i], official); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := collect(root, structureOfficial(tag, root.Namespace)); err != nil {
+		return err
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	r, err := e.Reader()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	doc, err := r.Doc()
+	if err != nil {
+		return err
+	}
+	renderer := e.newRenderer(r)
+	pages := signaturePageNumbers(doc)
+	checked := make(map[int]map[string]bool)
+	for _, ref := range refs {
+		page, _ := resourceValue(pages, ref.PageID)
+		if page == 0 {
+			return fmt.Errorf("custom tag page not found: %s", ref.PageID)
+		}
+		objects := checked[page]
+		if objects == nil {
+			content, err := r.PageContentByIndex(page - 1)
+			if err != nil {
+				return err
+			}
+			visitor := &structureObjectVisitor{objects: make(map[string]bool)}
+			if err := renderer.WalkPage(content, visitor); err != nil {
+				return err
+			}
+			objects = visitor.objects
+			checked[page] = objects
+		}
+		for _, id := range ref.ObjectIDs {
+			if !objects[editorResourceID(id)] {
+				return fmt.Errorf("custom tag object not found: %s/%s", ref.PageID, id)
+			}
+		}
+	}
+	return nil
+}

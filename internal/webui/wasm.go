@@ -208,6 +208,8 @@ func RunWASM() {
 	registerCallback("ofdgoRenderPage", renderPage)
 	registerCallback("ofdgoOutlineLinks", outlineLinks)
 	registerCallback("ofdgoStructureTargets", structureTargets)
+	registerCallback("ofdgoStructureObjects", structureObjects)
+	registerCallback("ofdgoChangeStructure", changeStructure)
 	registerCallback("ofdgoOpenLinks", openLinks)
 	registerCallback("ofdgoRenderBackends", renderBackends)
 	registerCallback("ofdgoSVGFontData", svgFontData)
@@ -921,6 +923,57 @@ func outlineLinks(args []js.Value) (any, error) {
 		return nil, err
 	}
 	return linkResults(links)
+}
+
+// changeStructure 提交标引操作，XML、目标校验及历史维护均由库完成
+// 入参: args JSON操作参数
+// 返回: any 编辑状态, error 参数、校验或提交错误
+func changeStructure(args []js.Value) (any, error) {
+	if len(args) != 1 || args[0].Type() != js.TypeString {
+		return nil, fmt.Errorf("invalid structure arguments")
+	}
+	var request struct {
+		Action     string                     `json:"action"`
+		Index      int                        `json:"index"`
+		Path       []int                      `json:"path"`
+		TypeID     string                     `json:"typeId"`
+		Node       ofdgo.StructureNode        `json:"node"`
+		References []ofdgo.StructureReference `json:"references"`
+	}
+	if err := json.Unmarshal([]byte(args[0].String()), &request); err != nil {
+		return nil, err
+	}
+	return changeObjects(func() error {
+		switch request.Action {
+		case "create":
+			_, err := currentEditor.AddStructure(ofdgo.CustomTag{TypeID: request.TypeID, NameSpace: request.Node.Namespace}, request.Node)
+			return err
+		case "add":
+			_, err := currentEditor.AddStructureNode(request.Index, request.Path, request.Node)
+			return err
+		case "update":
+			return currentEditor.UpdateStructureNode(request.Index, request.Path, request.Node)
+		case "delete":
+			if len(request.Path) == 0 {
+				return currentEditor.DeleteStructure(request.Index)
+			}
+			return currentEditor.DeleteStructureNode(request.Index, request.Path)
+		case "bind":
+			return currentEditor.SetStructureReferences(request.Index, request.Path, request.References)
+		default:
+			return fmt.Errorf("unsupported structure action %q", request.Action)
+		}
+	})
+}
+
+// structureObjects 获取当前编辑文档的绑定候选，不允许阅读模式调用编辑入口
+// 入参: args 从0开始的页面索引
+// 返回: any 图元标识和原文, error 参数或读取错误
+func structureObjects(args []js.Value) (any, error) {
+	if currentEditor == nil || currentSession == nil || len(args) != 1 {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	return currentSession.Renderer.StructureObjects(args[0].Int())
 }
 
 // structureTargets 查询当前文档标引节点的原文与定位范围

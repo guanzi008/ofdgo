@@ -30,10 +30,12 @@ const structureTypeOfficial = "od"
 const structureNamespaceEGov2013 = "http://www.nits.org.cn/eGovDoc/2013"
 
 // Structure 保存自定义标引入口及结构树，单个文件解析失败时通过Error报告，不影响其他标引
+// CanBind表示已识别公文引用语义，具体节点和目标仍由绑定接口校验
 type Structure struct {
 	TypeID    string         `json:"typeId,omitempty"`
 	Namespace string         `json:"namespace,omitempty"`
 	FileLoc   string         `json:"fileLoc"`
+	CanBind   bool           `json:"canBind,omitempty"`
 	Root      *StructureNode `json:"root,omitempty"`
 	Error     string         `json:"error,omitempty"`
 }
@@ -97,6 +99,9 @@ func (r *Reader) StructureContext(ctx context.Context) ([]Structure, error) {
 		data, err := r.readFileViewContext(ctx, r.ResPath(tag.FileLoc))
 		if err == nil {
 			item.Root, err = parseStructure(ctx, data, tag)
+			if err == nil {
+				item.CanBind = structureOfficial(tag, item.Root.Namespace)
+			}
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

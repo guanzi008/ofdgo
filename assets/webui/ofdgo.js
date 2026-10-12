@@ -540,6 +540,22 @@ const el = {
 	structurePanel: document.querySelector("#structurePanel"),
 	structureList: document.querySelector("#structureList"),
 	structureSummary: document.querySelector("#structureSummary"),
+	structureManage: document.querySelector("#structureManage"),
+	structureDialog: document.querySelector("#structureDialog"),
+	structureForm: document.querySelector("#structureForm"),
+	structureEntry: document.querySelector("#structureEntry"),
+	structureNodeSelect: document.querySelector("#structureNodeSelect"),
+	structureAction: document.querySelector("#structureAction"),
+	structureFields: document.querySelector("#structureFields"),
+	structureType: document.querySelector("#structureType"),
+	structureName: document.querySelector("#structureName"),
+	structureNamespace: document.querySelector("#structureNamespace"),
+	structureText: document.querySelector("#structureText"),
+	structureAttributes: document.querySelector("#structureAttributes"),
+	structureBinding: document.querySelector("#structureBinding"),
+	structureReferences: document.querySelector("#structureReferences"),
+	structureStatus: document.querySelector("#structureStatus"),
+	structureSubmit: document.querySelector("#structureSubmit"),
 	signatureSummary: document.querySelector("#signatureSummary"),
 	signatureList: document.querySelector("#signatureList"),
 	annotationNote: document.querySelector("#annotationNote"),
@@ -1211,6 +1227,32 @@ el.objectStyleForm.addEventListener("submit", async event => {
 	if (await changeDocument("ofdgoStyleObjects", { ...item, id: canvasEditor.items().map(member => member.id) }, style)) el.objectStylePanel.close();
 });
 el.outlineCancel.addEventListener("click", () => el.outlinePanel.close());
+el.structureManage.addEventListener("click", openStructureDialog);
+document.querySelector("#structureCancel").addEventListener("click", () => el.structureDialog.close());
+el.structureEntry.addEventListener("change", refreshStructureNodes);
+el.structureNodeSelect.addEventListener("change", refreshStructureFields);
+el.structureAction.addEventListener("change", refreshStructureFields);
+document.querySelector("#structureAttributeAdd").addEventListener("click", () => addStructureAttribute());
+document.querySelector("#structureReferenceAdd").addEventListener("click", () => addStructureReference());
+document.querySelector("#structureSelection").addEventListener("click", () => {
+	const items = canvasEditor.items();
+	if (!items.length) { el.structureStatus.textContent = "尚未选择图元"; return; }
+	const page = state.doc.pages[items[0].index];
+	addStructureReference({ pageId: page.id, objectIds: items.map(item => item.id) });
+});
+el.structureForm.addEventListener("submit", async event => {
+	event.preventDefault();
+	if (!state.editing || document.body.hasAttribute("aria-busy")) return;
+	const index = Number(el.structureEntry.value), path = JSON.parse(el.structureNodeSelect.value || "[]");
+	const action = index < 0 ? "create" : el.structureAction.value;
+	const node = { name: el.structureName.value, namespace: el.structureNamespace.value, text: el.structureText.value,
+		attributes: [...el.structureAttributes.children].map(row => ({ name: row.querySelector('[name="name"]').value, namespace: row.querySelector('[name="namespace"]').value, value: row.querySelector('[name="value"]').value })) };
+	const references = [...el.structureReferences.children].map(row => ({ pageId: row.querySelector('[name="page"]').value,
+		objectIds: row.querySelector('[name="ids"]').value.split(/[,\s]+/u).filter(Boolean) })).filter(ref => ref.objectIds.length);
+	el.structureStatus.textContent = "";
+	const saved = await changeDocument("ofdgoChangeStructure", null, JSON.stringify({ action, index, path, typeId: el.structureType.value, node, references }));
+	if (saved) el.structureDialog.close();
+});
 el.outlineForm.addEventListener("submit", async event => {
 	event.preventDefault();
 	const path = state.outlineAction === "add" ? JSON.parse(el.outlineParent.value) : state.outlineSelection;
@@ -1657,7 +1699,7 @@ function handleKeyDown(event) {
 
 function formDialogOpen() {
 	return Boolean(sealPreview) || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
-		|| el.versionPanel.open || el.batchPagesPanel.open || el.objectStylePanel.open || el.sourceTextPanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
+		|| el.structureDialog.open || el.versionPanel.open || el.batchPagesPanel.open || el.objectStylePanel.open || el.sourceTextPanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
 
 function setObjectDimension(input, value) {
@@ -3414,6 +3456,8 @@ async function changeDocument(name, item, ...args) {
 				el.objectBoundsStatus.textContent = err.message;
 			} else if (el.outlinePanel.open) {
 				el.outlineStatus.textContent = err.message;
+			} else if (el.structureDialog.open) {
+				el.structureStatus.textContent = err.message;
 			} else if (el.infoPanel.open) {
 				el.infoStatus.textContent = err.message;
 			} else if (el.attachmentDialog.open) {
@@ -4188,6 +4232,7 @@ async function openOFD(file, remote = null) {
 		el.sourceTextPanel.close();
 		el.objectBoundsPanel.close();
 		el.outlinePanel.close();
+		el.structureDialog.close();
 		updateControls();
 		await openDocument({ doc, pageIndex: remote?.pageIndex || 0, resetScroll: true, openSeq, activateActions: true });
 	} catch (err) {
@@ -8150,7 +8195,7 @@ function renderMeta(keepDetails = false) {
 	el.metaSignatures.textContent = doc.detailsPending ? "正在检查签名" : doc.detailsError ? "读取失败" : String(doc.signatureCount || 0);
 	renderMetaContent(el.attachmentList, [doc.attachments, doc.attachmentError, state.editing], renderAttachments);
 	renderMetaContent(el.signatureList, [doc.signatures, doc.signatureError], renderSignatures);
-	renderMetaContent(el.structureList, [doc.structures, doc.structureError, doc.documentIndex, doc.documentVersion, state.openSeq, state.editorInfo?.revision], renderStructures);
+	updateStructureControls();
 	renderMetaContent(el.docFontList, doc.fonts || [], renderDocumentFonts);
 	refreshEditorFonts();
 	updateLocalFontButton();
@@ -8227,9 +8272,149 @@ function renderAttachments() {
 	}
 }
 
+function openStructureDialog() {
+	if (!state.editing || !state.doc || document.body.hasAttribute("aria-busy")) return;
+	el.structureEntry.replaceChildren();
+	for (const [index, structure] of (state.doc.structures || []).entries()) {
+		el.structureEntry.add(new Option(`${index + 1} · ${structure.root?.name || structure.typeId}`, index));
+	}
+	el.structureEntry.add(new Option("新建标引", -1));
+	el.structureAction.value = "update";
+	refreshStructureNodes();
+	el.structureDialog.showModal();
+}
+
+function refreshStructureNodes() {
+	const structure = state.doc.structures?.[Number(el.structureEntry.value)];
+	el.structureNodeSelect.replaceChildren();
+	const append = (node, path, depth) => {
+		if (node.references?.length) return;
+		el.structureNodeSelect.add(new Option(`${"　".repeat(depth)}${node.name}`, JSON.stringify(path)));
+		for (const [index, child] of (node.children || []).entries()) append(child, [...path, index], depth + 1);
+	};
+	if (structure?.root) append(structure.root, [], 0);
+	refreshStructureFields();
+}
+
+function refreshStructureFields() {
+	const index = Number(el.structureEntry.value), creating = index < 0;
+	const structure = state.doc.structures?.[index];
+	let node = structure?.root, canBind = Boolean(structure?.canBind);
+	for (const part of JSON.parse(el.structureNodeSelect.value || "[]")) {
+		node = node?.children?.[part];
+		canBind &&= node?.namespace === structure.root.namespace;
+	}
+	canBind &&= node?.name !== "ObjectRef";
+	el.structureAction.querySelector('[value="bind"]').disabled = !canBind;
+	if (!canBind && el.structureAction.value === "bind") el.structureAction.value = "update";
+	if (!creating && !node) el.structureAction.value = "delete";
+	for (const option of el.structureAction.options) option.disabled = option.value === "bind" ? !canBind : !creating && !node && option.value !== "delete";
+	const action = creating ? "create" : el.structureAction.value;
+	document.querySelector("#structureNodeRow").hidden = creating || !node;
+	document.querySelector("#structureActionRow").hidden = creating;
+	document.querySelector("#structureTypeRow").hidden = !creating;
+	el.structureType.value = creating ? "custom" : structure?.typeId || "";
+	el.structureFields.hidden = action === "bind" || action === "delete";
+	el.structureBinding.hidden = action !== "bind";
+	el.structureName.value = action === "update" ? node?.name || "" : "";
+	el.structureNamespace.value = creating ? "" : node?.namespace || "";
+	el.structureText.value = action === "update" ? node?.text || "" : "";
+	el.structureAttributes.replaceChildren();
+	el.structureReferences.replaceChildren();
+	if (action === "update") for (const attr of node?.attributes || []) addStructureAttribute(attr);
+	if (action === "bind") {
+		const references = [...(node?.references || []), ...(node?.children || []).flatMap(child => child.references || [])];
+		for (const ref of references) addStructureReference(ref);
+		if (!references.length) addStructureReference();
+	}
+	for (const control of el.structureFields.querySelectorAll("input,textarea,button")) control.disabled = el.structureFields.hidden;
+	el.structureType.disabled = !creating;
+	el.structureStatus.textContent = structure?.error || (action === "delete" ? "删除此节点及子节点" : "");
+	el.structureSubmit.textContent = ({ create: "新增", add: "新增", update: "修改", bind: "绑定", delete: "删除" })[action];
+}
+
+function addStructureAttribute(attribute = {}) {
+	const row = document.createElement("div");
+	row.className = "structure-attribute";
+	for (const [name, label] of [["name", "属性名称"], ["namespace", "命名空间"], ["value", "属性内容"]]) {
+		const input = document.createElement("input");
+		input.name = name;
+		input.value = attribute[name] || "";
+		input.placeholder = label;
+		input.setAttribute("aria-label", label);
+		input.required = name === "name";
+		if (name === "value") input.className = "structure-attribute-value";
+		row.append(input);
+	}
+	const remove = document.createElement("button");
+	remove.type = "button";
+	remove.className = "small-button";
+	remove.textContent = "×";
+	remove.title = "删除属性";
+	remove.setAttribute("aria-label", remove.title);
+	remove.addEventListener("click", () => row.remove());
+	row.append(remove);
+	el.structureAttributes.append(row);
+}
+
+function addStructureReference(reference = {}) {
+	const row = document.createElement("div");
+	row.className = "structure-reference";
+	const page = document.createElement("select"), object = document.createElement("select"), ids = document.createElement("input");
+	page.name = "page";
+	ids.name = "ids";
+	ids.value = (reference.objectIds || []).join(",");
+	for (const [index, item] of state.doc.pages.entries()) page.add(new Option(`第${index + 1}页`, item.id));
+	if (reference.pageId) page.value = reference.pageId;
+	const remove = document.createElement("button"), add = document.createElement("button");
+	for (const [button, label, text] of [[remove, "删除引用", "×"], [add, "添加图元", "添加"]]) {
+		button.type = "button";
+		button.className = "small-button";
+		button.textContent = text;
+		button.title = label;
+		button.setAttribute("aria-label", label);
+	}
+	remove.addEventListener("click", () => row.remove());
+	add.addEventListener("click", () => {
+		if (object.value) ids.value = [...ids.value.split(/[,\s]+/u).filter(Boolean), object.value].join(",");
+	});
+	for (const [label, control, button] of [["页码", page, remove], ["图元", object, add], ["顺序", ids, null]]) {
+		const line = document.createElement("div"), title = document.createElement("label"), unit = document.createElement("div");
+		line.className = "form-row";
+		title.textContent = label;
+		control.setAttribute("aria-label", label);
+		unit.className = "form-unit";
+		unit.append(control);
+		if (button) unit.append(button);
+		line.append(title, unit);
+		row.append(line);
+	}
+	el.structureReferences.append(row);
+	const load = async () => {
+		const value = page.value, sequence = state.openSeq;
+		object.replaceChildren(new Option("读取中", ""));
+		add.disabled = true;
+		try {
+			const index = state.doc.pages.findIndex(item => item.id === value);
+			const targets = await callWASM("ofdgoStructureObjects", index);
+			if (!row.isConnected || sequence !== state.openSeq || value !== page.value) return;
+			object.replaceChildren(new Option("选择图元", ""));
+			for (const target of targets || []) object.add(new Option(`${target.id} · ${(target.text || "图元").slice(0, 60)}`, target.id));
+			add.disabled = false;
+		} catch (err) {
+			if (!row.isConnected || sequence !== state.openSeq || value !== page.value) return;
+			object.replaceChildren(new Option("读取失败", ""));
+			el.structureStatus.textContent = err.message;
+		}
+	};
+	page.addEventListener("change", () => { ids.value = ""; load(); });
+	load();
+}
+
 function renderStructures() {
 	const structures = state.doc?.structures || [];
-	el.structurePanel.hidden = !structures.length && !state.doc?.structureError;
+	el.structurePanel.hidden = !structures.length && !state.doc?.structureError && !(state.doc && state.editing);
+	el.structureManage.hidden = !state.editing;
 	el.structureSummary.textContent = structures.length;
 	el.structureList.replaceChildren();
 	if (state.doc?.structureError) appendInfoLine(el.structureList, "错误", state.doc.structureError, "fail");
@@ -8237,6 +8422,11 @@ function renderStructures() {
 		if (structure.root) el.structureList.append(structureNode(structure.root, index, []));
 		if (structure.error) appendInfoLine(el.structureList, "错误", structure.error, "fail");
 	}
+}
+
+function updateStructureControls() {
+	renderMetaContent(el.structureList, [state.doc?.structures, state.doc?.structureError, state.doc?.documentIndex, state.doc?.documentVersion, state.openSeq, state.editorInfo?.revision, state.editing], renderStructures);
+	el.structureManage.disabled = !state.ready || state.exporting || document.body.hasAttribute("aria-busy") || Boolean(state.doc?.detailsPending);
 }
 
 function structureNode(node, index, path) {
@@ -9083,6 +9273,7 @@ function updateDocumentControls() {
 
 function updateControls() {
 	renderSecurity();
+	updateStructureControls();
 	el.attachmentAdd.disabled = !state.editing || !state.ready || state.exporting;
 	renderMetaContent(el.attachmentList, [state.doc?.attachments, state.doc?.attachmentError, state.editing], renderAttachments);
 	const hasDoc = Boolean(state.doc);
@@ -9289,6 +9480,7 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("aria-busy", busy);
+	updateStructureControls();
 	updateDocumentControls();
 	renderSecurity();
 	updateDisplayControls();
@@ -9312,6 +9504,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	el.objectStyleForm.inert = busy;
 	el.objectBoundsForm.inert = busy;
 	el.outlineForm.inert = busy;
+	el.structureForm.inert = busy;
 	el.outlineList.inert = busy;
 	el.navigationTabs.inert = busy;
 	el.pageList.inert = busy;

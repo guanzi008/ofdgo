@@ -252,6 +252,15 @@ func editorXMLTextValue(data []byte, node *editorXML, before, after string) ([]b
 		content.Reset()
 		content.Write(escaped)
 	}
+	return editorXMLDirectText(data, node, content.Bytes())
+}
+
+// editorXMLDirectText 替换直接文本，保留子节点、注释和处理指令
+// 入参: data 原XML, node 目标节点, text 已转义的文本
+// 返回: []byte 节点片段, error XML解析错误
+func editorXMLDirectText(data []byte, node *editorXML, text []byte) ([]byte, error) {
+	var content bytes.Buffer
+	content.Write(text)
 	if node.open < node.close {
 		inner := data[node.open:node.close]
 		decoder := xml.NewDecoder(bytes.NewReader(inner))

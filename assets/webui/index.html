@@ -262,6 +262,26 @@
 				<div class="form-actions"><div id="objectStyleStatus" class="form-status" role="status"></div><button id="objectStyleCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
+		<dialog id="structureDialog" class="form-dialog structure-dialog" aria-label="管理标引">
+			<form id="structureForm">
+				<div class="form-row"><label for="structureEntry">标引</label><select id="structureEntry"></select></div>
+				<div id="structureNodeRow" class="form-row"><label for="structureNodeSelect">节点</label><select id="structureNodeSelect"></select></div>
+				<div id="structureActionRow" class="form-row"><label for="structureAction">操作</label><select id="structureAction"><option value="update">修改</option><option value="add">新增</option><option value="bind">绑定</option><option value="delete">删除</option></select></div>
+				<div id="structureFields">
+					<div id="structureTypeRow" class="form-row"><label for="structureType">类型</label><input id="structureType" type="text" required></div>
+					<div class="form-row"><label for="structureName">名称</label><input id="structureName" type="text" required></div>
+					<div class="form-row"><label for="structureNamespace">命名空间</label><input id="structureNamespace" type="text"></div>
+					<div class="form-row"><label for="structureText">内容</label><textarea id="structureText" rows="2"></textarea></div>
+					<div class="panel-row"><span>属性</span><button id="structureAttributeAdd" class="small-button" type="button" title="添加属性">添加</button></div>
+					<div id="structureAttributes" class="structure-edit-list"></div>
+				</div>
+				<div id="structureBinding" hidden>
+					<div class="panel-row"><span>引用</span><div class="panel-actions"><button id="structureSelection" class="small-button" type="button" title="绑定选区">选区</button><button id="structureReferenceAdd" class="small-button" type="button" title="添加引用">添加</button></div></div>
+					<div id="structureReferences" class="structure-edit-list"></div>
+				</div>
+				<div class="form-actions"><div id="structureStatus" class="form-status" role="status"></div><button id="structureCancel" class="button" type="button">取消</button><button id="structureSubmit" class="button" type="submit">确定</button></div>
+			</form>
+		</dialog>
 		<dialog id="outlinePanel" class="form-dialog" aria-label="编辑目录">
 			<form id="outlineForm">
 				<div class="form-row"><label for="outlineTitle">标题</label><input id="outlineTitle" type="text" required autofocus></div>
@@ -705,7 +725,7 @@
 					<div id="attachmentList" class="attachment-list"></div>
 				</section>
 				<section id="structurePanel" class="structure-panel" aria-labelledby="structurePanelTitle" hidden>
-					<div class="panel-row"><div id="structurePanelTitle" class="panel-title compact">结构</div><span id="structureSummary" class="count-pill">0</span></div>
+					<div class="panel-row"><div id="structurePanelTitle" class="panel-title compact">结构</div><div class="panel-actions"><span id="structureSummary" class="count-pill">0</span><button id="structureManage" class="small-button" type="button" title="管理标引" aria-haspopup="dialog" aria-controls="structureDialog" hidden>管理</button></div></div>
 					<div id="structureList" class="structure-list"></div>
 				</section>
 				<section id="signaturePanel" class="signature-panel" aria-labelledby="signaturePanelTitle" hidden>
