@@ -376,17 +376,178 @@ func (a Attachment) FileName() string {
 	}, name)
 }
 
-// UnmarshalXML 解析附件并应用默认值
+// UnmarshalXML 读取附件索引或文档中的索引路径，忽略外部同名条目
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (a *Attachments) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if start.Name.Local != "Attachments" {
+		return fmt.Errorf("expected Attachments root, got %s", start.Name.Local)
+	}
+	*a = Attachments{XMLName: start.Name}
+	return decodeDocumentIndex(d, start, "Attachment", &a.Path, &a.Attachment)
+}
+
+// UnmarshalXML 解析附件属性和内容路径，省略可见性及用途时采用标准默认值
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
 func (a *Attachment) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	type attachment Attachment
-	value := attachment{Visible: true, Usage: "none"}
+	*a = Attachment{
+		ID: attrValue(start, "ID"), Name: attrValue(start, "Name"), Format: attrValue(start, "Format"),
+		CreationDate: attrValue(start, "CreationDate"), ModDate: attrValue(start, "ModDate"),
+		Visible: true, Usage: "none",
+	}
+	for _, attr := range start.Attr {
+		if attr.Name.Space != "" {
+			continue
+		}
+		switch attr.Name.Local {
+		case "Size":
+			value, err := strconv.ParseFloat(strings.TrimSpace(attr.Value), 64)
+			if err != nil {
+				return err
+			}
+			a.Size = &value
+		case "Visible":
+			value, err := strconv.ParseBool(strings.TrimSpace(attr.Value))
+			if err != nil {
+				return err
+			}
+			a.Visible = value
+		case "Usage":
+			a.Usage = attr.Value
+		}
+	}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local == "FileLoc" {
+			return d.DecodeElement(&a.FileLoc, &node)
+		}
+		return d.Skip()
+	})
+}
+
+// UnmarshalXML 读取自定义标引索引或文档中的索引路径
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (tags *CustomTags) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if start.Name.Local != "CustomTags" {
+		return fmt.Errorf("expected CustomTags root, got %s", start.Name.Local)
+	}
+	*tags = CustomTags{XMLName: start.Name}
+	return decodeDocumentIndex(d, start, "CustomTag", &tags.Path, &tags.CustomTag)
+}
+
+// UnmarshalXML 读取自定义标引的类型及文件路径，不采用外部同名字段
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (tag *CustomTag) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*tag = CustomTag{TypeID: attrValue(start, "TypeID"), NameSpace: attrValue(start, "NameSpace")}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "SchemaLoc":
+			return d.DecodeElement(&tag.SchemaLoc, &node)
+		case "FileLoc":
+			return d.DecodeElement(&tag.FileLoc, &node)
+		}
+		return d.Skip()
+	})
+}
+
+// UnmarshalXML 读取扩展信息索引或文档中的索引路径
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (extensions *Extensions) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if start.Name.Local != "Extensions" {
+		return fmt.Errorf("expected Extensions root, got %s", start.Name.Local)
+	}
+	*extensions = Extensions{XMLName: start.Name}
+	return decodeDocumentIndex(d, start, "Extension", &extensions.Path, &extensions.Extension)
+}
+
+// UnmarshalXML 读取扩展项，Data中的任意属性和XML原文保持不变
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (extension *Extension) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*extension = Extension{
+		AppName: attrValue(start, "AppName"), Company: attrValue(start, "Company"),
+		AppVersion: attrValue(start, "AppVersion"), Date: attrValue(start, "Date"), RefID: attrValue(start, "RefId"),
+	}
+	for {
+		token, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch node := token.(type) {
+		case xml.StartElement:
+			var target any
+			if ofdXMLChild(start.Name, node.Name) {
+				switch node.Name.Local {
+				case "Property":
+					target = &extension.Property
+				case "ExtendData":
+					target = &extension.ExtendData
+				case "Data":
+					target = &extension.Data
+				}
+			}
+			if target == nil {
+				err = d.Skip()
+			} else {
+				err = d.DecodeElement(target, &node)
+			}
+			if err != nil {
+				return err
+			}
+		case xml.EndElement:
+			if node.Name == start.Name {
+				return nil
+			}
+		}
+	}
+}
+
+// UnmarshalXML 读取扩展属性名称、类型及文本值，忽略限定命名空间的同名属性
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (property *Property) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type plain Property
+	var value plain
+	start = ofdXMLStart(start)
 	if err := d.DecodeElement(&value, &start); err != nil {
 		return err
 	}
-	*a = Attachment(value)
+	*property = Property(value)
 	return nil
+}
+
+// decodeDocumentIndex 读取索引的直接条目及路径文本，不提升外部扩展中的节点
+// 入参: d XML解码器, start 起始节点, name 条目名称, location 路径文本, values 条目列表
+// 返回: error 解析错误
+func decodeDocumentIndex[T any](d *xml.Decoder, start xml.StartElement, name string, location *string, values *[]T) error {
+	var text strings.Builder
+	for {
+		token, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch node := token.(type) {
+		case xml.StartElement:
+			if node.Name.Local == name && ofdXMLChild(start.Name, node.Name) {
+				err = d.DecodeElement(values, &node)
+			} else {
+				err = d.Skip()
+			}
+			if err != nil {
+				return err
+			}
+		case xml.CharData:
+			text.Write(node)
+		case xml.EndElement:
+			if node.Name == start.Name {
+				*location = text.String()
+				return nil
+			}
+		}
+	}
 }
 
 // UnmarshalXML 读取OFD书签列表，跳过外部同名条目
