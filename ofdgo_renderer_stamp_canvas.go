@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"image"
 
 	"github.com/tdewolff/canvas"
@@ -25,6 +26,19 @@ import (
 // 入参: ctx 画布上下文, s 印章对象, pageH 页面高度
 func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 	if r.textOnly {
+		return
+	}
+	pageContext := r.pageContext
+	if pageContext == nil {
+		pageContext = context.Background()
+	}
+	defer func() {
+		if err := pageContext.Err(); err != nil {
+			r.renderError = err
+		}
+	}()
+	if err := pageContext.Err(); err != nil {
+		r.renderError = err
 		return
 	}
 	if s.Type == "ofd" && len(s.Data) > 0 {
@@ -37,12 +51,15 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 		reader, err := NewReader(bytes.NewReader(s.Data), int64(len(s.Data)))
 		if err == nil {
 			defer reader.Close()
-			doc, err := reader.Doc()
+			doc, err := reader.DocContext(pageContext)
 			if err == nil {
 				renderer := r.childRenderer(reader)
 				for _, pageRef := range doc.Pages.Page {
-					content, err := reader.PageContent(pageRef)
+					content, err := reader.PageContentContext(pageContext, pageRef)
 					if err != nil {
+						if pageContext.Err() != nil {
+							return
+						}
 						continue
 					}
 					sealBox, err := renderer.GetPageBox(content)
@@ -64,7 +81,7 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 		}
 	}
 	if len(s.Data) > 0 {
-		img, _, err := decodeImageData(s.Data)
+		img, _, err := decodeImageDataContext(pageContext, s.Data)
 		if err == nil {
 			if r.decodeImages {
 				img = imagePixelSource(img)
@@ -79,12 +96,25 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 // 入参: data OFD印章数据
 // 返回: image.Image 印章图像
 func (r *Renderer) renderOFDStampImage(data []byte) image.Image {
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	defer func() {
+		if err := ctx.Err(); err != nil {
+			r.renderError = err
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		r.renderError = err
+		return nil
+	}
 	reader, err := NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil
 	}
 	defer reader.Close()
-	doc, err := reader.Doc()
+	doc, err := reader.DocContext(ctx)
 	if err != nil {
 		return nil
 	}
@@ -92,8 +122,11 @@ func (r *Renderer) renderOFDStampImage(data []byte) image.Image {
 	renderer.decodeImages = true
 	renderer.TransparentBackground = true
 	for _, pageRef := range doc.Pages.Page {
-		content, err := reader.PageContent(pageRef)
+		content, err := reader.PageContentContext(ctx, pageRef)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			continue
 		}
 		img, err := renderer.RenderToImage(content)

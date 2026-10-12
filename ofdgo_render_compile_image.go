@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"math"
@@ -158,20 +159,27 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 	if c.textOnly || c.measure || len(stamp.Data) == 0 {
 		return nil
 	}
+	ctx := c.renderer.pageContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if stamp.Type == "ofd" {
 		reader, err := NewReader(bytes.NewReader(stamp.Data), int64(len(stamp.Data)))
 		if err != nil {
 			return err
 		}
 		defer reader.Close()
-		document, err := reader.Doc()
+		document, err := reader.DocContext(ctx)
 		if err != nil {
 			return err
 		}
 		renderer := c.renderer.childRenderer(reader)
 		renderer.TransparentBackground = true
 		for _, reference := range document.Pages.Page {
-			content, err := reader.PageContent(reference)
+			content, err := reader.PageContentContext(ctx, reference)
 			if err != nil {
 				return err
 			}
@@ -218,7 +226,7 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 		}
 		return nil
 	}
-	img, _, err := decodeImageData(stamp.Data)
+	img, _, err := decodeImageDataContext(ctx, stamp.Data)
 	if err != nil {
 		return err
 	}

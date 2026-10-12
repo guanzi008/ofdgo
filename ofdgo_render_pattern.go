@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"slices"
@@ -62,6 +63,13 @@ func (c *semanticCompiler) sharedStamp(stamp Stamp, compile func(*semanticCompil
 		return nil
 	}
 	r := c.renderer
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	state, _ := r.backendStates[stampContentStateKey{}].(*stampContentState)
 	config := r.backends
 	if state == nil || !sameBackend(state.config.Fonts, config.Fonts) || !sameBackend(state.config.Geometry, config.Geometry) ||
@@ -80,17 +88,31 @@ func (c *semanticCompiler) sharedStamp(stamp Stamp, compile func(*semanticCompil
 		local.Box.X, local.Box.Y = 0, 0
 		page := &RasterPage{Width: c.page.Width, Height: c.page.Height, DPI: c.page.DPI}
 		child := &semanticCompiler{renderer: r, geometry: c.geometry, page: page, patterns: c.patterns}
-		if err := compile(child, local); err != nil {
+		err := compile(child, local)
+		if cancelErr := ctx.Err(); cancelErr != nil {
+			return cancelErr
+		}
+		if err != nil {
 			return err
 		}
 		commands = page.Commands
 		cost := 0
 		for _, command := range commands {
-			cost += rasterCommandCost(command)
-			if command.Image != nil {
-				bounds := command.Image.Bounds()
-				cost += bounds.Dx() * bounds.Dy() * 4
+			part := rasterCommandCost(command)
+			if part < 0 || part > state.cache.limit-cost {
+				cost = state.cache.limit + 1
+				break
 			}
+			cost += part
+			if command.Image != nil {
+				cost += imageResourceCost(command.Image, state.cache.limit-cost)
+			}
+			if cost > state.cache.limit {
+				break
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		state.cache.put(key, commands, cost)
 	}

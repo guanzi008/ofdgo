@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"io"
 	"math"
 )
 
@@ -90,7 +91,7 @@ func (e *Editor) ImportImages(ctx context.Context, sources []ImagePageSource, at
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			page, err := e.addImagePage(data, options)
+			page, err := e.addImagePage(ctx, data, options)
 			if err != nil {
 				return fmt.Errorf("image %q: %w", source.Name, err)
 			}
@@ -107,9 +108,12 @@ func (e *Editor) ImportImages(ctx context.Context, sources []ImagePageSource, at
 }
 
 // addImagePage 保留原图并按方向、物理尺寸与纸张选项建页
-// 入参: data 图片数据, options 建页选项
+// 入参: ctx 取消上下文, data 图片数据, options 建页选项
 // 返回: int 从0开始的页面索引, error 错误信息
-func (e *Editor) addImagePage(data []byte, options ImagePageOptions) (int, error) {
+func (e *Editor) addImagePage(ctx context.Context, data []byte, options ImagePageOptions) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	config, format, err := decodeImageConfigData(data)
 	if err != nil {
 		return 0, err
@@ -119,9 +123,12 @@ func (e *Editor) addImagePage(data []byte, options ImagePageOptions) (int, error
 	}
 	var decoded image.Image
 	if format == "bmp" || format == "tiff" {
-		decoded, _, err = decodeImageData(data)
+		decoded, _, err = decodeImageDataContext(ctx, data)
 	} else {
-		decoded, _, err = image.Decode(bytes.NewReader(data))
+		decoded, _, err = image.Decode(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	}
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		return 0, cancelErr
 	}
 	if err != nil {
 		return 0, err
@@ -143,6 +150,9 @@ func (e *Editor) addImagePage(data []byte, options ImagePageOptions) (int, error
 	}
 	if !finite(w) || !finite(h) || w <= 0 || h <= 0 {
 		return 0, fmt.Errorf("invalid image page dimensions")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
 	}
 	resource, err := e.addImage(data, config, format, decoded)
 	if err != nil {
