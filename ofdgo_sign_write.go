@@ -44,27 +44,26 @@ type SignatureWriteMode uint8
 // SM2数字签名使用GB/T35275-2017消息结构；RSA/ECDSA使用裸签名，验签需WithSignatureCert
 // Seal仅接受已有合法SES v4电子印章，使用SM2/SM3，不声明GM/T0031-2025兼容
 // TrustRoots必须显式指定；证书吊销状态和外部业务授权由调用方在签署前检查
+// Time为签署方声明的时间，不是可信时间戳，零值取当前时间；Lock保护签名列表，禁止后续追加签署
+// ExistingVerifyOptions用于追加签署前和写出后的验证，可提供已有裸签名的验证证书
+// ReaderOptions用于打开加密包；Encryption为空时继承阅读器的加密策略
+// Compression在计算签名前优化图像，不改写已有签名保护的资源
 type SignatureWriteOptions struct {
-	Signer        crypto.Signer
-	Certificate   []byte
-	TrustRoots    [][]byte
-	Intermediates [][]byte
-	Seal          []byte
-	Stamps        []SignatureStamp
-	Mode          SignatureWriteMode
-	// Time是自报签署时间，不是可信时间戳；零值取当前时间
-	Time     time.Time
-	Provider SignatureProvider
-	// Lock保护签名列表，禁止后续追加签署
-	Lock bool
-	// ExistingVerifyOptions用于追加前与写出后回验，例如提供其他旧裸签名的证书
+	Signer                crypto.Signer
+	Certificate           []byte
+	TrustRoots            [][]byte
+	Intermediates         [][]byte
+	Seal                  []byte
+	Stamps                []SignatureStamp
+	Mode                  SignatureWriteMode
+	Time                  time.Time
+	Provider              SignatureProvider
+	Lock                  bool
 	ExistingVerifyOptions []SignatureVerifyOption
-	// ReaderOptions用于打开加密包；Encryption为空时继承阅读器的加密策略
-	ReaderOptions []ReaderOption
-	Encryption    *EncryptionOptions
-	// Compression在签名计算前优化图片，已有签名的资源不额外改写
-	Compression CompressionOptions
-	progress    editorProgress
+	ReaderOptions         []ReaderOption
+	Encryption            *EncryptionOptions
+	Compression           CompressionOptions
+	progress              editorProgress
 }
 
 // signatureWriteInfo 写出签名信息，省略数字签名中不存在的印章

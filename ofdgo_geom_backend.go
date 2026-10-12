@@ -30,21 +30,19 @@ const (
 // GeometryOperation 指定路径填充区域的布尔运算
 type GeometryOperation uint8
 
-// StrokeOptions 描述描边参数，长度单位为毫米，MiterLimitSet区分显式零值与默认截断值
+// StrokeOptions 描述描边参数，长度单位为毫米
+// Width须为正有限数；Cap和Join使用OFD名称，空值分别采用Butt和Miter
+// MiterLimit为尖角长度与半线宽的比值上限，MiterLimitSet区分显式零值与默认值
+// DashOffset为虚线起始偏移，允许负值；Dashes交替指定实线段和间隔长度，奇数项按重复一遍处理
+// Tolerance为曲线展开的误差目标，0采用后端默认精度
 type StrokeOptions struct {
-	// Width为正有限描边宽度
-	Width float64
-	// Cap和Join使用OFD名称，空值分别采用Butt和Miter
-	Cap, Join string
-	// MiterLimit为尖角长度与半线宽的比值上限
+	Width         float64
+	Cap, Join     string
 	MiterLimit    float64
 	MiterLimitSet bool
-	// DashOffset为绝对长度的虚线相位，允许负值
-	DashOffset float64
-	// Tolerance为曲线展开误差目标，0采用后端默认精度
-	Tolerance float64
-	// Dashes为交替绘制和留空的绝对长度，奇数项按重复一遍处理
-	Dashes []float64
+	DashOffset    float64
+	Tolerance     float64
+	Dashes        []float64
 }
 
 // GeometryBackend 操作库自有路径，坐标以页面左上角为原点，不修改任何输入
