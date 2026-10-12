@@ -996,7 +996,7 @@ func signatureCertInfo(data []byte) SignatureCertInfo {
 	}
 }
 
-// parseSignatureDateTime 解析带时区的签名时间
+// parseSignatureDateTime 解析带时区的签名时间，支持UTCTime两位年份
 // 入参: value 签名时间文本
 // 返回: time.Time 签名时间
 func parseSignatureDateTime(value string) time.Time {
@@ -1010,7 +1010,8 @@ func parseSignatureDateTime(value string) time.Time {
 			return t
 		}
 	}
-	return time.Time{}
+	t, _ := asn1Time(asn1.RawValue{FullBytes: asn1Wrap(asn1.TagUTCTime, []byte(value))})
+	return t
 }
 
 // parseSignatureCertificate 解析唯一的PEM或DER证书
