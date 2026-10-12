@@ -15,7 +15,9 @@
 package ofdgo
 
 import (
+	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 )
 
@@ -149,9 +151,15 @@ type fontDataKey struct {
 }
 
 // ResolveFont 使用配置的字体后端解析资源，保留精确匹配与回退的区别
+// 页面取消及后端取消、超时结果不缓存，后续调用可重试
 // 入参: id 字体资源标识, exact 是否要求精确匹配
 // 返回: ResolvedFont 字体与来源, error 解析错误
 func (r *Renderer) ResolveFont(id string, exact bool) (ResolvedFont, error) {
+	if r.pageContext != nil {
+		if err := r.pageContext.Err(); err != nil {
+			return ResolvedFont{}, err
+		}
+	}
 	if r.backends.Fonts == nil {
 		return ResolvedFont{}, fmt.Errorf("fonts: %w", ErrBackendUnavailable)
 	}
@@ -163,6 +171,14 @@ func (r *Renderer) ResolveFont(id string, exact bool) (ResolvedFont, error) {
 		return cached.font, cached.err
 	}
 	resolved, err := r.backends.Fonts.ResolveFont(r, key.id, exact)
+	if r.pageContext != nil {
+		if err := r.pageContext.Err(); err != nil {
+			return ResolvedFont{}, err
+		}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ResolvedFont{}, err
+	}
 	key.definition = r.Reader.fontDefinition(id)
 	if key.definition != nil && key.definition.ID != "" {
 		key.id = key.definition.ID
@@ -176,6 +192,11 @@ func (r *Renderer) ResolveFont(id string, exact bool) (ResolvedFont, error) {
 // 入参: id 字体资源标识
 // 返回: *PreparedFont 绘制字体, error 字体解析错误
 func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
+	if r.pageContext != nil {
+		if err := r.pageContext.Err(); err != nil {
+			return nil, err
+		}
+	}
 	if definition := r.Reader.fontDefinition(id); definition != nil && definition.ID != "" {
 		id = definition.ID
 	}
@@ -216,6 +237,11 @@ func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
 			}
 		}
 		prepared.digest = r.fontDigest(prepared.Data)
+		if r.pageContext != nil {
+			if err := r.pageContext.Err(); err != nil {
+				return nil, err
+			}
+		}
 		cost := min(len(prepared.Data), r.fontPreparations.limit)*2 + (len(prepared.Glyphs)+len(prepared.CIDs))*48 + 256
 		r.fontPreparations.put(key, PreparedFont{ResolvedFont: ResolvedFont{Data: prepared.Data}, Glyphs: prepared.Glyphs, CIDs: prepared.CIDs, digest: prepared.digest}, cost)
 	}
