@@ -239,9 +239,18 @@ func editorXMLTextValue(data []byte, node *editorXML, before, after string) ([]b
 	if before == after {
 		return data[node.start:node.end], nil
 	}
+	textCode := node.matchesOFD("TextCode")
+	if textCode {
+		after = textCodeXMLValue(after)
+	}
 	var content bytes.Buffer
 	if err := xml.EscapeText(&content, []byte(after)); err != nil {
 		return nil, err
+	}
+	if textCode && bytes.IndexByte(content.Bytes(), ' ') >= 0 {
+		escaped := bytes.ReplaceAll(content.Bytes(), []byte(" "), []byte("&#x20;"))
+		content.Reset()
+		content.Write(escaped)
 	}
 	if node.open < node.close {
 		inner := data[node.open:node.close]

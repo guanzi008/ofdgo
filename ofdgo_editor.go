@@ -1371,13 +1371,13 @@ func ofdNumber(value float64) string {
 	return strconv.FormatFloat(value, 'f', -1, 64)
 }
 
-// escapeOFDText 转义控制字符、反斜线和XML不允许的字符
+// escapeOFDText 转义控制字符和反斜线，空格由XML写出层转义
 // 入参: value 原文
 // 返回: string OFD文字编码
 func escapeOFDText(value string) string {
 	var text strings.Builder
 	for _, char := range value {
-		if char <= ' ' || char == '\\' || char == '\ufffe' || char == '\uffff' {
+		if char < ' ' || char == '\\' || char == '\ufffe' || char == '\uffff' {
 			fmt.Fprintf(&text, "\\%04X", char)
 		} else {
 			text.WriteRune(char)

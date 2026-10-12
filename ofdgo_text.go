@@ -278,6 +278,19 @@ func textDelta(deltas []float64, index int) (float64, bool) {
 	return deltas[len(deltas)-1], true
 }
 
+// textCodeXMLValue 将空格转义还原为字符，供XML写出层统一编码
+// 入参: value OFD文字编码
+// 返回: string 待写出的文字编码
+func textCodeXMLValue(value string) string {
+	if !strings.Contains(value, `\0020`) {
+		return value
+	}
+	if strings.ContainsAny(value, "\r\n") {
+		return escapeOFDText(string(textCodeRunes(value)))
+	}
+	return strings.ReplaceAll(value, `\0020`, " ")
+}
+
 // textCodeRunes 获取文本编码字符
 // 入参: value 文本编码内容
 // 返回: []rune 文本字符

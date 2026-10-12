@@ -1107,6 +1107,7 @@ func (x *ofdXML) textCode(value string, attrs ofdAttrs) {
 	if !x.checkContext() {
 		return
 	}
+	value = textCodeXMLValue(value)
 	x.escaped.Reset()
 	if x.err = xml.EscapeText(&x.escaped, []byte(value)); x.err != nil {
 		return
