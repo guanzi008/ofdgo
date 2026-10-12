@@ -23,17 +23,19 @@ import (
 	"slices"
 )
 
-// compactVersionFonts 清理无引用字体并按全部版本的用字裁剪，不修改编辑器快照
+// compactPackageFonts 清理无引用字体，补齐多文档及历史版本的字体裁剪，不修改编辑器快照
 // 入参: ctx 取消上下文, parts 输出修改, removed 待删除条目, generated 本次编码的页面引用
 // 返回: error 读取、结构或取消错误
-func (e *Editor) compactVersionFonts(ctx context.Context, parts map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
+func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
 	reader := e.source.reader
 	versioned := false
 	for _, body := range reader.OFD.DocBody {
 		versioned = versioned || body.versioned
 	}
 	if !versioned {
-		return nil
+		if reader.DocumentCount() <= 1 || e.backends.FontResources == nil || e.output != nil && e.output.options.Mode != CompressionUnchanged {
+			return nil
+		}
 	}
 	protected, err := reader.hasOutputSignatures(ctx)
 	if err != nil || protected {
@@ -103,7 +105,7 @@ func (e *Editor) compactVersionFonts(ctx context.Context, parts map[string][]byt
 	if err := pruneExternalFontFiles(ctx, view, slices.Collect(maps.Keys(candidates))...); err != nil {
 		return err
 	}
-	if err := e.subsetVersionFonts(ctx, view, removed, generated); err != nil {
+	if err := e.subsetPackageFonts(ctx, view, removed, generated); err != nil {
 		return err
 	}
 	for name, data := range view.files {
@@ -120,10 +122,10 @@ func (e *Editor) compactVersionFonts(ctx context.Context, parts map[string][]byt
 	return nil
 }
 
-// subsetVersionFonts 合并主入口、历史版本和其他文档的用字，保留共享字体的字形编号
+// subsetPackageFonts 按文档作用域收集用字，合并共享字体需求并保留字形编号
 // 入参: ctx 取消上下文, view 独立输出快照, removed 待删除条目, generated 本次编码的页面引用
 // 返回: error 读取、裁剪或取消错误
-func (e *Editor) subsetVersionFonts(ctx context.Context, view *Reader, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
+func (e *Editor) subsetPackageFonts(ctx context.Context, view *Reader, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
 	if e.backends.FontResources == nil {
 		return nil
 	}
