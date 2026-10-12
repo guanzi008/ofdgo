@@ -50,6 +50,14 @@ type versionEditGraph struct {
 // 入参: ctx 取消上下文, entry 文档入口, parts 待修改条目, generated 本次自产页面及引用
 // 返回: map[string]bool 引用路径, error 读取、结构或取消错误
 func (r *Reader) versionFileDependencies(ctx context.Context, entry string, parts map[string][]byte, generated map[string]editorGeneratedReferences) (map[string]bool, error) {
+	used, _, err := r.versionDependencies(ctx, entry, parts, generated)
+	return used, err
+}
+
+// versionDependencies 从指定入口汇总文件依赖和结构文件，不混入其他版本或读取二进制资源
+// 入参: ctx 取消上下文, entry 文档入口, parts 待修改条目, generated 本次自产页面及引用
+// 返回: map[string]bool 全部依赖, map[string]bool 结构文件, error 读取、结构或取消错误
+func (r *Reader) versionDependencies(ctx context.Context, entry string, parts map[string][]byte, generated map[string]editorGeneratedReferences) (map[string]bool, map[string]bool, error) {
 	view := *r
 	if len(parts) != 0 {
 		view.files = maps.Clone(r.files)
@@ -70,7 +78,7 @@ func (r *Reader) versionFileDependencies(ctx context.Context, entry string, part
 	}
 	for len(queue) != 0 {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		name := queue[0]
 		queue = queue[1:]
@@ -78,10 +86,10 @@ func (r *Reader) versionFileDependencies(ctx context.Context, entry string, part
 			continue
 		}
 		if err := view.documentFileReferences(ctx, name, false, add); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return used, ctx.Err()
+	return used, queued, ctx.Err()
 }
 
 // versionEditGraph 流式建立标准文件依赖图，不保留完整XML节点树或解压后的原包文件

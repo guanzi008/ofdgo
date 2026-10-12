@@ -166,7 +166,7 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 	return &snapshot, nil
 }
 
-// compressionImageSafety 保护蒙版及其原图和替换图像，不完整的文档结构不参与降采样
+// compressionImageSafety 按当前入口保护蒙版及其原图和替换图像，不完整的文档结构不参与降采样
 // 入参: ctx 取消上下文, images 图片资源
 // 返回: map[string]bool 只能无损处理的资源路径, bool 是否可分析尺寸, error 读取或取消错误
 func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo) (map[string]bool, bool, error) {
@@ -174,7 +174,11 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 	safe := true
 	structured := len(r.OFD.DocBody) != 0
 	if structured {
-		dependencies, structures, err := r.documentDependencies(ctx, r.DocumentIndex())
+		entry, err := r.DocumentRootContext(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		dependencies, structures, err := r.versionDependencies(ctx, entry, nil, nil)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, false, ctx.Err()

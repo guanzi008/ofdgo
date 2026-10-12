@@ -61,6 +61,12 @@ func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOp
 			}
 			return nil, nil, err
 		}
+		if len(catalog) == 0 {
+			if document != r {
+				document.Close()
+			}
+			continue
+		}
 		var demands map[string]image.Point
 		masks, geometry, err := document.compressionImageSafety(ctx, catalog)
 		if err == nil && geometry {
