@@ -21,6 +21,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"iter"
 	"maps"
 	"path"
 	"slices"
@@ -411,15 +412,29 @@ func normalizeResourceReferences(references map[string]bool) {
 // 返回: *editorXML 资源节点，未找到时为nil
 func editorResourceNode(root *editorXML, group, kind, id string) *editorXML {
 	nodes := make(map[string]*editorXML)
-	if collection := root.child(group); collection != nil {
-		for _, node := range collection.children {
-			if node.matchesOFD(kind) {
-				nodes[node.attr("ID")] = node
-			}
-		}
+	for node := range editorResourceNodes(root, group, kind) {
+		nodes[node.attr("ID")] = node
 	}
 	node, _ := resourceValue(nodes, id)
 	return node
+}
+
+// editorResourceNodes 按原顺序遍历同类资源，包含交错出现的重复集合
+// 入参: root 资源文件根节点, group 集合名称, kind 资源类型
+// 返回: iter.Seq[*editorXML] 资源节点序列
+func editorResourceNodes(root *editorXML, group, kind string) iter.Seq[*editorXML] {
+	return func(yield func(*editorXML) bool) {
+		for _, collection := range root.children {
+			if !collection.matchesOFD(group) {
+				continue
+			}
+			for _, node := range collection.children {
+				if node.matchesOFD(kind) && !yield(node) {
+					return
+				}
+			}
+		}
+	}
 }
 
 // editorResourceLocation 按ST_Loc与Res.BaseLoc解析路径，保留路径大小写

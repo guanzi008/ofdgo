@@ -14,7 +14,12 @@
 
 package ofdgo
 
-import "encoding/xml"
+import (
+	"encoding/xml"
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 // Res 资源文件结构
 type Res struct {
@@ -132,6 +137,138 @@ type CompositeGraphicUnit struct {
 	Actions              []Action               `xml:"Actions>Action"`
 	states               map[string]editorCompositeState
 	extentSet            bool
+}
+
+// UnmarshalXML 解析资源文件，隔离外部命名空间的同名集合。
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (res *Res) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if start.Name.Local != "Res" {
+		return fmt.Errorf("expected Res element, got %s", start.Name.Local)
+	}
+	*res = Res{XMLName: start.Name, BaseLoc: attrValue(start, "BaseLoc")}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		var target any
+		switch node.Name.Local {
+		case "ColorSpaces":
+			target = &res.ColorSpaces
+		case "Fonts":
+			target = &res.Fonts
+		case "MultiMedias":
+			target = &res.MultiMedias
+		case "DrawParams":
+			target = &res.DrawParams
+		case "CompositeGraphicUnits":
+			target = &res.CompositeGraphicUnits
+		default:
+			return d.Skip()
+		}
+		return d.DecodeElement(target, &node)
+	})
+}
+
+// UnmarshalXML 解析颜色空间集合。
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (spaces *ColorSpaces) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	return decodeOFDCollection(d, start, "ColorSpace", &spaces.ColorSpace)
+}
+
+// UnmarshalXML 解析颜色空间属性及调色板。
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (space *ColorSpace) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*space = ColorSpace{ID: attrValue(start, "ID"), Type: attrValue(start, "Type"), Profile: attrValue(start, "Profile")}
+	if value := strings.TrimSpace(attrValue(start, "BitsPerComponent")); value != "" {
+		bits, err := strconv.Atoi(value)
+		if err != nil {
+			return err
+		}
+		space.BitsPerComponent = bits
+	}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local == "Palette" {
+			return decodeOFDCollection(d, node, "CV", &space.Palette)
+		}
+		return d.Skip()
+	})
+}
+
+// UnmarshalXML 解析字体集合。
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (fonts *Fonts) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	return decodeOFDCollection(d, start, "Font", &fonts.Font)
+}
+
+// UnmarshalXML 解析字体声明及内嵌字体路径。
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (font *Font) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*font = Font{ID: attrValue(start, "ID"), FontName: attrValue(start, "FontName"), FamilyName: attrValue(start, "FamilyName"), Charset: attrValue(start, "Charset")}
+	for _, attr := range start.Attr {
+		if attr.Name.Space != "" {
+			continue
+		}
+		var target *bool
+		switch attr.Name.Local {
+		case "Italic":
+			target = &font.Italic
+		case "Bold":
+			target = &font.Bold
+		case "Serif":
+			target = &font.Serif
+		case "FixedWidth":
+			target = &font.FixedWidth
+		}
+		if value := strings.TrimSpace(attr.Value); target != nil && value != "" {
+			flag, err := strconv.ParseBool(value)
+			if err != nil {
+				return err
+			}
+			*target = flag
+		}
+	}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local == "FontFile" {
+			return d.DecodeElement(&font.FontFile, &node)
+		}
+		return d.Skip()
+	})
+}
+
+// UnmarshalXML 解析多媒体集合。
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (media *MultiMedias) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	return decodeOFDCollection(d, start, "MultiMedia", &media.MultiMedia)
+}
+
+// UnmarshalXML 解析多媒体声明及包内文件路径。
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (media *MultiMedia) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*media = MultiMedia{ID: attrValue(start, "ID"), Type: attrValue(start, "Type"), Format: attrValue(start, "Format")}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local == "MediaFile" {
+			return d.DecodeElement(&media.MediaFile, &node)
+		}
+		return d.Skip()
+	})
+}
+
+// UnmarshalXML 解析绘制参数集合。
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (params *DrawParams) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	return decodeOFDCollection(d, start, "DrawParam", &params.DrawParam)
+}
+
+// UnmarshalXML 解析复合图元资源集合。
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (units *CompositeGraphicUnits) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	return decodeOFDCollection(d, start, "CompositeGraphicUnit", &units.CompositeGraphicUnit)
 }
 
 // sameResourceID 判断资源标识是否相同，数字标识按数值比较

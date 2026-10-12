@@ -360,11 +360,9 @@ func fontBindingNode(data []byte, id string) (*editorXML, error) {
 	if err != nil {
 		return nil, err
 	}
-	if fonts := root.child("Fonts"); fonts != nil {
-		for _, node := range fonts.children {
-			if node.matchesOFD("Font") && editorResourceID(node.attr("ID")) == editorResourceID(id) {
-				return node, nil
-			}
+	for node := range editorResourceNodes(root, "Fonts", "Font") {
+		if editorResourceID(node.attr("ID")) == editorResourceID(id) {
+			return node, nil
 		}
 	}
 	return nil, fmt.Errorf("font declaration is missing")

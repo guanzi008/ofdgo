@@ -92,6 +92,18 @@ func decodeOFDChildren(d *xml.Decoder, start xml.StartElement, decode func(*xml.
 	}
 }
 
+// decodeOFDCollection 按命名空间追加同类子节点，保留重复资源集合的记录
+// 入参: d XML解码器, start 集合起始节点, name 子节点名称, values 接收结果的切片
+// 返回: error 解析错误
+func decodeOFDCollection[T any](d *xml.Decoder, start xml.StartElement, name string, values *[]T) error {
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local == name {
+			return d.DecodeElement(values, &node)
+		}
+		return d.Skip()
+	})
+}
+
 // classifyOFDNamespace 识别OFD命名空间，未声明与未知版本分别处理
 // 入参: namespace XML命名空间
 // 返回: ofdXMLNamespace 命名空间类别

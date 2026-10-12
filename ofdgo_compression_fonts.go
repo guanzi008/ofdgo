@@ -53,11 +53,10 @@ func (r *Reader) compressionFontUsage(ctx context.Context, documents map[string]
 		if err != nil {
 			return nil, err
 		}
-		fonts := root.child("Fonts")
-		if fonts == nil {
-			continue
-		}
-		for _, font := range fonts.children {
+		for font := range editorResourceNodes(root, "Fonts", "Font") {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			file := font.child("FontFile")
 			if file == nil {
 				continue
