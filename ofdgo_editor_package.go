@@ -272,6 +272,9 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 			return nil, err
 		}
 	}
+	if err := e.pruneStructureReferences(parts); err != nil {
+		return nil, err
+	}
 	for name, data := range maps.Clone(parts) {
 		if file, ok := reader.packageFile(name); ok {
 			actual := cleanPackagePath(file.Name)

@@ -537,6 +537,9 @@ const el = {
 	attachmentCancel: document.querySelector("#attachmentCancel"),
 	attachmentSubmit: document.querySelector("#attachmentSubmit"),
 	signaturePanel: document.querySelector("#signaturePanel"),
+	structurePanel: document.querySelector("#structurePanel"),
+	structureList: document.querySelector("#structureList"),
+	structureSummary: document.querySelector("#structureSummary"),
 	signatureSummary: document.querySelector("#signatureSummary"),
 	signatureList: document.querySelector("#signatureList"),
 	annotationNote: document.querySelector("#annotationNote"),
@@ -8147,6 +8150,7 @@ function renderMeta(keepDetails = false) {
 	el.metaSignatures.textContent = doc.detailsPending ? "正在检查签名" : doc.detailsError ? "读取失败" : String(doc.signatureCount || 0);
 	renderMetaContent(el.attachmentList, [doc.attachments, doc.attachmentError, state.editing], renderAttachments);
 	renderMetaContent(el.signatureList, [doc.signatures, doc.signatureError], renderSignatures);
+	renderMetaContent(el.structureList, [doc.structures, doc.structureError, doc.documentIndex, doc.documentVersion, state.openSeq, state.editorInfo?.revision], renderStructures);
 	renderMetaContent(el.docFontList, doc.fonts || [], renderDocumentFonts);
 	refreshEditorFonts();
 	updateLocalFontButton();
@@ -8221,6 +8225,87 @@ function renderAttachments() {
 		}
 		el.attachmentList.append(row);
 	}
+}
+
+function renderStructures() {
+	const structures = state.doc?.structures || [];
+	el.structurePanel.hidden = !structures.length && !state.doc?.structureError;
+	el.structureSummary.textContent = structures.length;
+	el.structureList.replaceChildren();
+	if (state.doc?.structureError) appendInfoLine(el.structureList, "错误", state.doc.structureError, "fail");
+	for (const [index, structure] of structures.entries()) {
+		if (structure.root) el.structureList.append(structureNode(structure.root, index, []));
+		if (structure.error) appendInfoLine(el.structureList, "错误", structure.error, "fail");
+	}
+}
+
+function structureNode(node, index, path) {
+	const details = document.createElement("details");
+	details.className = "structure-node";
+	const summary = document.createElement("summary");
+	summary.textContent = node.name;
+	details.append(summary);
+	let loaded = false;
+	details.addEventListener("toggle", async () => {
+		if (!details.open || loaded) return;
+		loaded = true;
+		const content = document.createElement("div");
+		content.className = "structure-content";
+		details.append(content);
+		for (const attr of node.attributes || []) appendInfoLine(content, attr.name, attr.value);
+		if (node.text && !node.references?.length) appendInfoLine(content, "原文", node.text);
+		const children = node.children || [];
+		const references = node.references?.length || children.some(child => child.references?.length);
+		for (const [i, child] of children.entries()) {
+			if (!child.references?.length) content.append(structureNode(child, index, [...path, i]));
+		}
+		if (!references) return;
+		const pending = document.createElement("div");
+		pending.className = "attachment-detail";
+		pending.textContent = "读取中";
+		pending.setAttribute("role", "status");
+		content.append(pending);
+		const sequence = state.openSeq;
+		try {
+			const targets = await callWASM("ofdgoStructureTargets", index, path);
+			if (sequence !== state.openSeq || !details.isConnected) return;
+			pending.remove();
+			appendInfoLine(content, "原文", targets.map(target => target.text || "").join(""));
+			const pages = new Map();
+			for (const target of targets) {
+				if (target.error) { appendInfoLine(content, "引用错误", `${target.pageId} · ${target.id}：${target.error}`, "fail"); continue; }
+				const b = target.bounds;
+				if (!(b.W > 0 && b.H > 0)) continue;
+				const region = pages.get(target.page);
+				if (region) {
+					const right = Math.max(region.x + region.width, b.X + b.W), bottom = Math.max(region.y + region.height, b.Y + b.H);
+					region.x = Math.min(region.x, b.X); region.y = Math.min(region.y, b.Y);
+					region.width = right - region.x; region.height = bottom - region.y;
+				} else pages.set(target.page, { page: target.page, x: b.X, y: b.Y, width: b.W, height: b.H });
+			}
+			if (pages.size) {
+				const line = document.createElement("div");
+				line.className = "info-line";
+				const label = document.createElement("span");
+				label.className = "info-label"; label.textContent = "位置";
+				const links = document.createElement("span"); links.className = "info-value structure-links";
+				for (const region of pages.values()) {
+					const button = document.createElement("button");
+					button.type = "button"; button.className = "signature-stamp-link";
+					button.textContent = `第${region.page}页`; button.title = "定位原文";
+					button.addEventListener("click", () => focusPageRegion(region, node.name));
+					links.append(button);
+				}
+				line.append(label, links); content.append(line);
+			}
+		} catch (err) {
+			pending.textContent = "读取失败";
+			appendInfoLine(content, "错误", err.message, "fail");
+			loaded = false;
+			details.addEventListener("toggle", () => { if (!details.open) content.remove(); }, { once: true });
+		}
+	});
+	return details;
 }
 
 function renderSignatures() {

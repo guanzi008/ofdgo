@@ -49,6 +49,7 @@ type editorPageImport struct {
 	evidence      map[string]string
 	resourceXML   []byte
 	pageParts     []byte
+	structureXML  []byte
 	documentXML   []byte
 	documentRoot  *editorXML
 	docRefs       map[string]map[string]*editorXML
@@ -360,6 +361,10 @@ func (e *Editor) importPages(ctx context.Context, source *Reader, indexes []int,
 		return nil, err
 	}
 	beforeOutlines, outlines := e.outlines, e.outlines
+	m.structureXML, err = m.structures()
+	if err != nil {
+		return nil, err
+	}
 	if options.Outlines {
 		imported, err := m.outlines()
 		if err != nil {
@@ -1705,6 +1710,31 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 			}
 			if base.document.Attachments.Path == "" {
 				data, err = editorXMLSetText(data, root, [][2]string{{"Attachments", loc}})
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	if len(m.structureXML) != 0 {
+		root, err = parseEditorXMLContext(m.ctx, data)
+		if err != nil {
+			return nil, err
+		}
+		if node := root.child("CustomTags"); node != nil && len(node.children) != 0 {
+			entries, err := editorXMLGenerated(m.structureXML, node.name.Space)
+			if err != nil {
+				return nil, err
+			}
+			content := append(bytes.Clone(data[node.open:node.close]), entries...)
+			data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, node, content)})
+		} else {
+			loc, err := mergeImportIndex(m.ctx, base.reader, files, base.document.CustomTags.Path, path.Join(m.directory, "CustomTags.xml"), "CustomTags", m.structureXML)
+			if err != nil {
+				return nil, err
+			}
+			if base.document.CustomTags.Path == "" {
+				data, err = editorXMLSetText(data, root, [][2]string{{"CustomTags", loc}})
 				if err != nil {
 					return nil, err
 				}

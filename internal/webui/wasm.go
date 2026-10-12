@@ -207,6 +207,7 @@ func RunWASM() {
 	registerCallback("ofdgoVerifySignatures", verifySignatures)
 	registerCallback("ofdgoRenderPage", renderPage)
 	registerCallback("ofdgoOutlineLinks", outlineLinks)
+	registerCallback("ofdgoStructureTargets", structureTargets)
 	registerCallback("ofdgoOpenLinks", openLinks)
 	registerCallback("ofdgoRenderBackends", renderBackends)
 	registerCallback("ofdgoSVGFontData", svgFontData)
@@ -920,6 +921,19 @@ func outlineLinks(args []js.Value) (any, error) {
 		return nil, err
 	}
 	return linkResults(links)
+}
+
+// structureTargets 查询当前文档标引节点的原文与定位范围
+// 入参: args 标引清单索引和节点路径
+// 返回: any 标引目标, error 参数或解析错误
+func structureTargets(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	if len(args) != 2 {
+		return nil, fmt.Errorf("missing structure path")
+	}
+	return currentSession.Renderer.StructureTargets(args[0].Int(), indexesFromJS(args[1]))
 }
 
 // linkResults 将库层动作目标转换为浏览器数据

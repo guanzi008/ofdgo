@@ -97,6 +97,8 @@ type DocumentInfo struct {
 	Signatures      []SignatureInfo    `json:"signatures"`
 	Pages           []PageInfo         `json:"pages"`
 	Outlines        []OutlineInfo      `json:"outlines,omitempty"`
+	Structures      []ofdgo.Structure  `json:"structures,omitempty"`
+	StructureError  string             `json:"structureError,omitempty"`
 	DetailsPending  bool               `json:"detailsPending,omitempty"`
 }
 
@@ -122,13 +124,15 @@ type DocumentEntry struct {
 
 // DocumentDetails 不含页面数组的文档补充信息
 type DocumentDetails struct {
-	FontCount       int              `json:"fontCount"`
-	SignatureCount  int              `json:"signatureCount"`
-	SignatureError  string           `json:"signatureError,omitempty"`
-	AttachmentError string           `json:"attachmentError,omitempty"`
-	Attachments     []AttachmentInfo `json:"attachments,omitempty"`
-	Fonts           []FontInfo       `json:"fonts"`
-	Signatures      []SignatureInfo  `json:"signatures"`
+	Structures      []ofdgo.Structure `json:"structures,omitempty"`
+	StructureError  string            `json:"structureError,omitempty"`
+	FontCount       int               `json:"fontCount"`
+	SignatureCount  int               `json:"signatureCount"`
+	SignatureError  string            `json:"signatureError,omitempty"`
+	AttachmentError string            `json:"attachmentError,omitempty"`
+	Attachments     []AttachmentInfo  `json:"attachments,omitempty"`
+	Fonts           []FontInfo        `json:"fonts"`
+	Signatures      []SignatureInfo   `json:"signatures"`
 }
 
 // OutlineInfo 目录节点信息
@@ -513,10 +517,15 @@ func (s *Session) Summary() DocumentInfo {
 	return info
 }
 
-// Details 获取无需逐页扫描的附件、签名及字体匹配结果
+// Details 获取无需逐页扫描的标引、附件、签名及字体匹配结果
 // 返回: DocumentDetails 文档补充信息
 func (s *Session) Details() DocumentDetails {
 	info := DocumentDetails{}
+	if structures, err := s.Reader.Structure(); err == nil {
+		info.Structures = structures
+	} else {
+		info.StructureError = err.Error()
+	}
 	if attachments, err := s.Reader.Attachments(); err == nil {
 		for _, attachment := range attachments {
 			if attachment.Visible || s.editing {
@@ -551,6 +560,8 @@ func (s *Session) Details() DocumentDetails {
 func (s *Session) Info() DocumentInfo {
 	info := s.Summary()
 	details := s.Details()
+	info.Structures = details.Structures
+	info.StructureError = details.StructureError
 	info.Attachments = details.Attachments
 	info.AttachmentError = details.AttachmentError
 	info.Signatures = details.Signatures

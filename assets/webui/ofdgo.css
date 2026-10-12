@@ -2696,6 +2696,7 @@ audio.page-media {
 .doc-font-panel,
 .attachment-panel,
 .signature-panel,
+.structure-panel,
 .security-panel {
 	margin-top: 18px;
 	padding-top: 12px;
@@ -2997,6 +2998,43 @@ audio.page-media {
 .info-value {
 	min-width: 0;
 	overflow-wrap: anywhere;
+}
+
+.structure-list,
+.structure-content {
+	display: grid;
+	gap: 6px;
+	min-width: 0;
+}
+
+.structure-node {
+	min-width: 0;
+	font-size: 12px;
+}
+
+.structure-node > summary {
+	cursor: pointer;
+	color: var(--accent-strong);
+	overflow-wrap: anywhere;
+}
+
+.structure-content {
+	margin-top: 6px;
+}
+
+.structure-content > .structure-node {
+	padding-left: 10px;
+}
+
+.structure-content .info-label {
+	white-space: normal;
+	overflow-wrap: anywhere;
+}
+
+.structure-links {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
 }
 
 .info-line.ok .info-value {
