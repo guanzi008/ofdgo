@@ -50,6 +50,7 @@ func (e *Editor) compressResourceParts(parts map[string][]byte, reader *Reader, 
 }
 
 // compressResourceReferences 优化资源，复用自产页面引用并流式读取暂存页面
+// 图片优化结果仅在本次写出内复用，失败时保留原始编码
 // 入参: parts 输出改动, reader 原包, removed 已移除条目, generated 本次自产页面及引用
 // 返回: error 读取或取消错误
 func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Reader, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
@@ -275,20 +276,17 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 				var err error
 				if !cached {
 					candidate, err = optimizeImageResource(e.output.ctx, data, options, demand)
-					if err == nil {
-						imageResults[cacheKey] = nil
-						if len(candidate) < len(data) {
-							imageResults[cacheKey] = candidate
-						} else {
-							candidate = nil
-						}
+					if err := e.output.ctx.Err(); err != nil {
+						return err
+					}
+					imageResults[cacheKey] = nil
+					if err == nil && len(candidate) < len(data) {
+						imageResults[cacheKey] = candidate
+					} else {
+						candidate = nil
 					}
 				}
-				if err != nil {
-					if e.output.ctx.Err() != nil {
-						return e.output.ctx.Err()
-					}
-				} else if candidate != nil {
+				if candidate != nil {
 					data = candidate
 					parts[actual[key]] = data
 					source.key.hash = sha256.Sum256(data)
