@@ -17,6 +17,8 @@ package ofdgo
 import (
 	"encoding/binary"
 	"fmt"
+	"maps"
+	"slices"
 )
 
 // variableSFNTSubsettable 核对TrueType可变轴与字形变化表的基本结构
@@ -51,14 +53,12 @@ func subsetVariableSFNTFont(sfnt *sfntFont, glyphs []uint16) ([]byte, error) {
 			usage.chars[char] = true
 		}
 	}
-	for gid := range usage.glyphs {
-		dependencies, err := sfnt.glyphDependencies(gid)
-		if err != nil {
-			return nil, err
-		}
-		for _, dependency := range dependencies {
-			usage.glyphs[dependency] = true
-		}
+	dependencies, err := sfnt.glyphDependencies(slices.Collect(maps.Keys(usage.glyphs))...)
+	if err != nil {
+		return nil, err
+	}
+	for _, dependency := range dependencies {
+		usage.glyphs[dependency] = true
 	}
 	mapping := make(map[rune]uint16, len(usage.chars))
 	for char := range usage.chars {

@@ -263,21 +263,24 @@ func (f *sfntFont) VerticalMetrics() (uint16, uint16, uint16) {
 // 返回: []byte 独立字体
 func (f *sfntFont) Write() []byte { data, _ := serializeOTF(f.Tables); return data }
 
-// glyphDependencies 收集复合字形依赖，拒绝循环引用和截断记录
-// 入参: gid 字形编号
+// glyphDependencies 批量收集复合字形依赖，校验引用、记录长度和嵌套深度
+// 入参: glyphs 字形编号
 // 返回: []uint16 依赖字形, error 字形错误
-func (f *sfntFont) glyphDependencies(gid uint16) ([]uint16, error) {
-	seen, active := make(map[uint16]bool), make(map[uint16]bool)
+func (f *sfntFont) glyphDependencies(glyphs ...uint16) ([]uint16, error) {
+	heights, active := make(map[uint16]int), make(map[uint16]bool)
 	var result []uint16
 	var visit func(uint16) error
 	visit = func(id uint16) error {
 		if id >= f.count || active[id] || len(active) > 64 {
 			return fmt.Errorf("invalid composite glyph reference")
 		}
-		if seen[id] {
+		if height := heights[id]; height != 0 {
+			if len(active)+height > 65 {
+				return fmt.Errorf("invalid composite glyph reference")
+			}
 			return nil
 		}
-		seen[id], active[id] = true, true
+		heights[id], active[id] = 1, true
 		defer delete(active, id)
 		data, err := trueTypeGlyphData(f.Tables, id)
 		if err != nil {
@@ -315,18 +318,23 @@ func (f *sfntFont) glyphDependencies(gid uint16) ([]uint16, error) {
 			if pos > len(data) {
 				return fmt.Errorf("truncated composite transform")
 			}
-			if !seen[child] {
+			if heights[child] == 0 {
 				result = append(result, child)
 			}
 			if err := visit(child); err != nil {
 				return err
 			}
+			heights[id] = max(heights[id], heights[child]+1)
 			if flags&0x20 == 0 {
 				break
 			}
 		}
 		return nil
 	}
-	err := visit(gid)
-	return result, err
+	for _, id := range glyphs {
+		if err := visit(id); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }

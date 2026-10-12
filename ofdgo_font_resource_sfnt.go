@@ -283,17 +283,12 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 			return nil
 		}
 	}
-	for id := range glyphs {
-		if id >= sfnt.NumGlyphs() {
-			return nil
-		}
-		dependencies, err := sfnt.glyphDependencies(id)
-		if err != nil {
-			return nil
-		}
-		for _, dependency := range dependencies {
-			glyphs[dependency] = true
-		}
+	dependencies, err := sfnt.glyphDependencies(slices.Collect(maps.Keys(glyphs))...)
+	if err != nil {
+		return nil
+	}
+	for _, dependency := range dependencies {
+		glyphs[dependency] = true
 	}
 	var glyf, loca []byte
 	for id := 0; id <= int(sfnt.NumGlyphs()); id++ {
@@ -426,16 +421,14 @@ func subsetCompactSFNTFont(sfnt *sfntFont, glyphs []uint16) ([]byte, error) {
 			ids = append(ids, id)
 		}
 	}
-	for index := 0; index < len(ids); index++ {
-		dependencies, err := sfnt.glyphDependencies(ids[index])
-		if err != nil {
-			return nil, err
-		}
-		for _, id := range dependencies {
-			if _, ok := remap[id]; !ok {
-				remap[id] = uint16(len(ids))
-				ids = append(ids, id)
-			}
+	dependencies, err := sfnt.glyphDependencies(ids...)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range dependencies {
+		if _, ok := remap[id]; !ok {
+			remap[id] = uint16(len(ids))
+			ids = append(ids, id)
 		}
 	}
 	table := make(map[string][]byte)
