@@ -239,13 +239,19 @@ func (e *Editor) MoveDocumentContext(ctx context.Context, from, to int) error {
 		return nil
 	}
 	return e.editDocumentsContext(ctx, func(reader *Reader, data []byte, root *editorXML) (int, error) {
-		bodies := make([][]byte, reader.DocumentCount())
-		for index := range bodies {
+		nodes := make([]*editorXML, 0, reader.DocumentCount())
+		bodies := make([][]byte, 0, reader.DocumentCount())
+		for _, body := range root.children {
 			if err := ctx.Err(); err != nil {
 				return 0, err
 			}
-			body := root.childAt("DocBody", index)
-			bodies[index] = data[body.start:body.end]
+			if body.matchesOFD("DocBody") {
+				nodes = append(nodes, body)
+				bodies = append(bodies, data[body.start:body.end])
+			}
+		}
+		if len(nodes) != reader.DocumentCount() {
+			return 0, fmt.Errorf("document entry count mismatch")
 		}
 		moveEditorItem(bodies, from, to)
 		var patches []editorXMLPatch
@@ -253,7 +259,7 @@ func (e *Editor) MoveDocumentContext(ctx context.Context, from, to int) error {
 			if err := ctx.Err(); err != nil {
 				return 0, err
 			}
-			body := root.childAt("DocBody", index)
+			body := nodes[index]
 			patches = append(patches, editorXMLPatch{body.start, body.end, content})
 		}
 		reader.files["OFD.xml"] = editorPatchXML(data, patches)

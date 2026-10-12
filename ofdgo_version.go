@@ -16,7 +16,9 @@ package ofdgo
 
 import (
 	"context"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 )
@@ -166,59 +168,100 @@ func parseVersionEntries(ctx context.Context, body *editorXML) ([]DocumentVersio
 	return result, nil
 }
 
-// readDocumentVersionContext 读取版本描述，按描述文件位置解析清单和文档入口
+// readDocumentVersionContext 流式读取版本描述，按描述文件位置解析清单和文档入口
 // 入参: ctx 取消上下文, id 入口中的版本标识, location 描述文件路径
 // 返回: DocumentVersionInfo 版本信息, error 读取、描述或取消错误
 func (r *Reader) readDocumentVersionContext(ctx context.Context, id, location string) (DocumentVersionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return DocumentVersionInfo{}, err
+	}
+	input, err := r.openFile(location)
+	if err != nil {
+		return DocumentVersionInfo{}, err
+	}
+	defer input.Close()
+	decoder := xml.NewDecoder(imageInput{ReadCloser: input, context: ctx})
 	var info DocumentVersionInfo
-	data, err := r.readFileViewContext(ctx, location)
-	if err != nil {
-		return info, err
-	}
-	root, err := parseEditorXMLContext(ctx, data)
-	if err != nil {
-		return info, err
-	}
-	if root.name.Local != "DocVersion" || strings.TrimSpace(root.attr("ID")) != id {
-		return info, fmt.Errorf("invalid version descriptor %s", location)
-	}
-	list, docRoot := root.child("FileList"), root.child("DocRoot")
-	if list == nil || docRoot == nil {
-		return info, fmt.Errorf("missing version FileList or DocRoot in %s", location)
-	}
-	if root.childAt("FileList", 1) != nil || root.childAt("DocRoot", 1) != nil {
-		return info, fmt.Errorf("duplicate version FileList or DocRoot in %s", location)
-	}
-	entry, err := versionFileLocation(location, editorImportText(data, docRoot))
-	if err != nil {
-		return info, err
-	}
-	info = DocumentVersionInfo{ID: id, Location: location, Version: root.attr("Version"), Name: root.attr("Name"), CreationDate: root.attr("CreationDate"), DocRoot: entry}
+	var root, parent *editorXML
+	var files, entry bool
 	ids := map[string]bool{id: true}
-	found := false
-	for _, node := range list.children {
+	for {
 		if err := ctx.Err(); err != nil {
 			return DocumentVersionInfo{}, err
 		}
-		if !node.matchesOFD("File") {
-			continue
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
 		}
-		fileID := strings.TrimSpace(node.attr("ID"))
-		if !ofdXMLIDValid(fileID) || ids[fileID] {
-			return DocumentVersionInfo{}, fmt.Errorf("invalid or duplicate version file ID %q", fileID)
-		}
-		ids[fileID] = true
-		name, err := versionFileLocation(location, editorImportText(data, node))
 		if err != nil {
 			return DocumentVersionInfo{}, err
 		}
-		found = found || name == entry
-		info.Files = append(info.Files, VersionFile{ID: fileID, Location: name})
+		switch start := token.(type) {
+		case xml.StartElement:
+			node := &editorXML{name: start.Name, attrs: start.Attr, parent: parent}
+			if parent == nil {
+				if root != nil || start.Name.Local != "DocVersion" || strings.TrimSpace(node.attr("ID")) != id {
+					return DocumentVersionInfo{}, fmt.Errorf("invalid version descriptor %s", location)
+				}
+				root, parent = node, node
+				info = DocumentVersionInfo{ID: id, Location: location, Version: node.attr("Version"), Name: node.attr("Name"), CreationDate: node.attr("CreationDate")}
+				continue
+			}
+			switch {
+			case parent == root && node.matchesOFD("FileList"):
+				if files {
+					return DocumentVersionInfo{}, fmt.Errorf("duplicate version FileList in %s", location)
+				}
+				files, parent = true, node
+			case parent == root && node.matchesOFD("DocRoot"):
+				if entry {
+					return DocumentVersionInfo{}, fmt.Errorf("duplicate version DocRoot in %s", location)
+				}
+				var value string
+				if err := decoder.DecodeElement(&value, &start); err != nil {
+					return DocumentVersionInfo{}, err
+				}
+				info.DocRoot, err = versionFileLocation(location, value)
+				if err != nil {
+					return DocumentVersionInfo{}, err
+				}
+				entry = true
+			case parent != root && node.matchesOFD("File"):
+				fileID := strings.TrimSpace(node.attr("ID"))
+				if !ofdXMLIDValid(fileID) || ids[fileID] {
+					return DocumentVersionInfo{}, fmt.Errorf("invalid or duplicate version file ID %q", fileID)
+				}
+				ids[fileID] = true
+				var value string
+				if err := decoder.DecodeElement(&value, &start); err != nil {
+					return DocumentVersionInfo{}, err
+				}
+				name, err := versionFileLocation(location, value)
+				if err != nil {
+					return DocumentVersionInfo{}, err
+				}
+				info.Files = append(info.Files, VersionFile{ID: fileID, Location: name})
+			default:
+				if err := decoder.Skip(); err != nil {
+					return DocumentVersionInfo{}, err
+				}
+			}
+		case xml.EndElement:
+			parent = parent.parent
+		}
 	}
-	if !found {
-		return DocumentVersionInfo{}, fmt.Errorf("version DocRoot absent from FileList: %s", entry)
+	if !files || !entry {
+		return DocumentVersionInfo{}, fmt.Errorf("missing version FileList or DocRoot in %s", location)
 	}
-	return info, nil
+	for _, file := range info.Files {
+		if err := ctx.Err(); err != nil {
+			return DocumentVersionInfo{}, err
+		}
+		if file.Location == info.DocRoot {
+			return info, nil
+		}
+	}
+	return DocumentVersionInfo{}, fmt.Errorf("version DocRoot absent from FileList: %s", info.DocRoot)
 }
 
 // versionFileLocation 解析版本描述中的ST_Loc，拒绝空路径和包外路径
