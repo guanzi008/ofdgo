@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+
+	"github.com/go-text/typesetting/font/opentype/tables"
 )
 
 // SFNTBackend 提供独立的OpenType字体度量、轮廓和资源处理
@@ -209,7 +211,7 @@ func subsetSFNTFont(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 }
 
 // subsetSourceSFNTFont 裁剪静态TrueType或CFF原有字体，保留字形编号、组合依赖、度量和提示指令
-// 集合、字形替换、可变、彩色和未知表保持原样，不对不完整的引用或异常字体猜测修复
+// 字形替换结果一并保留，集合、可变、彩色和未知表保持原样
 // 入参: data 字体数据, usage 全包用字记录
 // 返回: []byte 更小的字体子集，无确定收益时为空
 func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
@@ -222,7 +224,7 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 	}
 	for tag := range sfnt.Tables {
 		switch tag {
-		case "cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "CFF ", "cvt ", "fpgm", "prep", "gasp", "kern", "vhea", "vmtx", "VORG", "hdmx", "LTSH", "VDMX", "GDEF", "GPOS", "DSIG", "FFTM":
+		case "cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "CFF ", "cvt ", "fpgm", "prep", "gasp", "kern", "vhea", "vmtx", "VORG", "hdmx", "LTSH", "VDMX", "GDEF", "GPOS", "GSUB", "meta", "DSIG", "FFTM":
 		default:
 			return nil
 		}
@@ -253,6 +255,9 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 		if id != 0 {
 			mapping[char] = id
 		}
+	}
+	if !retainSFNTSubstitutions(sfnt.Tables["GSUB"], glyphs, sfnt.NumGlyphs()) {
+		return nil
 	}
 	if sfnt.IsCFF {
 		count, err := parseCFFAndCountGlyphs(sfnt.Tables["CFF "])
@@ -316,6 +321,94 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 		return nil
 	}
 	return result
+}
+
+// retainSFNTSubstitutions 保留全部替换结果，使原字形替换表在裁剪后仍可使用
+// 入参: data 替换表, glyphs 待保留字形, count 字形总数
+// 返回: bool 替换表及结果编号是否有效
+func retainSFNTSubstitutions(data []byte, glyphs map[uint16]bool, count uint16) bool {
+	if len(data) == 0 {
+		return true
+	}
+	if len(data) < 10 || binary.BigEndian.Uint16(data) != 1 || binary.BigEndian.Uint16(data[2:]) > 1 {
+		return false
+	}
+	if binary.BigEndian.Uint16(data[2:]) == 1 && (len(data) < 14 || binary.BigEndian.Uint32(data[10:]) != 0) {
+		return false
+	}
+	layout, _, err := tables.ParseLayout(data)
+	if err != nil {
+		return false
+	}
+	for _, lookup := range layout.LookupList.Lookups {
+		subtables, err := lookup.AsGSUBLookups()
+		if err != nil {
+			return false
+		}
+		for _, subtable := range subtables {
+			if extension, ok := subtable.(tables.ExtensionSubs); ok {
+				if extension.ExtensionOffset < 8 || uint64(extension.ExtensionOffset) > uint64(len(extension.RawData)) {
+					return false
+				}
+				subtable, err = extension.Resolve()
+				if err != nil {
+					return false
+				}
+			}
+			if !retainSFNTSubstitution(subtable, glyphs, count) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// retainSFNTSubstitution 收集替换子表的输出字形，上下文替换的结果由被引用的查找表提供
+// 入参: subtable 替换子表, glyphs 待保留字形, count 字形总数
+// 返回: bool 子表类型及输出字形是否有效
+func retainSFNTSubstitution(subtable tables.GSUBLookup, glyphs map[uint16]bool, count uint16) bool {
+	var outputs []tables.GlyphID
+	switch subtable := subtable.(type) {
+	case tables.SingleSubs:
+		switch data := subtable.Data.(type) {
+		case tables.SingleSubstData1:
+			for id := uint16(0); id < count; id++ {
+				if _, ok := data.Coverage.Index(tables.GlyphID(id)); ok {
+					outputs = append(outputs, tables.GlyphID(id+uint16(data.DeltaGlyphID)))
+				}
+			}
+		case tables.SingleSubstData2:
+			outputs = data.SubstituteGlyphIDs
+		default:
+			return false
+		}
+	case tables.MultipleSubs:
+		for _, sequence := range subtable.Sequences {
+			outputs = append(outputs, sequence.SubstituteGlyphIDs...)
+		}
+	case tables.AlternateSubs:
+		for _, set := range subtable.AlternateSets {
+			outputs = append(outputs, set.AlternateGlyphIDs...)
+		}
+	case tables.LigatureSubs:
+		for _, set := range subtable.LigatureSets {
+			for _, ligature := range set.Ligatures {
+				outputs = append(outputs, ligature.LigatureGlyph)
+			}
+		}
+	case tables.ReverseChainSingleSubs:
+		outputs = subtable.SubstituteGlyphIDs
+	case tables.ContextualSubs, tables.ChainedContextualSubs:
+	default:
+		return false
+	}
+	for _, id := range outputs {
+		if uint16(id) >= count {
+			return false
+		}
+		glyphs[uint16(id)] = true
+	}
+	return true
 }
 
 // subsetCompactSFNTFont 重排新建静态字体的字形，同步复合引用、字符映射和度量

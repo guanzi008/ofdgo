@@ -23,10 +23,10 @@ import (
 	"slices"
 )
 
-// compactVersionFonts 清理仅由版本清单保留的无引用字体，同步清单且不修改编辑器快照
-// 入参: ctx 取消上下文, parts 输出修改, removed 待删除条目
+// compactVersionFonts 清理无引用字体并按全部版本的用字裁剪，不修改编辑器快照
+// 入参: ctx 取消上下文, parts 输出修改, removed 待删除条目, generated 本次编码的页面引用
 // 返回: error 读取、结构或取消错误
-func (e *Editor) compactVersionFonts(ctx context.Context, parts map[string][]byte, removed map[string]bool) error {
+func (e *Editor) compactVersionFonts(ctx context.Context, parts map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
 	reader := e.source.reader
 	versioned := false
 	for _, body := range reader.OFD.DocBody {
@@ -100,10 +100,10 @@ func (e *Editor) compactVersionFonts(ctx context.Context, parts map[string][]byt
 			}
 		}
 	}
-	if len(candidates) == 0 {
-		return nil
-	}
 	if err := pruneExternalFontFiles(ctx, view, slices.Collect(maps.Keys(candidates))...); err != nil {
+		return err
+	}
+	if err := e.subsetVersionFonts(ctx, view, removed, generated); err != nil {
 		return err
 	}
 	for name, data := range view.files {
@@ -118,4 +118,69 @@ func (e *Editor) compactVersionFonts(ctx context.Context, parts map[string][]byt
 		}
 	}
 	return nil
+}
+
+// subsetVersionFonts 合并主入口、历史版本和其他文档的用字，保留共享字体的字形编号
+// 入参: ctx 取消上下文, view 独立输出快照, removed 待删除条目, generated 本次编码的页面引用
+// 返回: error 读取、裁剪或取消错误
+func (e *Editor) subsetVersionFonts(ctx context.Context, view *Reader, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
+	if e.backends.FontResources == nil {
+		return nil
+	}
+	names := maps.Clone(view.fileNames)
+	for name := range removed {
+		delete(names, name)
+	}
+	progress := editorProgress(e.OnWriteProgress)
+	refs, resources, references, safe, err := scanEditorResources(ctx, view, view.files, generated, names, progress, true)
+	if err != nil || !safe {
+		return err
+	}
+	scoped, err := resourceReferenceScopes(ctx, refs.documents, resources, references, "")
+	if err != nil || scoped == nil {
+		return err
+	}
+	read := func(name string) ([]byte, error) { return view.readFileViewContext(ctx, name) }
+	usage, err := resourceFontUsage(ctx, resources, scoped, read)
+	if err != nil {
+		return err
+	}
+	for _, source := range references {
+		for name := range source.files {
+			if font := usage[name]; font != nil && !source.versions[name] {
+				font.unsafe = true
+			}
+		}
+		for _, definition := range source.definitions {
+			for name := range definition.files {
+				if font := usage[name]; font != nil {
+					font.unsafe = true
+				}
+			}
+		}
+	}
+	var cache editorSourceFontCache
+	for index, name := range slices.Sorted(maps.Keys(usage)) {
+		if err := progress.report("fonts", index, len(usage)); err != nil {
+			return err
+		}
+		if usage[name].unsafe || len(usage[name].chars)+len(usage[name].glyphs) == 0 {
+			continue
+		}
+		data, err := read(name)
+		if err != nil {
+			return err
+		}
+		subset, err := cache.subset(ctx, e.backends.FontResources, data, usage[name])
+		if err != nil {
+			return err
+		}
+		if subset != nil {
+			view.files[name] = subset
+		}
+	}
+	if err := progress.report("fonts", len(usage), len(usage)); err != nil {
+		return err
+	}
+	return ctx.Err()
 }

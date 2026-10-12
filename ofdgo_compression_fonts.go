@@ -36,7 +36,15 @@ func (r *Reader) compressionFontUsage(ctx context.Context, documents map[string]
 	if err != nil || scoped == nil {
 		return nil, err
 	}
+	return resourceFontUsage(ctx, resources, scoped, read)
+}
+
+// resourceFontUsage 按已确认的文档作用域合并各字体文件的字符和字形引用
+// 入参: ctx 取消上下文, resources 资源索引, scoped 各索引的用字范围, read 输出文件读取方法
+// 返回: map[string]*editorFontUsage 各字体文件的用字, error 读取或取消错误
+func resourceFontUsage(ctx context.Context, resources []string, scoped map[string]*editorResourceRefs, read func(string) ([]byte, error)) (map[string]*editorFontUsage, error) {
 	result := make(map[string]*editorFontUsage)
+	protected := make(map[string]bool)
 	for _, name := range resources {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -66,12 +74,33 @@ func (r *Reader) compressionFontUsage(ctx context.Context, documents map[string]
 				return nil, err
 			}
 			location := editorResourceLocation(name, root.attr("BaseLoc"), value)
+			alternate := cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))
 			id, charset := editorResourceID(font.attr("ID")), font.attr("Charset")
-			unsafe := id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))
-			if result[location] == nil {
-				result[location] = newEditorFontUsage()
+			unsafe := id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != alternate
+			for _, path := range []string{location, alternate} {
+				if result[path] == nil {
+					result[path] = newEditorFontUsage()
+				}
+				result[path].merge(refs.fonts[id], unsafe)
 			}
-			result[location].merge(refs.fonts[id], unsafe)
+		}
+		for media := range editorResourceNodes(root, "MultiMedias", "MultiMedia") {
+			file := media.child("MediaFile")
+			if file == nil {
+				continue
+			}
+			var value string
+			if err := xml.Unmarshal(data[file.start:file.end], &value); err != nil {
+				return nil, err
+			}
+			for _, location := range []string{editorResourceLocation(name, root.attr("BaseLoc"), value), cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))} {
+				protected[location] = true
+			}
+		}
+	}
+	for location := range protected {
+		if usage := result[location]; usage != nil {
+			usage.unsafe = true
 		}
 	}
 	return result, ctx.Err()
