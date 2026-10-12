@@ -678,6 +678,15 @@ func (e *Editor) ReplaceImage(page int, id string, data []byte, fit string) erro
 	if object.Type != "ImageObject" {
 		return fmt.Errorf("object %q is not an image", id)
 	}
+	if object.ImageObject.ImageMask != "" {
+		config, _, err := decodeImageConfigData(data)
+		if err != nil {
+			return err
+		}
+		if err := e.validateImageMask(object.ImageObject.ImageMask, image.Pt(config.Width, config.Height)); err != nil {
+			return err
+		}
+	}
 	object.ImageObject.ResourceID, err = e.AddImage(data)
 	if err != nil {
 		return err
@@ -863,7 +872,8 @@ func (v *editorValidation) prepareObject(id string, object GraphicObject) (Graph
 		fill, stroke = obj.FillColor, (*FillColor)(obj.StrokeColor)
 	case "ImageObject":
 		obj := &object.ImageObject
-		if _, err := e.editorImage(obj.ResourceID); err != nil {
+		size, err := e.editorImage(obj.ResourceID)
+		if err != nil {
 			return GraphicObject{}, err
 		}
 		if obj.Substitution != "" {
@@ -872,7 +882,7 @@ func (v *editorValidation) prepareObject(id string, object GraphicObject) (Graph
 			}
 		}
 		if obj.ImageMask != "" {
-			if _, err := e.editorImage(obj.ImageMask); err != nil {
+			if err := e.validateImageMask(obj.ImageMask, size); err != nil {
 				return GraphicObject{}, err
 			}
 		}

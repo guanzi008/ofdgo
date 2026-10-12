@@ -96,21 +96,7 @@ func (c *semanticCompiler) sharedStamp(stamp Stamp, compile func(*semanticCompil
 			return err
 		}
 		commands = page.Commands
-		cost := 0
-		for _, command := range commands {
-			part := rasterCommandCost(command)
-			if part < 0 || part > state.cache.limit-cost {
-				cost = state.cache.limit + 1
-				break
-			}
-			cost += part
-			if command.Image != nil {
-				cost += imageResourceCost(command.Image, state.cache.limit-cost)
-			}
-			if cost > state.cache.limit {
-				break
-			}
-		}
+		cost := rasterCommandsCost(commands, state.cache.limit)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -158,10 +144,7 @@ func (c *semanticCompiler) patternCell(pattern *PatternPaint, matrix Matrix) ([]
 			return nil, err
 		}
 	}
-	cost := 0
-	for _, cmd := range child.page.Commands {
-		cost += rasterCommandCost(cmd)
-	}
+	cost := rasterCommandsCost(child.page.Commands, c.patterns.limit)
 	c.patterns.put(key, child.page.Commands, cost)
 	return translatePatternCommands(child.page.Commands, x, y), nil
 }
@@ -226,10 +209,10 @@ func translatePatternCommands(commands []RasterCommand, x, y float64) []RasterCo
 	return result
 }
 
-// appendPatternCell 将缓存指令放入当前裁剪，不修改单元数据
-// 入参: commands 单元指令, clip 页面裁剪, segments 已转换裁剪
+// appendClippedCommands 合并页面裁剪后追加指令，不修改原始指令
+// 入参: commands 绘制指令, clip 页面裁剪, segments 已转换裁剪
 // 返回: error 裁剪合并错误
-func (c *semanticCompiler) appendPatternCell(commands []RasterCommand, clip GeometryPath, segments []RasterSegment) error {
+func (c *semanticCompiler) appendClippedCommands(commands []RasterCommand, clip GeometryPath, segments []RasterSegment) error {
 	for _, command := range commands {
 		commandClip := segments
 		if command.Clip != nil {

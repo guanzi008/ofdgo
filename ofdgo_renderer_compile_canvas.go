@@ -104,14 +104,22 @@ func (c *canvasPageCompiler) RenderImage(img image.Image, m canvas.Matrix) {
 	if c.err != nil {
 		return
 	}
-	img = imagePixelSource(img)
+	var err error
+	img, err = imagePixelData(img)
+	if err != nil {
+		c.err = err
+		return
+	}
 	if (m[0][1] != 0 || m[1][0] != 0) && (m[0][0] != 0 || m[1][1] == 0) {
 		bounds := img.Bounds()
 		img = &rasterPaddedImage{source: img, rect: image.Rect(0, 0, bounds.Dx()+8, bounds.Dy()+8)}
 		m = m.Translate(-4, -4)
 	}
-	h := float64(img.Bounds().Dy())
+	bounds := img.Bounds()
+	h := float64(bounds.Dy())
 	t := RasterMatrix{m[0][0], -m[1][0], -m[0][1], m[1][1], m[0][2] + m[0][1]*h, c.page.Height - m[1][2] - m[1][1]*h}
+	t[4] -= t[0]*float64(bounds.Min.X) + t[2]*float64(bounds.Min.Y)
+	t[5] -= t[1]*float64(bounds.Min.X) + t[3]*float64(bounds.Min.Y)
 	c.page.Commands = append(c.page.Commands, RasterCommand{Image: img, Transform: t})
 }
 
@@ -119,26 +127,33 @@ func (c *canvasPageCompiler) RenderImage(img image.Image, m canvas.Matrix) {
 // 返回: image.Rectangle 图像边界
 func (s *rasterPaddedImage) Bounds() image.Rectangle { return s.rect }
 
-// ColorModel 返回预乘八位颜色模型，与实体补边图像保持一致
+// ColorModel 按原图采样精度返回支持透明补边的预乘颜色模型
 // 返回: color.Model 颜色模型
-func (s *rasterPaddedImage) ColorModel() color.Model { return color.RGBAModel }
+func (s *rasterPaddedImage) ColorModel() color.Model {
+	if imageHighPrecision(s.source) {
+		return color.RGBA64Model
+	}
+	return color.RGBAModel
+}
 
 // At 读取补边图像的预乘像素，边距及图像外透明
 // 入参: x 横向坐标, y 纵向坐标
 // 返回: color.Color 像素颜色
-func (s *rasterPaddedImage) At(x, y int) color.Color {
-	if !image.Pt(x, y).In(s.rect.Inset(4)) {
-		return color.RGBA{}
-	}
-	b := s.source.Bounds()
-	return color.RGBAModel.Convert(s.source.At(x-4+b.Min.X, y-4+b.Min.Y))
-}
+func (s *rasterPaddedImage) At(x, y int) color.Color { return s.RGBA64At(x, y) }
 
-// RGBA64At 返回预乘十六位像素供采样器读取
+// RGBA64At 保留原始预乘精度，支持采样接口的图像不进行颜色装箱
 // 入参: x 横向坐标, y 纵向坐标
 // 返回: color.RGBA64 像素颜色
 func (s *rasterPaddedImage) RGBA64At(x, y int) color.RGBA64 {
-	r, g, b, a := s.At(x, y).RGBA()
+	if !image.Pt(x, y).In(s.rect.Inset(4)) {
+		return color.RGBA64{}
+	}
+	bounds := s.source.Bounds()
+	x, y = x-4+bounds.Min.X, y-4+bounds.Min.Y
+	if source, ok := s.source.(image.RGBA64Image); ok {
+		return source.RGBA64At(x, y)
+	}
+	r, g, b, a := s.source.At(x, y).RGBA()
 	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
 }
 

@@ -232,7 +232,7 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 	var unicodeTables []sfntCmap
 	for _, record := range sfnt.cmaps {
 		if record.format == 14 {
-			return nil
+			continue
 		}
 		if record.platform == 0 || record.platform == 3 && (record.encoding == 1 || record.encoding == 10) {
 			unicodeTables = append(unicodeTables, record)
@@ -256,7 +256,8 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 			mapping[char] = id
 		}
 	}
-	if !retainSFNTSubstitutions(sfnt.Tables["GSUB"], glyphs, sfnt.NumGlyphs()) {
+	variations, ok := subsetCmapVariations(sfnt.Tables["cmap"], usage.chars, glyphs, sfnt.NumGlyphs())
+	if !ok || !retainSFNTSubstitutions(sfnt.Tables["GSUB"], glyphs, sfnt.NumGlyphs()) {
 		return nil
 	}
 	if sfnt.IsCFF {
@@ -270,7 +271,7 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 		}
 		tables := maps.Clone(sfnt.Tables)
 		tables["CFF "] = cff
-		tables["cmap"] = buildCmapTable(sfnt.NumGlyphs(), mapping)
+		tables["cmap"] = buildCmapWithVariations(sfnt.NumGlyphs(), mapping, variations)
 		delete(tables, "DSIG")
 		result, err := serializeOTF(tables)
 		if err != nil || len(result) >= len(data) {
@@ -307,7 +308,7 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 	}
 	tables := maps.Clone(sfnt.Tables)
 	tables["glyf"], tables["loca"] = glyf, loca
-	tables["cmap"] = buildCmapTable(uint16(sfnt.NumGlyphs()), mapping)
+	tables["cmap"] = buildCmapWithVariations(sfnt.NumGlyphs(), mapping, variations)
 	tables["head"] = bytes.Clone(tables["head"])
 	clear(tables["head"][8:12])
 	delete(tables, "DSIG")

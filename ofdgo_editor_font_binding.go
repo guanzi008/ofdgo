@@ -272,7 +272,7 @@ func (e *Editor) prepareFontBinding(ctx context.Context, scan *editorFontDocumen
 			index = fontCollectionIndex(data, []string{declaration.font.FontName, declaration.font.FamilyName}, declaration.font.Bold, declaration.font.Italic)
 		}
 	} else if len(file.Data) == 0 {
-		file, err = e.resolveBindingFont(scan, declaration)
+		file, err = e.resolveBindingFont(ctx, scan, declaration)
 		if err != nil {
 			return nil, err
 		}
@@ -302,7 +302,10 @@ func (e *Editor) prepareFontBinding(ctx context.Context, scan *editorFontDocumen
 			return nil, err
 		}
 		if explicit && len(object.CGTransform) != 0 && !verifiedGlyphs {
-			source, err := e.resolveBindingFont(scan, declaration)
+			source, err := e.resolveBindingFont(ctx, scan, declaration)
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, err
+			}
 			if err != nil || !sameBindingFont(source.Data, parsed.Data) {
 				return nil, fmt.Errorf("font glyph mapping requires the original font")
 			}
@@ -503,23 +506,33 @@ func sameBindingFont(source, target []byte) bool {
 }
 
 // resolveBindingFont 精确匹配当前字体并提取独立字体数据，集合索引不传递到提取结果
-// 入参: scan 文档引用, declaration 字体声明
+// 同一文档复用入口和资源定义，字体解析结果不跨调用保留
+// 入参: ctx 取消上下文, scan 文档引用, declaration 字体声明
 // 返回: FontFile 独立字体, error 匹配或解析错误
-func (e *Editor) resolveBindingFont(scan *editorFontDocument, declaration *editorFontDeclaration) (FontFile, error) {
-	reader := &Reader{Zip: scan.reader.Zip, files: maps.Clone(scan.reader.files), documentIndex: scan.index}
-	if scan.index == scan.reader.documentIndex {
-		reader.selectedVersion = scan.reader.selectedVersion
-	}
-	if err := reader.initRoot(); err != nil {
+func (e *Editor) resolveBindingFont(ctx context.Context, scan *editorFontDocument, declaration *editorFontDeclaration) (FontFile, error) {
+	if err := ctx.Err(); err != nil {
 		return FontFile{}, err
 	}
-	if _, err := reader.Doc(); err != nil {
-		return FontFile{}, err
+	reader := scan.fontReader
+	if reader == nil {
+		reader = &Reader{Zip: scan.reader.Zip, files: maps.Clone(scan.reader.files), documentIndex: scan.index}
+		if scan.index == scan.reader.documentIndex {
+			reader.selectedVersion = scan.reader.selectedVersion
+		}
+		if err := reader.initRootContext(ctx); err != nil {
+			return FontFile{}, err
+		}
+		if _, err := reader.DocContext(ctx); err != nil {
+			return FontFile{}, err
+		}
+		scan.fontReader = reader
 	}
 	definition := declaration.font
 	definition.FontFile = ""
 	reader.fontCache[definition.ID] = &definition
-	resolved, err := e.newRenderer(reader).ResolveFont(definition.ID, true)
+	renderer := e.newRenderer(reader)
+	renderer.pageContext = ctx
+	resolved, err := renderer.ResolveFont(definition.ID, true)
 	if err != nil {
 		return FontFile{}, err
 	}
@@ -532,6 +545,9 @@ func (e *Editor) resolveBindingFont(scan *editorFontDocument, declaration *edito
 		index = resolved.Face.Index
 	}
 	data, err := file.Face(index)
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		return FontFile{}, cancelErr
+	}
 	return FontFile{Data: data}, err
 }
 

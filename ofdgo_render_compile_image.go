@@ -64,23 +64,14 @@ func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) er
 		if err != nil {
 			return err
 		}
-		if object.ImageMask != "" || object.Alpha != nil && *object.Alpha < 255 {
-			img, err = imagePixelData(img)
-			if err != nil {
-				return err
-			}
+		mask, err := c.renderer.imageObjectMask(object, img)
+		if err != nil {
+			return err
 		}
-		if object.ImageMask != "" {
-			mask, err := c.renderer.ImageResource(object.ImageMask)
-			if err == nil {
-				mask, err = imagePixelData(mask)
-			}
-			if err != nil {
-				return err
-			}
-			img = imageWithMask(img, mask)
+		img, err = imageWithEffects(c.renderer.pageContext, img, mask, object.Alpha)
+		if err != nil {
+			return err
 		}
-		img = imageWithAlpha(img, object.Alpha)
 		bounds := img.Bounds()
 		matrix = matrix.Multiply(Matrix{a: 1 / float64(bounds.Dx()), d: 1 / float64(bounds.Dy())}).Multiply(TranslationMatrix(-float64(bounds.Min.X), -float64(bounds.Min.Y)))
 		if err := c.addImage(img, matrix, clip); err != nil {
@@ -187,18 +178,20 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 			if err != nil {
 				return err
 			}
+			matrix := TranslationMatrix(stamp.Box.X, stamp.Box.Y).Multiply(Matrix{a: stamp.Box.W / page.Width, d: stamp.Box.H / page.Height})
+			var clip GeometryPath
+			var segments []RasterSegment
 			if stamp.Clip != nil {
-				if renderer.backends.Raster == nil {
-					return fmt.Errorf("stamp raster: %w", ErrBackendUnavailable)
-				}
-				img, err := renderer.backends.Raster.Render(page)
+				clip = geometryRectangle(Box{X: stamp.Box.X + stamp.Clip.X, Y: stamp.Box.Y + stamp.Clip.Y, W: stamp.Clip.W, H: stamp.Clip.H})
+				segments, err = c.segments(clip)
 				if err != nil {
 					return err
 				}
-				return c.stampImage(stampImageWithTransparentWhite(img), stamp)
 			}
-			matrix := TranslationMatrix(stamp.Box.X, stamp.Box.Y).Multiply(Matrix{a: stamp.Box.W / page.Width, d: stamp.Box.H / page.Height})
 			for _, command := range page.Commands {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				command.Transform = RasterMatrix(matrix.Multiply(MatrixFromValues([6]float64(command.Transform))).Values())
 				if command.Stroke != nil {
 					stroke := *command.Stroke
@@ -221,7 +214,13 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 						command.Clip[i] = segment
 					}
 				}
-				c.page.Commands = append(c.page.Commands, command)
+				if stamp.Clip != nil {
+					if err := c.appendClippedCommands([]RasterCommand{command}, clip, segments); err != nil {
+						return err
+					}
+				} else {
+					c.page.Commands = append(c.page.Commands, command)
+				}
 			}
 		}
 		return nil
@@ -230,22 +229,27 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 	if err != nil {
 		return err
 	}
-	return c.stampImage(stampImageWithTransparentWhite(img), stamp)
+	return c.stampImage(img, stamp)
 }
 
 // stampImage 按印章裁剪区域放置图像
 // 入参: img 印章图像, stamp 印章
 // 返回: error 编译错误
 func (c *semanticCompiler) stampImage(img image.Image, stamp Stamp) error {
+	pixels, err := imagePixelDataContext(c.renderer.pageContext, img)
+	if err != nil {
+		return err
+	}
+	if c.renderer.decodeImages {
+		img = pixels
+	}
 	box := stamp.Box
+	var clip *GeometryPath
 	if stamp.Clip != nil {
-		img = clipStampImage(img, box, *stamp.Clip)
-		box.X += stamp.Clip.X
-		box.Y += stamp.Clip.Y
-		box.W = stamp.Clip.W
-		box.H = stamp.Clip.H
+		path := geometryRectangle(Box{X: box.X + stamp.Clip.X, Y: box.Y + stamp.Clip.Y, W: stamp.Clip.W, H: stamp.Clip.H})
+		clip = &path
 	}
 	bounds := img.Bounds()
 	matrix := TranslationMatrix(box.X, box.Y).Multiply(Matrix{a: box.W / float64(bounds.Dx()), d: box.H / float64(bounds.Dy())}).Multiply(TranslationMatrix(-float64(bounds.Min.X), -float64(bounds.Min.Y)))
-	return c.addImage(img, matrix, nil)
+	return c.addImage(img, matrix, clip)
 }

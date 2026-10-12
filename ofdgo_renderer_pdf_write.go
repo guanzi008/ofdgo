@@ -164,7 +164,7 @@ func (r *pdfRenderer) writePDF(ctx context.Context, data []byte, writer io.Write
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		pixels, err := imagePixelData(original)
+		pixels, err := imagePixelDataContext(ctx, original)
 		if err != nil {
 			return err
 		}

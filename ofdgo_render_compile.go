@@ -490,7 +490,7 @@ func (c *semanticCompiler) fillPattern(clip GeometryPath, pattern *PatternPaint,
 			if err != nil {
 				return err
 			}
-			if err := c.appendPatternCell(commands, clip, segments); err != nil {
+			if err := c.appendClippedCommands(commands, clip, segments); err != nil {
 				return err
 			}
 		}

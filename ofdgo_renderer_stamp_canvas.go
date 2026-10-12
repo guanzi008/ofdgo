@@ -44,7 +44,7 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 	if s.Type == "ofd" && len(s.Data) > 0 {
 		if s.Clip != nil {
 			if img := r.renderOFDStampImage(s.Data); img != nil {
-				r.renderStampImage(ctx, stampImageWithTransparentWhite(img), s, pageH)
+				r.renderStampImage(ctx, img, s, pageH)
 			}
 			return
 		}
@@ -60,11 +60,13 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 						if pageContext.Err() != nil {
 							return
 						}
-						continue
+						r.renderError = err
+						return
 					}
 					sealBox, err := renderer.GetPageBox(content)
 					if err != nil {
-						continue
+						r.renderError = err
+						return
 					}
 					ctx.Push()
 					ctx.Translate(s.Box.X, pageH-(s.Box.Y+s.Box.H))
@@ -78,17 +80,19 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 				}
 				return
 			}
+			r.renderError = err
+			return
 		}
+		r.renderError = err
+		return
 	}
 	if len(s.Data) > 0 {
 		img, _, err := decodeImageDataContext(pageContext, s.Data)
-		if err == nil {
-			if r.decodeImages {
-				img = imagePixelSource(img)
-			}
-			r.renderStampImage(ctx, stampImageWithTransparentWhite(img), s, pageH)
+		if err != nil {
+			r.renderError = err
 			return
 		}
+		r.renderStampImage(ctx, img, s, pageH)
 	}
 }
 
@@ -111,11 +115,13 @@ func (r *Renderer) renderOFDStampImage(data []byte) image.Image {
 	}
 	reader, err := NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
+		r.renderError = err
 		return nil
 	}
 	defer reader.Close()
 	doc, err := reader.DocContext(ctx)
 	if err != nil {
+		r.renderError = err
 		return nil
 	}
 	renderer := r.childRenderer(reader)
@@ -127,7 +133,8 @@ func (r *Renderer) renderOFDStampImage(data []byte) image.Image {
 			if ctx.Err() != nil {
 				return nil
 			}
-			continue
+			r.renderError = err
+			return nil
 		}
 		img, err := renderer.RenderToImage(content)
 		if err != nil {
@@ -142,17 +149,19 @@ func (r *Renderer) renderOFDStampImage(data []byte) image.Image {
 // renderStampImage 渲染印章图像
 // 入参: ctx 画布上下文, img 印章图像, s 印章对象, pageH 页面高度
 func (r *Renderer) renderStampImage(ctx *canvas.Context, img image.Image, s Stamp, pageH float64) {
-	box := s.Box
-	if s.Clip != nil {
-		img = clipStampImage(img, box, *s.Clip)
-		box.X += s.Clip.X
-		box.Y += s.Clip.Y
-		box.W = s.Clip.W
-		box.H = s.Clip.H
+	pixels, err := imagePixelDataContext(r.pageContext, img)
+	if err != nil {
+		r.renderError = err
+		return
 	}
-	ctx.Push()
-	ctx.Translate(box.X, pageH-(box.Y+box.H))
-	ctx.Scale(box.W/float64(img.Bounds().Dx()), box.H/float64(img.Bounds().Dy()))
-	ctx.DrawImage(0, 0, r.canvasEncodedImage(img), canvas.DPMM(1.0))
-	ctx.Pop()
+	if r.decodeImages {
+		img = pixels
+	}
+	box := s.Box
+	var clip *canvas.Path
+	if s.Clip != nil {
+		clip = canvas.Rectangle(s.Clip.W, s.Clip.H).Translate(box.X+s.Clip.X, pageH-box.Y-s.Clip.Y-s.Clip.H)
+	}
+	matrix := canvas.Identity.Translate(box.X, pageH-box.Y-box.H).Scale(box.W/float64(img.Bounds().Dx()), box.H/float64(img.Bounds().Dy()))
+	r.drawClippedImage(ctx, img, clip, matrix)
 }

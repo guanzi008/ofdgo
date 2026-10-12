@@ -16,6 +16,8 @@ package ofdgo
 
 import (
 	"container/list"
+	"image"
+	"reflect"
 )
 
 // renderCache 按估算字节数限制派生渲染数据，淘汰不修改源资源
@@ -82,6 +84,40 @@ func rasterCommandCost(command RasterCommand) int {
 		if mesh := command.Paint.Gradient.Mesh; mesh != nil {
 			cost += 32 + cap(mesh.Triangles)*240
 		}
+	}
+	return cost
+}
+
+// rasterCommandsCost 估算整组指令保留的内存，同一图片实例只计一次
+// 入参: commands 绘制指令, limit 缓存预算
+// 返回: int 估算字节数，超预算时返回预算加一
+func rasterCommandsCost(commands []RasterCommand, limit int) int {
+	limit = max(0, limit)
+	cost := 0
+	var images map[image.Image]bool
+	for _, command := range commands {
+		part := rasterCommandCost(command)
+		if part < 0 || part > limit-cost {
+			return limit + 1
+		}
+		cost += part
+		if command.Image == nil {
+			continue
+		}
+		if reflect.ValueOf(command.Image).Kind() == reflect.Pointer {
+			if images[command.Image] {
+				continue
+			}
+			if images == nil {
+				images = make(map[image.Image]bool)
+			}
+			images[command.Image] = true
+		}
+		part = imageResourceCost(command.Image, limit-cost)
+		if part > limit-cost {
+			return limit + 1
+		}
+		cost += part
 	}
 	return cost
 }

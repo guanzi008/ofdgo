@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"math"
@@ -44,25 +45,16 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		return
 	}
 	box, _ := ParseBox(obj.Boundary)
-	if obj.ImageMask != "" || obj.Alpha != nil && *obj.Alpha < 255 {
-		img, err = imagePixelData(img)
-		if err != nil {
-			r.renderError = err
-			return
-		}
+	mask, err := r.imageObjectMask(obj, img)
+	if err != nil {
+		r.renderError = err
+		return
 	}
-	if obj.ImageMask != "" {
-		mask, err := r.ImageResource(obj.ImageMask)
-		if err == nil {
-			mask, err = imagePixelData(mask)
-		}
-		if err != nil {
-			r.renderError = err
-			return
-		}
-		img = imageWithMask(img, mask)
+	img, err = imageWithEffects(r.pageContext, img, mask, obj.Alpha)
+	if err != nil {
+		r.renderError = err
+		return
 	}
-	img = imageWithAlpha(img, obj.Alpha)
 	imgBounds := img.Bounds()
 	imgW, imgH := float64(imgBounds.Dx()), float64(imgBounds.Dy())
 	if imgW <= 0 || imgH <= 0 {
@@ -91,6 +83,19 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		}
 	}
 	clipPath := r.intersectCachedClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
+	r.drawClippedImage(ctx, img, clipPath, m)
+	if r.renderError != nil {
+		return
+	}
+	if obj.Border != nil {
+		r.renderImageBorder(ctx, obj, box, pageH, parentCTM, boundaryInCTM, clipPath)
+	}
+}
+
+// drawClippedImage 共用图像及签章的几何裁剪，编译输出保留原图和独立裁剪路径
+// 入参: ctx 画布上下文, img 原图, clipPath 页面裁剪，可为空, m 像素到画布的变换
+func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPath *canvas.Path, m canvas.Matrix) {
+	imgW, imgH := float64(img.Bounds().Dx()), float64(img.Bounds().Dy())
 	imageClip := clipPath
 	compiler, compiled := ctx.Renderer.(*canvasPageCompiler)
 	if compiled && imageClip != nil && imageClipContains(img, imageClip, m) {
@@ -105,7 +110,12 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	m = m.Scale(imgW/float64(img.Bounds().Dx()), imgH/float64(img.Bounds().Dy()))
 	if _, pdf := ctx.Renderer.(*pdfRenderer); !pdf {
 		var pad int
-		img, pad = imageWithTransparentEdge(img)
+		var err error
+		img, pad, err = imageWithTransparentEdge(r.pageContext, img)
+		if err != nil {
+			r.renderError = err
+			return
+		}
 		if pad > 0 {
 			p := float64(pad)
 			m[0][2] -= m[0][0]*p + m[0][1]*p
@@ -121,9 +131,6 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 			return
 		}
 		compiler.page.Commands[len(compiler.page.Commands)-1].Clip = segments
-	}
-	if obj.Border != nil {
-		r.renderImageBorder(ctx, obj, box, pageH, parentCTM, boundaryInCTM, clipPath)
 	}
 }
 
@@ -175,11 +182,19 @@ func imageClipContains(img image.Image, clipPath *canvas.Path, m canvas.Matrix) 
 	return clipPath.Contains(outline)
 }
 
-// imageWithClip 应用图片裁剪区域
+// imageWithClip 应用图片裁剪区域，保留原图采样精度
 // 低分辨率图片按最低精度细化蒙版，细化后的像素上限16Mi，不降低原图分辨率
 // 入参: img 图片对象, clipPath 裁剪路径, m 图片变换矩阵, dpi 最低蒙版分辨率，0保留原图精度
 // 返回: image.Image 裁剪后的图片对象
 func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canvas.Matrix, dpi float64) image.Image {
+	work := r.pageContext
+	if work == nil {
+		work = context.Background()
+	}
+	if err := work.Err(); err != nil {
+		r.renderError = err
+		return img
+	}
 	if img == nil || clipPath == nil || m.Det() == 0 {
 		return img
 	}
@@ -192,7 +207,7 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		return img
 	}
 	original := img
-	source, err := imagePixelData(img)
+	source, err := imagePixelDataContext(r.pageContext, img)
 	if err != nil {
 		r.renderError = err
 		return img
@@ -202,11 +217,20 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 	scale = math.Min(scale, math.Sqrt((16<<20)/(float64(w)*float64(h))))
 	if scale > 1 {
 		nw, nh := int(float64(w)*scale), int(float64(h)*scale)
-		resized := image.NewNRGBA(image.Rect(0, 0, nw, nh))
-		draw.CatmullRom.Scale(resized, resized.Bounds(), imagePixelSource(img), bounds, draw.Src, nil)
+		var resized draw.Image
+		if imageHighPrecision(img) {
+			resized = image.NewNRGBA64(image.Rect(0, 0, nw, nh))
+		} else {
+			resized = image.NewNRGBA(image.Rect(0, 0, nw, nh))
+		}
+		draw.CatmullRom.Scale(resized, resized.Bounds(), img, bounds, draw.Src, nil)
 		img = resized
 		m = m.Scale(float64(w)/float64(nw), float64(h)/float64(nh))
 		bounds, w, h = resized.Bounds(), nw, nh
+	}
+	if err := work.Err(); err != nil {
+		r.renderError = err
+		return img
 	}
 	clip := clipPath.Copy().Transform(m.Inv())
 	compiler := &canvasPageCompiler{page: &RasterPage{Width: float64(w), Height: float64(h), DPI: 25.4}, geometry: r.backends.Geometry}
@@ -223,16 +247,67 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		return img
 	}
 	result, err := r.backends.Raster.Render(compiler.page)
+	if cancelErr := work.Err(); cancelErr != nil {
+		err = cancelErr
+	}
 	if err != nil {
 		r.renderError = err
 		return img
+	}
+	if result == nil || result.Bounds().Size() != image.Pt(w, h) {
+		r.renderError = fmt.Errorf("image clip raster dimensions differ from source")
+		return img
+	}
+	result, err = imagePixelDataContext(work, result)
+	if err != nil {
+		r.renderError = err
+		return img
+	}
+	if imageHighPrecision(img) || imageHighPrecision(result) {
+		out := image.NewNRGBA64(bounds)
+		maskBounds := result.Bounds()
+		opaque := true
+		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+			if err := work.Err(); err != nil {
+				r.renderError = err
+				return img
+			}
+			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				pixel := imageNRGBA64At(img, x, y)
+				alpha := imageAlphaAt(result, maskBounds.Min.X+x-bounds.Min.X, maskBounds.Min.Y+y-bounds.Min.Y)
+				opaque = opaque && alpha == 65535
+				pixel.A = uint16(uint32(pixel.A) * alpha / 65535)
+				out.SetNRGBA64(x, y, pixel)
+			}
+		}
+		if err := work.Err(); err != nil {
+			r.renderError = err
+			return img
+		}
+		if opaque {
+			if scale <= 1 {
+				return original
+			}
+			return img
+		}
+		return out
 	}
 	mask, ok := result.(*image.RGBA)
 	if !ok {
 		mask = image.NewRGBA(image.Rect(0, 0, w, h))
 		draw.Draw(mask, mask.Bounds(), result, result.Bounds().Min, draw.Src)
 	}
-	if mask.Opaque() {
+	if mask.Rect.Min != (image.Point{}) {
+		normalized := *mask
+		normalized.Rect = mask.Rect.Sub(mask.Rect.Min)
+		mask = &normalized
+	}
+	opaque := mask.Opaque()
+	if err := work.Err(); err != nil {
+		r.renderError = err
+		return img
+	}
+	if opaque {
 		if scale <= 1 {
 			return original
 		}
@@ -242,6 +317,10 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 	out := &image.NRGBA{Pix: mask.Pix, Stride: mask.Stride, Rect: bounds}
 	if src, ok := source.(*image.NRGBA); ok {
 		for y := 0; y < h; y++ {
+			if err := work.Err(); err != nil {
+				r.renderError = err
+				return img
+			}
 			offset := src.PixOffset(bounds.Min.X, bounds.Min.Y+y)
 			row := out.Pix[y*out.Stride : y*out.Stride+w*4]
 			pixels := src.Pix[offset : offset+w*4]
@@ -250,15 +329,27 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 				row[x+3] = uint8(int(pixels[x+3]) * int(row[x+3]) / 255)
 			}
 		}
+		if err := work.Err(); err != nil {
+			r.renderError = err
+			return img
+		}
 		return out
 	}
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		if err := work.Err(); err != nil {
+			r.renderError = err
+			return img
+		}
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			c := imageNRGBAAt(source, x, y)
 			a := mask.RGBAAt(x-bounds.Min.X, y-bounds.Min.Y).A
 			c.A = uint8(int(c.A) * int(a) / 255)
 			out.SetNRGBA(x, y, c)
 		}
+	}
+	if err := work.Err(); err != nil {
+		r.renderError = err
+		return img
 	}
 	return out
 }

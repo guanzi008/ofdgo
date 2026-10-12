@@ -26,13 +26,14 @@ import (
 
 // editorFontDocument 保存一个文档的字体声明与完整内容引用，不进入附件和签名封装
 type editorFontDocument struct {
-	reader    *Reader
-	index     int
-	files     map[string]*editorFontXML
-	fonts     map[string]*editorFontDeclaration
-	texts     map[string][]editorFontText
-	fontCache editorBindingFontCache
-	unsafe    bool
+	reader     *Reader
+	index      int
+	files      map[string]*editorFontXML
+	fonts      map[string]*editorFontDeclaration
+	texts      map[string][]editorFontText
+	fontCache  editorBindingFontCache
+	fontReader *Reader
+	unsafe     bool
 }
 
 // editorFontXML 保存字体声明及文字引用所在的XML

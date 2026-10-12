@@ -16,7 +16,9 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"image"
 	"maps"
 	"slices"
 )
@@ -113,12 +115,25 @@ func (e *Editor) OrderCompositeObjects(page int, path ObjectPath, indexes []int,
 // 入参: page 页面索引, path 父复合路径, index 图片序号, data PNG或JPEG数据
 // 返回: error 错误信息
 func (e *Editor) ReplaceCompositeImage(page int, path ObjectPath, index int, data []byte) error {
-	return e.editCompositeObjects(page, path, []int{index}, func(_ *Renderer, nodes []*editorCompositeNode, _ []CompositeMember) error {
+	return e.editCompositeObjects(page, path, []int{index}, func(renderer *Renderer, nodes []*editorCompositeNode, _ []CompositeMember) error {
 		node := nodes[0]
 		if node.object.Type != "ImageObject" {
 			return fmt.Errorf("composite member is not an image")
 		}
 		object := node.object
+		if object.ImageObject.ImageMask != "" {
+			config, _, err := decodeImageConfigData(data)
+			if err != nil {
+				return err
+			}
+			mask, err := renderer.ImageResource(object.ImageObject.ImageMask)
+			if err != nil {
+				return err
+			}
+			if err := validateImageMask(context.Background(), mask, image.Pt(config.Width, config.Height)); err != nil {
+				return err
+			}
+		}
 		id, err := e.AddImage(data)
 		if err != nil {
 			return err

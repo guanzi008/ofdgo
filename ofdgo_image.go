@@ -23,18 +23,16 @@ import (
 	"image/color"
 	_ "image/gif"
 	"io"
-	"math"
 
 	_ "github.com/xiaoqidun/j2kgo"
 	_ "github.com/xiaoqidun/jbig2"
 	_ "golang.org/x/image/bmp"
-	"golang.org/x/image/draw"
 	"golang.org/x/image/tiff"
 )
 
 // transparentEdgeImage 共享只读像素并按需计算透明边缘和采样边距
 type transparentEdgeImage struct {
-	source *image.NRGBA
+	source image.Image
 	rect   image.Rectangle
 }
 
@@ -61,7 +59,7 @@ func (s *transparentEdgeImage) NRGBAAt(x, y int) color.NRGBA {
 	}
 	b := s.source.Bounds()
 	sx, sy := b.Min.X+min(max(x-1, 0), b.Dx()-1), b.Min.Y+min(max(y-1, 0), b.Dy()-1)
-	c := s.source.NRGBAAt(sx, sy)
+	c := imageNRGBAAt(s.source, sx, sy)
 	if c.A == 0 {
 		if edge, ok := transparentEdgeColor(s.source, sx, sy); ok {
 			c = edge
@@ -352,86 +350,136 @@ func parseBMPHeader(data []byte) (int, int, int, uint16, uint32, error) {
 	return offset, width, height, bpp, compression, nil
 }
 
-// imageWithMask 应用图片蒙版
-// 入参: img 图片对象, mask 蒙版图片
-// 返回: image.Image 蒙版处理后的图片对象
-func imageWithMask(img, mask image.Image) image.Image {
-	if img == nil || mask == nil {
-		return img
+// imageWithEffects 合并同尺寸二值蒙版和对象透明度，保留原图采样精度及只读像素
+// 入参: ctx 取消上下文，nil使用后台上下文, img 原图, mask 二值蒙版，可为空, alpha 对象透明度，可为空
+// 返回: image.Image 处理后的图片, error 蒙版、解码或取消错误
+func imageWithEffects(ctx context.Context, img, mask image.Image, alpha *int) (image.Image, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	bounds := img.Bounds()
-	if bounds.Empty() || mask.Bounds().Empty() {
-		return img
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	source := imagePixelSource(img)
-	maskSource := imagePixelSource(mask)
-	maskBounds := maskSource.Bounds()
-	var opacity image.Image = maskSource
-	if bounds.Size() != maskBounds.Size() {
-		resized := image.NewGray(bounds)
-		draw.CatmullRom.Scale(resized, bounds, maskSource, maskBounds, draw.Src, nil)
-		opacity = resized
-		maskBounds = bounds
+	a := 255
+	if alpha != nil {
+		a = clampColor(*alpha)
 	}
-	out := image.NewNRGBA(bounds)
-	if src, ok := source.(*image.NRGBA); ok {
-		for y := 0; y < bounds.Dy(); y++ {
-			offset := src.PixOffset(bounds.Min.X, bounds.Min.Y+y)
-			row := out.Pix[y*out.Stride : (y+1)*out.Stride]
-			copy(row, src.Pix[offset:offset+len(row)])
-			for x := 3; x < len(row); x += 4 {
-				a := imageGrayAt(opacity, maskBounds.Min.X+x/4, maskBounds.Min.Y+y).Y
-				row[x] = uint8(int(row[x]) * int(a) / 255)
+	if img == nil || mask == nil && a == 255 {
+		return img, nil
+	}
+	source, err := imagePixelDataContext(ctx, img)
+	if err != nil {
+		return nil, err
+	}
+	bounds := source.Bounds()
+	var maskBounds image.Rectangle
+	if mask != nil {
+		mask, err = imagePixelDataContext(ctx, mask)
+		if err != nil {
+			return nil, err
+		}
+		maskBounds = mask.Bounds()
+		if bounds.Empty() || bounds.Size() != maskBounds.Size() {
+			return nil, fmt.Errorf("image mask dimensions differ from source")
+		}
+	}
+	if imageHighPrecision(source) {
+		out := image.NewNRGBA64(bounds)
+		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				opacity := a
+				if mask != nil {
+					value, err := imageMaskAlpha(mask, maskBounds.Min.X+x-bounds.Min.X, maskBounds.Min.Y+y-bounds.Min.Y)
+					if err != nil {
+						return nil, err
+					}
+					opacity *= int(value) / 255
+				}
+				pixel := imageNRGBA64At(source, x, y)
+				pixel.A = uint16(uint32(pixel.A) * uint32(opacity) / 255)
+				out.SetNRGBA64(x, y, pixel)
 			}
 		}
-		return out
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return out, nil
 	}
+	out := image.NewNRGBA(bounds)
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			mx := maskBounds.Min.X + x - bounds.Min.X
-			my := maskBounds.Min.Y + y - bounds.Min.Y
-			a := imageGrayAt(opacity, mx, my).Y
-			c := imageNRGBAAt(source, x, y)
-			c.A = uint8(int(c.A) * int(a) / 255)
-			out.SetNRGBA(x, y, c)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		row := out.Pix[(y-bounds.Min.Y)*out.Stride : (y-bounds.Min.Y+1)*out.Stride]
+		if src, ok := source.(*image.NRGBA); ok {
+			offset := src.PixOffset(bounds.Min.X, y)
+			copy(row, src.Pix[offset:offset+len(row)])
+		} else {
+			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				out.SetNRGBA(x, y, imageNRGBAAt(source, x, y))
+			}
+		}
+		for x := 0; x < bounds.Dx(); x++ {
+			opacity := a
+			if mask != nil {
+				value, err := imageMaskAlpha(mask, maskBounds.Min.X+x, maskBounds.Min.Y+y-bounds.Min.Y)
+				if err != nil {
+					return nil, err
+				}
+				opacity *= int(value) / 255
+			}
+			row[x*4+3] = uint8(int(row[x*4+3]) * opacity / 255)
 		}
 	}
-	return out
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-// imageWithAlpha 合并图片透明度
-// 入参: img 图片对象, alpha 对象透明度
-// 返回: image.Image 合并后的图片对象
-func imageWithAlpha(img image.Image, alpha *int) image.Image {
-	if img == nil || alpha == nil {
-		return img
+// imageMaskAlpha 读取二值蒙版，拒绝灰阶、彩色及带透明度的像素
+// 入参: mask 蒙版图像, x 横坐标, y 纵坐标
+// 返回: uint8 透明度，黑色为0、白色为255, error 非二值像素错误
+func imageMaskAlpha(mask image.Image, x, y int) (uint8, error) {
+	var r, g, b, a uint32
+	if source, ok := mask.(image.RGBA64Image); ok {
+		pixel := source.RGBA64At(x, y)
+		r, g, b, a = uint32(pixel.R), uint32(pixel.G), uint32(pixel.B), uint32(pixel.A)
+	} else {
+		r, g, b, a = mask.At(x, y).RGBA()
 	}
-	a := clampColor(*alpha)
-	if a == 255 {
-		return img
+	if a != 65535 || r != g || r != b || r != 0 && r != 65535 {
+		return 0, fmt.Errorf("image mask contains non-binary pixel at (%d, %d)", x, y)
 	}
-	bounds := img.Bounds()
-	out := image.NewNRGBA(bounds)
-	source := imagePixelSource(img)
-	if src, ok := source.(*image.NRGBA); ok {
-		for y := 0; y < bounds.Dy(); y++ {
-			offset := src.PixOffset(bounds.Min.X, bounds.Min.Y+y)
-			row := out.Pix[y*out.Stride : (y+1)*out.Stride]
-			copy(row, src.Pix[offset:offset+len(row)])
-			for x := 3; x < len(row); x += 4 {
-				row[x] = uint8(int(row[x]) * a / 255)
+	return uint8(r >> 8), nil
+}
+
+// validateImageMask 校验二值蒙版尺寸及像素，不分配合成图像
+// 入参: ctx 取消上下文, mask 蒙版图像, size 原图尺寸
+// 返回: error 解码、尺寸、像素或取消错误
+func validateImageMask(ctx context.Context, mask image.Image, size image.Point) error {
+	if mask.Bounds().Size() != size || size.X <= 0 || size.Y <= 0 {
+		return fmt.Errorf("image mask dimensions differ from source")
+	}
+	mask, err := imagePixelDataContext(ctx, mask)
+	if err != nil {
+		return err
+	}
+	bounds := mask.Bounds()
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			if _, err := imageMaskAlpha(mask, x, y); err != nil {
+				return err
 			}
 		}
-		return out
 	}
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			c := imageNRGBAAt(source, x, y)
-			c.A = uint8(int(c.A) * a / 255)
-			out.SetNRGBA(x, y, c)
-		}
-	}
-	return out
+	return ctx.Err()
 }
 
 // imagePixelSource 获取图片像素源
@@ -452,6 +500,28 @@ func imagePixelData(img image.Image) (image.Image, error) {
 		return src.Image()
 	}
 	return img, nil
+}
+
+// imagePixelDataContext 获取像素并传递取消状态，兼容不接收上下文的图像实现
+// 入参: ctx 取消上下文，nil使用后台上下文, img 图片对象
+// 返回: image.Image 解码像素, error 解码或取消错误
+func imagePixelDataContext(ctx context.Context, img image.Image) (image.Image, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if src, ok := img.(interface {
+		ImageContext(context.Context) (image.Image, error)
+	}); ok {
+		return src.ImageContext(ctx)
+	}
+	pixels, err := imagePixelData(img)
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		return nil, cancelErr
+	}
+	return pixels, err
 }
 
 // imageGrayAt 获取图片灰度像素
@@ -509,6 +579,14 @@ func imageAlphaAt(img image.Image, x, y int) uint32 {
 	return alpha
 }
 
+// imageHighPrecision 判断颜色模型是否保留十六位采样
+// 入参: img 图片对象
+// 返回: bool 是否使用十六位颜色或透明度
+func imageHighPrecision(img image.Image) bool {
+	model := img.ColorModel()
+	return model == color.NRGBA64Model || model == color.RGBA64Model || model == color.Gray16Model || model == color.Alpha16Model
+}
+
 // imageNRGBA64At 读取十六位非预乘像素，原生图像避免颜色装箱
 // 入参: img 图片对象, x X坐标, y Y坐标
 // 返回: color.NRGBA64 NRGBA64像素
@@ -545,9 +623,34 @@ func imageNRGBA64At(img image.Image, x, y int) color.NRGBA64 {
 }
 
 // transparentEdgeColor 获取透明像素相邻的可见颜色
-// 入参: img 图片对象, x X坐标, y Y坐标
+// 入参: source 图片对象, x X坐标, y Y坐标
 // 返回: color.NRGBA 颜色, bool 是否存在
-func transparentEdgeColor(img *image.NRGBA, x, y int) (color.NRGBA, bool) {
+func transparentEdgeColor(source image.Image, x, y int) (color.NRGBA, bool) {
+	img, ok := source.(*image.NRGBA)
+	if !ok {
+		bounds := source.Bounds()
+		var best color.NRGBA
+		for ny := max(y-1, bounds.Min.Y); ny < min(y+2, bounds.Max.Y); ny++ {
+			for nx := max(x-1, bounds.Min.X); nx < min(x+2, bounds.Max.X); nx++ {
+				if nx == x && ny == y {
+					continue
+				}
+				pixel := imageNRGBAAt(source, nx, ny)
+				if pixel.A > best.A {
+					best = pixel
+					if best.A == 255 {
+						best.A = 1
+						return best, true
+					}
+				}
+			}
+		}
+		if best.A == 0 {
+			return color.NRGBA{}, false
+		}
+		best.A = 1
+		return best, true
+	}
 	bounds := img.Bounds()
 	best, alpha := 0, uint8(0)
 	left, right := max(x-1, bounds.Min.X), min(x+2, bounds.Max.X)
@@ -578,134 +681,88 @@ func transparentPaddingColor(c color.NRGBA) color.NRGBA {
 	return c
 }
 
-// clipStampImage 裁剪印章图像
-// 入参: img 印章图像, box 印章区域, clip 裁剪区域
-// 返回: image.Image 裁剪后的印章图像
-func clipStampImage(img image.Image, box, clip Box) image.Image {
-	bounds := img.Bounds()
-	x0 := int(math.Floor(clip.X / box.W * float64(bounds.Dx())))
-	y0 := int(math.Floor(clip.Y / box.H * float64(bounds.Dy())))
-	x1 := int(math.Ceil((clip.X + clip.W) / box.W * float64(bounds.Dx())))
-	y1 := int(math.Ceil((clip.Y + clip.H) / box.H * float64(bounds.Dy())))
-	out := image.NewNRGBA(image.Rect(0, 0, x1-x0, y1-y0))
-	draw.Draw(out, out.Bounds(), img, image.Pt(bounds.Min.X+x0, bounds.Min.Y+y0), draw.Src)
-	return out
-}
-
-// stampImageWithTransparentWhite 处理印章图片白色底色
-// 入参: img 印章图片对象
-// 返回: image.Image 处理后的印章图片对象
-func stampImageWithTransparentWhite(img image.Image) image.Image {
-	if opaque, ok := img.(interface{ Opaque() bool }); ok && !opaque.Opaque() {
-		return img
+// imageWithTransparentEdge 扫描透明边缘并共享只读像素，保留原图采样精度
+// 入参: ctx 取消上下文，nil使用后台上下文, img 图片对象
+// 返回: image.Image 补边图像, int 补边像素数, error 解码或取消错误
+func imageWithTransparentEdge(ctx context.Context, img image.Image) (image.Image, int, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	bounds := img.Bounds()
-	out := image.NewNRGBA(bounds)
-	hasAlpha := false
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			c := color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
-			if c.A < 255 {
-				hasAlpha = true
-			}
-			out.SetNRGBA(x, y, c)
-		}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
 	}
-	if hasAlpha {
-		return img
-	}
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			c := out.NRGBAAt(x, y)
-			if c.R >= 250 && c.G >= 250 && c.B >= 250 {
-				c.A = 0
-				out.SetNRGBA(x, y, c)
-			}
-		}
-	}
-	return out
-}
-
-// imageWithTransparentEdge 补齐透明图片边缘颜色
-// 入参: img 图片对象
-// 返回: image.Image 补齐后的图片对象, int 补齐像素数
-func imageWithTransparentEdge(img image.Image) (image.Image, int) {
 	if img == nil {
-		return img, 0
+		return img, 0, nil
 	}
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
 	if w == 0 || h == 0 {
-		return img, 0
+		return img, 0, nil
 	}
 	if src, ok := img.(*EncodedImage); ok && src.MIME() == "image/jpeg" {
-		return img, 0
+		return img, 0, nil
 	}
-	source := imagePixelSource(img)
-	if opaque, ok := source.(interface{ Opaque() bool }); ok && opaque.Opaque() {
-		return img, 0
+	source, err := imagePixelDataContext(ctx, img)
+	if err != nil {
+		return nil, 0, err
 	}
-	if model := source.ColorModel(); model == color.NRGBA64Model || model == color.RGBA64Model || model == color.Alpha16Model || model == color.Gray16Model {
-		return imageWithTransparentEdge64(img, source)
+	switch source.(type) {
+	case *image.Gray, *image.Gray16, *image.YCbCr, *image.CMYK:
+		return img, 0, nil
 	}
 	hasZero, hasVisible := false, false
-	src, ok := source.(*image.NRGBA)
-	if ok {
-		srcBounds := src.Bounds()
-		hasZero = src.Pix[3] == 0
+	var pixels []byte
+	var stride, step int
+	switch src := source.(type) {
+	case *image.NRGBA:
+		pixels, stride, step = src.Pix, src.Stride, 4
+	case *image.RGBA:
+		pixels, stride, step = src.Pix, src.Stride, 4
+	case *image.Alpha:
+		pixels, stride, step = src.Pix, src.Stride, 1
+	}
+	if pixels != nil {
+		hasZero = pixels[step-1] == 0
 		hasVisible = !hasZero
 	scan:
-		for y := srcBounds.Min.Y; y < srcBounds.Max.Y; y++ {
-			offset := src.PixOffset(srcBounds.Min.X, y) + 3
+		for y := 0; y < h; y++ {
+			if err := ctx.Err(); err != nil {
+				return nil, 0, err
+			}
+			offset := y*stride + step - 1
 			for x := 0; x < w; x++ {
-				if (src.Pix[offset] == 0) != hasZero {
+				if (pixels[offset] == 0) != hasZero {
 					hasZero, hasVisible = true, true
 					break scan
 				}
-				offset += 4
+				offset += step
 			}
 		}
 	} else {
-		src = image.NewNRGBA(image.Rect(0, 0, w, h))
-		for y := 0; y < h; y++ {
-			for x := 0; x < w; x++ {
-				c := imageNRGBAAt(source, bounds.Min.X+x, bounds.Min.Y+y)
-				src.SetNRGBA(x, y, c)
-				if c.A == 0 {
+		for y := bounds.Min.Y; y < bounds.Max.Y && !(hasZero && hasVisible); y++ {
+			if err := ctx.Err(); err != nil {
+				return nil, 0, err
+			}
+			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				if imageAlphaAt(source, x, y) == 0 {
 					hasZero = true
 				} else {
 					hasVisible = true
 				}
+				if hasZero && hasVisible {
+					break
+				}
 			}
 		}
 	}
-	if !hasZero || !hasVisible {
-		return img, 0
-	}
-	return &transparentEdgeImage{source: src, rect: image.Rect(0, 0, w+2, h+2)}, 1
-}
-
-// imageWithTransparentEdge64 保留十六位颜色和透明度，不经八位图像中转
-// 入参: original 原始图像, source 已解码的像素源
-// 返回: image.Image 边缘处理结果, int 补齐像素数
-func imageWithTransparentEdge64(original, source image.Image) (image.Image, int) {
-	bounds := source.Bounds()
-	hasZero, hasVisible := false, false
-	for y := bounds.Min.Y; y < bounds.Max.Y && !(hasZero && hasVisible); y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			_, _, _, a := source.At(x, y).RGBA()
-			if a == 0 {
-				hasZero = true
-			} else {
-				hasVisible = true
-			}
-			if hasZero && hasVisible {
-				break
-			}
-		}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
 	}
 	if !hasZero || !hasVisible {
-		return original, 0
+		return img, 0, nil
 	}
-	return &transparentEdgeImage64{source: source, rect: image.Rect(0, 0, bounds.Dx()+2, bounds.Dy()+2)}, 1
+	if imageHighPrecision(source) {
+		return &transparentEdgeImage64{source: source, rect: image.Rect(0, 0, w+2, h+2)}, 1, nil
+	}
+	return &transparentEdgeImage{source: source, rect: image.Rect(0, 0, w+2, h+2)}, 1, nil
 }

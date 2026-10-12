@@ -957,6 +957,36 @@ func (e *Editor) editorImage(id string) (image.Point, error) {
 	return size, nil
 }
 
+// validateImageMask 校验蒙版与原图尺寸一致且仅包含不透明黑白像素
+// 入参: id 蒙版资源标识, size 原图尺寸
+// 返回: error 资源、尺寸或像素错误
+func (e *Editor) validateImageMask(id string, size image.Point) error {
+	var data []byte
+	for _, resource := range e.resources {
+		if resource.image != nil && sameResourceID(resource.image.ID, id) {
+			data = resource.data
+			break
+		}
+	}
+	if data == nil && e.source != nil {
+		reader := e.source.reader
+		name, ok := resourceValue(reader.ResMap, id)
+		if !ok {
+			return fmt.Errorf("image mask resource %q not found", id)
+		}
+		var err error
+		data, err = reader.readFileView(reader.ResPath(name))
+		if err != nil {
+			return err
+		}
+	}
+	mask, _, err := decodeImageData(data)
+	if err != nil {
+		return err
+	}
+	return validateImageMask(context.Background(), mask, size)
+}
+
 // editorObjectXML 编码可编辑对象，包含独立命名空间声明
 // 入参: object 对象
 // 返回: []byte XML片段, error 错误信息

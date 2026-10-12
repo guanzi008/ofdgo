@@ -206,14 +206,7 @@ func (c *pdfCompositor) geometry(node pdfCompositeNode, stroke bool) (pdfComposi
 		c.cache.bounds[key] = geometry.box
 		cost := 256
 		if geometry.scene != nil {
-			for _, command := range geometry.scene.Commands {
-				part := rasterCommandCost(command)
-				if part <= 0 || part > cache.limit-cost {
-					cost = cache.limit + 1
-					break
-				}
-				cost += part
-			}
+			cost += rasterCommandsCost(geometry.scene.Commands, cache.limit-cost)
 		}
 		cache.put(sceneKey, geometry, cost)
 	}

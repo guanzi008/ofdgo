@@ -15,14 +15,20 @@
 package ofdgo
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"image"
+	"io"
 	"runtime"
 	"sync"
 )
 
 // outputImageBatchLimit 限制并行批次持有的原始编码，超限图片单独处理
 const outputImageBatchLimit = 16 << 20
+
+// outputImageWorkingSetLimit 限制并行批次的像素工作量估算，超限图片单独处理
+const outputImageWorkingSetLimit = 64 << 20
 
 // outputImageJob 保存独立图片任务，不访问编辑文档或调用进度回调
 type outputImageJob struct {
@@ -63,13 +69,13 @@ func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, e
 		return nil
 	}
 	batch := make([]outputImageJob, 0, workers)
-	size := 0
+	size, workingSet := 0, 0
 	run := func() error {
 		if err := e.runOutputImages(batch, results); err != nil {
 			return err
 		}
 		clear(batch)
-		batch, size = batch[:0], 0
+		batch, size, workingSet = batch[:0], 0, 0
 		return nil
 	}
 	for _, key := range keys {
@@ -101,20 +107,42 @@ func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, e
 		if duplicate {
 			continue
 		}
-		if len(batch) != 0 && len(data) > outputImageBatchLimit-size {
+		cost := outputImageWorkingSet(e.output.ctx, data)
+		if len(batch) != 0 && (len(data) > outputImageBatchLimit-size || cost > outputImageWorkingSetLimit-workingSet) {
 			if err := run(); err != nil {
 				return err
 			}
 		}
 		batch = append(batch, outputImageJob{key: cacheKey, data: data})
 		size += len(data)
-		if len(batch) == workers || size >= outputImageBatchLimit {
+		workingSet += cost
+		if len(batch) == workers || size >= outputImageBatchLimit || workingSet >= outputImageWorkingSetLimit {
 			if err := run(); err != nil {
 				return err
 			}
 		}
 	}
 	return run()
+}
+
+// outputImageWorkingSet 按原图尺寸估算解码和重采样缓冲，不以降采样目标代替原图
+// 按两份16位RGBA像素缓冲分批，不代表实际内存上限；格式或尺寸不明时单独处理
+// 入参: ctx 取消上下文, data 原始图像编码
+// 返回: int 编码及像素缓冲的估算字节数，上限为单批预算
+func outputImageWorkingSet(ctx context.Context, data []byte) int {
+	if len(data) >= outputImageWorkingSetLimit {
+		return outputImageWorkingSetLimit
+	}
+	input := imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx}
+	config, _, err := decodeImageConfig(input)
+	if err != nil || config.Width <= 0 || config.Height <= 0 {
+		return outputImageWorkingSetLimit
+	}
+	available := outputImageWorkingSetLimit - len(data)
+	if config.Width > available/16/config.Height {
+		return outputImageWorkingSetLimit
+	}
+	return len(data) + config.Width*config.Height*16
 }
 
 // runOutputImages 等待整批结束后记录更小候选，失败图片保留原始编码
