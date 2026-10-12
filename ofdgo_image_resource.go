@@ -16,12 +16,12 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"image/color"
 	_ "image/jpeg"
 	_ "image/png"
-	"io"
 	"sync"
 )
 
@@ -144,6 +144,11 @@ func newEncodedImage(data []byte) (*EncodedImage, error) {
 // 入参: resPath 图片资源路径
 // 返回: image.Image 图片对象, error 读取错误
 func (r *Renderer) cachedImageResource(resPath string) (image.Image, error) {
+	if r.pageContext != nil {
+		if err := r.pageContext.Err(); err != nil {
+			return nil, err
+		}
+	}
 	resPath = cleanPackagePath(r.Reader.ResPath(resPath))
 	img, ok := r.imageCache.get(resPath)
 	if !ok {
@@ -192,19 +197,18 @@ func (r *Renderer) decodeImageResource(resPath string) (image.Image, error) {
 	return img, nil
 }
 
-// readImageResource 读取图片资源并保留可直接嵌入的原始编码
+// readImageResource 按页面上下文读取图片，借用已加载的只读编码
 // 入参: resPath 图片资源路径
 // 返回: image.Image 图片对象, error 读取或解码错误
 func (r *Renderer) readImageResource(resPath string) (image.Image, error) {
-	rc, err := r.Reader.openFile(resPath)
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	data, err := r.Reader.readFileViewContext(ctx, resPath)
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		return nil, err
-	}
-	img, _, err := decodeImageData(data)
+	img, _, err := decodeImageDataContext(ctx, data)
 	return img, err
 }

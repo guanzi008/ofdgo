@@ -22,6 +22,7 @@ import (
 	"image"
 	"image/color"
 	_ "image/gif"
+	"io"
 	"math"
 
 	_ "github.com/xiaoqidun/j2kgo"
@@ -141,6 +142,21 @@ func (s *transparentEdgeImage64) RGBA64At(x, y int) color.RGBA64 {
 // 入参: data 图片数据
 // 返回: image.Image 图片对象, string 图片格式, error 错误信息
 func decodeImageData(data []byte) (image.Image, string, error) {
+	return decodeImageDataContext(context.Background(), data)
+}
+
+// decodeImageDataContext 解码图片并传递取消状态，PNG和JPEG仍保留惰性像素解码
+// 入参: ctx 取消上下文, data 只读图片编码
+// 返回: image.Image 图片对象, string 图片格式, error 解码或取消错误
+func decodeImageDataContext(ctx context.Context, data []byte) (img image.Image, format string, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	defer func() {
+		if cancelErr := ctx.Err(); cancelErr != nil {
+			img, err = nil, cancelErr
+		}
+	}()
 	if isJPEGData(data) || isPNGData(data) {
 		img, err := newEncodedImage(data)
 		if err != nil {
@@ -153,14 +169,17 @@ func decodeImageData(data []byte) (image.Image, string, error) {
 		if err != nil {
 			return nil, "tiff", err
 		}
-		img, err := decodeTIFFImage(nil, data, layout)
+		img, err := decodeTIFFImage(ctx, data, layout)
 		return img, "tiff", err
 	}
-	img, format, err := image.Decode(bytes.NewReader(data))
+	img, format, err = image.Decode(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
 	if err == nil {
 		return img, normalizeSealType(format), nil
 	}
-	if img, err := decodeBMPImage(data); err == nil {
+	if ctx.Err() != nil {
+		return nil, "", ctx.Err()
+	}
+	if img, err := decodeBMPImageContext(ctx, data); err == nil {
 		return img, "bmp", nil
 	}
 	return nil, "", err
