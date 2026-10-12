@@ -133,7 +133,7 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 	}
 	switch token := token.(type) {
 	case xml.StartElement:
-		if token.Name.Space != "" && token.Name.Space != ofdNamespace2016 {
+		if classifyOFDNamespace(token.Name.Space) == ofdXMLUnknown {
 			s.safe = false
 			return false
 		}
