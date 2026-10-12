@@ -102,16 +102,52 @@ func (p *PathObject) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
 func (p *DrawParam) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	type plain DrawParam
-	var value struct {
-		plain
-		DashPattern *string `xml:"DashPattern,attr"`
+	*p = DrawParam{
+		ID: attrValue(start, "ID"), Relative: attrValue(start, "Relative"), ResourceID: attrValue(start, "ResourceID"),
+		BaseLoc: attrValue(start, "BaseLoc"), Link: attrValue(start, "Link"), Join: attrValue(start, "Join"),
+		Cap: attrValue(start, "Cap"), Font: attrValue(start, "Font"), DashPattern: attrValue(start, "DashPattern"),
 	}
-	if err := d.DecodeElement(&value, &start); err != nil {
-		return err
-	}
-	*p = DrawParam(value.plain)
 	for _, attr := range start.Attr {
+		if attr.Name.Space != "" {
+			continue
+		}
+		var target *float64
+		switch attr.Name.Local {
+		case "LineWidth":
+			target = &p.LineWidth
+		case "MiterLimit":
+			target = &p.MiterLimit
+		case "DashOffset":
+			p.DashOffset = new(float64)
+			target = p.DashOffset
+		case "Size":
+			target = &p.Size
+		case "DashPattern":
+			p.dashPatternSet = p.DashPattern == ""
+		case "Weight":
+			if value := strings.TrimSpace(attr.Value); value != "" {
+				weight, err := strconv.Atoi(value)
+				if err != nil {
+					return err
+				}
+				p.Weight = weight
+			}
+		case "Italic":
+			if value := strings.TrimSpace(attr.Value); value != "" {
+				italic, err := strconv.ParseBool(value)
+				if err != nil {
+					return err
+				}
+				p.Italic = italic
+			}
+		}
+		if value := strings.TrimSpace(attr.Value); target != nil && value != "" {
+			number, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				return err
+			}
+			*target = number
+		}
 		if attr.Name.Local == "LineWidth" {
 			p.LineWidthSet = p.LineWidth == 0
 		}
@@ -119,32 +155,52 @@ func (p *DrawParam) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 			p.MiterLimitSet = p.MiterLimit == 0
 		}
 	}
-	if value.DashPattern != nil {
-		p.DashPattern = *value.DashPattern
-		p.dashPatternSet = p.DashPattern == ""
-	}
-	return nil
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "FillColor":
+			return d.DecodeElement(&p.FillColor, &node)
+		case "StrokeColor":
+			return d.DecodeElement(&p.StrokeColor, &node)
+		}
+		return d.Skip()
+	})
 }
 
 // UnmarshalXML 解析填充颜色并区分未支持的复杂颜色
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
 func (c *FillColor) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	type plain FillColor
-	var value struct {
-		plain
-		LegacyMesh *LaGouraudShd `xml:"LaGourandShd"`
-		Other      *struct{}     `xml:",any"`
-	}
-	if err := d.DecodeElement(&value, &start); err != nil {
+	var base ShdColor
+	if err := base.decodeAttributes(start); err != nil {
 		return err
 	}
-	*c = FillColor(value.plain)
+	*c = FillColor{Value: base.Value, Index: base.Index, ColorSpace: base.ColorSpace, Alpha: base.Alpha}
+	var schemaMesh *LaGouraudShd
+	err := decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		var target any
+		switch node.Name.Local {
+		case "Pattern":
+			target = &c.Pattern
+		case "AxialShd":
+			target = &c.AxialShd
+		case "RadialShd":
+			target = &c.RadialShd
+		case "GouraudShd":
+			target = &c.GouraudShd
+		case "LaGouraudShd":
+			target = &c.LaGouraudShd
+		case "LaGourandShd":
+			target = &schemaMesh
+		default:
+			c.unsupported = true
+			return d.Skip()
+		}
+		return d.DecodeElement(target, &node)
+	})
 	if c.LaGouraudShd == nil {
-		c.LaGouraudShd = value.LegacyMesh
+		c.LaGouraudShd = schemaMesh
 	}
-	c.unsupported = value.Other != nil
-	return nil
+	return err
 }
 
 // UnmarshalXML 解析勾边颜色并区分未支持的复杂颜色
@@ -270,9 +326,124 @@ func (p PatternContent) empty() bool {
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
 func (s *ShdSegment) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	type segment ShdSegment
 	*s = ShdSegment{positionMissing: attrValue(start, "Position") == ""}
-	return d.DecodeElement((*segment)(s), &start)
+	if value := strings.TrimSpace(attrValue(start, "Position")); value != "" {
+		position, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return err
+		}
+		s.Position = position
+	}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local == "Color" {
+			return d.DecodeElement(&s.Color, &node)
+		}
+		return d.Skip()
+	})
+}
+
+// UnmarshalXML 解析图案参数及所属命名空间中的单元内容
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (p *Pattern) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*p = Pattern{ReflectMethod: attrValue(start, "ReflectMethod"), RelativeTo: attrValue(start, "RelativeTo"), CTM: attrValue(start, "CTM")}
+	for _, field := range []struct {
+		name   string
+		target *float64
+	}{
+		{"Width", &p.Width}, {"Height", &p.Height}, {"XStep", &p.XStep}, {"YStep", &p.YStep},
+	} {
+		if value := strings.TrimSpace(attrValue(start, field.name)); value != "" {
+			number, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				return err
+			}
+			*field.target = number
+		}
+	}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local == "CellContent" {
+			return d.DecodeElement(&p.CellContent, &node)
+		}
+		return d.Skip()
+	})
+}
+
+// UnmarshalXML 解析轴向渐变参数及有序颜色分段
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (s *AxialShd) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*s = AxialShd{MapType: attrValue(start, "MapType"), Extend: attrValue(start, "Extend"), StartPoint: attrValue(start, "StartPoint"), EndPoint: attrValue(start, "EndPoint")}
+	if value := strings.TrimSpace(attrValue(start, "MapUnit")); value != "" {
+		number, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return err
+		}
+		s.MapUnit = number
+	}
+	return decodeOFDCollection(d, start, "Segment", &s.Segment)
+}
+
+// UnmarshalXML 解析径向渐变参数及有序颜色分段
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (s *RadialShd) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*s = RadialShd{MapType: attrValue(start, "MapType"), Extend: attrValue(start, "Extend"), StartPoint: attrValue(start, "StartPoint"), EndPoint: attrValue(start, "EndPoint")}
+	for _, field := range []struct {
+		name   string
+		target *float64
+	}{
+		{"MapUnit", &s.MapUnit}, {"Eccentricity", &s.Eccentricity}, {"Angle", &s.Angle}, {"StartRadius", &s.StartRadius}, {"EndRadius", &s.EndRadius},
+	} {
+		if value := strings.TrimSpace(attrValue(start, field.name)); value != "" {
+			number, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				return err
+			}
+			*field.target = number
+		}
+	}
+	return decodeOFDCollection(d, start, "Segment", &s.Segment)
+}
+
+// decodeAttributes 解析基本颜色属性，忽略带命名空间的扩展属性
+// 入参: start 颜色起始节点
+// 返回: error 属性格式错误
+func (c *ShdColor) decodeAttributes(start xml.StartElement) error {
+	*c = ShdColor{Value: attrValue(start, "Value"), ColorSpace: attrValue(start, "ColorSpace")}
+	for _, attr := range start.Attr {
+		if attr.Name.Space != "" {
+			continue
+		}
+		var target **int
+		switch attr.Name.Local {
+		case "Index":
+			target = &c.Index
+		case "Alpha":
+			target = &c.Alpha
+		default:
+			continue
+		}
+		*target = new(int)
+		if value := strings.TrimSpace(attr.Value); value != "" {
+			number, err := strconv.Atoi(value)
+			if err != nil {
+				return err
+			}
+			**target = number
+		}
+	}
+	return nil
+}
+
+// UnmarshalXML 解析渐变使用的基本颜色，不读取扩展子节点
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (c *ShdColor) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if err := c.decodeAttributes(start); err != nil {
+		return err
+	}
+	return d.Skip()
 }
 
 // decodeGraphicObject 解析图形对象

@@ -15,9 +15,12 @@
 package ofdgo
 
 import (
+	"encoding/xml"
 	"fmt"
 	"image/color"
 	"math"
+	"strconv"
+	"strings"
 )
 
 // GouraudShd 高洛德渐变，按EdgeFlag连接三角形
@@ -56,6 +59,95 @@ type MeshVertex struct {
 type MeshShading struct {
 	Triangles  [][3]MeshVertex
 	Background color.RGBA
+}
+
+// UnmarshalXML 解析高洛德渐变的控制点和背景色
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (s *GouraudShd) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*s = GouraudShd{}
+	if value := strings.TrimSpace(attrValue(start, "Extend")); value != "" {
+		number, err := strconv.Atoi(value)
+		if err != nil {
+			return err
+		}
+		s.Extend = number
+	}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "Point":
+			return d.DecodeElement(&s.Point, &node)
+		case "BackColor":
+			return d.DecodeElement(&s.BackColor, &node)
+		default:
+			return d.Skip()
+		}
+	})
+}
+
+// UnmarshalXML 解析格构高洛德渐变的每行控制点数、控制点和背景色
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (s *LaGouraudShd) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*s = LaGouraudShd{}
+	for _, field := range []struct {
+		name   string
+		target *int
+	}{
+		{"Extend", &s.Extend}, {"VerticesPerRow", &s.VerticesPerRow},
+	} {
+		if value := strings.TrimSpace(attrValue(start, field.name)); value != "" {
+			number, err := strconv.Atoi(value)
+			if err != nil {
+				return err
+			}
+			*field.target = number
+		}
+	}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "Point":
+			return d.DecodeElement(&s.Point, &node)
+		case "BackColor":
+			return d.DecodeElement(&s.BackColor, &node)
+		default:
+			return d.Skip()
+		}
+	})
+}
+
+// UnmarshalXML 解析网格控制点坐标、连接标志和基本颜色
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (p *ShdPoint) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*p = ShdPoint{}
+	for _, field := range []struct {
+		name   string
+		target *float64
+	}{
+		{"X", &p.X}, {"Y", &p.Y},
+	} {
+		if value := strings.TrimSpace(attrValue(start, field.name)); value != "" {
+			number, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				return err
+			}
+			*field.target = number
+		}
+	}
+	if value := strings.TrimSpace(attrValue(start, "EdgeFlag")); value != "" {
+		number, err := strconv.Atoi(value)
+		if err != nil {
+			return err
+		}
+		p.EdgeFlag = number
+	}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local == "Color" {
+			return d.DecodeElement(&p.Color, &node)
+		}
+		return d.Skip()
+	})
 }
 
 // At 按三角形面积权重插值原颜色分量，返回预乘RGBA
