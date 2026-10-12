@@ -58,12 +58,12 @@ github.com/tdewolff/parse/v2 v2.8.16 h1:bLk5svUOQRkW/Y2SJ+DeENSIkZBcTIkq+Atyv5D8
 github.com/tdewolff/parse/v2 v2.8.16/go.mod h1:XdsoSFThlVIRIajAuqz1evNY7bagZS8LBOPA3aVopwQ=
 github.com/tdewolff/test v1.0.12 h1:7F21DqIajswxuche0geHdrUZRCWE4oko4b7bcmkkrxk=
 github.com/tdewolff/test v1.0.12/go.mod h1:XPuWBzvdUzhCuxWO1ojpXsyzsA5bFoS3tO/Q3kFuTG8=
-github.com/xiaoqidun/j2kgo v0.0.0-20261012032935-927f385982f8 h1:OIYzaxtwTC1i0cSlNRuOxWvuWOu2VT2YWxRur+yFq/E=
-github.com/xiaoqidun/j2kgo v0.0.0-20261012032935-927f385982f8/go.mod h1:DCwAfuDzCDYqUiAlZ7BDwigTjaXw7o9L1FtEma/D1aA=
+github.com/xiaoqidun/j2kgo v1.0.0 h1:n7F3s0H8/4x8ET0d65FGScRgTfiqbYuiiiJF/5HFI1I=
+github.com/xiaoqidun/j2kgo v1.0.0/go.mod h1:DCwAfuDzCDYqUiAlZ7BDwigTjaXw7o9L1FtEma/D1aA=
 github.com/xiaoqidun/jbig2 v1.1.5 h1:QcqjDBe/Zp+JlxYtmhsiYG+Ft36jjPB6+INPlmaI/ls=
 github.com/xiaoqidun/jbig2 v1.1.5/go.mod h1:9jromqVwMqlptUDEt6Yip8vqYA5I1YjhG7FgMl/Z2dA=
-github.com/xiaoqidun/pdfgo v0.0.0-20261012033554-2b72d3053550 h1:4b6EuE8fS08RRc+fzSIqGkU6ZtRRimR8Ci61N9JdAcw=
-github.com/xiaoqidun/pdfgo v0.0.0-20261012033554-2b72d3053550/go.mod h1:U8o02Ms+IIzeqWLYTY6Q6TDLIyel2fnOTWZO3GtskOo=
+github.com/xiaoqidun/pdfgo v0.0.0-20261012061033-90df32d37c4d h1:asgIx1MO7h1zcN4weRAxrBv6ZHsz/85JRImvIW9qbeM=
+github.com/xiaoqidun/pdfgo v0.0.0-20261012061033-90df32d37c4d/go.mod h1:UWsVkKkd37a3wEa/tGLUOSwccKGArwmrvEAYlmnEz0U=
 github.com/xyproto/randomstring v1.0.5 h1:YtlWPoRdgMu3NZtP45drfy1GKoojuR7hmRcnhZqKjWU=
 github.com/xyproto/randomstring v1.0.5/go.mod h1:rgmS5DeNXLivK7YprL0pY+lTuhNQW3iGxZ18UQApw/E=
 github.com/yuin/goldmark v1.8.5 h1:r6N5afV5qj/5S4UTch8agZHJ8UxNCMwX7WjkkJam2NA=
