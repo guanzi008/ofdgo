@@ -14,7 +14,10 @@
 
 package ofdgo
 
-import "unicode/utf8"
+import (
+	"encoding/xml"
+	"unicode/utf8"
+)
 
 // 旧版与2016版OFD命名空间
 const (
@@ -32,6 +35,62 @@ const (
 
 // ofdXMLNamespace 标识XML命名空间，不代表文档版本或功能支持范围
 type ofdXMLNamespace uint8
+
+// ofdXMLChild 判断子节点是否属于可识别的OFD命名空间或父节点所在的未知命名空间
+// 入参: parent 父节点名称, child 子节点名称
+// 返回: bool 是否属于同一OFD结构
+func ofdXMLChild(parent, child xml.Name) bool {
+	return classifyOFDNamespace(child.Space) != ofdXMLUnknown || child.Space == parent.Space
+}
+
+// ofdXMLStart 保留OFD节点的无命名空间属性，不修改解码器返回的属性切片
+// 入参: start 起始节点
+// 返回: xml.StartElement 供标准结构解码使用的节点
+func ofdXMLStart(start xml.StartElement) xml.StartElement {
+	for i, attr := range start.Attr {
+		if attr.Name.Space == "" {
+			continue
+		}
+		attrs := make([]xml.Attr, i, len(start.Attr)-1)
+		copy(attrs, start.Attr[:i])
+		for _, attr := range start.Attr[i+1:] {
+			if attr.Name.Space == "" {
+				attrs = append(attrs, attr)
+			}
+		}
+		start.Attr = attrs
+		break
+	}
+	return start
+}
+
+// decodeOFDChildren 按命名空间解析直接子节点，跳过外部扩展而不提升其内部节点
+// 入参: d XML解码器, start 容器起始节点, decode 子节点解码函数
+// 返回: error 解析错误
+func decodeOFDChildren(d *xml.Decoder, start xml.StartElement, decode func(*xml.Decoder, xml.StartElement) error) error {
+	for {
+		token, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch node := token.(type) {
+		case xml.StartElement:
+			if !ofdXMLChild(start.Name, node.Name) {
+				if err := d.Skip(); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := decode(d, ofdXMLStart(node)); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			if node.Name == start.Name {
+				return nil
+			}
+		}
+	}
+}
 
 // classifyOFDNamespace 识别OFD命名空间，未声明与未知版本分别处理
 // 入参: namespace XML命名空间

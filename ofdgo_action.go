@@ -139,6 +139,23 @@ type actionSource struct {
 	Graphic bool
 }
 
+// decodeOFDActions 读取标准动作列表，不将外部同名节点作为交互动作
+// 入参: d XML解码器, start 列表起始节点, actions 动作接收列表
+// 返回: error 解析错误
+func decodeOFDActions(d *xml.Decoder, start xml.StartElement, actions *[]Action) error {
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local != "Action" {
+			return d.Skip()
+		}
+		var action Action
+		if err := d.DecodeElement(&action, &node); err != nil {
+			return err
+		}
+		*actions = append(*actions, action)
+		return nil
+	})
+}
+
 // UnmarshalXML 解析跳转目标
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息

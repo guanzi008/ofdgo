@@ -14,7 +14,10 @@
 
 package ofdgo
 
-import "encoding/xml"
+import (
+	"encoding/xml"
+	"fmt"
+)
 
 // PageContent 页面内容
 type PageContent struct {
@@ -269,4 +272,57 @@ type ImageBorder struct {
 	DashOffset            float64      `xml:"DashOffset,attr"`
 	DashPattern           string       `xml:"DashPattern,attr"`
 	BorderColor           *StrokeColor `xml:"BorderColor"`
+}
+
+// UnmarshalXML 读取页面直接子节点，扩展内容不作为页面区域、资源或图层使用
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (page *PageContent) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if start.Name.Local != "Page" {
+		return fmt.Errorf("expected Page root, got %s", start.Name.Local)
+	}
+	*page = PageContent{XMLName: start.Name}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "Area":
+			return d.DecodeElement(&page.Area, &node)
+		case "Template":
+			var template Template
+			if err := d.DecodeElement(&template, &node); err != nil {
+				return err
+			}
+			page.Template = append(page.Template, template)
+		case "PageRes":
+			var location string
+			if err := d.DecodeElement(&location, &node); err != nil {
+				return err
+			}
+			page.PageRes = append(page.PageRes, location)
+		case "Content":
+			return d.DecodeElement(&page.Content, &node)
+		case "Actions":
+			return decodeOFDActions(d, node, &page.Actions)
+		default:
+			return d.Skip()
+		}
+		return nil
+	})
+}
+
+// UnmarshalXML 读取页面图层，不将外部命名空间中的Layer作为图层
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (content *Content) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*content = Content{}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local != "Layer" {
+			return d.Skip()
+		}
+		var layer Layer
+		if err := d.DecodeElement(&layer, &node); err != nil {
+			return err
+		}
+		content.Layer = append(content.Layer, layer)
+		return nil
+	})
 }

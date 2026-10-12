@@ -162,7 +162,7 @@ func (l *Layer) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	l.ID = attrValue(start, "ID")
 	l.Type = attrValue(start, "Type")
 	l.DrawParam = attrValue(start, "DrawParam")
-	return decodeObjectContainer(d, start, l.decodeObject)
+	return decodeOFDChildren(d, start, l.decodeObject)
 }
 
 // UnmarshalXML 解析复合图元并保留对象顺序
@@ -199,7 +199,7 @@ func (c *CompositeGraphicUnit) UnmarshalXML(d *xml.Decoder, start xml.StartEleme
 			c.Visible = &visible
 		}
 	}
-	return decodeObjectContainer(d, start, c.decodeObject)
+	return decodeOFDChildren(d, start, c.decodeObject)
 }
 
 // UnmarshalXML 解析注释外观并保留对象顺序
@@ -208,7 +208,7 @@ func (c *CompositeGraphicUnit) UnmarshalXML(d *xml.Decoder, start xml.StartEleme
 func (a *Appearance) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	*a = Appearance{}
 	a.Boundary = attrValue(start, "Boundary")
-	return decodeObjectContainer(d, start, a.decodeObject)
+	return decodeOFDChildren(d, start, a.decodeObject)
 }
 
 // UnmarshalXML 解析图案单元内容并保留对象顺序
@@ -216,7 +216,7 @@ func (a *Appearance) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 // 返回: error 错误信息
 func (p *PatternContent) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	*p = PatternContent{Thumbnail: attrValue(start, "Thumbnail")}
-	return decodeObjectContainer(d, start, p.decodeObject)
+	return decodeOFDChildren(d, start, p.decodeObject)
 }
 
 // objects 按绘制顺序访问底纹单元，Objects优先于分类数组
@@ -314,28 +314,6 @@ func decodeGraphicObject(d *xml.Decoder, start xml.StartElement, target graphicO
 	return true, nil
 }
 
-// decodeObjectContainer 解析图形对象容器
-// 入参: d XML解码器, start 起始节点, decode 对象解码函数
-// 返回: error 错误信息
-func decodeObjectContainer(d *xml.Decoder, start xml.StartElement, decode func(*xml.Decoder, xml.StartElement) error) error {
-	for {
-		tok, err := d.Token()
-		if err != nil {
-			return err
-		}
-		switch node := tok.(type) {
-		case xml.StartElement:
-			if err := decode(d, node); err != nil {
-				return err
-			}
-		case xml.EndElement:
-			if node.Name.Local == start.Name.Local {
-				return nil
-			}
-		}
-	}
-}
-
 // decodeObject 解析图层子对象
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
@@ -351,7 +329,7 @@ func (l *Layer) decodeObject(d *xml.Decoder, start xml.StartElement) error {
 		return err
 	}
 	if start.Name.Local == "PageBlock" {
-		return decodeObjectContainer(d, start, l.decodeObject)
+		return decodeOFDChildren(d, start, l.decodeObject)
 	}
 	return d.Skip()
 }
@@ -388,15 +366,9 @@ func (c *CompositeGraphicUnit) decodeObject(d *xml.Decoder, start xml.StartEleme
 		}
 		c.Clips = &clips
 	case "Actions":
-		var actions struct {
-			Action []Action `xml:"Action"`
-		}
-		if err := d.DecodeElement(&actions, &start); err != nil {
-			return err
-		}
-		c.Actions = actions.Action
+		return decodeOFDActions(d, start, &c.Actions)
 	case "Content", "PageBlock":
-		return decodeObjectContainer(d, start, c.decodeObject)
+		return decodeOFDChildren(d, start, c.decodeObject)
 	default:
 		return d.Skip()
 	}
@@ -418,7 +390,7 @@ func (a *Appearance) decodeObject(d *xml.Decoder, start xml.StartElement) error 
 		return err
 	}
 	if start.Name.Local == "PageBlock" {
-		return decodeObjectContainer(d, start, a.decodeObject)
+		return decodeOFDChildren(d, start, a.decodeObject)
 	}
 	return d.Skip()
 }
@@ -438,17 +410,17 @@ func (p *PatternContent) decodeObject(d *xml.Decoder, start xml.StartElement) er
 		return err
 	}
 	if start.Name.Local == "PageBlock" {
-		return decodeObjectContainer(d, start, p.decodeObject)
+		return decodeOFDChildren(d, start, p.decodeObject)
 	}
 	return d.Skip()
 }
 
-// attrValue 获取XML属性值
+// attrValue 获取无命名空间的XML属性值
 // 入参: start 起始节点, name 属性名
 // 返回: string 属性值
 func attrValue(start xml.StartElement, name string) string {
 	for _, attr := range start.Attr {
-		if attr.Name.Local == name {
+		if attr.Name.Space == "" && attr.Name.Local == name {
 			return attr.Value
 		}
 	}

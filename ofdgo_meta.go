@@ -14,7 +14,10 @@
 
 package ofdgo
 
-import "encoding/xml"
+import (
+	"encoding/xml"
+	"fmt"
+)
 
 // ofdCreator 标识本库生成的文档
 const ofdCreator = "xiaoqidun/ofdgo"
@@ -35,23 +38,6 @@ type DocBody struct {
 	DocRoot    string  `xml:"DocRoot"`
 	Signatures string  `xml:"Signatures"`
 	versioned  bool
-}
-
-// UnmarshalXML 读取文档入口并记录版本列表是否存在，版本描述在选择时读取
-// 入参: decoder XML解码器, start 起始节点
-// 返回: error 解析错误
-func (body *DocBody) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
-	type docBody DocBody
-	var value struct {
-		docBody
-		Versions *struct{} `xml:"Versions"`
-	}
-	if err := decoder.DecodeElement(&value, &start); err != nil {
-		return err
-	}
-	*body = DocBody(value.docBody)
-	body.versioned = value.Versions != nil
-	return nil
 }
 
 // DocInfo 文档元数据
@@ -78,4 +64,45 @@ type CustomData struct {
 	Name        string `xml:"Name,attr"`
 	Value       string `xml:",chardata"`
 	sourceIndex int
+}
+
+// UnmarshalXML 读取主入口，区分标准文档条目与扩展中的同名节点
+// 入参: decoder XML解码器, start 起始节点
+// 返回: error 解析错误
+func (ofd *OFD) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
+	if start.Name.Local != "OFD" {
+		return fmt.Errorf("expected OFD root, got %s", start.Name.Local)
+	}
+	*ofd = OFD{XMLName: start.Name, Version: attrValue(start, "Version"), DocType: attrValue(start, "DocType")}
+	return decodeOFDChildren(decoder, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local != "DocBody" {
+			return d.Skip()
+		}
+		var body DocBody
+		if err := d.DecodeElement(&body, &node); err != nil {
+			return err
+		}
+		ofd.DocBody = append(ofd.DocBody, body)
+		return nil
+	})
+}
+
+// UnmarshalXML 读取文档入口并记录版本列表是否存在，版本描述在选择时读取
+// 入参: decoder XML解码器, start 起始节点
+// 返回: error 解析错误
+func (body *DocBody) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
+	*body = DocBody{}
+	return decodeOFDChildren(decoder, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "DocInfo":
+			return d.DecodeElement(&body.DocInfo, &node)
+		case "DocRoot":
+			return d.DecodeElement(&body.DocRoot, &node)
+		case "Signatures":
+			return d.DecodeElement(&body.Signatures, &node)
+		case "Versions":
+			body.versioned = true
+		}
+		return d.Skip()
+	})
 }

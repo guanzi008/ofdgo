@@ -220,11 +220,11 @@ func (p *fontUsagePage) UnmarshalXML(d *xml.Decoder, start xml.StartElement) err
 	if start.Name.Local != "Page" {
 		return fmt.Errorf("expected element type <Page> but have <%s>", start.Name.Local)
 	}
-	return decodeObjectContainer(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
 		if node.Name.Local != "Content" {
 			return d.Skip()
 		}
-		return decodeObjectContainer(d, node, func(d *xml.Decoder, layer xml.StartElement) error {
+		return decodeOFDChildren(d, node, func(d *xml.Decoder, layer xml.StartElement) error {
 			if layer.Name.Local != "Layer" {
 				return d.Skip()
 			}
@@ -434,7 +434,7 @@ func (r *Renderer) readPageFontUsage(page Page) (map[string]int, error) {
 // 入参: d XML解码器, start 容器起始节点, defaults 默认绘制参数
 // 返回: error 错误信息
 func (p *fontUsagePage) decodeObjects(d *xml.Decoder, start xml.StartElement, defaults *DrawParam) error {
-	return decodeObjectContainer(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
 		switch node.Name.Local {
 		case "PageBlock":
 			return p.decodeObjects(d, node, defaults)

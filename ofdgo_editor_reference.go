@@ -33,6 +33,28 @@ type editorGeneratedReferences struct {
 	staged *editorStagedPage
 }
 
+// editorVectorUsage 保存自产矢量资源的引用快照，内容和路径变化时失效
+type editorVectorUsage struct {
+	name   string
+	digest [32]byte
+	refs   *editorResourceRefs
+}
+
+// editorReferenceScan 按XML事件收集资源和字体用字，未知内容保持完整扫描
+type editorReferenceScan struct {
+	refs     *editorResourceRefs
+	objects  map[string]bool
+	name     string
+	base     string
+	stack    []string
+	fonts    []*editorFontUsage
+	text     strings.Builder
+	resource bool
+	capture  bool
+	safe     bool
+	seen     bool
+}
+
 // matches 判断条目仍为本次编码结果，空条目与暂存占位不混用
 // 入参: data 当前条目数据
 // 返回: bool 是否可以复用本次引用
@@ -48,13 +70,6 @@ func (r editorGeneratedReferences) matches(data []byte) bool {
 // 返回: bool 是否为引用完整且不含文件路径的暂存页面
 func (r editorGeneratedReferences) stagedLeaf(data []byte) bool {
 	return r.staged != nil && data == nil && r.refs != nil && len(r.refs.files) == 0
-}
-
-// editorVectorUsage 保存自产矢量资源的引用快照，内容和路径变化时失效
-type editorVectorUsage struct {
-	name   string
-	digest [32]byte
-	refs   *editorResourceRefs
 }
 
 // matches 核对资源路径和完整内容摘要，不以切片地址判断内容
@@ -87,21 +102,6 @@ func (e *Editor) generatedVectorReferences(parts map[string][]byte, generated ma
 		generated[resource.name] = editorGeneratedReferences{data: data, refs: resource.usage.refs}
 	}
 	return generated
-}
-
-// editorReferenceScan 按XML事件收集资源和字体用字，未知内容保持完整扫描
-type editorReferenceScan struct {
-	refs     *editorResourceRefs
-	objects  map[string]bool
-	name     string
-	base     string
-	stack    []string
-	fonts    []*editorFontUsage
-	text     strings.Builder
-	resource bool
-	capture  bool
-	safe     bool
-	seen     bool
 }
 
 // vectorUsage 保留完整且限额内的自产矢量引用，超限时保存流程重新扫描

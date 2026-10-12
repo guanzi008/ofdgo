@@ -24,6 +24,14 @@ import (
 	"strings"
 )
 
+// pageReferenceNode 记录跳转引用扫描中的父节点及删除范围
+type pageReferenceNode struct {
+	name              string
+	start, patch      int
+	children, removed int
+	standard, drop    bool
+}
+
 // pruneDocumentReferences 在输出快照中清理已删除页面和附件的引用，不修改历史快照或其他文档
 // 沿当前文档、页面、模板、资源、注释和签名索引检查，不进入附件、私有扩展和签名原始凭据
 // 版本包保留原签名及其页面引用，避免改写其他版本共用的签名数据
@@ -183,14 +191,6 @@ func (e *Editor) pruneDocumentReferences(parts map[string][]byte, generated map[
 		}
 	}
 	return ctx.Err()
-}
-
-// pageReferenceNode 记录跳转引用扫描中的父节点及删除范围
-type pageReferenceNode struct {
-	name              string
-	start, patch      int
-	children, removed int
-	standard, drop    bool
 }
 
 // pruneCreatedPageReferences 清理创作文档中被明确删除页面的直接跳转，不检查其他目标是否可达

@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"encoding/xml"
+	"fmt"
 	"path"
 	"strings"
 )
@@ -202,6 +203,112 @@ type print struct {
 	Copies    *int  `xml:"Copies,attr"`
 }
 
+// UnmarshalXML 按命名空间读取文档结构，扩展数据仍由原解码器保留原文
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (doc *Document) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if start.Name.Local != "Document" {
+		return fmt.Errorf("expected Document root, got %s", start.Name.Local)
+	}
+	*doc = Document{XMLName: start.Name, Permissions: defaultPermissions()}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		var target any
+		switch node.Name.Local {
+		case "CommonData":
+			target = &doc.CommonData
+		case "Pages":
+			target = &doc.Pages
+		case "Outlines":
+			target = &doc.Outlines
+		case "Permissions":
+			target = &doc.Permissions
+		case "Actions":
+			return decodeOFDActions(d, node, &doc.Actions)
+		case "Bookmarks":
+			target = &doc.Bookmarks
+		case "Annotations":
+			target = &doc.Annotations
+		case "Attachments":
+			target = &doc.Attachments
+		case "CustomTags":
+			target = &doc.CustomTags
+		case "Extensions":
+			target = &doc.Extensions
+		default:
+			return d.Skip()
+		}
+		return d.DecodeElement(target, &node)
+	})
+}
+
+// UnmarshalXML 读取文档公共区域、模板与资源引用，忽略外部同名节点
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (common *CommonData) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*common = CommonData{}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		var target any
+		switch node.Name.Local {
+		case "MaxUnitID":
+			target = &common.MaxUnitID
+		case "PageArea":
+			target = &common.PageArea
+		case "PublicRes":
+			target = &common.PublicRes
+		case "DocumentRes":
+			target = &common.DocumentRes
+		case "TemplatePage":
+			target = &common.TemplatePage
+		case "DefaultCS":
+			target = &common.DefaultCS
+		default:
+			return d.Skip()
+		}
+		return d.DecodeElement(target, &node)
+	})
+}
+
+// UnmarshalXML 读取页面区域，防止外部同名字段覆盖标准区域
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (area *PageArea) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*area = PageArea{}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		var target *string
+		switch node.Name.Local {
+		case "PhysicalBox":
+			target = &area.PhysicalBox
+		case "ApplicationBox":
+			target = &area.ApplicationBox
+		case "ContentBox":
+			target = &area.ContentBox
+		case "BleedBox":
+			target = &area.BleedBox
+		default:
+			return d.Skip()
+		}
+		return d.DecodeElement(target, &node)
+	})
+}
+
+// UnmarshalXML 读取标准页面引用，忽略外部扩展中的同名条目
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (pages *Pages) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*pages = Pages{}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local != "Page" {
+			return d.Skip()
+		}
+		var page Page
+		if err := d.DecodeElement(&page, &node); err != nil {
+			return err
+		}
+		pages.Page = append(pages.Page, page)
+		return nil
+	})
+}
+
 // PageIndex 按标识查找页面，优先匹配原文和标准十进制写法，等价编号有歧义时不匹配
 // 入参: id 页面标识
 // 返回: int 从0开始的页面索引，未找到时为-1
@@ -247,19 +354,6 @@ func (doc *Document) OutlineInfos() []OutlineInfo {
 		pages[page.ID] = index + 1
 	}
 	return outlineInfos(doc.Outlines.OutlineElem, bookmarks, pages)
-}
-
-// UnmarshalXML 解析文档并应用权限默认值
-// 入参: d XML解码器, start 起始节点
-// 返回: error 错误信息
-func (doc *Document) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	type document Document
-	value := document{Permissions: defaultPermissions()}
-	if err := d.DecodeElement(&value, &start); err != nil {
-		return err
-	}
-	*doc = Document(value)
-	return nil
 }
 
 // FileName 获取另存文件名，优先使用带扩展名的显示名称，剔除目录及文件名非法字符

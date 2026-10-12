@@ -25,6 +25,9 @@ import (
 	"io"
 )
 
+// errTIFFRandomAccess 表示目录链需要回读，仅流式输入需重新打开资源
+var errTIFFRandomAccess = errors.New("TIFF directory requires random access")
+
 // tiffImageLayout 保存单页TIFF的尺寸、方向、采样及压缩参数
 type tiffImageLayout struct {
 	width, height int
@@ -38,9 +41,6 @@ type tiffImageLayout struct {
 	compression   uint32
 	t4, t6        uint32
 }
-
-// errTIFFRandomAccess 表示目录链需要回读，仅流式输入需重新打开资源
-var errTIFFRandomAccess = errors.New("TIFF directory requires random access")
 
 // tiffDirectoryInput 只替换解码视图中的首目录偏移，不复制或改写原始资源
 type tiffDirectoryInput struct {

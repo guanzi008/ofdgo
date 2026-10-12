@@ -62,6 +62,27 @@ type Reader struct {
 	encryption                *encryptionState
 }
 
+// documentPageList 仅读取文档中的页面索引，统计页数时不构建其他结构
+type documentPageList struct {
+	Pages Pages
+}
+
+// UnmarshalXML 按文档命名空间读取页面列表，跳过其他文档结构和扩展
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (list *documentPageList) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if start.Name.Local != "Document" {
+		return fmt.Errorf("expected Document root, got %s", start.Name.Local)
+	}
+	*list = documentPageList{}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local == "Pages" {
+			return d.DecodeElement(&list.Pages, &node)
+		}
+		return d.Skip()
+	})
+}
+
 // Close 关闭阅读器持有的文件，重复调用不再关闭底层文件
 // 返回: error 错误信息
 func (r *Reader) Close() error {
@@ -117,10 +138,7 @@ func (r *Reader) DocumentPageCountContext(ctx context.Context, index int) (int, 
 	if err != nil {
 		return 0, err
 	}
-	var doc struct {
-		XMLName xml.Name `xml:"Document"`
-		Pages   Pages    `xml:"Pages"`
-	}
+	var doc documentPageList
 	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
 	if err := decoder.Decode(&doc); err != nil {
 		return 0, fmt.Errorf("failed to unmarshal document.xml: %w", err)
@@ -1003,6 +1021,7 @@ func (r *Reader) readPageHeaderContext(ctx context.Context, page Page) (PageCont
 	defer f.Close()
 	var content PageContent
 	d := xml.NewDecoder(imageInput{ReadCloser: f, context: ctx})
+	var root xml.Name
 scan:
 	for {
 		if err := ctx.Err(); err != nil {
@@ -1016,9 +1035,21 @@ scan:
 			return PageContent{}, err
 		}
 		if start, ok := token.(xml.StartElement); ok {
-			switch start.Name.Local {
-			case "Page":
+			if root.Local == "" {
+				if start.Name.Local != "Page" {
+					return PageContent{}, fmt.Errorf("expected Page root, got %s", start.Name.Local)
+				}
+				root = start.Name
 				continue
+			}
+			if !ofdXMLChild(root, start.Name) {
+				if err := d.Skip(); err != nil {
+					return PageContent{}, err
+				}
+				continue
+			}
+			start = ofdXMLStart(start)
+			switch start.Name.Local {
 			case "Template":
 				var template Template
 				if err := d.DecodeElement(&template, &start); err != nil {

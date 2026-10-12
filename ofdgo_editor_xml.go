@@ -273,11 +273,14 @@ func editorXMLTextValue(data []byte, node *editorXML, before, after string) ([]b
 	return append(entry, data[patch.end:node.end]...), nil
 }
 
-// editorXMLObjects 递归登记图层和页块内的对象位置，保留原容器层级
+// editorXMLObjects 递归登记图层和页块内的OFD对象位置，不进入外部扩展
 // 入参: container 图层或页块, nodes 标识与节点映射
 // 返回: error 错误信息
 func editorXMLObjects(container *editorXML, nodes map[string]*editorXML) error {
 	for _, node := range container.children {
+		if !ofdXMLChild(container.name, node.name) {
+			continue
+		}
 		if id := node.attr("ID"); id != "" {
 			if nodes[id] != nil {
 				return fmt.Errorf("duplicate object ID %q", id)

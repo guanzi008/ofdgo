@@ -23,6 +23,13 @@ import (
 	"math/bits"
 )
 
+// bmpColorMask 保存一个BMP颜色分量的位域位置和取值范围
+type bmpColorMask struct {
+	mask  uint32
+	shift uint
+	max   uint32
+}
+
 // decodeImageConfig 读取图片尺寸，BMP和TIFF只读取布局信息，不解码像素
 // 入参: input 图片输入流
 // 返回: image.Config 图片配置, string 图片格式, error 头部错误
@@ -55,13 +62,6 @@ func decodeImageConfig(input io.Reader) (image.Config, string, error) {
 		}
 	}
 	return image.DecodeConfig(buffer)
-}
-
-// bmpColorMask 保存一个BMP颜色分量的位域位置和取值范围
-type bmpColorMask struct {
-	mask  uint32
-	shift uint
-	max   uint32
 }
 
 // sample 将位域采样值映射到八位通道，缺省透明度为不透明

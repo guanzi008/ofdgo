@@ -28,9 +28,6 @@ import (
 	"strings"
 )
 
-// FontMode 指定字体资源的保存方式，不改变文字位置或压缩选项
-type FontMode uint8
-
 const (
 	// FontKeep 保留原有嵌入方式
 	FontKeep FontMode = iota
@@ -39,6 +36,9 @@ const (
 	// FontExternal 移除可安全恢复字符映射的内嵌字体
 	FontExternal
 )
+
+// FontMode 指定字体资源的保存方式，不改变文字位置或压缩选项
+type FontMode uint8
 
 // FontChange 返回单个字体的处理结果，Document为零基文档索引，Reason非空表示保持原样
 type FontChange struct {

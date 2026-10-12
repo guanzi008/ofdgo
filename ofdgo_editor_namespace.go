@@ -24,7 +24,13 @@ import (
 // 入参: name 节点名称
 // 返回: bool 是否匹配
 func (n *editorXML) matchesOFD(name string) bool {
-	return n.name.Local == name && (classifyOFDNamespace(n.name.Space) != ofdXMLUnknown || n.parent != nil && n.name.Space == n.parent.name.Space)
+	if n.name.Local != name {
+		return false
+	}
+	if n.parent == nil {
+		return classifyOFDNamespace(n.name.Space) != ofdXMLUnknown
+	}
+	return ofdXMLChild(n.parent.name, n.name)
 }
 
 // textXML 按所在节点的命名空间编码文本节点

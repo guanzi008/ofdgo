@@ -380,6 +380,9 @@ func (e *Editor) repairSourceObjectIDs(data []byte, root *editorXML) ([]byte, bo
 	var visit func(*editorXML) error
 	visit = func(parent *editorXML) error {
 		for _, node := range parent.children {
+			if !ofdXMLChild(parent.name, node.name) {
+				continue
+			}
 			id := node.attr("ID")
 			if id != "" && seen[id] {
 				switch node.name.Local {
@@ -401,7 +404,7 @@ func (e *Editor) repairSourceObjectIDs(data []byte, root *editorXML) ([]byte, bo
 	}
 	if content := root.child("Content"); content != nil {
 		for _, layer := range content.children {
-			if layer.name.Local == "Layer" {
+			if layer.matchesOFD("Layer") {
 				if err := visit(layer); err != nil {
 					return nil, false, err
 				}
@@ -508,7 +511,7 @@ func (e *Editor) loadSourcePage(index int) error {
 	nodes := make(map[string]*editorXML)
 	if content := root.child("Content"); content != nil {
 		for _, layer := range content.children {
-			if layer.name.Local != "Layer" {
+			if !layer.matchesOFD("Layer") {
 				continue
 			}
 			if err := editorXMLObjects(layer, nodes); err != nil {

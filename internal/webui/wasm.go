@@ -126,6 +126,14 @@ type annotationOptions struct {
 	Area                                            *ofdgo.Box
 }
 
+// outputContext 定期让出浏览器线程，将取消请求传入库层长操作
+type outputContext struct {
+	context.Context
+	cancel     context.CancelFunc
+	checkpoint func() error
+	checked    time.Time
+}
+
 // Write 将数据块交给浏览器保存
 // 入参: data 导出数据
 // 返回: int 写入长度, error 错误信息
@@ -4624,14 +4632,6 @@ func compressionFromJS(value js.Value, options *ofdgo.CompressionOptions) error 
 		return err
 	}
 	return options.Validate()
-}
-
-// outputContext 定期让出浏览器线程，将取消请求传入库层长操作
-type outputContext struct {
-	context.Context
-	cancel     context.CancelFunc
-	checkpoint func() error
-	checked    time.Time
 }
 
 // newOutputContext 创建单次串行导出的取消上下文

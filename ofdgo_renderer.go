@@ -61,6 +61,9 @@ type Renderer struct {
 	TransparentBackground bool
 }
 
+// RendererOption 渲染器配置选项
+type RendererOption func(*Renderer)
+
 // deviceLineWidth 按设备分辨率计算描边宽度，零线宽为一像素，正线宽至少为两像素
 // 入参: width 页面空间线宽，单位为毫米
 // 返回: float64 设备描边宽度，单位为毫米
@@ -74,9 +77,6 @@ func (r *Renderer) deviceLineWidth(width float64) float64 {
 	}
 	return width
 }
-
-// RendererOption 渲染器配置选项
-type RendererOption func(*Renderer)
 
 // ClearCache 释放派生字体、图片、模板与后端缓存，不改变文档和渲染配置
 func (r *Renderer) ClearCache() {
