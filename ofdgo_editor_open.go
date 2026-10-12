@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -117,7 +118,15 @@ type PageCapabilities struct {
 // 版本共享文件在提交修改时隔离，保留其他版本及其文件清单
 // 返回: *Editor 编辑器, error 错误信息
 func (r *Reader) Editor() (*Editor, error) {
-	_, err := r.Doc()
+	return r.EditorContext(context.Background())
+}
+
+// EditorContext 打开当前文档进行保真编辑，读取及构建页面索引时响应取消
+// 编辑器及其快照使用期间不得关闭输入Reader，不修改输入包或限制编辑权限
+// 入参: ctx 取消上下文
+// 返回: *Editor 编辑器, error 初始化或取消错误
+func (r *Reader) EditorContext(ctx context.Context) (*Editor, error) {
+	_, err := r.DocContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -144,12 +153,18 @@ func (r *Reader) Editor() (*Editor, error) {
 	e.pages = make([]PageContent, len(doc.Pages.Page))
 	sourcePages := make([]editorSourcePage, len(doc.Pages.Page))
 	for i, page := range doc.Pages.Page {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if page.ID == "" || e.source.pages[page.ID] != nil {
 			return nil, fmt.Errorf("missing or duplicate page ID %q", page.ID)
 		}
 		sourcePages[i].ref = page
 		e.source.pages[page.ID] = &sourcePages[i]
 		e.pages[i] = PageContent{ID: page.ID}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return e, nil
 }
@@ -646,11 +661,15 @@ func editorPreservedObject(before, after GraphicObject) bool {
 		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
 		a.Fill, a.Stroke, a.FillColor, a.StrokeColor, a.LineWidth = b.Fill, b.Stroke, b.FillColor, b.StrokeColor, b.LineWidth
 		a.LineWidthSet = b.LineWidthSet
+		a.MiterLimit, a.MiterLimitSet = b.MiterLimit, b.MiterLimitSet
+		a.DashOffset, a.DashPattern, a.Cap, a.Join = b.DashOffset, b.DashPattern, b.Cap, b.Join
+		a.dashPatternSet = b.dashPatternSet
 	case "PathObject":
 		a, b := &before.PathObject, after.PathObject
 		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
 		a.Fill, a.Stroke, a.FillColor, a.StrokeColor, a.LineWidth = b.Fill, b.Stroke, b.FillColor, b.StrokeColor, b.LineWidth
 		a.LineWidthSet = b.LineWidthSet
+		a.MiterLimit, a.MiterLimitSet = b.MiterLimit, b.MiterLimitSet
 		a.DashOffset, a.DashPattern, a.Cap, a.Join = b.DashOffset, b.DashPattern, b.Cap, b.Join
 		a.dashPatternSet = b.dashPatternSet
 	case "ImageObject":

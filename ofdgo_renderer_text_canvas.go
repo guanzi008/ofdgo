@@ -108,20 +108,14 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		if dp != nil {
 			strokeStyle.applyDrawParam(r, dp, bx, by, pageH, obj.Alpha)
 		}
-		if obj.StrokeColor != nil {
-			strokeStyle.applyStrokeColor(r, obj.StrokeColor, bx, by, pageH, obj.Alpha)
-		}
-		if obj.LineWidth > 0 || obj.LineWidthSet {
-			strokeStyle.lineWidth = obj.LineWidth
-		}
-		strokeStyle.applyLineJoin(obj.Join, obj.MiterLimit)
+		strokeObject := obj.pathStyle()
+		strokeObject.FillColor = nil
+		strokeStyle.applyPathObject(r, strokeObject, bx, by, pageH)
 		if strokeStyle.strokePaint == nil {
 			strokeStyle.strokePaint = canvas.Transparent
 		}
 		strokeStyle.scale(ctm)
-		if strokeStyle.lineWidth == 0 {
-			strokeStyle.lineWidth = 25.4 / r.DPI
-		}
+		strokeStyle.lineWidth = r.deviceLineWidth(strokeStyle.lineWidth)
 		transformShdPaint(strokeStyle.strokePaint, parentCTM, bx, by, pageH, boundaryInCTM)
 		strokeStyle.strokePaint, shadingClip, strokeView = resolveShdPaint(ctx, strokeStyle.strokePaint)
 		strokeClip = r.intersectCachedClipPath(strokeClip, shadingClip)
@@ -220,8 +214,12 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	}
 	codePos := 0
 	textPos := 0
-	for index, tc := range obj.TextCode {
-		if textRun != nil && obj.textCodeLineBreak(index) {
+	var lines textLineScanner
+	if textRun != nil {
+		lines = newTextLineScanner(obj)
+	}
+	for _, tc := range obj.TextCode {
+		if textRun != nil && lines.next(tc) {
 			textPos++
 		}
 		var runes []rune

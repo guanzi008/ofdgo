@@ -35,7 +35,7 @@ func (r *Renderer) parseFillPaint(fillColor *FillColor, x, y, pageH float64) any
 	case PaintLinear, PaintRadial:
 		return canvasShading(paint, x, y, pageH)
 	case PaintMesh:
-		return &shdPaint{gradient: rasterGradientCanvas{gradient: &RasterGradient{Kind: RasterMesh, Mesh: paint.Mesh}}, view: canvas.Matrix{{1, 0, x}, {0, -1, pageH - y}}}
+		return &shdPaint{gradient: newRasterGradientCanvas(&RasterGradient{Kind: RasterMesh, Mesh: paint.Mesh}), view: canvas.Matrix{{1, 0, x}, {0, -1, pageH - y}}}
 	default:
 		return paint.Color
 	}

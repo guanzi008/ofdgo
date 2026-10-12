@@ -114,6 +114,7 @@ type pdfCompositeCache struct {
 	imageProcesses  map[pdfImageProcessKey]*pdfgo.ImageProcess
 	masks           map[*pdfgo.SoftMask][]pdfCompositeNode
 	meshes          map[*pdfgo.MeshGradient][]pdfMeshTriangle
+	linearMeshes    *renderCache[pdfLinearMeshKey, []pdfgo.MeshTriangle]
 	patterns        map[pdfgo.Paint]*pdfCompositePattern
 	shadingPatterns map[*pdfgo.ShadingPattern][]pdfCompositeNode
 	shadingSources  map[pdfShadingSourceKey][]pdfCompositeNode
@@ -637,16 +638,19 @@ func (p *pdfImporter) compositeObjects(nodes []pdfCompositeNode) error {
 }
 
 // opaque 检查图元是否无需与页面背景混合
-// 入参: space 当前混合空间
-// 返回: bool 是否可直接保留, error 遮罩解析错误
-func (n pdfCompositeNode) opaque(space *pdfgo.ColorSpace) (bool, error) {
+// 入参: n 待检查图元, space 当前混合空间
+// 返回: bool 是否可直接保留, error 遮罩解析或取消错误
+func (p *pdfImporter) opaque(n pdfCompositeNode, space *pdfgo.ColorSpace) (bool, error) {
+	if err := p.ctx.Err(); err != nil {
+		return false, err
+	}
 	if n.group != nil {
 		g := n.group
 		if g.Knockout && n.textObject == nil || g.Alpha != 1 || g.SoftMask != nil || !pdfNormalBlend(g.BlendMode) || g.ColorSpace != nil && !g.ColorSpace.Equal(space) {
 			return false, nil
 		}
 		for _, child := range n.children {
-			if opaque, err := child.opaque(space); err != nil || !opaque {
+			if opaque, err := p.opaque(child, space); err != nil || !opaque {
 				return false, err
 			}
 		}
@@ -662,8 +666,8 @@ func (n pdfCompositeNode) opaque(space *pdfgo.ColorSpace) (bool, error) {
 	if fill && style.FillOverprint && pdfOverprintNeedsSeparation(style.Fill) || stroke && style.StrokeOverprint && pdfOverprintNeedsSeparation(style.Stroke) {
 		return false, nil
 	}
-	if fill && pdfGradientError(style.Fill) != nil || stroke && pdfGradientError(style.Stroke) != nil {
-		return false, nil
+	if fill && p.gradientError(style.Fill) != nil || stroke && p.gradientError(style.Stroke) != nil {
+		return false, p.ctx.Err()
 	}
 	if n.image != nil {
 		masked, err := n.image.Image.HasMask()

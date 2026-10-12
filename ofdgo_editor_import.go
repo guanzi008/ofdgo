@@ -1212,6 +1212,15 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 	var content []byte
 	pageContent := name == "Page" && node.parent == nil
 	if pageContent {
+		for _, child := range node.children {
+			if child.matchesOFD("PageRes") || !entry.template && child.matchesOFD("Template") {
+				encoded, err := m.encode(entry, child)
+				if err != nil {
+					return nil, err
+				}
+				content = append(content, encoded...)
+			}
+		}
 		local := node.child("Area")
 		if local == nil {
 			var templates []Template
@@ -1234,20 +1243,17 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			if err != nil {
 				return nil, err
 			}
-			content = encoded
+			content = append(content, encoded...)
 		} else {
 			encoded, err := m.encode(entry, local)
 			if err != nil {
 				return nil, err
 			}
-			content = encoded
+			content = append(content, encoded...)
 		}
 	}
 	for _, child := range node.children {
-		if pageContent && entry.template && child.matchesOFD("Template") {
-			continue
-		}
-		if pageContent && child.name.Local == "Area" {
+		if pageContent && (child.matchesOFD("Area") || child.matchesOFD("Template") || child.matchesOFD("PageRes")) {
 			continue
 		}
 		if name == "Goto" && child.name.Local == "Bookmark" {

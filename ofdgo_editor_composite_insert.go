@@ -179,6 +179,9 @@ func (e *Editor) wrapCompositePath(renderer *Renderer, node *editorCompositeNode
 // 入参: node 页面坐标中的对象节点
 // 返回: error 错误信息
 func (e *Editor) isolateCompositeStyle(node *editorCompositeNode) error {
+	if err := e.isolateCompositeDefaultPaint(node); err != nil {
+		return err
+	}
 	if node.object.Type == "CompositeObject" || node.object.Type == "CompositeGraphicUnit" || node.object.Type == "PathObject" {
 		id, err := e.neutralDrawParam()
 		if err != nil {
@@ -220,7 +223,149 @@ func (e *Editor) isolateCompositeStyle(node *editorCompositeNode) error {
 	return node.update(object)
 }
 
-// neutralDrawParam 注册可复用的完整默认绘制参数，不改变文档默认颜色空间
+// isolateCompositeDefaultPaint 固定基准参数会覆盖的默认透明色，按继承环境复用资源副本
+// 入参: node 待复制的独立节点
+// 返回: error 参数、资源或XML错误
+func (e *Editor) isolateCompositeDefaultPaint(node *editorCompositeNode) error {
+	type resourceKey struct {
+		id           string
+		fill, stroke bool
+	}
+	cache := make(map[resourceKey]string)
+	visiting := make(map[string]bool)
+	var transparent *FillColor
+	var isolate func(*editorCompositeNode, DrawParam) error
+	isolate = func(current *editorCompositeNode, base DrawParam) error {
+		parameter, err := e.editorDrawParam(current.node.attr("DrawParam"), make(map[string]bool))
+		if err != nil {
+			return err
+		}
+		base = *mergeDrawParam(base, parameter)
+		if base.FillColor != nil && base.StrokeColor != nil {
+			return nil
+		}
+		object := current.object
+		path := object.Type == "PathObject" && object.PathObject.FillColor == nil && base.FillColor == nil
+		text := object.Type == "TextObject" && object.TextObject.StrokeColor == nil && base.StrokeColor == nil
+		if path || text {
+			if transparent == nil {
+				transparent, err = e.RGBColor(color.NRGBA{})
+				if err != nil {
+					return err
+				}
+			}
+			if path {
+				object.PathObject.FillColor = transparent
+			} else {
+				object.TextObject.StrokeColor = (*StrokeColor)(transparent)
+			}
+			return current.update(object)
+		}
+		if object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
+			return nil
+		}
+		id := object.CompositeGraphicUnit.ResourceID
+		replacement := id
+		if id != "" {
+			key := resourceKey{editorResourceID(id), base.FillColor != nil, base.StrokeColor != nil}
+			if key.id == "" {
+				key.id = id
+			}
+			if visiting[key.id] {
+				return fmt.Errorf("cyclic composite resource %q", id)
+			}
+			var ok bool
+			replacement, ok = cache[key]
+			if !ok {
+				resource, err := e.compositeDefinition(id)
+				if err != nil {
+					return err
+				}
+				visiting[key.id] = true
+				err = isolate(resource, base)
+				delete(visiting, key.id)
+				if err != nil {
+					return err
+				}
+				replacement = id
+				if resource.changed {
+					for _, entry := range e.resources {
+						if sameResourceID(entry.composite, id) {
+							resource.setStates(entry.states)
+							break
+						}
+					}
+					replacement, err = e.addCompositeResource(resource.data, resource.states)
+					if err != nil {
+						return err
+					}
+				}
+				cache[key] = replacement
+			}
+		}
+		var patches []editorXMLPatch
+		var visit func(*editorXML) error
+		visit = func(parent *editorXML) error {
+			for _, child := range parent.children {
+				if classifyOFDNamespace(child.name.Space) == ofdXMLUnknown {
+					continue
+				}
+				switch child.name.Local {
+				case "Content", "PageBlock":
+					if err := visit(child); err != nil {
+						return err
+					}
+				case "TextObject", "PathObject", "CompositeObject", "CompositeGraphicUnit":
+					if child.name.Local == "TextObject" && (base.StrokeColor != nil || child.child("StrokeColor") != nil) || child.name.Local == "PathObject" && (base.FillColor != nil || child.child("FillColor") != nil) {
+						continue
+					}
+					data, err := editorXMLStandalone(current.data[child.start:child.end], child)
+					if err != nil {
+						return err
+					}
+					member, err := newEditorCompositeNode(data)
+					if err != nil {
+						return err
+					}
+					if err := isolate(member, base); err != nil {
+						return err
+					}
+					if member.changed {
+						patches = append(patches, editorXMLPatch{child.start, child.end, member.data})
+					}
+				}
+			}
+			return nil
+		}
+		if err := visit(current.node); err != nil {
+			return err
+		}
+		if len(patches) != 0 {
+			next, err := newEditorCompositeNode(editorPatchXML(current.data, patches))
+			if err != nil {
+				return err
+			}
+			current.data, current.node, current.object, current.changed = next.data, next.node, next.object, true
+		}
+		if replacement != id {
+			object = current.object
+			object.CompositeGraphicUnit.ResourceID = replacement
+			return current.update(object)
+		}
+		return nil
+	}
+	var base DrawParam
+	for _, id := range node.drawParams {
+		parameter, err := e.editorDrawParam(id, make(map[string]bool))
+		if err != nil {
+			return err
+		}
+		base = *mergeDrawParam(base, parameter)
+	}
+	return isolate(node, base)
+}
+
+// neutralDrawParam 注册隔离继承用的基准参数，默认透明色由对象显式保留
 // 返回: string 绘制参数标识, error 错误信息
 func (e *Editor) neutralDrawParam() (string, error) {
 	fill, err := e.RGBColor(color.NRGBA{A: 255})
@@ -261,6 +406,9 @@ func (e *Editor) addEditorDrawParam(draw DrawParam) (string, error) {
 			attrs.add("LineWidth", "0")
 		}
 		attrs.number("MiterLimit", draw.MiterLimit)
+		if draw.MiterLimitSet && draw.MiterLimit == 0 {
+			attrs.add("MiterLimit", "0")
+		}
 		if draw.Relative == "" || draw.dashPatternSet || draw.DashPattern != "" {
 			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: draw.DashPattern})
 		}

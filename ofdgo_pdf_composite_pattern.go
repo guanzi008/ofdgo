@@ -290,7 +290,7 @@ func (p *pdfImporter) directCompositeNode(node pdfCompositeNode, space *pdfgo.Co
 	if group := node.group; group != nil && !group.Knockout && group.Alpha == 1 && group.SoftMask == nil && pdfNormalBlend(group.BlendMode) && (group.ColorSpace == nil || group.ColorSpace.SRGBEquivalent()) {
 		directGroup = true
 	}
-	opaque, err := node.opaque(space)
+	opaque, err := p.opaque(node, space)
 	if err != nil {
 		return false, err
 	}

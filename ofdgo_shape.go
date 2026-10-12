@@ -205,7 +205,7 @@ func (p PathObject) ReshapeFrame(box Box) (PathObject, error) {
 	if box == previous {
 		return p, nil
 	}
-	if _, err := creationBox(editorBoxString(box)); err != nil {
+	if err := validateCreationBox(box); err != nil {
 		return PathObject{}, err
 	}
 	shape, err := NewShape(kind, Box{W: box.W, H: box.H})
@@ -214,7 +214,7 @@ func (p PathObject) ReshapeFrame(box Box) (PathObject, error) {
 	}
 	matrix = matrix.Multiply(TranslationMatrix(box.X, box.Y))
 	bounds := matrix.TransformBox(Box{W: box.W, H: box.H})
-	if _, err := creationBox(editorBoxString(bounds)); err != nil {
+	if err := validateCreationBox(bounds); err != nil {
 		return PathObject{}, err
 	}
 	p.Boundary = editorBoxString(bounds)

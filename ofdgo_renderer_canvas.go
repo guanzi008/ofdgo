@@ -40,6 +40,18 @@ type rasterStrokeGradientCanvas struct {
 type rasterGradientCanvas struct {
 	gradient *RasterGradient
 	space    canvas.ColorSpace
+	mesh     *MeshSampler
+}
+
+// newRasterGradientCanvas 准备渐变适配器及独立网格采样器
+// 入参: gradient 公共渐变
+// 返回: rasterGradientCanvas Canvas渐变
+func newRasterGradientCanvas(gradient *RasterGradient) rasterGradientCanvas {
+	result := rasterGradientCanvas{gradient: gradient}
+	if gradient.Kind == RasterMesh {
+		result.mesh = gradient.Mesh.NewSampler()
+	}
+	return result
 }
 
 // Name 返回后端标识
@@ -123,7 +135,9 @@ func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Ima
 			}
 		}
 		paint := canvas.Paint{Color: cmd.Paint.Color}
+		var sampled rasterGradientCanvas
 		if g := cmd.Paint.Gradient; g != nil {
+			sampled = newRasterGradientCanvas(g)
 			stops := make(canvas.Grad, len(g.Stops))
 			for j, stop := range g.Stops {
 				stops[j] = canvas.Stop{Offset: stop.Offset, Color: stop.Color}
@@ -135,12 +149,12 @@ func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Ima
 			case RasterRadial:
 				paint = canvas.Paint{Gradient: stops.ToRadial(start, g.R0, end, g.R1)}
 			case RasterMesh:
-				paint = canvas.Paint{Gradient: rasterGradientCanvas{gradient: g}}
+				paint = canvas.Paint{Gradient: sampled}
 			default:
 				return nil, fmt.Errorf("canvas command %d: unsupported gradient %d", i, g.Kind)
 			}
 			if g.Spread != nil || g.Sample != nil {
-				paint = canvas.Paint{Gradient: rasterGradientCanvas{gradient: g}}
+				paint = canvas.Paint{Gradient: sampled}
 			}
 		}
 		style := canvas.Style{Fill: paint, FillRule: canvas.NonZero}
@@ -159,10 +173,10 @@ func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Ima
 				if err != nil {
 					return nil, err
 				}
-				paint = canvas.Paint{Gradient: rasterStrokeGradientCanvas{rasterGradientCanvas{gradient: cmd.Paint.Gradient}, inverse}}
+				paint = canvas.Paint{Gradient: rasterStrokeGradientCanvas{sampled, inverse}}
 			}
 			line := pathStyle{lineJoin: canvas.MiterJoin, miterLimit: defaultMiterLimit}
-			line.applyLineJoin(options.Join, options.MiterLimit)
+			line.applyLineJoin(options.Join, options.MiterLimit, options.MiterLimitSet)
 			style = canvas.Style{Stroke: paint, StrokeWidth: options.Width, StrokeCapper: pathLineCap(options.Cap, canvas.ButtCap), StrokeJoiner: line.lineJoin, FillRule: canvas.NonZero}
 			if len(options.Dashes) > 0 {
 				style.DashOffset = options.DashOffset / options.Width
@@ -224,7 +238,12 @@ func (g rasterStrokeGradientCanvas) SetColorSpace(space canvas.ColorSpace) canva
 // 入参: x 横坐标, y 纵坐标
 // 返回: color.RGBA 渐变颜色
 func (g rasterGradientCanvas) At(x, y float64) color.RGBA {
-	value := g.gradient.At(x, y)
+	var value color.RGBA
+	if g.mesh != nil {
+		value = g.mesh.At(x, y)
+	} else {
+		value = g.gradient.At(x, y)
+	}
 	if g.space != nil {
 		return g.space.ToLinear(value)
 	}

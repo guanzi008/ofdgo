@@ -16,10 +16,12 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/xml"
 	"fmt"
 	"image"
+	"io"
 	"maps"
 	"path"
 	"slices"
@@ -105,6 +107,10 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		return err
 	}
 	type resourceFile struct{ key, role string }
+	type resourceSize struct {
+		role string
+		size uint64
+	}
 	files := make(map[resourceFile]bool)
 	for _, name := range resources {
 		data, err := read(name)
@@ -171,31 +177,43 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 	imageResults := make(map[outputImageKey][]byte)
 	imageSources := make(map[string]outputImageSource)
 	ordered := slices.Sorted(maps.Keys(actual))
+	sizes := make(map[string]uint64, len(files))
+	largeCounts := make(map[resourceSize]int)
 	var imageKeys []string
 	for _, key := range ordered {
-		if !refs.files[key] && files[resourceFile{key, "MediaFile"}] && !files[resourceFile{key, "FontFile"}] {
+		if err := e.output.ctx.Err(); err != nil {
+			return err
+		}
+		font, media := files[resourceFile{key, "FontFile"}], files[resourceFile{key, "MediaFile"}]
+		if refs.files[key] || font == media {
+			continue
+		}
+		size, err := outputResourceSize(reader, parts, actual[key])
+		if err != nil {
+			return err
+		}
+		sizes[key] = size
+		if size > outputOptimizationBufferLimit {
+			role := "MediaFile"
+			if font {
+				role = "FontFile"
+			}
+			largeCounts[resourceSize{role, size}]++
+		} else if media {
 			imageKeys = append(imageKeys, key)
 		}
 	}
 	load := func(key string) ([]byte, error) {
-		if data, ok := parts[actual[key]]; ok && len(data) > outputOptimizationBufferLimit {
+		if sizes[key] > outputOptimizationBufferLimit {
 			return nil, nil
 		}
-		if reader != nil && parts[actual[key]] == nil {
-			if file, ok := reader.packageFile(actual[key]); ok && file.UncompressedSize64 > outputOptimizationBufferLimit {
-				return nil, nil
-			}
-		}
-		data, err := read(actual[key])
-		if len(data) > outputOptimizationBufferLimit {
-			return nil, nil
-		}
-		return data, err
+		return read(actual[key])
 	}
 	if err := e.prepareOutputImages(imageKeys, load, imageResults, imageSources); err != nil {
 		return err
 	}
 	var fontCache editorSourceFontCache
+	var hashBuffer []byte
 	for _, key := range ordered {
 		if refs.files[key] || files[resourceFile{key, "FontFile"}] && files[resourceFile{key, "MediaFile"}] {
 			continue
@@ -207,20 +225,36 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 			if err := editorProgress(e.OnWriteProgress).withContext(e.output.ctx).report("compress", e.output.completed, 0); err != nil {
 				return err
 			}
+			if size := sizes[key]; size > outputOptimizationBufferLimit && largeCounts[resourceSize{role, size}] < 2 {
+				continue
+			}
 			source, prefetched := imageSources[key]
+			usage := fontUsage[key]
+			subset := role == "FontFile" && usage != nil && !usage.unsafe && e.backends.FontResources != nil
 			var data []byte
+			optimizable := prefetched
 			if !prefetched {
 				var err error
-				data, err = load(key)
-				if err != nil {
-					return err
+				if role == "MediaFile" || subset {
+					data, err = load(key)
+					if err != nil {
+						return err
+					}
 				}
-				if data == nil {
-					continue
+				optimizable = data != nil
+				if optimizable {
+					source.key.hash = sha256.Sum256(data)
+				} else {
+					if hashBuffer == nil {
+						hashBuffer = make([]byte, 32*1024)
+					}
+					source.key.hash, err = outputResourceDigest(e.output.ctx, reader, parts, actual[key], hashBuffer)
+					if err != nil {
+						return err
+					}
 				}
-				source.key.hash = sha256.Sum256(data)
 			}
-			if usage := fontUsage[key]; role == "FontFile" && usage != nil && !usage.unsafe {
+			if optimizable && subset {
 				candidate, err := fontCache.subset(e.output.ctx, e.backends.FontResources, data, usage)
 				if err != nil {
 					return fmt.Errorf("subset font %s: %w", key, err)
@@ -234,7 +268,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 					source.key.hash = sha256.Sum256(data)
 				}
 			}
-			if role == "MediaFile" {
+			if role == "MediaFile" && optimizable {
 				options, demand := e.outputImageOptions(key)
 				cacheKey := outputImageKey{hash: source.key.hash, options: options, size: demand}
 				candidate, cached := imageResults[cacheKey]
@@ -304,6 +338,9 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 			}
 		}
 	}
+	if len(aliases) == 0 && len(formats) == 0 {
+		return e.output.ctx.Err()
+	}
 	for _, name := range resources {
 		if refs.versions[cleanPackagePath(name)] {
 			continue
@@ -356,4 +393,54 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		}
 	}
 	return e.output.ctx.Err()
+}
+
+// outputResourceSize 获取资源的实际输出大小，优先使用本次改动及已加载数据
+// 入参: reader 原包，可为空, parts 输出改动, name 资源路径
+// 返回: uint64 未压缩字节数, error 文件不存在
+func outputResourceSize(reader *Reader, parts map[string][]byte, name string) (uint64, error) {
+	if data, ok := parts[name]; ok {
+		return uint64(len(data)), nil
+	}
+	if reader != nil {
+		if data, ok := reader.files[cleanPackagePath(name)]; ok {
+			return uint64(len(data)), nil
+		}
+		if file, ok := reader.packageFile(name); ok {
+			return file.UncompressedSize64, nil
+		}
+	}
+	return 0, fmt.Errorf("file not found: %s", name)
+}
+
+// outputResourceDigest 流式计算资源摘要，不将原包中的大文件加载到内存
+// 入参: ctx 取消上下文, reader 原包，可为空, parts 输出改动, name 资源路径, buffer 复用缓冲
+// 返回: [32]byte 内容摘要, error 读取或取消错误
+func outputResourceDigest(ctx context.Context, reader *Reader, parts map[string][]byte, name string, buffer []byte) ([32]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return [32]byte{}, err
+	}
+	var input io.ReadCloser
+	if data, ok := parts[name]; ok {
+		input = io.NopCloser(bytes.NewReader(data))
+	} else {
+		if reader == nil {
+			return [32]byte{}, fmt.Errorf("file not found: %s", name)
+		}
+		var err error
+		input, err = reader.openFile(name)
+		if err != nil {
+			return [32]byte{}, err
+		}
+	}
+	hash := sha256.New()
+	_, err := io.CopyBuffer(hash, imageInput{ReadCloser: input, context: ctx}, buffer)
+	closeErr := input.Close()
+	if err != nil {
+		return [32]byte{}, err
+	}
+	if closeErr != nil {
+		return [32]byte{}, closeErr
+	}
+	return [32]byte(hash.Sum(nil)), ctx.Err()
 }

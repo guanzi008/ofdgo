@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/asn1"
 	"encoding/binary"
 	"encoding/xml"
@@ -167,9 +168,12 @@ func parseSignatureStampBox(s string) (Box, error) {
 }
 
 // parseSignatures 解析签名文件
-// 入参: doc 文档结构
+// 入参: ctx 取消上下文, doc 文档结构
 // 返回: error 错误信息
-func (r *Reader) parseSignatures(doc *Document) error {
+func (r *Reader) parseSignatures(ctx context.Context, doc *Document) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if doc.Signatures == "" {
 		return nil
 	}
@@ -180,11 +184,14 @@ func (r *Reader) parseSignatures(doc *Document) error {
 	}
 	defer f.Close()
 	var signatures Signatures
-	if err := xml.NewDecoder(f).Decode(&signatures); err != nil {
+	if err := xml.NewDecoder(imageInput{ReadCloser: f, context: ctx}).Decode(&signatures); err != nil {
 		return err
 	}
 	pages := signaturePageNumbers(doc)
 	for _, sigRef := range signatures.List {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		func(sigRef Signature) {
 			sigPath := resolveResourcePath(sigListPath, "", sigRef.BaseLoc)
 			sf, err := r.openFile(sigPath)
@@ -193,20 +200,20 @@ func (r *Reader) parseSignatures(doc *Document) error {
 			}
 			defer sf.Close()
 			var sigFile SignatureFile
-			if err := xml.NewDecoder(sf).Decode(&sigFile); err != nil {
+			if err := xml.NewDecoder(imageInput{ReadCloser: sf, context: ctx}).Decode(&sigFile); err != nil {
 				return
 			}
 			var sealType string
 			var sealData []byte
 			if sigFile.SignedInfo.Seal.BaseLoc != "" {
 				sealPath := resolveResourcePath(sigPath, "", sigFile.SignedInfo.Seal.BaseLoc)
-				if data, err := r.readFile(sealPath); err == nil {
+				if data, err := r.readFileViewContext(ctx, sealPath); err == nil {
 					sealType, sealData = extractSeal(data)
 				}
 			}
 			if len(sealData) == 0 && sigFile.SignedValue != "" {
 				signedValuePath := resolveResourcePath(sigPath, "", sigFile.SignedValue)
-				if data, err := r.readFile(signedValuePath); err == nil {
+				if data, err := r.readFileViewContext(ctx, signedValuePath); err == nil {
 					if sig, err := parseSESSignature(data); err == nil {
 						sealType, sealData = sig.Seal.PicType, sig.Seal.PicData
 					} else {
@@ -217,7 +224,11 @@ func (r *Reader) parseSignatures(doc *Document) error {
 			if len(sealData) == 0 {
 				return
 			}
+			sealData = bytes.Clone(sealData)
 			for _, annot := range sigFile.SignedInfo.StampAnnot {
+				if ctx.Err() != nil {
+					return
+				}
 				page, ok := resourceValue(pages, annot.PageRef)
 				if !ok {
 					continue
@@ -239,7 +250,7 @@ func (r *Reader) parseSignatures(doc *Document) error {
 			}
 		}(sigRef)
 	}
-	return nil
+	return ctx.Err()
 }
 
 // signaturePageNumbers 获取签名页面编号索引

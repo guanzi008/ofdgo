@@ -34,13 +34,35 @@ type textGlyphTransform struct {
 	Glyphs    []textGlyph
 }
 
+// pathStyle 提取文字绘制属性和变换，供路径描边处理复用
+// 返回: PathObject 绘制属性
+func (obj TextObject) pathStyle() PathObject {
+	return PathObject{CTM: obj.CTM, DrawParam: obj.DrawParam, Alpha: obj.Alpha, Fill: obj.Fill, Stroke: obj.Stroke,
+		FillColor: obj.FillColor, StrokeColor: obj.StrokeColor, LineWidth: obj.LineWidth, LineWidthSet: obj.LineWidthSet,
+		Cap: obj.Cap, Join: obj.Join, MiterLimit: obj.MiterLimit, MiterLimitSet: obj.MiterLimitSet, DashPattern: obj.DashPattern,
+		dashPatternSet: obj.dashPatternSet, DashOffset: obj.DashOffset}
+}
+
+// withPathStyle 替换共用绘制属性，保留文字内容、字体及定位
+// 入参: style 绘制属性
+// 返回: TextObject 修改后的文字对象
+func (obj TextObject) withPathStyle(style PathObject) TextObject {
+	obj.DrawParam, obj.Alpha, obj.Fill, obj.Stroke = style.DrawParam, style.Alpha, style.Fill, style.Stroke
+	obj.FillColor, obj.StrokeColor = style.FillColor, style.StrokeColor
+	obj.LineWidth, obj.LineWidthSet = style.LineWidth, style.LineWidthSet
+	obj.Cap, obj.Join, obj.MiterLimit = style.Cap, style.Join, style.MiterLimit
+	obj.MiterLimitSet = style.MiterLimitSet
+	obj.DashPattern, obj.dashPatternSet, obj.DashOffset = style.DashPattern, style.dashPatternSet, style.DashOffset
+	return obj
+}
+
 // Text 获取定位后的文字，横向换行以换行符分隔，字形索引以占位字符表示
 // 返回: string 原文
 func (obj TextObject) Text() string {
-	obj.TextCode = textCodeOrigins(obj.TextCode, 0)
+	lines := newTextLineScanner(obj)
 	var text strings.Builder
-	for i, code := range obj.TextCode {
-		if obj.textCodeLineBreak(i) {
+	for _, code := range obj.TextCode {
+		if lines.next(code) {
 			text.WriteByte('\n')
 		}
 		if code.Index == "" {
@@ -62,120 +84,6 @@ func (tc *TextCode) GetDeltaX() []float64 {
 // 返回: []float64 偏移量数组
 func (tc *TextCode) GetDeltaY() []float64 {
 	return parseFloats(tc.DeltaY)
-}
-
-// textCodeLineBreak 根据行首、行距和字形位置推断横向文本换行
-// 入参: index 文本编码索引
-// 返回: bool 是否换行
-func (obj TextObject) textCodeLineBreak(index int) bool {
-	if index == 0 || obj.ReadDirection != 0 || obj.CharDirection != 0 || obj.TextCode[index].Y == "" {
-		return false
-	}
-	code, previous := obj.TextCode[index], obj.TextCode[index-1]
-	for i := index - 2; i >= 0 && (previous.X == "" || previous.Y == ""); i-- {
-		if previous.X == "" {
-			previous.X = obj.TextCode[i].X
-		}
-		if previous.Y == "" {
-			previous.Y = obj.TextCode[i].Y
-		}
-	}
-	if previous.X == "" {
-		previous.X = "0"
-	}
-	if previous.Y == "" {
-		previous.Y = "0"
-	}
-	if code.X == "" {
-		code.X = previous.X
-	}
-	startX := obj.TextCode[0].X
-	if startX == "" {
-		startX = "0"
-	}
-	x, ex := strconv.ParseFloat(code.X, 64)
-	start, es := strconv.ParseFloat(startX, 64)
-	y, ey := strconv.ParseFloat(code.Y, 64)
-	prev, ep := strconv.ParseFloat(previous.Y, 64)
-	if ex != nil || es != nil || ey != nil || ep != nil {
-		return false
-	}
-	if x == start && y != prev {
-		return true
-	}
-	left, err := strconv.ParseFloat(previous.X, 64)
-	if err != nil || obj.Size <= 0 || y-prev < obj.Size/2 || previous.DeltaY != "" || code.DeltaY != "" {
-		return false
-	}
-	count := obj.textCodeGlyphCount(index - 1)
-	if count == 0 {
-		return false
-	}
-	right := left + obj.Size
-	positioner := NewTextPositioner(previous)
-	for range count {
-		right = math.Max(right, positioner.Next().X+obj.Size)
-	}
-	return x <= right
-}
-
-// textCodeGlyphCount 统计文本段实际绘制的字形数量，计入字符到字形的变换
-// 入参: index 文本段索引
-// 返回: int 字形数量
-func (obj TextObject) textCodeGlyphCount(index int) int {
-	code := obj.TextCode[index]
-	if code.Index != "" {
-		count := 0
-		for _, field := range strings.Fields(code.Index) {
-			first, last, interval := strings.Cut(field, "-")
-			start, err := strconv.ParseUint(first, 10, 16)
-			if err != nil {
-				continue
-			}
-			if !interval {
-				count++
-				continue
-			}
-			end, err := strconv.ParseUint(last, 10, 16)
-			if err == nil && end >= start {
-				count += int(end-start) + 1
-			}
-		}
-		return count
-	}
-	count := textCodeRuneCount(code.Value)
-	if len(obj.CGTransform) == 0 || count == 0 {
-		return count
-	}
-	offset := 0
-	for _, previous := range obj.TextCode[:index] {
-		offset += textCodeRuneCount(previous.Value)
-	}
-	transforms := make(map[int][2]int)
-	for _, transform := range obj.CGTransform {
-		start, codes := transform.CodePosition-offset, max(1, transform.CodeCount)
-		if start < 0 || start >= count {
-			continue
-		}
-		glyphs := len(parseInts(transform.Glyphs))
-		if transform.GlyphCount > 0 {
-			glyphs = min(glyphs, transform.GlyphCount)
-		}
-		if glyphs > 0 {
-			transforms[start] = [2]int{codes, glyphs}
-		}
-	}
-	glyphs := 0
-	for i := 0; i < count; {
-		if transform, ok := transforms[i]; ok && transform[0] <= count-i {
-			i += transform[0]
-			glyphs += transform[1]
-		} else {
-			i++
-			glyphs++
-		}
-	}
-	return glyphs
 }
 
 // textCodeRuneCount 统计文本编码中的字符数，识别转义及XML排版空白

@@ -322,9 +322,7 @@ func (r *Reader) VerifyDocumentSignatures(index int, opts ...SignatureVerifyOpti
 	if err := xml.Unmarshal(data, &doc); err != nil {
 		return nil, err
 	}
-	if doc.Signatures == "" {
-		doc.Signatures = view.versionSignatures(body.Signatures)
-	}
+	doc.Signatures = view.versionSignatures(body.Signatures)
 	if doc.Signatures == "" {
 		return nil, nil
 	}

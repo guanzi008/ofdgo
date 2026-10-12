@@ -83,35 +83,41 @@ type ClipArea struct {
 }
 
 // TextObject 文本对象
+// MiterLimitSet为true时，零截断值覆盖继承值，否则零值表示未指定
 type TextObject struct {
-	ID            string        `xml:"ID,attr"`
-	Boundary      string        `xml:"Boundary,attr"`
-	DrawParam     string        `xml:"DrawParam,attr"`
-	LineWidth     float64       `xml:"LineWidth,attr"`
-	Join          string        `xml:"Join,attr"`
-	MiterLimit    float64       `xml:"MiterLimit,attr"`
-	Font          string        `xml:"Font,attr"`
-	Size          float64       `xml:"Size,attr"`
-	Weight        int           `xml:"Weight,attr"`
-	Italic        bool          `xml:"Italic,attr"`
-	Decoration    string        `xml:"Decoration,attr"`
-	HScale        float64       `xml:"HScale,attr"`
-	VScale        float64       `xml:"VScale,attr"`
-	ReadDirection int           `xml:"ReadDirection,attr"`
-	CharDirection int           `xml:"CharDirection,attr"`
-	CTM           string        `xml:"CTM,attr"`
-	Alpha         *int          `xml:"Alpha,attr"`
-	Visible       *bool         `xml:"Visible,attr"`
-	Fill          *bool         `xml:"Fill,attr"`
-	Stroke        *bool         `xml:"Stroke,attr"`
-	StrokeColor   *StrokeColor  `xml:"StrokeColor"`
-	FillColor     *FillColor    `xml:"FillColor"`
-	CGTransform   []CGTransform `xml:"CGTransform"`
-	TextCode      []TextCode    `xml:"TextCode"`
-	Clips         *Clips        `xml:"Clips"`
-	Actions       []Action      `xml:"Actions>Action"`
-	LineWidthSet  bool          `xml:"-"`
-	layout        *textLayout
+	ID             string        `xml:"ID,attr"`
+	Boundary       string        `xml:"Boundary,attr"`
+	DrawParam      string        `xml:"DrawParam,attr"`
+	LineWidth      float64       `xml:"LineWidth,attr"`
+	Cap            string        `xml:"Cap,attr"`
+	DashPattern    string        `xml:"DashPattern,attr"`
+	DashOffset     *float64      `xml:"DashOffset,attr"`
+	Join           string        `xml:"Join,attr"`
+	MiterLimit     float64       `xml:"MiterLimit,attr"`
+	Font           string        `xml:"Font,attr"`
+	Size           float64       `xml:"Size,attr"`
+	Weight         int           `xml:"Weight,attr"`
+	Italic         bool          `xml:"Italic,attr"`
+	Decoration     string        `xml:"Decoration,attr"`
+	HScale         float64       `xml:"HScale,attr"`
+	VScale         float64       `xml:"VScale,attr"`
+	ReadDirection  int           `xml:"ReadDirection,attr"`
+	CharDirection  int           `xml:"CharDirection,attr"`
+	CTM            string        `xml:"CTM,attr"`
+	Alpha          *int          `xml:"Alpha,attr"`
+	Visible        *bool         `xml:"Visible,attr"`
+	Fill           *bool         `xml:"Fill,attr"`
+	Stroke         *bool         `xml:"Stroke,attr"`
+	StrokeColor    *StrokeColor  `xml:"StrokeColor"`
+	FillColor      *FillColor    `xml:"FillColor"`
+	CGTransform    []CGTransform `xml:"CGTransform"`
+	TextCode       []TextCode    `xml:"TextCode"`
+	Clips          *Clips        `xml:"Clips"`
+	Actions        []Action      `xml:"Actions>Action"`
+	LineWidthSet   bool          `xml:"-"`
+	MiterLimitSet  bool          `xml:"-"`
+	dashPatternSet bool
+	layout         *textLayout
 }
 
 // FillColor 填充颜色
@@ -171,6 +177,7 @@ type CGTransform struct {
 }
 
 // PathObject 路径对象
+// MiterLimitSet为true时，零截断值覆盖继承值，否则零值表示未指定
 type PathObject struct {
 	ID              string       `xml:"ID,attr"`
 	Boundary        string       `xml:"Boundary,attr"`
@@ -193,6 +200,7 @@ type PathObject struct {
 	Clips           *Clips       `xml:"Clips"`
 	Actions         []Action     `xml:"Actions>Action"`
 	LineWidthSet    bool         `xml:"-"`
+	MiterLimitSet   bool         `xml:"-"`
 	dashPatternSet  bool
 }
 

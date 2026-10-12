@@ -140,7 +140,7 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 		return &snapshot, nil
 	}
 	if e.source != nil {
-		protected, err := e.source.reader.hasOutputSignatures()
+		protected, err := e.source.reader.hasOutputSignatures(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -285,28 +285,19 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 	return paths, safe, ctx.Err()
 }
 
-// hasOutputSignatures 检查包中各文档，避免改写其他文档签名保护的共享资源
-// 返回: bool 是否存在签名, error 文档读取错误
-func (r *Reader) hasOutputSignatures() (bool, error) {
+// hasOutputSignatures 检查全部文档的签名入口，不受当前文档或版本选择影响
+// 入参: ctx 取消上下文
+// 返回: bool 是否声明签名入口, error 取消错误
+func (r *Reader) hasOutputSignatures(ctx context.Context) (bool, error) {
 	for _, body := range r.OFD.DocBody {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		if body.Signatures != "" {
 			return true, nil
 		}
-		data, err := r.readFile(body.DocRoot)
-		if err != nil {
-			return false, err
-		}
-		var doc struct {
-			Signatures string `xml:"Signatures"`
-		}
-		if err := xml.Unmarshal(data, &doc); err != nil {
-			return false, err
-		}
-		if doc.Signatures != "" {
-			return true, nil
-		}
 	}
-	return false, nil
+	return false, ctx.Err()
 }
 
 // writeOutputEntry 优化ZIP编码，保留资源名称及条目的未压缩字节

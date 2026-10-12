@@ -184,7 +184,7 @@ func (e *Editor) FlipCompositeObjects(page int, path ObjectPath, indexes []int, 
 // 入参: page 页面索引, path 父复合对象路径, indexes 成员序号, box 页面毫米目标范围
 // 返回: error 错误信息
 func (e *Editor) ResizeCompositeObjects(page int, path ObjectPath, indexes []int, box Box) error {
-	if _, err := creationBox(editorBoxString(box)); err != nil {
+	if err := validateCreationBox(box); err != nil {
 		return err
 	}
 	return e.editCompositeObjects(page, path, indexes, func(renderer *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
@@ -219,29 +219,45 @@ func (e *Editor) ResizeCompositeObjects(page int, path ObjectPath, indexes []int
 	})
 }
 
-// StyleCompositeObjects 原子修改成员透明度、文字颜色及路径填充、描边和线宽
+// StyleCompositeObjects 原子修改成员透明度及文字、路径的填充和描边
 // 不重排文字，不改写继承参数；显式实线覆盖原虚线继承
-// 入参: page 页面索引, path 父路径, indexes 成员序号, style 待修改属性，线宽使用页面毫米
+// 入参: page 页面索引, path 父路径, indexes 成员序号, style 待修改属性，线宽、虚线长度及偏移使用页面毫米
 // 返回: error 错误信息
 func (e *Editor) StyleCompositeObjects(page int, path ObjectPath, indexes []int, style ObjectStyle) error {
+	if style.DashPattern != nil {
+		if err := validateEditorStroke(PathObject{DashPattern: *style.DashPattern}); err != nil {
+			return err
+		}
+	}
 	return e.editCompositeObjects(page, path, indexes, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
-		paint := style.Fill != nil || style.Stroke != nil || style.FillColor != nil || style.StrokeColor != nil || style.LineWidth != nil || style.DashPattern != nil || style.DashOffset != nil || style.Cap != nil || style.Join != nil
+		paint := style.Fill != nil || style.Stroke != nil || style.FillColor != nil || style.StrokeColor != nil || style.LineWidth != nil || style.MiterLimit != nil || style.DashPattern != nil || style.DashOffset != nil || style.Cap != nil || style.Join != nil
 		for i, node := range nodes {
 			capability := members[i].Capabilities
 			if !capability.Transform || paint && !capability.Paint {
 				return fmt.Errorf("composite member %d cannot accept this style: %w", indexes[i], capability.editError())
 			}
 			local := style
+			var painted PathObject
 			switch members[i].Object.Type {
 			case "TextObject":
-				local.FillColor = editorStyleColor(style.FillColor, members[i].Object.TextObject.FillColor)
+				painted = members[i].Object.TextObject.pathStyle()
 			case "PathObject":
-				p := members[i].Object.PathObject
-				local.FillColor = editorStyleColor(style.FillColor, p.FillColor)
-				local.StrokeColor = (*StrokeColor)(editorStyleColor((*FillColor)(style.StrokeColor), (*FillColor)(p.StrokeColor)))
+				painted = members[i].Object.PathObject
+			}
+			if members[i].Object.Type == "TextObject" || members[i].Object.Type == "PathObject" {
+				local.FillColor = editorStyleColor(style.FillColor, painted.FillColor)
+				local.StrokeColor = (*StrokeColor)(editorStyleColor((*FillColor)(style.StrokeColor), (*FillColor)(painted.StrokeColor)))
 				if style.LineWidth != nil {
 					width := *style.LineWidth / members[i].StrokeScale
 					local.LineWidth = &width
+				}
+				if style.DashPattern != nil {
+					dash := scaleTextNumbers(*style.DashPattern, 1/members[i].StrokeScale)
+					local.DashPattern = &dash
+				}
+				if style.DashOffset != nil {
+					offset := *style.DashOffset / members[i].StrokeScale
+					local.DashOffset = &offset
 				}
 			}
 			object, err := e.styleObject(node.object, local)
@@ -648,6 +664,13 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 					capability.Reflow = capability.TextContent
 					capability.LayoutKnown = text.layout != nil
 				}
+			}
+		}
+		if transform && err == nil && node.object.Type == "TextObject" {
+			capability.RewriteText = capability.TextContent
+			if !capability.RewriteText {
+				text := style.TextObject
+				capability.RewriteText = e.RewriteText(&text, text.Text()) == nil
 			}
 		}
 		if transform && node.object.Type == "ImageObject" && bounds.Bounds.W > 0 && bounds.Bounds.H > 0 {

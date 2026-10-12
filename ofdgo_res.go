@@ -79,6 +79,7 @@ type DrawParams struct {
 }
 
 // DrawParam 绘制参数
+// MiterLimitSet为true时，零截断值覆盖继承值，否则零值表示未指定
 type DrawParam struct {
 	ID             string       `xml:"ID,attr"`
 	Relative       string       `xml:"Relative,attr"`
@@ -98,6 +99,7 @@ type DrawParam struct {
 	FillColor      *FillColor   `xml:"FillColor"`
 	StrokeColor    *StrokeColor `xml:"StrokeColor"`
 	LineWidthSet   bool         `xml:"-"`
+	MiterLimitSet  bool         `xml:"-"`
 	dashPatternSet bool
 }
 

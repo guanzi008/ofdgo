@@ -371,7 +371,7 @@ func (line geometryPolyline) stroke(result GeometryPath, options StrokeOptions) 
 			return
 		}
 		limit := options.MiterLimit
-		if limit == 0 {
+		if limit == 0 && !options.MiterLimitSet {
 			limit = defaultMiterLimit
 		}
 		if options.Join == "" || options.Join == "Miter" {

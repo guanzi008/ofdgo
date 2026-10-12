@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 )
@@ -149,13 +150,13 @@ func (r *Reader) annotationInfos(index int, pageID string) []AnnotationInfo {
 }
 
 // parseAnnotations 解析注释文件
-// 入参: doc 文档结构
+// 入参: ctx 取消上下文, doc 文档结构
 // 返回: error 错误信息
-func (r *Reader) parseAnnotations(doc *Document) error {
+func (r *Reader) parseAnnotations(ctx context.Context, doc *Document) error {
 	if doc.Annotations == "" {
 		return nil
 	}
-	annotations, err := r.annotationIndex(doc)
+	annotations, err := r.annotationIndexContext(ctx, doc)
 	if err != nil {
 		return err
 	}
@@ -164,26 +165,39 @@ func (r *Reader) parseAnnotations(doc *Document) error {
 	}
 	annPath := r.ResPath(doc.Annotations)
 	for _, page := range annotations.Page {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		annotPath := resolveResourcePath(annPath, "", page.FileLoc)
 		af, err := r.openFile(annotPath)
 		if err != nil {
 			continue
 		}
 		var pageAnnot PageAnnot
-		err = xml.NewDecoder(af).Decode(&pageAnnot)
+		err = xml.NewDecoder(imageInput{ReadCloser: af, context: ctx}).Decode(&pageAnnot)
 		_ = af.Close()
 		if err != nil {
 			continue
 		}
 		r.Annots[page.PageID] = append(r.Annots[page.PageID], pageAnnot.Annot...)
 	}
-	return nil
+	return ctx.Err()
 }
 
 // annotationIndex 读取注解索引，将页引用对应到文档声明的标识，不解析页面外观
 // 入参: doc 文档结构
 // 返回: Annotations 注解索引, error 错误信息
 func (r *Reader) annotationIndex(doc *Document) (Annotations, error) {
+	return r.annotationIndexContext(context.Background(), doc)
+}
+
+// annotationIndexContext 读取注解索引并规范页引用，取消时不提交文件索引
+// 入参: ctx 取消上下文, doc 文档结构
+// 返回: Annotations 注解索引, error 读取或取消错误
+func (r *Reader) annotationIndexContext(ctx context.Context, doc *Document) (Annotations, error) {
+	if err := ctx.Err(); err != nil {
+		return Annotations{}, err
+	}
 	if doc.Annotations == "" {
 		return Annotations{}, nil
 	}
@@ -194,17 +208,23 @@ func (r *Reader) annotationIndex(doc *Document) (Annotations, error) {
 	}
 	defer f.Close()
 	var annotations Annotations
-	if err := xml.NewDecoder(f).Decode(&annotations); err != nil {
+	if err := xml.NewDecoder(imageInput{ReadCloser: f, context: ctx}).Decode(&annotations); err != nil {
 		return Annotations{}, err
 	}
 	pageIDs := make(map[string]string, len(doc.Pages.Page))
 	for _, page := range doc.Pages.Page {
+		if err := ctx.Err(); err != nil {
+			return Annotations{}, err
+		}
 		if id := editorResourceID(page.ID); id != "" {
 			pageIDs[id] = page.ID
 		}
 	}
-	r.annotationFiles = make(map[string][]string)
+	files := make(map[string][]string)
 	for i := range annotations.Page {
+		if err := ctx.Err(); err != nil {
+			return Annotations{}, err
+		}
 		page := &annotations.Page[i]
 		if id := pageIDs[editorResourceID(page.PageID)]; id != "" {
 			page.PageID = id
@@ -213,7 +233,11 @@ func (r *Reader) annotationIndex(doc *Document) (Annotations, error) {
 		if file, ok := r.packageFile(annotPath); ok {
 			annotPath = cleanPackagePath(file.Name)
 		}
-		r.annotationFiles[annotPath] = append(r.annotationFiles[annotPath], page.PageID)
+		files[annotPath] = append(files[annotPath], page.PageID)
 	}
+	if err := ctx.Err(); err != nil {
+		return Annotations{}, err
+	}
+	r.annotationFiles = files
 	return annotations, nil
 }

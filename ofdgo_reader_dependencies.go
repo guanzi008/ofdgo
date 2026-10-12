@@ -235,13 +235,13 @@ func (r *Reader) documentDependencies(ctx context.Context, indexes ...int) (map[
 // 入参: ctx 取消上下文, name 文件路径, rejectUnknown 是否拒绝无法识别的扩展节点, add 接收引用路径及类别
 // 返回: error 读取或结构错误
 func (r *Reader) documentFileReferences(ctx context.Context, name string, rejectUnknown bool, add func(string, int)) error {
-	return r.scanDocumentFileReferences(ctx, name, rejectUnknown, add, nil)
+	return r.scanDocumentFileReferences(ctx, name, rejectUnknown, add, nil, nil)
 }
 
 // scanDocumentFileReferences 流式扫描文件依赖，按需记录引用节点位置，不构建完整节点树
-// 入参: ctx 取消上下文, name 文件路径, rejectUnknown 是否拒绝未知扩展, add 接收依赖, record 接收引用位置，可为nil
+// 入参: ctx 取消上下文, name 文件路径, rejectUnknown 是否拒绝未知扩展, add 接收依赖, record 接收引用位置，可为nil, inspect 检查节点，可为nil
 // 返回: error 读取、结构或取消错误
-func (r *Reader) scanDocumentFileReferences(ctx context.Context, name string, rejectUnknown bool, add func(string, int), record func(*editorXML, string, string)) error {
+func (r *Reader) scanDocumentFileReferences(ctx context.Context, name string, rejectUnknown bool, add func(string, int), record func(*editorXML, string, string), inspect func(xml.StartElement) error) error {
 	input, err := r.openFile(name)
 	if err != nil {
 		return err
@@ -269,6 +269,11 @@ func (r *Reader) scanDocumentFileReferences(ctx context.Context, name string, re
 		}
 		switch node := token.(type) {
 		case xml.StartElement:
+			if inspect != nil {
+				if err := inspect(node); err != nil {
+					return err
+				}
+			}
 			parent := ""
 			if len(stack) == 0 {
 				if root != "" {

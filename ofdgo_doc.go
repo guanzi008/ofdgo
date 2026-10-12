@@ -21,6 +21,7 @@ import (
 )
 
 // Document 文档结构
+// Signatures由阅读器按主入口和所选版本解析，不属于文档根节点的XML内容
 type Document struct {
 	XMLName     xml.Name    `xml:"Document"`
 	CommonData  CommonData  `xml:"CommonData"`
@@ -30,7 +31,7 @@ type Document struct {
 	Actions     []Action    `xml:"Actions>Action"`
 	Bookmarks   Bookmarks   `xml:"Bookmarks"`
 	Annotations string      `xml:"Annotations"`
-	Signatures  string      `xml:"Signatures"`
+	Signatures  string      `xml:"-"`
 	Attachments Attachments `xml:"Attachments"`
 	CustomTags  CustomTags  `xml:"CustomTags"`
 	Extensions  Extensions  `xml:"Extensions"`

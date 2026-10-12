@@ -35,6 +35,7 @@ type pathStyle struct {
 	lineWidth     float64
 	lineCap       canvas.Capper
 	lineJoin      canvas.Joiner
+	lineJoinName  string
 	miterLimit    float64
 	dashOffset    float64
 	dashPattern   []float64
@@ -90,21 +91,35 @@ func pathLineCap(cap string, fallback canvas.Capper) canvas.Capper {
 }
 
 // applyLineJoin 应用线连接样式及尖角限制
-// 入参: join 线连接名称, limit 尖角限制
-func (s *pathStyle) applyLineJoin(join string, limit float64) {
-	if limit > 0 {
+// 入参: join 线连接名称, limit 尖角限制, explicit 是否显式指定零截断值
+func (s *pathStyle) applyLineJoin(join string, limit float64, explicit bool) {
+	if limit > 0 || explicit {
 		s.miterLimit = limit
 	}
+	if s.lineJoinName == "" {
+		switch s.lineJoin.(type) {
+		case canvas.RoundJoiner:
+			s.lineJoinName = "Round"
+		case canvas.BevelJoiner:
+			s.lineJoinName = "Bevel"
+		default:
+			s.lineJoinName = "Miter"
+		}
+	}
 	switch join {
-	case "Miter":
-		s.lineJoin = canvas.MiterJoin
+	case "Miter", "Round", "Bevel":
+		s.lineJoinName = join
+	}
+	switch s.lineJoinName {
 	case "Round":
 		s.lineJoin = canvas.RoundJoin
 	case "Bevel":
 		s.lineJoin = canvas.BevelJoin
-	}
-	if _, ok := s.lineJoin.(canvas.MiterJoiner); ok {
+	default:
 		s.lineJoin = canvas.MiterJoiner{GapJoiner: canvas.BevelJoin, Limit: s.miterLimit}
+		if s.miterLimit <= 1 {
+			s.lineJoin = canvas.BevelJoin
+		}
 	}
 }
 
@@ -123,7 +138,7 @@ func (s *pathStyle) applyDrawParam(r *Renderer, dp *DrawParam, bx, by, pageH flo
 	if dp.Cap != "" {
 		s.lineCap = pathLineCap(dp.Cap, s.lineCap)
 	}
-	s.applyLineJoin(dp.Join, dp.MiterLimit)
+	s.applyLineJoin(dp.Join, dp.MiterLimit, dp.MiterLimitSet)
 	if dp.DashPattern != "" || dp.dashPatternSet {
 		s.dashPattern = parseFloats(dp.DashPattern)
 	}
@@ -147,7 +162,7 @@ func (s *pathStyle) applyPathObject(r *Renderer, obj PathObject, bx, by, pageH f
 	if obj.Cap != "" {
 		s.lineCap = pathLineCap(obj.Cap, canvas.ButtCap)
 	}
-	s.applyLineJoin(obj.Join, obj.MiterLimit)
+	s.applyLineJoin(obj.Join, obj.MiterLimit, obj.MiterLimitSet)
 	if obj.DashPattern != "" || obj.dashPatternSet {
 		s.dashPattern = parseFloats(obj.DashPattern)
 	}
@@ -213,9 +228,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	}
 	style.applyPathObject(r, obj, bx, by, pageH)
 	style.scale(ctm)
-	if style.lineWidth == 0 {
-		style.lineWidth = 25.4 / r.DPI
-	}
+	style.lineWidth = r.deviceLineWidth(style.lineWidth)
 	objectCTM := TranslationMatrix(bx, by).Multiply(ctm)
 	if boundaryInCTM && parentCTM != nil {
 		objectCTM = parentCTM.Multiply(TranslationMatrix(bx, by)).Multiply(localCTM)
@@ -226,10 +239,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	if boundaryInCTM {
 		pathCTM = localCTM
 	}
-	p := r.buildTinyFillRectPath(obj, pageH, pathCTM, bx, by)
-	if p == nil {
-		p = r.buildPath(obj, pageH, pathCTM, false)
-	}
+	p := r.buildPath(obj, pageH, pathCTM, false)
 	if boundaryInCTM && parentCTM != nil {
 		p = p.Transform(canvas.Matrix{
 			{parentCTM.a, -parentCTM.c, parentCTM.c*pageH + parentCTM.e},
@@ -470,20 +480,4 @@ func (r *Renderer) parseCanvasPath(data string) (*canvas.Path, error) {
 		cache.put(key, path.Copy(), cost)
 	}
 	return path, nil
-}
-
-// buildTinyFillRectPath 构建微小填充矩形路径
-// 入参: obj 路径对象, pageH 页面高度, ctm 变换矩阵, bx 边界X坐标, by 边界Y坐标
-// 返回: *canvas.Path 路径对象
-func (r *Renderer) buildTinyFillRectPath(obj PathObject, pageH float64, ctm Matrix, bx, by float64) *canvas.Path {
-	path := tinyFillRectPath(obj, TranslationMatrix(bx, by).Multiply(ctm))
-	if path == nil {
-		return nil
-	}
-	p, err := geometryToCanvasPath(&path)
-	if err != nil {
-		r.renderError = err
-		return nil
-	}
-	return p.Translate(0, pageH)
 }

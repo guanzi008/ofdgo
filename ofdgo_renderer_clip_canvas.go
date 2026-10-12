@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"image"
+	"math"
 	"slices"
 
 	"github.com/tdewolff/canvas"
@@ -119,6 +120,9 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ma
 				textObj.FillColor = &FillColor{Value: "0 0 0"}
 				textObj.StrokeColor = &StrokeColor{Value: "0 0 0"}
 				textRenderer := *r
+				if scale := math.Sqrt(math.Abs(m.a*m.d - m.b*m.c)); scale > 0 {
+					textRenderer.DPI *= scale
+				}
 				textRenderer.pageText = nil
 				textRenderer.textOnly = false
 				textRenderer.renderText(ctx, textObj, 0, r.drawParamDefaults(area.DrawParam, nil), nil, false, nil)
@@ -170,8 +174,10 @@ func (r *Renderer) buildClipAreaPath(obj PathObject, drawParam string, parent Ma
 		obj.FillColor, obj.StrokeColor = nil, nil
 		style := r.newPathStyle(dp, 0, 0, 0, nil)
 		style.applyPathObject(r, obj, 0, 0, 0)
-		if style.lineWidth == 0 {
-			style.lineWidth = 25.4 / r.DPI
+		if scale := math.Sqrt(math.Abs(m.a*m.d - m.b*m.c)); scale > 0 {
+			style.lineWidth = r.deviceLineWidth(style.lineWidth*scale) / scale
+		} else {
+			style.lineWidth = r.deviceLineWidth(style.lineWidth)
 		}
 		result = unionClipPath(result, r.strokeDashedCanvasPath(p, style.lineWidth, style.lineCap, style.lineJoin, style.dashOffset, style.dashPattern, false))
 	}

@@ -78,18 +78,31 @@ func (e *Editor) DocumentInfo(index int) (DocInfo, error) {
 // 入参: index 文档索引，从0开始, info 文档信息
 // 返回: error 修改错误
 func (e *Editor) SetDocumentInfo(index int, info DocInfo) error {
+	return e.SetDocumentInfoContext(context.Background(), index, info)
+}
+
+// SetDocumentInfoContext 修改文档信息，取消或失败时保留元数据和撤销历史
+// 入参: ctx 取消上下文, index 文档索引，从0开始, info 文档信息
+// 返回: error 修改或取消错误
+func (e *Editor) SetDocumentInfoContext(ctx context.Context, index int, info DocInfo) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	before, err := e.DocumentInfo(index)
 	if err != nil {
 		return err
 	}
 	if reflect.DeepEqual(before, info) {
-		return nil
+		return ctx.Err()
 	}
 	if index == e.DocumentIndex() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		e.SetInfo(info)
 		return nil
 	}
-	return e.editDocuments(func(reader *Reader, data []byte, _ *editorXML) (int, error) {
+	return e.editDocumentsContext(ctx, func(reader *Reader, data []byte, _ *editorXML) (int, error) {
 		updated, err := editorUpdateInfoXML(data, NewEditor().Info.DocID, index, before, info)
 		if err != nil {
 			return 0, err
@@ -104,6 +117,16 @@ func (e *Editor) SetDocumentInfo(index int, info DocInfo) error {
 // 入参: title 文档标题, width 页面宽度, height 页面高度, at 插入位置，从0开始，可等于文档数量
 // 返回: int 新文档索引, error 创建错误
 func (e *Editor) AddDocument(title string, width, height float64, at int) (int, error) {
+	return e.AddDocumentContext(context.Background(), title, width, height, at)
+}
+
+// AddDocumentContext 插入并选中空白文档，取消或失败时保留原包和撤销历史
+// 入参: ctx 取消上下文, title 文档标题, width 页面宽度, height 页面高度, at 插入位置，从0开始，可等于文档数量
+// 返回: int 新文档索引, error 创建或取消错误
+func (e *Editor) AddDocumentContext(ctx context.Context, title string, width, height float64, at int) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if at < 0 || at > e.DocumentCount() {
 		return 0, fmt.Errorf("document index %d out of range", at)
 	}
@@ -112,25 +135,34 @@ func (e *Editor) AddDocument(title string, width, height float64, at int) (int, 
 	if _, err := created.AddPage(width, height); err != nil {
 		return 0, err
 	}
-	err := e.editDocuments(func(reader *Reader, data []byte, root *editorXML) (int, error) {
+	err := e.editDocumentsContext(ctx, func(reader *Reader, data []byte, root *editorXML) (int, error) {
 		occupied := make(map[string]bool)
 		for name := range reader.fileNames {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
 			directory, _, _ := strings.Cut(name, "/")
 			occupied[directory] = true
 		}
 		directory := ""
 		for number := 0; ; number++ {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
 			candidate := fmt.Sprintf("Doc_%d", number)
 			if !occupied[candidate] {
 				directory = candidate
 				break
 			}
 		}
-		createdReader, err := created.Reader()
+		createdReader, err := created.ReaderContext(ctx)
 		if err != nil {
 			return 0, err
 		}
 		for name, content := range createdReader.files {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
 			if name == "OFD.xml" {
 				continue
 			}
@@ -168,33 +200,59 @@ func (e *Editor) AddDocument(title string, width, height float64, at int) (int, 
 // 入参: index 文档索引，从0开始, title 标题，空值移除标题
 // 返回: error 修改错误
 func (e *Editor) RenameDocument(index int, title string) error {
+	return e.RenameDocumentContext(context.Background(), index, title)
+}
+
+// RenameDocumentContext 修改文档标题，取消或失败时保留其他元数据和撤销历史
+// 入参: ctx 取消上下文, index 文档索引，从0开始, title 标题，空值移除标题
+// 返回: error 修改或取消错误
+func (e *Editor) RenameDocumentContext(ctx context.Context, index int, title string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	info, err := e.DocumentInfo(index)
 	if err != nil {
 		return err
 	}
 	info.Title = title
-	return e.SetDocumentInfo(index, info)
+	return e.SetDocumentInfoContext(ctx, index, info)
 }
 
 // MoveDocument 调整包内文档顺序，当前文档随条目移动，不重写内容，可通过Undo撤销
 // 入参: from 原文档索引, to 目标索引，均从0开始
 // 返回: error 移动错误
 func (e *Editor) MoveDocument(from, to int) error {
+	return e.MoveDocumentContext(context.Background(), from, to)
+}
+
+// MoveDocumentContext 调整文档顺序，取消或失败时保留当前文档和撤销历史
+// 入参: ctx 取消上下文, from 原文档索引, to 目标索引，均从0开始
+// 返回: error 移动或取消错误
+func (e *Editor) MoveDocumentContext(ctx context.Context, from, to int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if from < 0 || from >= e.DocumentCount() || to < 0 || to >= e.DocumentCount() {
 		return fmt.Errorf("document index out of range")
 	}
 	if from == to {
 		return nil
 	}
-	return e.editDocuments(func(reader *Reader, data []byte, root *editorXML) (int, error) {
+	return e.editDocumentsContext(ctx, func(reader *Reader, data []byte, root *editorXML) (int, error) {
 		bodies := make([][]byte, reader.DocumentCount())
 		for index := range bodies {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
 			body := root.childAt("DocBody", index)
 			bodies[index] = data[body.start:body.end]
 		}
 		moveEditorItem(bodies, from, to)
 		var patches []editorXMLPatch
 		for index, content := range bodies {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
 			body := root.childAt("DocBody", index)
 			patches = append(patches, editorXMLPatch{body.start, body.end, content})
 		}
@@ -295,17 +353,6 @@ func (e *Editor) DeleteDocumentContext(ctx context.Context, index int) error {
 	})
 }
 
-// editDocuments 在独立包快照中修改文档入口，失败时不改变当前状态或历史
-// 入参: edit 修改包快照并返回新的当前文档索引
-// 返回: error 修改错误
-func (e *Editor) editDocuments(edit func(*Reader, []byte, *editorXML) (int, error)) error {
-	ctx := context.Background()
-	if e.output != nil {
-		ctx = e.output.ctx
-	}
-	return e.editDocumentsContext(ctx, edit)
-}
-
 // editDocumentsContext 在独立快照中修改文档入口，确认未取消后提交完整状态
 // 入参: ctx 取消上下文, edit 修改包快照并返回新的当前文档索引
 // 返回: error 修改或取消错误
@@ -314,6 +361,13 @@ func (e *Editor) editDocumentsContext(ctx context.Context, edit func(*Reader, []
 	if err != nil {
 		return err
 	}
+	return e.editDocumentSnapshot(ctx, reader, edit)
+}
+
+// editDocumentSnapshot 修改已有独立快照的文档入口，成功后提交并记录撤销历史
+// 入参: ctx 取消上下文, reader 包含当前编辑内容的独立快照, edit 修改快照并返回当前文档索引
+// 返回: error 修改或取消错误
+func (e *Editor) editDocumentSnapshot(ctx context.Context, reader *Reader, edit func(*Reader, []byte, *editorXML) (int, error)) error {
 	data, err := reader.readFileViewContext(ctx, "OFD.xml")
 	if err != nil {
 		return err
@@ -340,11 +394,11 @@ func (e *Editor) editDocumentsContext(ctx context.Context, edit func(*Reader, []
 	if previous.DocRoot != current.DocRoot || previous.DocInfo.DocID != current.DocInfo.DocID {
 		reader.selectedVersion = nil
 	}
-	if _, err := reader.Doc(); err != nil {
+	if _, err := reader.DocContext(ctx); err != nil {
 		return err
 	}
 	next := *e
-	if err := next.adoptDocumentReader(reader); err != nil {
+	if err := next.adoptDocumentReader(ctx, reader); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -356,9 +410,9 @@ func (e *Editor) editDocumentsContext(ctx context.Context, edit func(*Reader, []
 }
 
 // adoptDocumentReader 接入已加载的编辑入口，跨文档或版本时重建页面与资源状态
-// 入参: reader 不拥有输入文件的独立阅读器
+// 入参: ctx 取消上下文, reader 不拥有输入文件的独立阅读器
 // 返回: error 编辑器初始化错误
-func (e *Editor) adoptDocumentReader(reader *Reader) error {
+func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader) error {
 	version, err := reader.DocumentVersionID()
 	if err != nil {
 		return err
@@ -372,7 +426,7 @@ func (e *Editor) adoptDocumentReader(reader *Reader) error {
 		source.reader = reader
 		e.source = &source
 	} else {
-		next, err := reader.Editor()
+		next, err := reader.EditorContext(ctx)
 		if err != nil {
 			return err
 		}

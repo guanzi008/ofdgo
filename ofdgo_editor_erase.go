@@ -28,7 +28,7 @@ import (
 // 入参: page 页面索引, ids 对象标识, box 页面毫米坐标中的擦除范围
 // 返回: error 错误信息
 func (e *Editor) EraseObjects(page int, ids []string, box Box) error {
-	if _, err := creationBox(editorBoxString(box)); err != nil {
+	if err := validateCreationBox(box); err != nil {
 		return err
 	}
 	return e.eraseObjects(page, ids, box, nil, nil)
@@ -55,7 +55,7 @@ func (e *Editor) EraseObjectsPath(page int, ids []string, points []Point) error 
 // 入参: page 页面索引, path 父路径, indexes 成员序号, box 页面毫米范围
 // 返回: error 错误信息
 func (e *Editor) EraseCompositeObjects(page int, path ObjectPath, indexes []int, box Box) error {
-	if _, err := creationBox(editorBoxString(box)); err != nil {
+	if err := validateCreationBox(box); err != nil {
 		return err
 	}
 	return e.eraseCompositeObjects(page, path, indexes, geometryRectangle(box))

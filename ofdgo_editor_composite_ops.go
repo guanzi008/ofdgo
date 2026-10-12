@@ -312,7 +312,7 @@ func (e *Editor) reshapeCompositeObject(page int, path ObjectPath, index int, ki
 		if lineShapeKind(kind) {
 			object.PathObject, err = object.PathObject.ReshapeLine(kind, transformLineBox(box, inverse))
 		} else {
-			if _, err := creationBox(editorBoxString(box)); err != nil {
+			if err := validateCreationBox(box); err != nil {
 				return err
 			}
 			object.PathObject, err = object.PathObject.Reshape(inverse.TransformBox(box))

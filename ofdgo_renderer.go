@@ -61,6 +61,20 @@ type Renderer struct {
 	TransparentBackground bool
 }
 
+// deviceLineWidth 按设备分辨率计算描边宽度，零线宽为一像素，正线宽至少为两像素
+// 入参: width 页面空间线宽，单位为毫米
+// 返回: float64 设备描边宽度，单位为毫米
+func (r *Renderer) deviceLineWidth(width float64) float64 {
+	pixel := 25.4 / r.DPI
+	if width == 0 {
+		return pixel
+	}
+	if width > 0 {
+		return max(width, 2*pixel)
+	}
+	return width
+}
+
 // RendererOption 渲染器配置选项
 type RendererOption func(*Renderer)
 
@@ -117,6 +131,13 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 // 入参: templateID 模板ID
 // 返回: *PageContent 模板页面
 func (r *Renderer) loadTemplate(templateID string) *PageContent {
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil
+	}
 	if key := editorResourceID(templateID); key != "" {
 		templateID = key
 	}
@@ -127,7 +148,7 @@ func (r *Renderer) loadTemplate(templateID string) *PageContent {
 		if !sameResourceID(tpl.ID, templateID) {
 			continue
 		}
-		page, err := r.Reader.readPageContent(Page{BaseLoc: tpl.BaseLoc}, false, true)
+		page, err := r.Reader.readPageContent(ctx, Page{BaseLoc: tpl.BaseLoc}, false, true)
 		if err != nil {
 			return nil
 		}

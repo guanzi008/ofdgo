@@ -49,7 +49,7 @@ func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOp
 		document := r
 		if index != r.DocumentIndex() {
 			var err error
-			document, err = r.Document(index)
+			document, err = r.DocumentContext(ctx, index)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -112,18 +112,19 @@ func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, 
 	if dpi == 0 {
 		return nil, nil
 	}
-	count, err := r.PageCount()
+	doc, err := r.DocContext(ctx)
 	if err != nil {
 		return nil, ctx.Err()
 	}
 	renderer := NewRenderer(r, WithRenderBackends(RenderBackends{}))
+	renderer.pageContext = ctx
 	defer renderer.ClearCache()
 	visitor := &compressionImages{ctx: ctx, dpi: dpi, sizes: make(map[string]image.Point), renderer: renderer}
-	for index := 0; index < count; index++ {
+	for _, ref := range doc.Pages.Page {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		page, err := r.PageContentByIndex(index)
+		page, err := r.PageContentContext(ctx, ref)
 		if err != nil {
 			return nil, ctx.Err()
 		}

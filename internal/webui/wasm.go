@@ -1869,6 +1869,12 @@ func editorAppearance(item map[string]any, object ofdgo.GraphicObject, paint boo
 		if path.DashOffset != nil {
 			item["dashOffset"] = *path.DashOffset
 		}
+		if item["scoped"] == true {
+			item["dashPattern"] = editorDashPattern(path.DashPattern, scale)
+			if path.DashOffset != nil {
+				item["dashOffset"] = *path.DashOffset * scale
+			}
+		}
 		if paint {
 			item["fill"], item["stroke"] = path.Fill != nil && *path.Fill, path.Stroke == nil || *path.Stroke
 			item["fillColor"], item["strokeColor"] = editorColorHex(path.FillColor), editorColorHex((*ofdgo.FillColor)(path.StrokeColor))
@@ -2259,35 +2265,39 @@ func editorFont(args []js.Value) (any, error) {
 	return successResult(map[string]any{"bytes": bytesToJS(data)}), nil
 }
 
+// editorObjectAt 读取页面对象或复合对象成员的有效样式快照
+// 入参: page 页面索引, key 界面对象路径
+// 返回: ofdgo.GraphicObject 对象快照, error 错误信息
+func editorObjectAt(page int, key string) (ofdgo.GraphicObject, error) {
+	if currentEditor == nil {
+		return ofdgo.GraphicObject{}, fmt.Errorf("no document is being edited")
+	}
+	if separator := strings.LastIndex(key, "/"); separator >= 0 {
+		path, err := compositePath(key[:separator])
+		if err != nil {
+			return ofdgo.GraphicObject{}, err
+		}
+		member, err := strconv.Atoi(key[separator+1:])
+		if err != nil {
+			return ofdgo.GraphicObject{}, err
+		}
+		members, err := currentEditor.CompositeObjectsAt(page, path, []int{member})
+		if err != nil {
+			return ofdgo.GraphicObject{}, err
+		}
+		return members[0].Object, nil
+	}
+	return currentEditor.Object(page, key)
+}
+
 // previewText 生成保留原定位的输入预览，不修改文档或历史
 // 入参: args 页码、对象路径、新文字、可选字体数据和字号
 // 返回: any 定位段及字体样式, error 错误信息
 func previewText(args []js.Value) (any, error) {
-	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being edited")
-	}
-	page, key := args[0].Int(), args[1].String()
-	var object ofdgo.GraphicObject
-	if separator := strings.LastIndex(key, "/"); separator >= 0 {
-		path, err := compositePath(key[:separator])
-		if err != nil {
-			return nil, err
-		}
-		member, err := strconv.Atoi(key[separator+1:])
-		if err != nil {
-			return nil, err
-		}
-		members, err := currentEditor.CompositeObjectsAt(page, path, []int{member})
-		if err != nil {
-			return nil, err
-		}
-		object = members[0].Object
-	} else {
-		var err error
-		object, err = currentEditor.Object(page, key)
-		if err != nil {
-			return nil, err
-		}
+	key := args[1].String()
+	object, err := editorObjectAt(args[0].Int(), key)
+	if err != nil {
+		return nil, err
 	}
 	text := object.TextObject
 	if object.Type != "TextObject" {
@@ -2361,10 +2371,10 @@ func previewText(args []js.Value) (any, error) {
 }
 
 // previewPositionedText 预览保留定位的文字替换，不修改编辑器或撤销记录
-// 入参: args 页面、对象标识和内容
+// 入参: args 页面、对象路径和内容
 // 返回: any SVG预览, error 错误信息
 func previewPositionedText(args []js.Value) (any, error) {
-	object, err := currentEditor.Object(args[0].Int(), args[1].String())
+	object, err := editorObjectAt(args[0].Int(), args[1].String())
 	if err != nil {
 		return nil, err
 	}
@@ -3190,6 +3200,24 @@ func resolveStylePaint(paint *ofdgo.FillColor) error {
 	return nil
 }
 
+// editorDashPattern 将内部对象的虚线长度格式化为页面毫米
+// 入参: value 对象空间虚线长度, scale 页面描边倍率
+// 返回: string 页面空间虚线长度，无法解析时保留原文
+func editorDashPattern(value string, scale float64) string {
+	if scale == 1 || value == "" {
+		return value
+	}
+	fields := strings.Fields(value)
+	for i, field := range fields {
+		number, err := strconv.ParseFloat(field, 64)
+		if err != nil || math.IsNaN(number*scale) || math.IsInf(number*scale, 0) {
+			return value
+		}
+		fields[i] = strconv.FormatFloat(number*scale, 'f', -1, 64)
+	}
+	return strings.Join(fields, " ")
+}
+
 // objectStyle 读取高级面板提交的外观字段，省略字段保持原值
 // 入参: value 前端样式
 // 返回: ofdgo.ObjectStyle 库层样式
@@ -3453,21 +3481,26 @@ func documentVersions(args []js.Value) (any, error) {
 	if currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	var versions []ofdgo.DocumentVersionInfo
-	var err error
+	reader := currentSession.Reader
 	if currentEditor != nil {
-		versions, err = currentEditor.DocumentVersions()
-	} else {
-		versions, err = currentSession.Reader.DocumentVersions()
+		var err error
+		reader, err = currentEditor.Reader()
+		if err != nil {
+			return nil, err
+		}
 	}
+	versions, err := reader.DocumentVersions()
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]VersionEntry, 1, len(versions)+1)
-	entries[0].Default = true
+	entries := make([]VersionEntry, 0, len(versions)+1)
+	hasMain := reader.OFD.DocBody[reader.DocumentIndex()].DocRoot != ""
+	if hasMain {
+		entries = append(entries, VersionEntry{Default: true})
+	}
 	for _, version := range versions {
 		entries = append(entries, VersionEntry{ID: version.ID, Index: version.Index, Name: version.Name, Default: version.Current})
-		if version.Current {
+		if version.Current && hasMain {
 			entries[0].Default = false
 		}
 	}

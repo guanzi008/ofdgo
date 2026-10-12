@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -530,7 +531,7 @@ func (e *Editor) restoreFontSnapshot(state Editor) {
 	*e = state
 }
 
-// pruneExternalFontFiles 清理全包无引用字体并同步版本清单，保留附件及无法确认的扩展引用
+// pruneExternalFontFiles 流式核对全包字体引用并同步版本清单，保留附件及无法确认的扩展引用
 // 入参: ctx 取消上下文, reader 包快照, candidates 待清理的字体路径
 // 返回: error 取消或读取错误
 func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...string) error {
@@ -559,7 +560,7 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 	}
 	structures["OFD.xml"] = true
 	files := make(map[string]bool)
-	versions := make(map[string]*editorFontXML)
+	versions := make(map[string][]versionEditLink)
 	names := slices.Sorted(maps.Keys(structures))
 	for _, name := range slices.Sorted(maps.Keys(reader.fileNames)) {
 		if !structures[name] && strings.HasSuffix(strings.ToLower(name), ".xml") {
@@ -573,55 +574,46 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 		if files[name] && !structures[name] {
 			continue
 		}
-		data, err := reader.readFileViewContext(ctx, name)
-		if err != nil {
+		root, uncertain := "", false
+		inspect := func(node xml.StartElement) error {
+			if root == "" {
+				root = node.Name.Local
+			}
+			if classifyOFDNamespace(node.Name.Space) == ofdXMLUnknown || slices.Contains([]string{"CustomTags", "Extensions", "ExtendData", "Data"}, node.Name.Local) {
+				uncertain = true
+				return fmt.Errorf("unknown font file dependencies in %s", name)
+			}
+			for _, attr := range node.Attr {
+				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != "http://www.w3.org/XML/1998/namespace" {
+					uncertain = true
+					return fmt.Errorf("unknown font file dependencies in %s", name)
+				}
+			}
+			return nil
+		}
+		add := func(location string, kind int) {
+			location = cleanPackagePath(location)
+			if root == "DocVersion" && kind == packageReferenceData {
+				return
+			}
+			delete(removed, location)
+			if kind == packageReferenceData {
+				files[location] = true
+			}
+		}
+		record := func(node *editorXML, attribute, target string) {
+			if root == "DocVersion" && node.name.Local == "File" && attribute == "" && removed[target] {
+				versions[name] = append(versions[name], versionEditLink{node: node, target: target})
+			}
+		}
+		if err := reader.scanDocumentFileReferences(ctx, name, true, add, record, inspect); err != nil {
+			var syntax *xml.SyntaxError
+			if uncertain || errors.As(err, &syntax) {
+				return ctx.Err()
+			}
 			return err
 		}
-		root, err := parseEditorXMLContext(ctx, data)
-		if err != nil {
-			return ctx.Err()
-		}
-		base := ""
-		if root.matchesOFD("Res") {
-			base = root.attr("BaseLoc")
-		}
-		if root.matchesOFD("DocVersion") {
-			versions[name] = &editorFontXML{name: name, data: data, root: root}
-		}
-		var retains func(*editorXML) bool
-		retains = func(node *editorXML) bool {
-			if ctx.Err() != nil {
-				return true
-			}
-			if classifyOFDNamespace(node.name.Space) == ofdXMLUnknown || slices.Contains([]string{"CustomTags", "Extensions", "ExtendData", "Data"}, node.name.Local) {
-				return true
-			}
-			parent := ""
-			if node.parent != nil {
-				parent = node.parent.name.Local
-			}
-			for _, attr := range node.attrs {
-				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != "http://www.w3.org/XML/1998/namespace" {
-					return true
-				}
-				if kind := packageReference(root.name.Local, parent, node.name.Local, attr.Name.Local); attr.Name.Space == "" && kind != packageReferenceNone {
-					location := cleanPackagePath(resolveResourcePath(name, base, attr.Value))
-					delete(removed, location)
-					if kind == packageReferenceData {
-						files[location] = true
-					}
-				}
-			}
-			if kind := packageReference(root.name.Local, parent, node.name.Local, ""); kind != packageReferenceNone && !(root.matchesOFD("DocVersion") && parent == "FileList" && node.matchesOFD("File")) {
-				location := resolveResourcePath(name, base, strings.TrimSpace(editorImportText(data, node)))
-				delete(removed, cleanPackagePath(location))
-				if kind == packageReferenceData {
-					files[cleanPackagePath(location)] = true
-				}
-			}
-			return slices.ContainsFunc(node.children, retains)
-		}
-		if retains(root) || len(removed) == 0 {
+		if len(removed) == 0 {
 			return ctx.Err()
 		}
 	}
@@ -629,23 +621,25 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 		return err
 	}
 	updates := make(map[string][]byte)
-	for name, file := range versions {
+	for name, links := range versions {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		var patches []editorXMLPatch
-		if list := file.root.child("FileList"); list != nil {
-			for _, node := range list.children {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				if node.matchesOFD("File") && removed[resolveResourcePath(name, "", strings.TrimSpace(editorImportText(file.data, node)))] {
-					patches = append(patches, editorXMLPatch{start: node.start, end: node.end})
-				}
+		for _, link := range links {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if removed[link.target] {
+				patches = append(patches, editorXMLPatch{start: link.node.start, end: link.node.end})
 			}
 		}
 		if len(patches) != 0 {
-			updates[name] = editorPatchXML(file.data, patches)
+			data, err := reader.readFileViewContext(ctx, name)
+			if err != nil {
+				return err
+			}
+			updates[name] = editorPatchXML(data, patches)
 		}
 	}
 	if err := ctx.Err(); err != nil {

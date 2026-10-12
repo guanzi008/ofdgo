@@ -340,11 +340,23 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 			}
 			patches = append(patches, editorXMLPatch{area.start, area.end, updated})
 		} else {
-			value, err := source.root.containerXML("Area", nil, source.root.textXML("PhysicalBox", page.Area.PhysicalBox))
+			var fields []byte
+			for _, field := range [][2]string{{"PhysicalBox", page.Area.PhysicalBox}, {"ApplicationBox", page.Area.ApplicationBox}, {"ContentBox", page.Area.ContentBox}, {"BleedBox", page.Area.BleedBox}} {
+				if field[1] != "" {
+					fields = append(fields, source.root.textXML(field[0], field[1])...)
+				}
+			}
+			value, err := source.root.containerXML("Area", nil, fields)
 			if err != nil {
 				return nil, err
 			}
-			patches = append(patches, editorXMLPatch{source.root.open, source.root.open, value})
+			position := source.root.open
+			for _, child := range source.root.children {
+				if child.matchesOFD("Template") || child.matchesOFD("PageRes") {
+					position = child.end
+				}
+			}
+			patches = append(patches, editorXMLPatch{position, position, value})
 		}
 	}
 	for layerIndex, original := range source.original.Content.Layer {
@@ -546,7 +558,7 @@ func (e *Editor) sourcePageData(page PageContent, references *editorReferenceSca
 		err := x.finish()
 		return bytes.TrimPrefix(data.Bytes(), []byte(xml.Header)), err
 	}
-	area, err := editorXMLContainer("Area", nil, editorXMLText("PhysicalBox", page.Area.PhysicalBox))
+	header, err := e.encodeXML(func(x *ofdXML) { x.pageHeader(page) })
 	if err != nil {
 		return nil, err
 	}
@@ -562,7 +574,7 @@ func (e *Editor) sourcePageData(page PageContent, references *editorReferenceSca
 	if err != nil {
 		return nil, err
 	}
-	data := append(area, content...)
+	data := append(bytes.TrimPrefix(header, []byte(xml.Header)), content...)
 	if len(page.Actions) != 0 {
 		actions, err := e.encodeXML(func(x *ofdXML) { x.actions(page.Actions) })
 		if err != nil {
@@ -754,7 +766,7 @@ func (e *Editor) sourceReader(ctx context.Context, progress editorProgress) (*Re
 				delete(reader.pageHeaderCache, name)
 			}
 		}
-		if _, err := reader.Doc(); err != nil {
+		if _, err := reader.DocContext(ctx); err != nil {
 			return nil, err
 		}
 		return reader, nil
@@ -768,7 +780,7 @@ func (e *Editor) sourceReader(ctx context.Context, progress editorProgress) (*Re
 	if err := reader.initRootContext(ctx); err != nil {
 		return nil, err
 	}
-	if _, err := reader.Doc(); err != nil {
+	if _, err := reader.DocContext(ctx); err != nil {
 		return nil, err
 	}
 	for name, header := range e.source.reader.pageHeaderCache {

@@ -20,8 +20,9 @@ import (
 	"strconv"
 )
 
-// UpdateCompositeText 修改内部普通横向文字，原文保留定位，已知段落按会话选项重排
+// UpdateCompositeText 修改内部文字，原文保留定位，已知段落按会话选项重排
 // 空样式保留原字体、字号和颜色，显式改变字号时重新排版并保留首行基线
+// 方向和字形映射沿用RewriteText的定位校验，不改变原文中未修改的属性
 // 入参: page 页面索引, path 父复合路径, index 成员序号, value 文字, style 文字样式增量
 // 返回: error 错误信息
 func (e *Editor) UpdateCompositeText(page int, path ObjectPath, index int, value string, style TextStyle) error {
@@ -69,7 +70,8 @@ func (e *Editor) changeCompositeText(page int, path ObjectPath, indexes []int, v
 // 入参: node 原文节点, member 有效快照, value 新内容, style 样式增量, options 段落选项, frame 文字框调整
 // 返回: error 错误信息
 func (e *Editor) updateCompositeText(node *editorCompositeNode, member CompositeMember, value *string, style TextStyle, options *TextLayout, frame *Box) error {
-	if node.object.Type != "TextObject" || !member.Capabilities.ReplaceFont {
+	rewriteOnly := value != nil && options == nil && frame == nil && style.Color == "" && (style.Font == "" || style.Font == member.Object.TextObject.Font) && (style.Size == 0 || style.Size == member.Object.TextObject.Size)
+	if node.object.Type != "TextObject" || !member.Capabilities.ReplaceFont && !(rewriteOnly && member.Capabilities.RewriteText) {
 		return fmt.Errorf("composite text style is not supported")
 	}
 	object := cloneEditorData(node.object)

@@ -63,30 +63,38 @@ type MeshShading struct {
 // 返回: color.RGBA 采样颜色
 func (m *MeshShading) At(x, y float64) color.RGBA {
 	for i := len(m.Triangles) - 1; i >= 0; i-- {
-		t := m.Triangles[i]
-		a, b, c := t[0].Point, t[1].Point, t[2].Point
-		d := (b.Y-c.Y)*(a.X-c.X) + (c.X-b.X)*(a.Y-c.Y)
-		if d == 0 {
-			continue
+		if value, ok := meshTriangleColor(&m.Triangles[i], x, y); ok {
+			return value
 		}
-		u := ((b.Y-c.Y)*(x-c.X) + (c.X-b.X)*(y-c.Y)) / d
-		v := ((c.Y-a.Y)*(x-c.X) + (a.X-c.X)*(y-c.Y)) / d
-		w := 1 - u - v
-		if u < -1e-12 || v < -1e-12 || w < -1e-12 {
-			continue
-		}
-		var values [4]float64
-		alpha := 0.0
-		for j, weight := range [3]float64{u, v, w} {
-			alpha += weight * t[j].Alpha
-			for k := range values {
-				values[k] += weight * t[j].Values[k]
-			}
-		}
-		red, green, blue := t[0].rgb(values)
-		return color.RGBA{meshByte(red * alpha), meshByte(green * alpha), meshByte(blue * alpha), meshByte(alpha)}
 	}
 	return m.Background
+}
+
+// meshTriangleColor 按面积权重采样单个三角形，范围外不产生颜色
+// 入参: triangle 三角形顶点, x 横坐标, y 纵坐标
+// 返回: color.RGBA 预乘颜色, bool 是否位于三角形内
+func meshTriangleColor(triangle *[3]MeshVertex, x, y float64) (color.RGBA, bool) {
+	a, b, c := triangle[0].Point, triangle[1].Point, triangle[2].Point
+	d := (b.Y-c.Y)*(a.X-c.X) + (c.X-b.X)*(a.Y-c.Y)
+	if d == 0 {
+		return color.RGBA{}, false
+	}
+	u := ((b.Y-c.Y)*(x-c.X) + (c.X-b.X)*(y-c.Y)) / d
+	v := ((c.Y-a.Y)*(x-c.X) + (a.X-c.X)*(y-c.Y)) / d
+	w := 1 - u - v
+	if u < -1e-12 || v < -1e-12 || w < -1e-12 {
+		return color.RGBA{}, false
+	}
+	var values [4]float64
+	alpha := 0.0
+	for j, weight := range [3]float64{u, v, w} {
+		alpha += weight * triangle[j].Alpha
+		for k := range values {
+			values[k] += weight * triangle[j].Values[k]
+		}
+	}
+	red, green, blue := triangle[0].rgb(values)
+	return color.RGBA{meshByte(red * alpha), meshByte(green * alpha), meshByte(blue * alpha), meshByte(alpha)}, true
 }
 
 // outline 返回方向一致的三角形轮廓，供绘制裁剪和对象度量共用

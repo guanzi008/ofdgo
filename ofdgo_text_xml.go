@@ -85,6 +85,12 @@ func (obj *TextObject) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement
 		if attr.Name.Local == "LineWidth" {
 			obj.LineWidthSet = obj.LineWidth == 0
 		}
+		if attr.Name.Local == "MiterLimit" {
+			obj.MiterLimitSet = obj.MiterLimit == 0
+		}
+		if attr.Name.Local == "DashPattern" {
+			obj.dashPatternSet = obj.DashPattern == ""
+		}
 	}
 	return nil
 }

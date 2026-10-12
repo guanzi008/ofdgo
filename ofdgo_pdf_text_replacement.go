@@ -168,7 +168,10 @@ func (r *pdfTextReplacements) count(nodes []pdfCompositeNode, blocked bool) erro
 		}
 		childBlocked := blocked
 		if group := node.group; group != nil && node.textObject == nil {
-			opaque, err := node.opaque(group.ColorSpace)
+			opaque, err := r.importer.opaque(node, group.ColorSpace)
+			if err := r.importer.ctx.Err(); err != nil {
+				return err
+			}
 			childBlocked = childBlocked || !opaque || err != nil || group.ColorSpace != nil && !group.ColorSpace.SRGBEquivalent()
 		}
 		if err := r.count(node.children, childBlocked); err != nil {

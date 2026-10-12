@@ -141,6 +141,14 @@ func (e *Editor) Reader() (*Reader, error) {
 	return e.reader(nil)
 }
 
+// ReaderContext 获取可取消的独立内存快照，失败时不返回部分结果
+// 快照保持Reader的资源所有权规则，不改变当前编辑状态或撤销记录
+// 入参: ctx 取消上下文
+// 返回: *Reader 阅读器, error 准备或取消错误
+func (e *Editor) ReaderContext(ctx context.Context) (*Reader, error) {
+	return e.readerContext(ctx, nil)
+}
+
 // Write 写入并累计字节数
 // 入参: data 数据
 // 返回: int 字节数, error 错误信息
@@ -276,11 +284,11 @@ func (e *Editor) readerContext(ctx context.Context, progress editorProgress) (*R
 	if err := r.initRootContext(ctx); err != nil {
 		return nil, err
 	}
-	if _, err := r.Doc(); err != nil {
+	if _, err := r.DocContext(ctx); err != nil {
 		return nil, err
 	}
 	for i, page := range r.doc.Pages.Page {
-		r.pageHeaderCache[r.ResPath(page.BaseLoc)] = PageContent{Area: PageArea{PhysicalBox: e.pages[i].Area.PhysicalBox}}
+		r.pageHeaderCache[r.ResPath(page.BaseLoc)] = PageContent{Area: e.pages[i].Area, Template: slices.Clone(e.pages[i].Template), PageRes: slices.Clone(e.pages[i].PageRes)}
 	}
 	return r, nil
 }
@@ -411,9 +419,7 @@ func (e *Editor) writePartsWithPages(write func(string, []byte, bool) error, pro
 		x.root("Document", nil)
 		x.start("CommonData", nil)
 		x.text("MaxUnitID", strconv.Itoa(e.maxID))
-		x.start("PageArea", nil)
-		x.text("PhysicalBox", e.pages[0].Area.PhysicalBox)
-		x.end("PageArea")
+		x.pageArea("PageArea", e.pages[0].Area)
 		if len(fonts)+len(images)+len(spaces) != 0 {
 			x.text("DocumentRes", "DocumentRes.xml")
 		}
@@ -620,13 +626,11 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 	return fonts, images, spaces, files
 }
 
-// page 写出页面尺寸、图层和对象
+// page 按标准顺序写出页面定义、图层、对象及动作
 // 入参: page 页面内容
 func (x *ofdXML) page(page PageContent) {
 	x.root("Page", nil)
-	x.start("Area", nil)
-	x.text("PhysicalBox", page.Area.PhysicalBox)
-	x.end("Area")
+	x.pageHeader(page)
 	x.start("Content", nil)
 	for _, layer := range page.Content.Layer {
 		if x.err != nil {
@@ -637,6 +641,34 @@ func (x *ofdXML) page(page PageContent) {
 	x.end("Content")
 	x.actions(page.Actions)
 	x.end("Page")
+}
+
+// pageHeader 写出模板、页资源及页面区域
+// 入参: page 页面内容
+func (x *ofdXML) pageHeader(page PageContent) {
+	for _, template := range page.Template {
+		attrs := ofdAttrs{{Name: xml.Name{Local: "TemplateID"}, Value: template.TemplateID}}
+		attrs.add("ZOrder", template.ZOrder)
+		x.start("Template", attrs)
+		x.end("Template")
+	}
+	for _, resource := range page.PageRes {
+		x.text("PageRes", resource)
+	}
+	x.pageArea("Area", page.Area)
+}
+
+// pageArea 写出物理、显示、版心及出血区域，省略未定义的可选区域
+// 入参: name 区域容器名称, area 页面区域
+func (x *ofdXML) pageArea(name string, area PageArea) {
+	x.start(name, nil)
+	x.text("PhysicalBox", area.PhysicalBox)
+	for _, field := range [][2]string{{"ApplicationBox", area.ApplicationBox}, {"ContentBox", area.ContentBox}, {"BleedBox", area.BleedBox}} {
+		if field[1] != "" {
+			x.text(field[0], field[1])
+		}
+	}
+	x.end(name)
 }
 
 // layer 写出新建图层及其对象
@@ -890,7 +922,19 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 			attrs.add("LineWidth", "0")
 		}
 		attrs.number("MiterLimit", obj.MiterLimit)
+		if obj.MiterLimitSet && obj.MiterLimit == 0 {
+			attrs.add("MiterLimit", "0")
+		}
 		attrs.add("Join", obj.Join)
+		attrs.add("Cap", obj.Cap)
+		if obj.dashPatternSet {
+			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: obj.DashPattern})
+		} else {
+			attrs.add("DashPattern", obj.DashPattern)
+		}
+		if obj.DashOffset != nil {
+			attrs.add("DashOffset", ofdNumber(*obj.DashOffset))
+		}
 		if obj.Italic {
 			attrs.add("Italic", "true")
 		}
@@ -911,6 +955,9 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 			attrs.add("LineWidth", "0")
 		}
 		attrs.number("MiterLimit", obj.MiterLimit)
+		if obj.MiterLimitSet && obj.MiterLimit == 0 {
+			attrs.add("MiterLimit", "0")
+		}
 		attrs.add("Join", obj.Join)
 		attrs.add("Cap", obj.Cap)
 		attrs.add("Rule", obj.Rule)

@@ -120,7 +120,7 @@ func (r *Reader) extractedVersionRoot(ctx context.Context, version DocumentVersi
 		return nil, err
 	}
 	body := root.childAt("DocBody", r.documentIndex)
-	if body == nil || body.child("DocRoot") == nil {
+	if body == nil {
 		return nil, fmt.Errorf("document entry not found: %d", r.documentIndex)
 	}
 	var patches []editorXMLPatch
@@ -133,9 +133,17 @@ func (r *Reader) extractedVersionRoot(ctx context.Context, version DocumentVersi
 		}
 	}
 	entry := body.child("DocRoot")
-	patches = append(patches, editorXMLContent(data, entry, editorFontXMLText(version.DocRoot)))
+	if entry != nil {
+		patches = append(patches, editorXMLContent(data, entry, editorFontXMLText(version.DocRoot)))
+	}
 	if versions := body.child("Versions"); versions != nil {
-		patches = append(patches, editorXMLPatch{start: versions.start, end: versions.end})
+		var replacement []byte
+		if entry == nil {
+			replacement = body.textXML("DocRoot", version.DocRoot)
+		}
+		patches = append(patches, editorXMLPatch{versions.start, versions.end, replacement})
+	} else if entry == nil {
+		return nil, fmt.Errorf("document entry not found: %d", r.documentIndex)
 	}
 	references := []*editorXML{body.child("Signatures")}
 	if info := body.child("DocInfo"); info != nil {

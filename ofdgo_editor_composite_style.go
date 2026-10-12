@@ -16,19 +16,21 @@ package ofdgo
 
 import "fmt"
 
-// Style 获取内部成员的独立样式快照，路径CTM只表达页面描边倍率
+// Style 获取内部成员的独立样式快照，文字和路径CTM只表达页面描边倍率
 // 可传入CopyStyle或CopyCompositeStyle，不作为几何复制快照
 // 返回: GraphicObject 有效样式来源
 func (m CompositeMember) Style() GraphicObject {
 	object := cloneEditorData(m.Object)
 	if object.Type == "PathObject" {
 		object.PathObject.CTM = Matrix{a: m.StrokeScale, d: m.StrokeScale}.String()
+	} else if object.Type == "TextObject" {
+		object.TextObject.CTM = Matrix{a: m.StrokeScale, d: m.StrokeScale}.String()
 	}
 	return object
 }
 
 // CopyCompositeStyle 将同类型样式复制到内部选区，保留内容、位置、裁剪及其他实例
-// 路径复制页面实际线宽和虚线，文字沿用目标段落和基线，全部成功后提交一次撤销
+// 描边复制页面实际线宽和虚线，文字沿用目标段落和基线，全部成功后提交一次撤销
 // 入参: page 页面索引, path 父路径, indexes 成员序号, source Object或CompositeMember.Style取得的样式快照
 // 返回: error 错误信息
 func (e *Editor) CopyCompositeStyle(page int, path ObjectPath, indexes []int, source GraphicObject) error {
@@ -36,6 +38,14 @@ func (e *Editor) CopyCompositeStyle(page int, path ObjectPath, indexes []int, so
 		return err
 	}
 	return e.editCompositeObjects(page, path, indexes, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
+		if len(nodes) == 0 {
+			return nil
+		}
+		var err error
+		source, err = e.explicitDefaultPaint(source)
+		if err != nil {
+			return err
+		}
 		for i, node := range nodes {
 			member := members[i]
 			if node.object.Type != source.Type || !member.Capabilities.Transform || source.Type != "ImageObject" && !member.Capabilities.Paint {
@@ -52,8 +62,11 @@ func (e *Editor) CopyCompositeStyle(page int, path ObjectPath, indexes []int, so
 				if err != nil {
 					return err
 				}
-				object.TextObject.FillColor = cloneEditorData(source.TextObject.FillColor)
-				object.TextObject.Alpha = cloneEditorData(source.TextObject.Alpha)
+				style := copyEditorPathStyle(object.TextObject.pathStyle(), source.TextObject.pathStyle(), editorStrokeScale(source.TextObject.CTM)/member.StrokeScale)
+				if err := validateEditorStroke(style); err != nil {
+					return err
+				}
+				object.TextObject = object.TextObject.withPathStyle(style)
 				object.TextObject.DrawParam, err = e.neutralDrawParam()
 				if err != nil {
 					return err

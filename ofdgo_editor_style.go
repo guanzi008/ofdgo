@@ -23,7 +23,7 @@ import (
 )
 
 // ObjectStyle 对象外观，nil字段保持原值，颜色的Alpha为nil时保留原颜色透明度
-// StyleObjects使用对象坐标毫米，StyleCompositeObjects的LineWidth使用页面毫米
+// StyleObjects使用对象坐标毫米，StyleCompositeObjects的线宽、虚线长度及偏移使用页面毫米
 type ObjectStyle struct {
 	Alpha       *int
 	Fill        *bool
@@ -31,6 +31,7 @@ type ObjectStyle struct {
 	FillColor   *FillColor
 	StrokeColor *StrokeColor
 	LineWidth   *float64
+	MiterLimit  *float64
 	DashPattern *string
 	DashOffset  *float64
 	Cap         *string
@@ -251,7 +252,7 @@ func (e *Editor) AddDrawParam(draw DrawParam) (string, error) {
 	return e.addEditorDrawParam(cloneEditorData(draw))
 }
 
-// StyleObjects 原子更新对象透明度、文字颜色及路径填充和描边样式
+// StyleObjects 原子更新对象透明度及文字、路径的填充和描边样式
 // 入参: page 页面索引, ids 对象标识, style 待修改属性
 // 返回: error 错误信息
 func (e *Editor) StyleObjects(page int, ids []string, style ObjectStyle) error {
@@ -260,7 +261,7 @@ func (e *Editor) StyleObjects(page int, ids []string, style ObjectStyle) error {
 		return err
 	}
 	for i := range objects {
-		if style.Fill != nil || style.Stroke != nil || style.FillColor != nil || style.StrokeColor != nil || style.LineWidth != nil {
+		if style.Fill != nil || style.Stroke != nil || style.FillColor != nil || style.StrokeColor != nil || style.LineWidth != nil || style.MiterLimit != nil || style.DashPattern != nil || style.DashOffset != nil || style.Cap != nil || style.Join != nil {
 			capability, err := e.ObjectCapabilities(page, ids[i])
 			if err != nil {
 				return err
@@ -278,8 +279,8 @@ func (e *Editor) StyleObjects(page int, ids []string, style ObjectStyle) error {
 }
 
 // CopyStyle 将同类型对象的外观复制到选区，不复制内容、位置、资源数据或动作
-// 文字复制字体、字号、颜色及透明度，沿用目标段落设置；字体标识须属于当前文档
-// 路径按页面中的实际线宽和虚线长度复制，保持目标变换
+// 文字复制字体、字号、填充、描边及透明度，沿用目标段落设置；字体标识须属于当前文档
+// 描边按页面中的实际线宽和虚线长度复制，保持目标变换
 // 入参: page 目标页面索引, ids 目标对象标识, source 样式来源快照
 // 返回: error 错误信息
 func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err error) {
@@ -306,21 +307,9 @@ func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err er
 			}
 		}
 	}()
-	if source.Type == "TextObject" && source.TextObject.FillColor == nil || source.Type == "PathObject" && (source.PathObject.FillColor == nil || source.PathObject.StrokeColor == nil) {
-		black, err := e.RGBColor(color.NRGBA{A: 255})
-		if err != nil {
-			return err
-		}
-		if source.Type == "TextObject" {
-			source.TextObject.FillColor = black
-		} else {
-			if source.PathObject.FillColor == nil {
-				source.PathObject.FillColor = black
-			}
-			if source.PathObject.StrokeColor == nil {
-				source.PathObject.StrokeColor = (*StrokeColor)(black)
-			}
-		}
+	source, err = e.explicitDefaultPaint(source)
+	if err != nil {
+		return err
 	}
 	if source.Type == "TextObject" {
 		objects, err = e.styleTextObjects(objects, TextStyle{Font: source.TextObject.Font, Size: source.TextObject.Size})
@@ -328,8 +317,9 @@ func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err er
 			return err
 		}
 		for i := range objects {
-			objects[i].TextObject.FillColor = cloneEditorData(source.TextObject.FillColor)
-			objects[i].TextObject.Alpha = cloneEditorData(source.TextObject.Alpha)
+			text := objects[i].TextObject
+			style := copyEditorPathStyle(text.pathStyle(), source.TextObject.pathStyle(), editorStrokeScale(source.TextObject.CTM)/editorStrokeScale(text.CTM))
+			objects[i].TextObject = text.withPathStyle(style)
 		}
 		return e.UpdateObjects(page, objects)
 	}
@@ -344,6 +334,44 @@ func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err er
 		objects[i] = object
 	}
 	return e.updateObjects(page, objects, true)
+}
+
+// explicitDefaultPaint 将样式快照的缺省颜色写为显式颜色，避免继承目标容器颜色
+// 入参: object 已解析继承样式的文字或路径，其他类型保持不变
+// 返回: GraphicObject 颜色完整的样式快照, error 颜色资源错误
+func (e *Editor) explicitDefaultPaint(object GraphicObject) (GraphicObject, error) {
+	var fill **FillColor
+	var stroke **StrokeColor
+	text := object.Type == "TextObject"
+	if text {
+		fill, stroke = &object.TextObject.FillColor, &object.TextObject.StrokeColor
+	} else if object.Type == "PathObject" {
+		fill, stroke = &object.PathObject.FillColor, &object.PathObject.StrokeColor
+	} else {
+		return object, nil
+	}
+	if *fill != nil && *stroke != nil {
+		return object, nil
+	}
+	black, err := e.RGBColor(color.NRGBA{A: 255})
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	transparent, zero := *black, 0
+	transparent.Alpha = &zero
+	if *fill == nil {
+		*fill = &transparent
+		if text {
+			*fill = black
+		}
+	}
+	if *stroke == nil {
+		*stroke = (*StrokeColor)(black)
+		if text {
+			*stroke = (*StrokeColor)(&transparent)
+		}
+	}
+	return object, nil
 }
 
 // StyleImageBorders 原子修改图片边框，保留未修改的颜色、线型及原文扩展
@@ -498,26 +526,28 @@ func (e *Editor) resolveEditorStyleDefaults(object GraphicObject, base *DrawPara
 	if object.Type == "PathObject" {
 		obj := &object.PathObject
 		style = mergeDrawParam(*style, &DrawParam{LineWidth: obj.LineWidth, LineWidthSet: obj.LineWidthSet, Join: obj.Join, Cap: obj.Cap,
-			MiterLimit: obj.MiterLimit, DashPattern: obj.DashPattern, dashPatternSet: obj.dashPatternSet, DashOffset: obj.DashOffset,
+			MiterLimit: obj.MiterLimit, MiterLimitSet: obj.MiterLimitSet, DashPattern: obj.DashPattern, dashPatternSet: obj.dashPatternSet, DashOffset: obj.DashOffset,
 			FillColor: obj.FillColor, StrokeColor: obj.StrokeColor})
 		obj.DrawParam = ""
 		obj.LineWidth, obj.Join, obj.Cap = style.LineWidth, style.Join, style.Cap
 		obj.LineWidthSet = style.LineWidthSet
 		obj.MiterLimit, obj.DashPattern, obj.DashOffset = style.MiterLimit, style.DashPattern, style.DashOffset
+		obj.MiterLimitSet = style.MiterLimitSet
 		obj.dashPatternSet = style.dashPatternSet
 		obj.FillColor, obj.StrokeColor = style.FillColor, style.StrokeColor
 	} else {
 		obj := &object.TextObject
-		if style.Cap != "" && style.Cap != "Butt" || style.DashPattern != "" || style.DashOffset != nil && *style.DashOffset != 0 {
-			return GraphicObject{}, &EditError{Code: EditUnsupportedStyle, Err: fmt.Errorf("text draw parameters require unsupported stroke styles")}
-		}
 		style = mergeDrawParam(*style, &DrawParam{LineWidth: obj.LineWidth, LineWidthSet: obj.LineWidthSet, Join: obj.Join,
-			MiterLimit: obj.MiterLimit, FillColor: obj.FillColor, StrokeColor: obj.StrokeColor})
+			MiterLimit: obj.MiterLimit, MiterLimitSet: obj.MiterLimitSet, FillColor: obj.FillColor, StrokeColor: obj.StrokeColor, Cap: obj.Cap,
+			DashPattern: obj.DashPattern, dashPatternSet: obj.dashPatternSet, DashOffset: obj.DashOffset})
 		text := mergeDrawParam(*dp, &DrawParam{Font: obj.Font, Size: obj.Size, Weight: obj.Weight, Italic: obj.Italic})
 		obj.DrawParam = ""
 		obj.Font, obj.Size, obj.Weight, obj.Italic = text.Font, text.Size, text.Weight, text.Italic
 		obj.LineWidth, obj.Join, obj.MiterLimit = style.LineWidth, style.Join, style.MiterLimit
+		obj.MiterLimitSet = style.MiterLimitSet
 		obj.LineWidthSet = style.LineWidthSet
+		obj.Cap, obj.DashPattern, obj.DashOffset = style.Cap, style.DashPattern, style.DashOffset
+		obj.dashPatternSet = style.dashPatternSet
 		obj.FillColor, obj.StrokeColor = style.FillColor, style.StrokeColor
 	}
 	for _, color := range []*FillColor{style.FillColor, (*FillColor)(style.StrokeColor)} {
@@ -535,10 +565,10 @@ func (e *Editor) styleObject(object GraphicObject, style ObjectStyle) (GraphicOb
 	if style.Alpha != nil && (*style.Alpha < 0 || *style.Alpha > 255) {
 		return GraphicObject{}, fmt.Errorf("alpha must be between 0 and 255")
 	}
-	stroke := style.DashPattern != nil || style.DashOffset != nil || style.Cap != nil || style.Join != nil
+	stroke := style.DashPattern != nil || style.DashOffset != nil || style.Cap != nil || style.Join != nil || style.MiterLimit != nil
 	paint := style.Fill != nil || style.Stroke != nil || style.StrokeColor != nil || style.LineWidth != nil
-	if (stroke || paint) && object.Type != "PathObject" {
-		return GraphicObject{}, fmt.Errorf("stroke style requires path objects")
+	if (stroke || paint) && object.Type != "PathObject" && object.Type != "TextObject" {
+		return GraphicObject{}, fmt.Errorf("stroke style requires text or path objects")
 	}
 	if style.FillColor != nil && object.Type != "TextObject" && object.Type != "PathObject" {
 		return GraphicObject{}, fmt.Errorf("fill color requires text or path objects")
@@ -551,13 +581,6 @@ func (e *Editor) styleObject(object GraphicObject, style ObjectStyle) (GraphicOb
 		}
 	}
 	switch object.Type {
-	case "TextObject":
-		if style.Alpha != nil {
-			object.TextObject.Alpha = style.Alpha
-		}
-		if style.FillColor != nil {
-			object.TextObject.FillColor = editorStyleColor(style.FillColor, object.TextObject.FillColor)
-		}
 	case "ImageObject":
 		if style.Alpha != nil {
 			object.ImageObject.Alpha = style.Alpha
@@ -566,8 +589,11 @@ func (e *Editor) styleObject(object GraphicObject, style ObjectStyle) (GraphicOb
 		if style.Alpha != nil {
 			object.CompositeGraphicUnit.Alpha = style.Alpha
 		}
-	case "PathObject":
-		path := &object.PathObject
+	case "TextObject", "PathObject":
+		path := object.PathObject
+		if object.Type == "TextObject" {
+			path = object.TextObject.pathStyle()
+		}
 		if style.Alpha != nil {
 			path.Alpha = style.Alpha
 		}
@@ -603,10 +629,19 @@ func (e *Editor) styleObject(object GraphicObject, style ObjectStyle) (GraphicOb
 		if style.Join != nil {
 			path.Join = *style.Join
 		}
+		if style.MiterLimit != nil {
+			path.MiterLimit = *style.MiterLimit
+			path.MiterLimitSet = path.MiterLimit == 0
+		}
 		if stroke {
-			if err := validateEditorStroke(*path); err != nil {
+			if err := validateEditorStroke(path); err != nil {
 				return GraphicObject{}, err
 			}
+		}
+		if object.Type == "TextObject" {
+			object.TextObject = object.TextObject.withPathStyle(path)
+		} else {
+			object.PathObject = path
 		}
 	default:
 		return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
@@ -633,7 +668,7 @@ func (e *Editor) validateCopyStyle(source GraphicObject) error {
 	var colors []*FillColor
 	switch source.Type {
 	case "TextObject":
-		alpha, colors = source.TextObject.Alpha, []*FillColor{source.TextObject.FillColor}
+		return e.validateCopyStyle(GraphicObject{Type: "PathObject", PathObject: source.TextObject.pathStyle()})
 	case "PathObject":
 		from := source.PathObject
 		alpha, colors = from.Alpha, []*FillColor{from.FillColor, (*FillColor)(from.StrokeColor)}
@@ -668,6 +703,7 @@ func copyEditorPathStyle(to, from PathObject, scale float64) PathObject {
 	to.FillColor, to.StrokeColor = from.FillColor, from.StrokeColor
 	to.LineWidth, to.Cap, to.Join, to.MiterLimit = from.LineWidth, from.Cap, from.Join, from.MiterLimit
 	to.LineWidthSet = from.LineWidthSet
+	to.MiterLimitSet = from.MiterLimitSet
 	to.DashPattern, to.DashOffset, to.dashPatternSet = from.DashPattern, from.DashOffset, true
 	if to.LineWidth == 0 && !to.LineWidthSet {
 		to.LineWidth = defaultPathLineWidth
@@ -678,7 +714,7 @@ func copyEditorPathStyle(to, from PathObject, scale float64) PathObject {
 	if to.Join == "" {
 		to.Join = "Miter"
 	}
-	if to.MiterLimit == 0 {
+	if to.MiterLimit == 0 && !to.MiterLimitSet {
 		to.MiterLimit = defaultMiterLimit
 	}
 	if to.DashOffset == nil {
@@ -757,6 +793,9 @@ func validateEditorStroke(path PathObject) error {
 	if err != nil {
 		return err
 	}
+	if len(values) < 2 {
+		return fmt.Errorf("dash pattern requires at least two lengths")
+	}
 	total := 0.0
 	for _, value := range values {
 		if value < 0 {
@@ -766,6 +805,9 @@ func validateEditorStroke(path PathObject) error {
 	}
 	if total == 0 {
 		return fmt.Errorf("dash pattern must have a positive length")
+	}
+	if !finite(total) || len(values)%2 != 0 && !finite(total*2) {
+		return fmt.Errorf("dash period overflow")
 	}
 	return nil
 }

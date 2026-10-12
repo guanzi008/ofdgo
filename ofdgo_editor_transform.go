@@ -82,7 +82,7 @@ func (e *Editor) FlipObjects(page int, ids []string, axis string) error {
 // 入参: page 页面索引, ids 对象标识, box 页面毫米坐标中的目标范围
 // 返回: error 错误信息
 func (e *Editor) ResizeObjects(page int, ids []string, box Box) error {
-	if _, err := creationBox(editorBoxString(box)); err != nil {
+	if err := validateCreationBox(box); err != nil {
 		return err
 	}
 	objects, _, err := e.selectedObjects(page, ids)
@@ -123,10 +123,15 @@ func (obj ImageObject) ImageBounds() (Box, error) {
 	if obj.CTM == "" {
 		return box, nil
 	}
-	if _, err := creationNumbers(obj.CTM, 6); err != nil {
+	values, err := creationNumbers(obj.CTM, 6)
+	if err != nil {
 		return Box{}, err
 	}
-	return TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(obj.CTM)).TransformBox(Box{W: 1, H: 1}), nil
+	box = TranslationMatrix(box.X, box.Y).Multiply(MatrixFromValues([6]float64(values))).TransformBox(Box{W: 1, H: 1})
+	if !finite(box.X) || !finite(box.Y) || !finite(box.W) || !finite(box.H) || !finite(box.X+box.W) || !finite(box.Y+box.H) {
+		return Box{}, fmt.Errorf("image bounds exceed finite range")
+	}
+	return box, nil
 }
 
 // CropImage 按页面毫米坐标重设图片裁剪，保留原始资源及像素，可再次扩大裁剪区域
@@ -519,21 +524,35 @@ func cropImageObject(image *ImageObject, box Box) error {
 	if err != nil {
 		return err
 	}
-	if _, err := creationBox(editorBoxString(box)); err != nil {
+	if err := validateCreationBox(box); err != nil {
 		return err
 	}
 	if box.X < full.X-1e-9 || box.Y < full.Y-1e-9 || box.X+box.W > full.X+full.W+1e-9 || box.Y+box.H > full.Y+full.H+1e-9 {
 		return fmt.Errorf("crop must stay within the image bounds")
 	}
 	before, _ := ParseBox(image.Boundary)
+	matrix := NewMatrix(image.CTM)
 	if image.CTM == "" {
-		image.CTM = Matrix{a: before.W, d: before.H}.String()
+		matrix = Matrix{a: before.W, d: before.H}
 	}
 	if box.X != before.X || box.Y != before.Y {
-		image.CTM = TranslationMatrix(before.X-box.X, before.Y-box.Y).Multiply(NewMatrix(image.CTM)).String()
+		x, y := matrix.e+(before.X-box.X), matrix.f+(before.Y-box.Y)
+		if !finite(x) {
+			x = before.X + matrix.e - box.X
+		}
+		if !finite(y) {
+			y = before.Y + matrix.f - box.Y
+		}
+		matrix.e, matrix.f = x, y
 	}
-	image.Boundary = editorBoxString(box)
-	image.Clips = nil
+	if !finite(matrix.e) || !finite(matrix.f) {
+		return fmt.Errorf("crop transform exceeds finite range")
+	}
+	next := *image
+	if image.CTM == "" || box.X != before.X || box.Y != before.Y {
+		next.CTM = matrix.String()
+	}
+	next.Boundary, next.Clips = editorBoxString(box), nil
 	if box != full {
 		path, err := NewShape(ShapeRectangle, Box{W: box.W, H: box.H})
 		if err != nil {
@@ -541,8 +560,9 @@ func cropImageObject(image *ImageObject, box Box) error {
 		}
 		fill, stroke := true, false
 		path.Fill, path.Stroke = &fill, &stroke
-		image.Clips = &Clips{Clip: []Clip{{Area: []ClipArea{{Path: []PathObject{path}}}}}}
+		next.Clips = &Clips{Clip: []Clip{{Area: []ClipArea{{Path: []PathObject{path}}}}}}
 	}
+	*image = next
 	return nil
 }
 

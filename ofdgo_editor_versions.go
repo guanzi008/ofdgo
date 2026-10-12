@@ -29,14 +29,24 @@ import (
 // DocumentVersions 获取当前编辑文档的版本信息，包含尚未写出的修改
 // 返回: []DocumentVersionInfo 版本信息, error 读取错误
 func (e *Editor) DocumentVersions() ([]DocumentVersionInfo, error) {
+	return e.DocumentVersionsContext(context.Background())
+}
+
+// DocumentVersionsContext 获取包含未保存修改的版本信息，支持取消快照准备及描述读取
+// 入参: ctx 取消上下文
+// 返回: []DocumentVersionInfo 版本信息, error 读取或取消错误
+func (e *Editor) DocumentVersionsContext(ctx context.Context) ([]DocumentVersionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if e.source == nil {
 		return nil, nil
 	}
-	reader, err := e.Reader()
+	reader, err := e.ReaderContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return reader.DocumentVersions()
+	return reader.DocumentVersionsContext(ctx)
 }
 
 // DocumentVersionID 获取当前编辑版本的标识，主入口返回空字符串
@@ -53,22 +63,37 @@ func (e *Editor) DocumentVersionID() (string, error) {
 // 入参: id 版本标识
 // 返回: error 切换错误
 func (e *Editor) SelectVersion(id string) error {
+	return e.SelectVersionContext(context.Background(), id)
+}
+
+// SelectVersionContext 切换编辑版本并保留未保存修改，取消或失败时不改变编辑状态和历史
+// 入参: ctx 取消上下文, id 版本标识，空值选择主入口
+// 返回: error 切换或取消错误
+func (e *Editor) SelectVersionContext(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	current, err := e.DocumentVersionID()
 	if err != nil || current == id {
 		return err
 	}
-	reader, err := e.Reader()
+	reader, err := e.readerContext(ctx, nil)
 	if err != nil {
 		return err
 	}
-	view, err := reader.DocumentVersion(id)
+	view, err := reader.DocumentVersionContext(ctx, id)
 	if err != nil {
 		return err
 	}
 	before := e.transactionSnapshot()
-	if err := e.adoptDocumentReader(view); err != nil {
+	next := *e
+	if err := next.adoptDocumentReader(ctx, view); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	*e = next
 	e.recordTransaction(before)
 	return nil
 }
@@ -180,7 +205,7 @@ func (e *Editor) AddVersionContext(ctx context.Context, name string) (string, er
 		if err != nil {
 			return 0, err
 		}
-		data, err = editorVersionDefault(data, body, "")
+		data, err = editorVersionDefault(ctx, data, body, "")
 		if err != nil {
 			return 0, err
 		}
@@ -212,16 +237,42 @@ func (e *Editor) AddVersionContext(ctx context.Context, name string) (string, er
 }
 
 // SetDefaultVersion 设置下次打开使用的版本，不切换当前编辑入口，可通过Undo撤销
-// 空标识取消默认版本并使用主入口；修改OFD.xml可能使已有签名失效
+// 空标识取消默认版本并使用主入口，无主入口时不可取消；修改OFD.xml可能使已有签名失效
 // 入参: id 版本标识
 // 返回: error 设置错误
 func (e *Editor) SetDefaultVersion(id string) error {
-	versions, err := e.DocumentVersions()
+	return e.SetDefaultVersionContext(context.Background(), id)
+}
+
+// SetDefaultVersionContext 修改默认版本，取消或失败时保留编辑入口和撤销历史
+// 入参: ctx 取消上下文, id 版本标识，空值取消默认版本
+// 返回: error 设置或取消错误
+func (e *Editor) SetDefaultVersionContext(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if e.source == nil {
+		if id == "" {
+			return nil
+		}
+		return fmt.Errorf("document version not found: %s", id)
+	}
+	reader, err := e.ReaderContext(ctx)
+	if err != nil {
+		return err
+	}
+	if id == "" && reader.OFD.DocBody[reader.documentIndex].DocRoot == "" {
+		return fmt.Errorf("document has no main entry")
+	}
+	versions, err := reader.DocumentVersionsContext(ctx)
 	if err != nil {
 		return err
 	}
 	found, changed := id == "", false
 	for _, version := range versions {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		found = found || version.ID == id
 		changed = changed || version.Current != (version.ID == id)
 	}
@@ -229,14 +280,14 @@ func (e *Editor) SetDefaultVersion(id string) error {
 		return fmt.Errorf("document version not found: %s", id)
 	}
 	if !changed {
-		return nil
+		return ctx.Err()
 	}
-	return e.editDocuments(func(reader *Reader, data []byte, root *editorXML) (int, error) {
+	return e.editDocumentSnapshot(ctx, reader, func(reader *Reader, data []byte, root *editorXML) (int, error) {
 		current, err := reader.DocumentVersionID()
 		if err != nil {
 			return 0, err
 		}
-		updated, err := editorVersionDefault(data, root.childAt("DocBody", reader.documentIndex), id)
+		updated, err := editorVersionDefault(ctx, data, root.childAt("DocBody", reader.documentIndex), id)
 		if err != nil {
 			return 0, err
 		}
@@ -250,7 +301,24 @@ func (e *Editor) SetDefaultVersion(id string) error {
 // 入参: id 版本标识, name 版本名称，空值清空名称
 // 返回: error 修改错误
 func (e *Editor) RenameVersion(id, name string) error {
-	versions, err := e.DocumentVersions()
+	return e.RenameVersionContext(context.Background(), id, name)
+}
+
+// RenameVersionContext 修改版本名称，取消或失败时保留描述文件、共享资源和撤销历史
+// 入参: ctx 取消上下文, id 版本标识, name 版本名称，空值清空名称
+// 返回: error 修改或取消错误
+func (e *Editor) RenameVersionContext(ctx context.Context, id, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if e.source == nil {
+		return fmt.Errorf("document version not found: %s", id)
+	}
+	reader, err := e.ReaderContext(ctx)
+	if err != nil {
+		return err
+	}
+	versions, err := reader.DocumentVersionsContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -259,15 +327,15 @@ func (e *Editor) RenameVersion(id, name string) error {
 		return fmt.Errorf("document version not found: %s", id)
 	}
 	if versions[index].Name == name {
-		return nil
+		return ctx.Err()
 	}
-	return e.editDocuments(func(reader *Reader, data []byte, root *editorXML) (int, error) {
+	return e.editDocumentSnapshot(ctx, reader, func(reader *Reader, data []byte, root *editorXML) (int, error) {
 		version := versions[index]
-		original, err := reader.readFile(version.Location)
+		original, err := reader.readFileViewContext(ctx, version.Location)
 		if err != nil {
 			return 0, err
 		}
-		descriptor, err := parseEditorXML(original)
+		descriptor, err := parseEditorXMLContext(ctx, original)
 		if err != nil {
 			return 0, err
 		}
@@ -278,6 +346,9 @@ func (e *Editor) RenameVersion(id, name string) error {
 		location := packageAvailableName(reader, nil, version.Location)
 		body := root.childAt("DocBody", reader.documentIndex)
 		for _, node := range body.child("Versions").children {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
 			if node.matchesOFD("Version") && node.attr("ID") == id {
 				fragment, err := editorXMLAttribute(data, node, "BaseLoc", "/"+location)
 				if err != nil {
@@ -288,7 +359,7 @@ func (e *Editor) RenameVersion(id, name string) error {
 			}
 		}
 		reader.files[location] = updated
-		if err := reader.retireVersionFiles(context.Background(), map[string]bool{version.Location: true}); err != nil {
+		if err := reader.retireVersionFiles(ctx, map[string]bool{version.Location: true}); err != nil {
 			return 0, err
 		}
 		return reader.documentIndex, nil
@@ -297,6 +368,7 @@ func (e *Editor) RenameVersion(id, name string) error {
 
 // DeleteVersion 删除版本及其独占文件，可通过Undo撤销，不删除文档主入口
 // 删除当前版本后转到剩余默认版本或主入口；修改入口可能使已有签名失效
+// 无主入口时保留至少一个版本，需要替代默认版本时选择剩余版本中版本号最大的条目
 // 入参: id 版本标识，不能为空
 // 返回: error 删除错误
 func (e *Editor) DeleteVersion(id string) error {
@@ -321,6 +393,30 @@ func (e *Editor) DeleteVersionContext(ctx context.Context, id string) error {
 		if err != nil {
 			return 0, err
 		}
+		replacement := ""
+		if reader.OFD.DocBody[reader.documentIndex].DocRoot == "" {
+			if len(versions) == 1 {
+				return 0, fmt.Errorf("document must retain at least one version")
+			}
+			var fallback *DocumentVersionInfo
+			hasDefault := false
+			for i := range versions {
+				if err := ctx.Err(); err != nil {
+					return 0, err
+				}
+				if i == index {
+					continue
+				}
+				version := &versions[i]
+				hasDefault = hasDefault || version.Current
+				if fallback == nil || version.Index > fallback.Index {
+					fallback = version
+				}
+			}
+			if !hasDefault && (versions[index].Current || current == id) {
+				replacement = fallback.ID
+			}
+		}
 		list := root.childAt("DocBody", reader.documentIndex).child("Versions")
 		for _, node := range list.children {
 			if err := ctx.Err(); err != nil {
@@ -332,6 +428,17 @@ func (e *Editor) DeleteVersionContext(ctx context.Context, id string) error {
 				}
 				reader.files["OFD.xml"] = editorPatchXML(data, []editorXMLPatch{{start: node.start, end: node.end}})
 				break
+			}
+		}
+		if replacement != "" {
+			data = reader.files["OFD.xml"]
+			root, err = parseEditorXMLContext(ctx, data)
+			if err != nil {
+				return 0, err
+			}
+			reader.files["OFD.xml"], err = editorVersionDefault(ctx, data, root.childAt("DocBody", reader.documentIndex), replacement)
+			if err != nil {
+				return 0, err
 			}
 		}
 		if current == id {
@@ -352,15 +459,21 @@ func (e *Editor) DeleteVersionContext(ctx context.Context, id string) error {
 }
 
 // editorVersionDefault 修改版本入口的Current属性，不改变条目顺序或其他属性
-// 入参: data OFD入口原文, body 文档节点, id 默认版本，空值取消默认版本
+// 入参: ctx 取消上下文, data OFD入口原文, body 文档节点, id 默认版本，空值取消默认版本
 // 返回: []byte 更新后的入口, error 属性编码错误
-func editorVersionDefault(data []byte, body *editorXML, id string) ([]byte, error) {
+func editorVersionDefault(ctx context.Context, data []byte, body *editorXML, id string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	list := body.child("Versions")
 	if list == nil {
 		return data, nil
 	}
 	var patches []editorXMLPatch
 	for _, node := range list.children {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !node.matchesOFD("Version") {
 			continue
 		}

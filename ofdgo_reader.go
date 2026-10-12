@@ -139,14 +139,25 @@ func (r *Reader) DocumentPageCountContext(ctx context.Context, index int) (int, 
 // 入参: index 文档索引，从0开始
 // 返回: *Reader 文档阅读器, error 错误信息
 func (r *Reader) Document(index int) (*Reader, error) {
+	return r.DocumentContext(context.Background(), index)
+}
+
+// DocumentContext 创建指定文档的独立阅读器，读取结构和关联内容时响应取消
+// 返回值不关闭输入文件，使用期间不得关闭持有输入文件的原阅读器
+// 入参: ctx 取消上下文, index 文档索引，从0开始
+// 返回: *Reader 文档阅读器, error 读取或取消错误
+func (r *Reader) DocumentContext(ctx context.Context, index int) (*Reader, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if index < 0 || index >= r.DocumentCount() {
 		return nil, fmt.Errorf("document index %d out of range", index)
 	}
 	next := &Reader{Path: r.Path, Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: index}
-	if err := next.initRoot(); err != nil {
+	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}
-	if _, err := next.Doc(); err != nil {
+	if _, err := next.DocContext(ctx); err != nil {
 		return nil, err
 	}
 	return next, nil
@@ -155,15 +166,65 @@ func (r *Reader) Document(index int) (*Reader, error) {
 // Doc 获取当前文档结构
 // 返回: *Document 文档结构, error 错误信息
 func (r *Reader) Doc() (*Document, error) {
-	doc, err := r.docStructure()
+	return r.DocContext(context.Background())
+}
+
+// DocContext 获取当前文档结构及关联内容，取消或失败时保留原阅读状态
+// 入参: ctx 取消上下文
+// 返回: *Document 文档结构, error 读取或取消错误
+func (r *Reader) DocContext(ctx context.Context) (*Document, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r.doc != nil && !r.relatedPending {
+		return r.doc, nil
+	}
+	view := *r
+	if r.doc == nil {
+		view.resourcesRead = maps.Clone(r.resourcesRead)
+		view.resourceFiles = maps.Clone(r.resourceFiles)
+		view.ResMap = maps.Clone(r.ResMap)
+		view.mediaCache = maps.Clone(r.mediaCache)
+		view.fontCache = maps.Clone(r.fontCache)
+		view.colorSpaceCache = maps.Clone(r.colorSpaceCache)
+		view.drawParamCache = maps.Clone(r.drawParamCache)
+		view.compositeGraphicUnitCache = maps.Clone(r.compositeGraphicUnitCache)
+	}
+	doc, err := view.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if r.relatedPending {
-		r.relatedPending = false
-		_ = r.parseAnnotations(doc)
-		_ = r.parseSignatures(doc)
+	if view.relatedPending {
+		view.Annots = maps.Clone(r.Annots)
+		for page, entries := range view.Annots {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			view.Annots[page] = slices.Clone(entries)
+		}
+		view.Stamps = maps.Clone(r.Stamps)
+		for page, entries := range view.Stamps {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			view.Stamps[page] = slices.Clone(entries)
+		}
+		_ = view.parseAnnotations(ctx, doc)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		_ = view.parseSignatures(ctx, doc)
+		view.relatedPending = false
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r.doc == nil {
+		r.commitDocumentStructure(&view)
+	} else {
+		r.relatedPending = view.relatedPending
+	}
+	r.Annots, r.Stamps, r.annotationFiles = view.Annots, view.Stamps, view.annotationFiles
 	return doc, nil
 }
 
@@ -202,9 +263,7 @@ func (r *Reader) docStructureContext(ctx context.Context) (*Document, error) {
 	if err := decoder.Decode(&doc); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal document.xml: %w", err)
 	}
-	if doc.Signatures == "" {
-		doc.Signatures = view.versionSignatures(docAttr.Signatures)
-	}
+	doc.Signatures = view.versionSignatures(docAttr.Signatures)
 	view.resourcesRead = maps.Clone(r.resourcesRead)
 	view.resourceFiles = maps.Clone(r.resourceFiles)
 	view.ResMap = maps.Clone(r.ResMap)
@@ -226,6 +285,14 @@ func (r *Reader) docStructureContext(ctx context.Context) (*Document, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	view.doc, view.relatedPending = &doc, true
+	r.commitDocumentStructure(&view)
+	return r.doc, nil
+}
+
+// commitDocumentStructure 提交已完成的文档读取，保留渲染器共享的资源索引
+// 入参: view 已验证的独立读取状态
+func (r *Reader) commitDocumentStructure(view *Reader) {
 	maps.Copy(r.resourcesRead, view.resourcesRead)
 	maps.Copy(r.resourceFiles, view.resourceFiles)
 	maps.Copy(r.ResMap, view.ResMap)
@@ -235,8 +302,7 @@ func (r *Reader) docStructureContext(ctx context.Context) (*Document, error) {
 	maps.Copy(r.drawParamCache, view.drawParamCache)
 	maps.Copy(r.compositeGraphicUnitCache, view.compositeGraphicUnitCache)
 	r.documentRoot, r.versionInfo, r.RootDir = view.documentRoot, view.versionInfo, view.RootDir
-	r.doc, r.relatedPending = &doc, true
-	return r.doc, nil
+	r.doc, r.relatedPending = view.doc, view.relatedPending
 }
 
 // PageContent 获取页面内容
@@ -244,7 +310,14 @@ func (r *Reader) docStructureContext(ctx context.Context) (*Document, error) {
 // 入参: page 页面对象
 // 返回: *PageContent 页面内容, error 错误信息
 func (r *Reader) PageContent(page Page) (*PageContent, error) {
-	return r.readPageContent(page, false, false)
+	return r.PageContentContext(context.Background(), page)
+}
+
+// PageContentContext 读取独立页面内容，取消时不返回部分页面
+// 入参: ctx 取消上下文, page 页面对象
+// 返回: *PageContent 页面内容, error 读取、解析或取消错误
+func (r *Reader) PageContentContext(ctx context.Context, page Page) (*PageContent, error) {
+	return r.readPageContent(ctx, page, false, false)
 }
 
 // PageCount 获取当前文档总页数
@@ -261,25 +334,39 @@ func (r *Reader) PageCount() (int, error) {
 // 入参: index 页面索引，从0开始
 // 返回: *PageContent 页面内容, error 错误信息
 func (r *Reader) PageContentByIndex(index int) (*PageContent, error) {
-	doc, err := r.Doc()
+	return r.PageContentByIndexContext(context.Background(), index)
+}
+
+// PageContentByIndexContext 按当前文档页面顺序读取独立页面内容
+// 入参: ctx 取消上下文, index 页面索引，从0开始
+// 返回: *PageContent 页面内容, error 索引、读取或取消错误
+func (r *Reader) PageContentByIndexContext(ctx context.Context, index int) (*PageContent, error) {
+	doc, err := r.DocContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if index < 0 || index >= len(doc.Pages.Page) {
 		return nil, fmt.Errorf("page index %d out of range", index)
 	}
-	return r.PageContent(doc.Pages.Page[index])
+	return r.PageContentContext(ctx, doc.Pages.Page[index])
 }
 
 // PageArea 读取页面区域，不解析页面图元
 // 入参: page 页面对象
 // 返回: PageArea 页面区域, error 错误信息
 func (r *Reader) PageArea(page Page) (PageArea, error) {
-	content, err := r.readPageHeader(page)
+	return r.PageAreaContext(context.Background(), page)
+}
+
+// PageAreaContext 读取页面区域并解析模板继承，不解析页面图元
+// 入参: ctx 取消上下文, page 页面对象
+// 返回: PageArea 页面区域, error 读取、解析或取消错误
+func (r *Reader) PageAreaContext(ctx context.Context, page Page) (PageArea, error) {
+	content, err := r.readPageHeaderContext(ctx, page)
 	if err != nil {
 		return PageArea{}, err
 	}
-	return r.resolvePageArea(content.Area, content.Template)
+	return r.resolvePageAreaContext(ctx, content.Area, content.Template)
 }
 
 // ResPath 按当前文档目录解析ST_Loc，包内绝对路径以根目录为基准
@@ -842,20 +929,20 @@ func resolveResourcePath(resPath, baseLoc, filePath string) string {
 }
 
 // readPageContent 读取页面，可跳过文字提取不使用的独立路径和图片
-// 入参: page 页面对象, textOnly 是否仅用于文字提取, template 是否按模板页读取
+// 入参: ctx 取消上下文, page 页面对象, textOnly 是否仅用于文字提取, template 是否按模板页读取
 // 返回: *PageContent 页面内容, error 错误信息
-func (r *Reader) readPageContent(page Page, textOnly, template bool) (*PageContent, error) {
+func (r *Reader) readPageContent(ctx context.Context, page Page, textOnly, template bool) (*PageContent, error) {
 	fullPath := r.ResPath(page.BaseLoc)
-	data, err := r.readFile(fullPath)
+	data, err := r.readFileViewContext(ctx, fullPath)
 	if err != nil {
 		return nil, err
 	}
 	var content PageContent
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
 	if textOnly {
-		decoder := &textPageTokens{Decoder: xml.NewDecoder(bytes.NewReader(data))}
-		err = xml.NewTokenDecoder(decoder).Decode(&content)
+		err = xml.NewTokenDecoder(&textPageTokens{Decoder: decoder}).Decode(&content)
 	} else {
-		err = xml.Unmarshal(data, &content)
+		err = decoder.Decode(&content)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal page content: %w", err)
@@ -865,10 +952,15 @@ func (r *Reader) readPageContent(page Page, textOnly, template bool) (*PageConte
 		content.Template = nil
 	}
 	for _, res := range content.PageRes {
-		r.loadRes("/" + resolveResourcePath(fullPath, "", res))
+		if err := r.loadResContext(ctx, "/"+resolveResourcePath(fullPath, "", res)); err != nil {
+			return nil, err
+		}
 	}
-	content.Area, err = r.resolvePageArea(content.Area, content.Template)
+	content.Area, err = r.resolvePageAreaContext(ctx, content.Area, content.Template)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	return &content, nil
@@ -890,6 +982,16 @@ func (r *Reader) loadPageResources(page Page) {
 // 入参: page 页面对象
 // 返回: PageContent 页面头部, error 错误信息
 func (r *Reader) readPageHeader(page Page) (PageContent, error) {
+	return r.readPageHeaderContext(context.Background(), page)
+}
+
+// readPageHeaderContext 读取并缓存页面头部，取消时不缓存部分结果
+// 入参: ctx 取消上下文, page 页面对象
+// 返回: PageContent 页面头部, error 读取、解析或取消错误
+func (r *Reader) readPageHeaderContext(ctx context.Context, page Page) (PageContent, error) {
+	if err := ctx.Err(); err != nil {
+		return PageContent{}, err
+	}
 	name := r.ResPath(page.BaseLoc)
 	if content, ok := r.pageHeaderCache[name]; ok {
 		return content, nil
@@ -900,9 +1002,12 @@ func (r *Reader) readPageHeader(page Page) (PageContent, error) {
 	}
 	defer f.Close()
 	var content PageContent
-	d := xml.NewDecoder(f)
+	d := xml.NewDecoder(imageInput{ReadCloser: f, context: ctx})
 scan:
 	for {
+		if err := ctx.Err(); err != nil {
+			return PageContent{}, err
+		}
 		token, err := d.Token()
 		if err == io.EOF {
 			break
@@ -939,6 +1044,9 @@ scan:
 			}
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return PageContent{}, err
+	}
 	r.pageHeaderCache[name] = content
 	return content, nil
 }
@@ -947,15 +1055,28 @@ scan:
 // 入参: area 页面区域, templates 模板引用
 // 返回: PageArea 页面区域, error 错误信息
 func (r *Reader) resolvePageArea(area PageArea, templates []Template) (PageArea, error) {
+	return r.resolvePageAreaContext(context.Background(), area, templates)
+}
+
+// resolvePageAreaContext 按模板顺序解析页面区域的继承，读取过程中响应取消
+// 入参: ctx 取消上下文, area 页面区域, templates 模板引用
+// 返回: PageArea 页面区域, error 读取或取消错误
+func (r *Reader) resolvePageAreaContext(ctx context.Context, area PageArea, templates []Template) (PageArea, error) {
+	if err := ctx.Err(); err != nil {
+		return PageArea{}, err
+	}
 	if area != (PageArea{}) || r.doc == nil {
 		return area, nil
 	}
 	for _, ref := range templates {
 		for _, template := range r.doc.CommonData.TemplatePage {
+			if err := ctx.Err(); err != nil {
+				return PageArea{}, err
+			}
 			if !sameResourceID(template.ID, ref.TemplateID) {
 				continue
 			}
-			content, err := r.readPageHeader(Page{BaseLoc: template.BaseLoc})
+			content, err := r.readPageHeaderContext(ctx, Page{BaseLoc: template.BaseLoc})
 			if err != nil {
 				return PageArea{}, err
 			}

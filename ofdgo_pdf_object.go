@@ -311,7 +311,10 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	if (paintMode == 0 || paintMode == 2) && mark.Style.FillOverprint && pdfOverprintNeedsSeparation(mark.Style.Fill) || (paintMode == 1 || paintMode == 2) && mark.Style.StrokeOverprint && pdfOverprintNeedsSeparation(mark.Style.Stroke) {
 		return &pdfgo.UnsupportedError{Feature: "text color separation overprint"}
 	}
-	if p.warning != nil && ((paintMode == 0 || paintMode == 2) && pdfGradientError(mark.Style.Fill) != nil || (paintMode == 1 || paintMode == 2) && pdfGradientError(mark.Style.Stroke) != nil) {
+	if p.warning != nil && ((paintMode == 0 || paintMode == 2) && p.gradientError(mark.Style.Fill) != nil || (paintMode == 1 || paintMode == 2) && p.gradientError(mark.Style.Stroke) != nil) {
+		if err := p.ctx.Err(); err != nil {
+			return err
+		}
 		gradient := mark
 		return p.compositeRegion(nil, pdfCompositeNode{text: &gradient}, &pdfgo.ColorSpace{Model: "DeviceRGB"}, false)
 	}
@@ -544,10 +547,14 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		box = Box{box.X - margin, box.Y - margin, box.W + 2*margin, box.H + 2*margin}
 		object.LineWidth = lineWidth / scale
 		object.LineWidthSet = object.LineWidth == 0
+		object.Cap = []string{"Butt", "Round", "Square"}[mark.Style.Cap]
 		object.Join = []string{"Miter", "Round", "Bevel"}[mark.Style.Join]
 		object.MiterLimit = mark.Style.MiterLimit
 		if len(mark.Style.Dash) > 0 {
-			return &pdfgo.UnsupportedError{Feature: "dashed text stroke"}
+			strokeScale := math.Hypot(p.matrix[0], p.matrix[1]) * sx / scale
+			object.DashPattern = pdfDashPattern(mark.Style.Dash, strokeScale)
+			phase := mark.Style.DashPhase * strokeScale
+			object.DashOffset = &phase
 		}
 	}
 	object.Boundary = pdfBoundary(box)

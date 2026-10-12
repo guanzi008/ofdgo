@@ -27,7 +27,7 @@ import (
 // 入参: page 页面索引, path 父复合路径, index 图片序号, box 页面毫米范围
 // 返回: error 错误信息
 func (e *Editor) CropCompositeImage(page int, path ObjectPath, index int, box Box) error {
-	if _, err := creationBox(editorBoxString(box)); err != nil {
+	if err := validateCreationBox(box); err != nil {
 		return err
 	}
 	return e.editCompositeObjects(page, path, []int{index}, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {

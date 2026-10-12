@@ -122,7 +122,7 @@ func (r *Reader) versionEditGraph(ctx context.Context, entry string, parts map[s
 		record := func(node *editorXML, attribute, target string) {
 			file.links = append(file.links, versionEditLink{node: node, attribute: attribute, target: target})
 		}
-		if err := view.scanDocumentFileReferences(ctx, name, false, add, record); err != nil {
+		if err := view.scanDocumentFileReferences(ctx, name, false, add, record, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -182,7 +182,7 @@ func (r *Reader) versionSharedFiles(ctx context.Context) (map[string]bool, error
 			shared[file.Location] = true
 		}
 	}
-	if r.versionInfo != nil {
+	if r.versionInfo != nil && r.OFD.DocBody[r.documentIndex].DocRoot != "" {
 		entry, err := versionFileLocation("OFD.xml", r.OFD.DocBody[r.documentIndex].DocRoot)
 		if err != nil {
 			return nil, err
@@ -238,9 +238,9 @@ func (r *Reader) versionChanges(ctx context.Context, changes map[string][]byte) 
 }
 
 // versionFileUnchanged 分块比较原文件与待写入内容，读取失败时保留替换内容
-// 入参: ctx 取消上下文, name 包内路径, data 待写入内容, buffer 非空比较缓冲区
+// 入参: ctx 取消上下文, name 包内路径, data 待写入内容, buffer 复用缓冲区，比较ZIP条目时按需分配
 // 返回: bool 内容相同, error 取消错误
-func (r *Reader) versionFileUnchanged(ctx context.Context, name string, data, buffer []byte) (bool, error) {
+func (r *Reader) versionFileUnchanged(ctx context.Context, name string, data []byte, buffer *[]byte) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -253,7 +253,7 @@ func (r *Reader) versionFileUnchanged(ctx context.Context, name string, data, bu
 			if err := ctx.Err(); err != nil {
 				return false, err
 			}
-			end := offset + min(len(buffer), len(data)-offset)
+			end := offset + min(32*1024, len(data)-offset)
 			if !bytes.Equal(original[offset:end], data[offset:end]) {
 				return false, nil
 			}
@@ -270,9 +270,12 @@ func (r *Reader) versionFileUnchanged(ctx context.Context, name string, data, bu
 		return false, nil
 	}
 	defer input.Close()
+	if len(*buffer) == 0 {
+		*buffer = make([]byte, 32*1024)
+	}
 	reader := imageInput{ReadCloser: input, context: ctx}
 	for len(data) != 0 {
-		block := buffer[:min(len(buffer), len(data))]
+		block := (*buffer)[:min(len(*buffer), len(data))]
 		if _, err := io.ReadFull(&reader, block); err != nil {
 			return false, ctx.Err()
 		}
@@ -281,11 +284,11 @@ func (r *Reader) versionFileUnchanged(ctx context.Context, name string, data, bu
 		}
 		data = data[len(block):]
 	}
-	n, err := reader.Read(buffer[:1])
+	n, err := reader.Read((*buffer)[:1])
 	return n == 0 && err == io.EOF, ctx.Err()
 }
 
-// versionOutputChanges 隔离文档或版本改动并同步删除清单，保留其他入口仍需使用的文件
+// versionOutputChanges 隔离文档或版本改动并同步删除清单，失败时不修改调用方清单
 // 入参: ctx 取消上下文, changes 待写入条目, removed 待删除条目，返回前移除受保护路径, generated 本次自产页面及引用，随隔离路径更新
 // 返回: map[string][]byte 隔离后的修改集, error 读取、引用或结构错误
 func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences) (map[string][]byte, error) {
@@ -303,12 +306,12 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 	if parts == nil {
 		parts = make(map[string][]byte)
 	}
-	buffer := make([]byte, 32*1024)
+	var buffer []byte
 	for name, data := range parts {
 		if generated[name].stagedLeaf(data) {
 			continue
 		}
-		same, err := r.versionFileUnchanged(ctx, name, data, buffer)
+		same, err := r.versionFileUnchanged(ctx, name, data, &buffer)
 		if err != nil {
 			return nil, err
 		}
@@ -339,6 +342,8 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 	if err != nil {
 		return nil, err
 	}
+	outputRemoved := removed
+	removed = maps.Clone(removed)
 	for name := range removed {
 		if graph.used[name] {
 			delete(removed, name)
@@ -433,6 +438,11 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	for name := range outputRemoved {
+		if _, ok := removed[name]; !ok {
+			delete(outputRemoved, name)
+		}
 	}
 	for source, target := range paths {
 		if known := generated[source]; known.stagedLeaf(parts[target]) {

@@ -1045,6 +1045,11 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 				obj.LineWidth = defaultPathLineWidth
 			}
 			obj.LineWidth *= scale
+			obj.DashPattern = scaleTextNumbers(obj.DashPattern, scale)
+			if obj.DashOffset != nil {
+				offset := *obj.DashOffset * scale
+				obj.DashOffset = &offset
+			}
 			for i := range obj.TextCode {
 				code := &obj.TextCode[i]
 				for _, value := range []*string{&code.X, &code.Y, &code.DeltaX, &code.DeltaY} {
@@ -1099,6 +1104,9 @@ func scaleTextNumbers(value string, scale float64) string {
 // 入参: obj 文字对象
 // 返回: error 错误信息
 func (e *Editor) prepareText(obj *TextObject) error {
+	if err := validateEditorStroke(obj.pathStyle()); err != nil {
+		return err
+	}
 	if id := editorResourceID(obj.Font); id != "" {
 		obj.Font = id
 	}
@@ -1133,7 +1141,7 @@ func (e *Editor) prepareText(obj *TextObject) error {
 	if err := validateTextGlyphs(*obj, glyphCount); err != nil {
 		return err
 	}
-	if !finite(obj.HScale) || obj.HScale < 0 || !finite(obj.LineWidth) || obj.LineWidth < 0 || !finite(obj.MiterLimit) || obj.MiterLimit < 0 {
+	if !finite(obj.HScale) || obj.HScale < 0 {
 		return fmt.Errorf("invalid text dimensions")
 	}
 	if obj.Weight < 0 || obj.Weight > 900 || obj.Weight%100 != 0 {
@@ -1294,10 +1302,24 @@ func creationBox(value string) (Box, error) {
 	if err != nil {
 		return Box{}, err
 	}
-	if values[2] <= 0 || values[3] <= 0 {
-		return Box{}, fmt.Errorf("boundary dimensions must be positive")
+	box := Box{X: values[0], Y: values[1], W: values[2], H: values[3]}
+	if err := validateCreationBox(box); err != nil {
+		return Box{}, err
 	}
-	return Box{X: values[0], Y: values[1], W: values[2], H: values[3]}, nil
+	return box, nil
+}
+
+// validateCreationBox 校验编辑范围的有限坐标、端点及正尺寸
+// 入参: box 矩形范围
+// 返回: error 非有限坐标或非正尺寸
+func validateCreationBox(box Box) error {
+	if !finite(box.X) || !finite(box.Y) || !finite(box.W) || !finite(box.H) || !finite(box.X+box.W) || !finite(box.Y+box.H) {
+		return fmt.Errorf("boundary coordinates must be finite")
+	}
+	if box.W <= 0 || box.H <= 0 {
+		return fmt.Errorf("boundary dimensions must be positive")
+	}
+	return nil
 }
 
 // creationColor 校验默认RGB颜色空间中的基本颜色

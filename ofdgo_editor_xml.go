@@ -318,7 +318,7 @@ func editorXMLSupported(node *editorXML) bool {
 	var allowed, children string
 	switch node.name.Local {
 	case "TextObject", "Text":
-		allowed, children = "ID Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Italic Visible Stroke Fill Alpha", "Clips FillColor StrokeColor CGTransform TextCode"
+		allowed, children = "ID Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Cap DashPattern DashOffset Italic Visible Stroke Fill Alpha", "Clips FillColor StrokeColor CGTransform TextCode"
 	case "CGTransform":
 		allowed, children = "CodePosition CodeCount GlyphCount", "Glyphs"
 	case "Glyphs":
@@ -362,7 +362,7 @@ func editorXMLTransformable(node *editorXML) bool {
 	var attrs string
 	switch node.name.Local {
 	case "TextObject":
-		attrs = "ID Boundary CTM DrawParam Font Size HScale VScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Italic Decoration Visible Stroke Fill Alpha"
+		attrs = "ID Boundary CTM DrawParam Font Size HScale VScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Cap DashPattern DashOffset Italic Decoration Visible Stroke Fill Alpha"
 	case "PathObject":
 		attrs = "ID Boundary CTM DrawParam LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha"
 	case "ImageObject":

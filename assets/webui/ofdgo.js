@@ -2225,7 +2225,7 @@ function updateVersionControls() {
 	el.versionList.inert = busy || Boolean(manager?.loading);
 	el.versionName.disabled = el.versionAdd.disabled = unavailable || !state.editing;
 	el.versionRename.disabled = unavailable || !state.editing || !entry?.id || el.versionName.value.trim() === entry.name;
-	el.versionDelete.disabled = unavailable || !state.editing || !entry?.id;
+	el.versionDelete.disabled = unavailable || !state.editing || !entry?.id || manager.entries.length < 2;
 	el.versionDefault.disabled = unavailable || !state.editing || Boolean(entry?.default);
 	el.versionSelect.disabled = unavailable || entry?.id === (state.doc?.documentVersion || "");
 }
@@ -2695,7 +2695,7 @@ async function editCanvasObject(item) {
 	}
 	if (item.type === "TextObject") {
 		if (!canEditObject(item, "textContent")) {
-			if (!item.scoped && canEditObject(item, "rewriteText")) {
+			if (canEditObject(item, "rewriteText")) {
 				state.sourceText = { item, openSeq: state.openSeq };
 				el.sourceTextValue.value = item.text;
 				el.sourceTextStatus.textContent = "";
@@ -9081,7 +9081,7 @@ function updateObjectControls(item, reset = false) {
 	el.resetCropButton.disabled = canEditObject(item, "resetCrop") ? disabled : el.cropImageButton.disabled || !cropping && (item.scoped ? !item.cropped : !item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
 	el.objectDistribute.disabled = el.objectAlign.disabled || !item.items || item.items.length < 3;
 	el.editObjectButton.disabled = disabled || Boolean(item.items) || !canEditObject(item, "enter") && (item.type === "PathObject"
-		|| !(item.type === "TextObject" && !item.scoped && canEditObject(item, "rewriteText")) && !canEditObject(item, item.type === "TextObject" ? "textContent" : item.type === "ImageObject" ? "replaceImage" : "update"));
+		|| !(item.type === "TextObject" && canEditObject(item, "rewriteText")) && !canEditObject(item, item.type === "TextObject" ? "textContent" : item.type === "ImageObject" ? "replaceImage" : "update"));
 	el.editObjectButton.textContent = canEditObject(item, "enter") ? "进入" : item?.type === "ImageObject" ? "替换" : "修改";
 	el.editObjectButton.title = canEditObject(item, "enter") ? item?.type === "Annotation" ? "进入注解" : "进入组合" : item?.type === "ImageObject" ? "替换图片" : item?.type === "Annotation" ? "修改注解" : "修改对象";
 	el.editObjectButton.setAttribute("aria-label", el.editObjectButton.title);

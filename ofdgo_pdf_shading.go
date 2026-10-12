@@ -180,10 +180,13 @@ func pdfGradientStopsError(stops []pdfgo.GradientStop, space *pdfgo.ColorSpace) 
 	return nil
 }
 
-// pdfGradientError 检查渐变函数与源空间能否原生映射为OFD分段
+// gradientError 检查渐变函数与源空间能否原生映射为OFD分段
 // 入参: paint 画刷
-// 返回: error 不可等价表达的渐变
-func pdfGradientError(paint pdfgo.Paint) error {
+// 返回: error 不可等价表达的渐变或取消错误
+func (p *pdfImporter) gradientError(paint pdfgo.Paint) error {
+	if err := p.ctx.Err(); err != nil {
+		return err
+	}
 	if paint.Shading != nil {
 		return &pdfgo.UnsupportedError{Feature: "shading pattern state compositing"}
 	}
@@ -192,26 +195,254 @@ func pdfGradientError(paint pdfgo.Paint) error {
 	}
 	if paint.Mesh != nil {
 		mesh := paint.Mesh
-		if len(mesh.Patches) != 0 || len(mesh.Triangles) == 0 || mesh.UsesFunction() || mesh.Background != nil || mesh.Bounds != nil {
+		if len(mesh.Patches) != 0 || len(mesh.Triangles) == 0 {
 			return &pdfgo.UnsupportedError{Feature: "nonlinear mesh conversion"}
+		}
+		for i := range mesh.Triangles {
+			if err := p.ctx.Err(); err != nil {
+				return err
+			}
+			if _, err := mesh.LinearColors(i); err != nil {
+				if _, err := p.linearMeshTriangles(mesh, i); err != nil {
+					return err
+				}
+			}
 		}
 		if mesh.Space.Calibrated() && !pdfICCTransfer(mesh.Space) && !mesh.Space.SRGBEquivalent() {
 			return &pdfgo.UnsupportedError{Feature: "nonlinear calibrated mesh conversion"}
 		}
 	}
 	if paint.Axial != nil {
-		if paint.Axial.Background != nil || paint.Axial.Bounds != nil {
-			return &pdfgo.UnsupportedError{Feature: "bounded axial pattern conversion"}
-		}
 		return pdfGradientStopsError(paint.Axial.Stops, paint.Axial.Space)
 	}
 	if paint.Radial != nil {
-		if paint.Radial.Background != nil || paint.Radial.Bounds != nil {
-			return &pdfgo.UnsupportedError{Feature: "bounded radial pattern conversion"}
+		if paint.Radial.Background != nil && !pdfRadialNested(paint.Radial) {
+			return &pdfgo.UnsupportedError{Feature: "radial pattern background conversion"}
 		}
 		return pdfGradientStopsError(paint.Radial.Stops, paint.Radial.Space)
 	}
-	return nil
+	return p.ctx.Err()
+}
+
+// pdfGradientPattern 判断渐变是否需要底纹保留边界或背景
+// 入参: paint PDF画刷
+// 返回: bool 是否需要底纹单元
+func pdfGradientPattern(paint pdfgo.Paint) bool {
+	return paint.Axial != nil && (paint.Axial.Bounds != nil || paint.Axial.Background != nil && paint.Axial.Extend != [2]bool{true, true}) || paint.Radial != nil && (paint.Radial.Bounds != nil || paint.Radial.Background != nil && paint.Radial.Extend != [2]bool{true, true}) || paint.Mesh != nil && paint.Mesh.Bounds != nil
+}
+
+// pdfRadialNested 判断起止圆是否严格内含，确保绘制区由内外圆边界唯一限定
+// 入参: gradient 径向渐变
+// 返回: bool 是否严格内含
+func pdfRadialNested(gradient *pdfgo.RadialGradient) bool {
+	return math.Hypot(gradient.End.X-gradient.Start.X, gradient.End.Y-gradient.Start.Y) < math.Abs(gradient.EndRadius-gradient.StartRadius)
+}
+
+// gradientPattern 用底纹单元保留渐变边界及背景，单元覆盖整个对象以避免重复绘制
+// 入参: paint PDF渐变画刷, box 页面坐标中的对象边界
+// 返回: *FillColor OFD底纹颜色, error 坐标或渐变转换错误
+func (p *pdfImporter) gradientPattern(paint pdfgo.Paint, box Box) (*FillColor, error) {
+	if !finite(box.X) || !finite(box.Y) || !finite(box.W) || !finite(box.H) || box.W <= 0 || box.H <= 0 {
+		return nil, fmt.Errorf("invalid PDF gradient paint bounds")
+	}
+	var bounds *pdfgo.Rectangle
+	var background *[4]float64
+	var space *pdfgo.ColorSpace
+	var intent pdfgo.Name
+	var extend [2]bool
+	matrix := pdfgo.Identity()
+	plain := paint
+	plain.Alpha = 1
+	if paint.Axial != nil {
+		gradient := *paint.Axial
+		bounds, matrix = gradient.Bounds, gradient.Matrix
+		background, space, intent, extend = gradient.Background, gradient.Space, gradient.Intent, gradient.Extend
+		gradient.Bounds = nil
+		gradient.Background = nil
+		plain.Axial = &gradient
+	} else if paint.Radial != nil {
+		gradient := *paint.Radial
+		bounds, matrix = gradient.Bounds, gradient.Matrix
+		background, space, intent, extend = gradient.Background, gradient.Space, gradient.Intent, gradient.Extend
+		gradient.Bounds = nil
+		gradient.Background = nil
+		plain.Radial = &gradient
+	} else {
+		gradient := *paint.Mesh
+		bounds, matrix = gradient.Bounds, gradient.Matrix
+		gradient.Bounds = nil
+		plain.Mesh = &gradient
+	}
+	if matrix == (pdfgo.Matrix{}) {
+		matrix = pdfgo.Identity()
+	}
+	matrix = p.matrix.Mul(matrix)
+	if _, ok := matrix.Inverse(); !ok {
+		return nil, fmt.Errorf("invalid PDF gradient bounds matrix")
+	}
+	fill, err := p.paintColor(plain, box)
+	if err != nil {
+		return nil, err
+	}
+	filled, stroked := true, false
+	boundary := pdfBoundary(Box{W: box.W, H: box.H})
+	object := PathObject{Boundary: boundary, AbbreviatedData: "M 0 0 L " + pdfNumbers(box.W, 0) + " L " + pdfNumbers(box.W, box.H) + " L " + pdfNumbers(0, box.H) + " C", Fill: &filled, Stroke: &stroked, FillColor: fill}
+	if bounds != nil {
+		points := [4]pdfgo.Point{{X: bounds.XMin, Y: bounds.YMin}, {X: bounds.XMax, Y: bounds.YMin}, {X: bounds.XMax, Y: bounds.YMax}, {X: bounds.XMin, Y: bounds.YMax}}
+		data := ""
+		for i, point := range points {
+			point = matrix.Apply(point)
+			if !finite(point.X) || !finite(point.Y) {
+				return nil, fmt.Errorf("invalid PDF gradient bounds")
+			}
+			if i == 0 {
+				data = "M "
+			} else {
+				data += " L "
+			}
+			data += pdfNumbers(point.X-box.X, point.Y-box.Y)
+		}
+		clip := PathObject{Boundary: boundary, AbbreviatedData: data + " C", Fill: &filled, Stroke: &stroked}
+		object.Clips = &Clips{Clip: []Clip{{Area: []ClipArea{{Path: []PathObject{clip}}}}}}
+	}
+	objects := []PathObject{object}
+	if background != nil && extend != [2]bool{true, true} {
+		data := ""
+		if paint.Axial != nil {
+			data, err = pdfAxialBackground(fill.AxialShd, box)
+		} else {
+			data, err = pdfRadialBackground(paint.Radial, matrix, box)
+			clip := object
+			clip.FillColor, clip.Clips = nil, nil
+			clips := &Clips{Clip: []Clip{{Area: []ClipArea{{Path: []PathObject{clip}}}}}}
+			if object.Clips != nil {
+				clips.Clip = append(clips.Clip, object.Clips.Clip...)
+			}
+			object.Clips = clips
+			object.Rule = "Even-Odd"
+		}
+		if err != nil {
+			return nil, err
+		}
+		if data != "" {
+			color, err := p.gradientBackgroundColor(*background, space, intent)
+			if err != nil {
+				return nil, err
+			}
+			object.AbbreviatedData = data
+			object.FillColor = &FillColor{Value: color.Value, ColorSpace: color.ColorSpace}
+			objects = append(objects, object)
+		}
+	}
+	color := p.color(paint)
+	color.Pattern = &Pattern{Width: box.W, Height: box.H, RelativeTo: "Page", CTM: pdfNumbers(1, 0, 0, 1, box.X, box.Y), CellContent: PatternContent{PathObject: objects}}
+	return color, nil
+}
+
+// gradientBackgroundColor 保留渐变背景的源颜色分量并复用颜色空间资源
+// 入参: values 背景分量, space 源颜色空间, intent 渲染意图
+// 返回: ShdColor OFD基本颜色, error 颜色转换错误
+func (p *pdfImporter) gradientBackgroundColor(values [4]float64, space *pdfgo.ColorSpace, intent pdfgo.Name) (ShdColor, error) {
+	if space == nil || space.Components() < 1 || space.Components() > 4 {
+		return ShdColor{}, fmt.Errorf("invalid PDF gradient background color space")
+	}
+	stop := pdfgo.GradientStop{Values: values}
+	if !pdfICCTransfer(space) && (space.Model != "DeviceCMYK" || space.Calibrated()) {
+		var err error
+		stop.RGB, err = space.RGB(values[:space.Components()], intent)
+		if err != nil {
+			return ShdColor{}, err
+		}
+	}
+	segments, err := p.gradientSegments([]pdfgo.GradientStop{stop}, space, intent)
+	if err != nil {
+		return ShdColor{}, err
+	}
+	return segments[0].Color, nil
+}
+
+// pdfRadialBackground 用圆弧保留内含双圆的背景区域，不离散化渐变边界
+// 入参: gradient 源渐变, matrix 渐变到页面的矩阵, box 对象边界
+// 返回: string 奇偶填充背景路径, error 几何转换错误
+func pdfRadialBackground(gradient *pdfgo.RadialGradient, matrix pdfgo.Matrix, box Box) (string, error) {
+	inner, outer := gradient.Start, gradient.End
+	r0, r1, extend := gradient.StartRadius, gradient.EndRadius, gradient.Extend
+	if r1 < r0 {
+		inner, outer, r0, r1 = outer, inner, r1, r0
+		extend = [2]bool{extend[1], extend[0]}
+	}
+	var circles, path GeometryPath
+	if !extend[1] {
+		path = geometryRectangle(Box{W: box.W, H: box.H})
+		circles = geometryCircle(RasterPoint{X: outer.X, Y: outer.Y}, r1)
+	}
+	if !extend[0] && r0 > 0 {
+		circles = append(circles, geometryCircle(RasterPoint{X: inner.X, Y: inner.Y}, r0)...)
+	}
+	local := Matrix{a: matrix[0], b: matrix[1], c: matrix[2], d: matrix[3], e: matrix[4] - box.X, f: matrix[5] - box.Y}
+	circles, err := circles.Transform(local)
+	if err != nil {
+		return "", err
+	}
+	return append(path, circles...).OFD()
+}
+
+// pdfAxialBackground 裁出轴向渐变未延伸的两侧区域，与渐变绘制区互不重叠
+// 入参: shading 对象局部渐变, box 对象边界
+// 返回: string 背景路径, error 非有限坐标
+func pdfAxialBackground(shading *AxialShd, box Box) (string, error) {
+	start, end := parseFloats(shading.StartPoint), parseFloats(shading.EndPoint)
+	dx, dy := end[0]-start[0], end[1]-start[1]
+	scale := math.Max(math.Abs(dx), math.Abs(dy))
+	if !finite(scale) || scale == 0 {
+		return "", fmt.Errorf("invalid PDF gradient background axis")
+	}
+	dx, dy = dx/scale, dy/scale
+	corners := [4]pdfgo.Point{{}, {X: box.W}, {X: box.W, Y: box.H}, {Y: box.H}}
+	data := ""
+	for side, origin := range [][]float64{start, end} {
+		if side == 0 && (shading.Extend == "1" || shading.Extend == "3") || side == 1 && (shading.Extend == "2" || shading.Extend == "3") {
+			continue
+		}
+		distances := [4]float64{}
+		for i, point := range corners {
+			distances[i] = (point.X-origin[0])*dx + (point.Y-origin[1])*dy
+			if side == 1 {
+				distances[i] = -distances[i]
+			}
+			if !finite(distances[i]) {
+				return "", fmt.Errorf("invalid PDF gradient background extent")
+			}
+		}
+		points := make([]pdfgo.Point, 0, 5)
+		previous := 3
+		for i, point := range corners {
+			a, b := distances[previous], distances[i]
+			if (a <= 0) != (b <= 0) {
+				scale := math.Max(math.Abs(a), math.Abs(b))
+				ratio := (a / scale) / (a/scale - b/scale)
+				from := corners[previous]
+				points = append(points, pdfgo.Point{X: from.X + (point.X-from.X)*ratio, Y: from.Y + (point.Y-from.Y)*ratio})
+			}
+			if b <= 0 {
+				points = append(points, point)
+			}
+			previous = i
+		}
+		if len(points) < 3 {
+			continue
+		}
+		for i, point := range points {
+			if i == 0 {
+				data += " M "
+			} else {
+				data += " L "
+			}
+			data += pdfNumbers(point.X, point.Y)
+		}
+		data += " C"
+	}
+	return data, nil
 }
 
 // gradientPath 按原始函数合成渐变路径，保留填充描边的单一对象语义

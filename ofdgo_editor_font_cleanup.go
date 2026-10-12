@@ -35,7 +35,7 @@ func (e *Editor) compactVersionFonts(ctx context.Context, parts map[string][]byt
 	if !versioned {
 		return nil
 	}
-	protected, err := reader.hasOutputSignatures()
+	protected, err := reader.hasOutputSignatures(ctx)
 	if err != nil || protected {
 		return err
 	}

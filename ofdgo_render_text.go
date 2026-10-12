@@ -140,8 +140,9 @@ func (r *Renderer) PositionText(object TextObject, state RenderState) (*Position
 	angle := float64(object.CharDirection) * math.Pi / 180
 	rotate := Matrix{a: math.Cos(angle), b: math.Sin(angle), c: -math.Sin(angle), d: math.Cos(angle)}
 	glyphLinear := Matrix{a: linear.a, b: linear.b, c: linear.c, d: linear.d}.Multiply(rotate)
-	for index, code := range object.TextCode {
-		if object.textCodeLineBreak(index) {
+	lines := newTextLineScanner(object)
+	for _, code := range object.TextCode {
+		if lines.next(code) {
 			textOffset++
 		}
 		runes := textCodeRunes(code.Value)

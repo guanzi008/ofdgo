@@ -81,11 +81,22 @@ func (e *MissingGlyphError) Error() string {
 // 已知段落重新排版；原布局未知时替换字体和颜色保留坐标，不允许自动调整字号
 // 入参: page 页面索引, ids 文字对象标识, style 样式增量
 // 返回: error 错误信息
-func (e *Editor) StyleText(page int, ids []string, style TextStyle) error {
+func (e *Editor) StyleText(page int, ids []string, style TextStyle) (err error) {
 	objects, _, err := e.selectedObjects(page, ids)
 	if err != nil {
 		return err
 	}
+	count, maximum := len(e.resources), e.maxID
+	ready := e.source != nil && e.source.idsReady
+	defer func() {
+		if err != nil {
+			clear(e.resources[count:])
+			e.resources, e.maxID = e.resources[:count], maximum
+			if e.source != nil {
+				e.source.idsReady = ready
+			}
+		}
+	}()
 	updates, err := e.styleTextObjects(objects, style)
 	if err != nil {
 		return err
@@ -97,7 +108,7 @@ func (e *Editor) StyleText(page int, ids []string, style TextStyle) error {
 // 原文等长替换保留全部位移，单个TextCode内增删仅调整局部步进，跨定位段增删需显式重排
 // 入参: page 页面索引, id 文字对象标识, value 新内容, style 样式增量
 // 返回: error 错误信息
-func (e *Editor) UpdateTextContent(page int, id, value string, style TextStyle) error {
+func (e *Editor) UpdateTextContent(page int, id, value string, style TextStyle) (err error) {
 	capability, err := e.ObjectCapabilities(page, id)
 	if err != nil {
 		return err
@@ -118,6 +129,17 @@ func (e *Editor) UpdateTextContent(page int, id, value string, style TextStyle) 
 		}
 		return e.updateObjects(page, []GraphicObject{object}, true)
 	}
+	count, maximum := len(e.resources), e.maxID
+	ready := e.source != nil && e.source.idsReady
+	defer func() {
+		if err != nil {
+			clear(e.resources[count:])
+			e.resources, e.maxID = e.resources[:count], maximum
+			if e.source != nil {
+				e.source.idsReady = ready
+			}
+		}
+	}()
 	updates, err := e.styleTextObjects([]GraphicObject{object}, style)
 	if err != nil {
 		return err
@@ -178,10 +200,11 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 	}
 	codes := append([]TextCode(nil), obj.TextCode...)
 	transforms := append([]CGTransform(nil), obj.CGTransform...)
+	lines := newTextLineScanner(*obj)
 	if len(old) == len(next) {
 		offset := 0
 		for i := range codes {
-			if obj.textCodeLineBreak(i) {
+			if lines.next(codes[i]) {
 				if next[offset] != '\n' {
 					return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("changing text lines requires explicit layout")}
 				}
@@ -212,7 +235,7 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 		}
 		offset, changed := 0, false
 		for i := range codes {
-			if obj.textCodeLineBreak(i) {
+			if lines.next(codes[i]) {
 				offset++
 			}
 			runes := textCodeRunes(codes[i].Value)

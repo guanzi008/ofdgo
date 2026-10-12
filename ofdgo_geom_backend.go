@@ -30,14 +30,15 @@ const (
 // GeometryOperation 指定路径填充区域的布尔运算
 type GeometryOperation uint8
 
-// StrokeOptions 描述描边参数，长度单位为毫米
+// StrokeOptions 描述描边参数，长度单位为毫米，MiterLimitSet区分显式零值与默认截断值
 type StrokeOptions struct {
 	// Width为正有限描边宽度
 	Width float64
 	// Cap和Join使用OFD名称，空值分别采用Butt和Miter
 	Cap, Join string
-	// MiterLimit为尖角长度与半线宽的比值上限，0采用默认值
-	MiterLimit float64
+	// MiterLimit为尖角长度与半线宽的比值上限
+	MiterLimit    float64
+	MiterLimitSet bool
 	// DashOffset为绝对长度的虚线相位，允许负值
 	DashOffset float64
 	// Tolerance为曲线展开误差目标，0采用后端默认精度

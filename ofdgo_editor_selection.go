@@ -96,7 +96,7 @@ func (e *Editor) FlipSelection(page int, objects, annotations []string, axis str
 // 入参: page 页面索引, objects 正文标识, annotations 注解标识, box 页面毫米目标范围
 // 返回: error 标识、度量或编辑错误
 func (e *Editor) ResizeSelection(page int, objects, annotations []string, box Box) error {
-	if _, err := creationBox(editorBoxString(box)); err != nil {
+	if err := validateCreationBox(box); err != nil {
 		return err
 	}
 	bounds, err := e.SelectionBounds(page, objects, annotations)

@@ -381,6 +381,23 @@ func pdfNumbers(values ...float64) string {
 	return string(data)
 }
 
+// pdfDashPattern 换算PDF虚线长度，将单值数组展开为等长线段与间隔
+// 入参: dash PDF虚线数组, scale 坐标缩放比例
+// 返回: string OFD虚线数组
+func pdfDashPattern(dash []float64, scale float64) string {
+	if len(dash) == 0 {
+		return ""
+	}
+	values := make([]float64, max(2, len(dash)))
+	for i, value := range dash {
+		values[i] = value * scale
+	}
+	if len(dash) == 1 {
+		values[1] = values[0]
+	}
+	return pdfNumbers(values...)
+}
+
 // pdfBoundary 序列化对象边界
 // 入参: b 对象边界
 // 返回: string OFD边界数据
@@ -618,7 +635,10 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 	if mark.Fill && mark.Style.FillOverprint && pdfOverprintNeedsSeparation(mark.Style.Fill) || mark.Stroke && mark.Style.StrokeOverprint && pdfOverprintNeedsSeparation(mark.Style.Stroke) {
 		return &pdfgo.UnsupportedError{Feature: "color separation overprint"}
 	}
-	if p.warning != nil && (mark.Fill && pdfGradientError(mark.Style.Fill) != nil || mark.Stroke && pdfGradientError(mark.Style.Stroke) != nil) {
+	if p.warning != nil && (mark.Fill && p.gradientError(mark.Style.Fill) != nil || mark.Stroke && p.gradientError(mark.Style.Stroke) != nil) {
+		if err := p.ctx.Err(); err != nil {
+			return err
+		}
 		return p.gradientPath(mark)
 	}
 	box, err := p.pathBoundsContext(p.ctx, mark.Path)
@@ -652,7 +672,7 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 		ctm = pdfNumbers(m[:]...)
 	}
 	paint := func(value pdfgo.Paint) (*FillColor, error) {
-		if value.Tiling != nil {
+		if value.Tiling != nil || pdfGradientPattern(value) {
 			return p.paintColor(value, box)
 		}
 		return drawing.paintColor(value, origin)
@@ -685,11 +705,7 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 		object.Rule = "Even-Odd"
 	}
 	if len(mark.Style.Dash) > 0 {
-		values := make([]float64, len(mark.Style.Dash))
-		for n, v := range mark.Style.Dash {
-			values[n] = v * scale
-		}
-		object.DashPattern = pdfNumbers(values...)
+		object.DashPattern = pdfDashPattern(mark.Style.Dash, scale)
 		phase := mark.Style.DashPhase * scale
 		object.DashOffset = &phase
 	}
@@ -702,8 +718,11 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 // 入参: paint PDF画刷, box 对象边界
 // 返回: *FillColor OFD颜色或渐变, error 图案转换错误
 func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error) {
-	if err := pdfGradientError(paint); err != nil {
+	if err := p.gradientError(paint); err != nil {
 		return nil, err
+	}
+	if pdfGradientPattern(paint) {
+		return p.gradientPattern(paint, box)
 	}
 	if paint.Mesh != nil {
 		return p.meshColor(paint, box)

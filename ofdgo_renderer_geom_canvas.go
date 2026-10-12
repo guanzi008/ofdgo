@@ -173,7 +173,7 @@ func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (result Ge
 		}
 	}()
 	style := pathStyle{lineJoin: canvas.MiterJoin, lineCap: canvas.ButtCap, miterLimit: defaultMiterLimit}
-	style.applyLineJoin(options.Join, options.MiterLimit)
+	style.applyLineJoin(options.Join, options.MiterLimit, options.MiterLimitSet)
 	style.lineCap = pathLineCap(options.Cap, style.lineCap)
 	p = p.Dash(options.DashOffset, options.Dashes...)
 	p = p.Flatten(tolerance)
@@ -224,6 +224,7 @@ func canvasStrokeOptions(width float64, cap canvas.Capper, join canvas.Joiner, t
 		options.Join = "Bevel"
 	case canvas.MiterJoiner:
 		options.MiterLimit = value.Limit
+		options.MiterLimitSet = value.Limit == 0
 	}
 	return options
 }

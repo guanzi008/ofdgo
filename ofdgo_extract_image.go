@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/xml"
 	"fmt"
@@ -87,7 +88,7 @@ func (r *Reader) Images(ctx context.Context) ([]ImageInfo, error) {
 	if r.imageCatalog != nil {
 		return slices.Clone(r.imageCatalog), nil
 	}
-	doc, err := r.Doc()
+	doc, err := r.DocContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +104,7 @@ func (r *Reader) Images(ctx context.Context) ([]ImageInfo, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		header, err := r.readPageHeader(page)
+		header, err := r.readPageHeaderContext(ctx, page)
 		if err != nil {
 			return nil, err
 		}
@@ -122,15 +123,19 @@ func (r *Reader) Images(ctx context.Context) ([]ImageInfo, error) {
 			continue
 		}
 		seen[name] = true
-		data, err := r.readFile(name)
+		data, err := r.readFileViewContext(ctx, name)
 		if err != nil {
 			return nil, err
 		}
 		var res Res
-		if err := xml.Unmarshal(data, &res); err != nil {
+		decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+		if err := decoder.Decode(&res); err != nil {
 			return nil, err
 		}
 		for _, media := range res.MultiMedias.MultiMedia {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if media.Type != "Image" {
 				continue
 			}
@@ -150,6 +155,9 @@ func (r *Reader) Images(ctx context.Context) ([]ImageInfo, error) {
 			items = append(items, item)
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	r.imageCatalog = items
 	return slices.Clone(items), nil
 }
@@ -163,15 +171,19 @@ func (r *Reader) Image(ctx context.Context, id string) (ImageInfo, error) {
 	}
 	name, _ := resourceValue(r.resourceFiles, id)
 	if name != "" {
-		data, err := r.readFile(name)
+		data, err := r.readFileViewContext(ctx, name)
 		if err != nil {
 			return ImageInfo{}, err
 		}
 		var res Res
-		if err := xml.Unmarshal(data, &res); err != nil {
+		decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+		if err := decoder.Decode(&res); err != nil {
 			return ImageInfo{}, err
 		}
 		for _, media := range res.MultiMedias.MultiMedia {
+			if err := ctx.Err(); err != nil {
+				return ImageInfo{}, err
+			}
 			if imageResourceKey(media.ID) == imageResourceKey(id) && media.Type == "Image" && media.MediaFile != "" {
 				location := resolveResourcePath(name, res.BaseLoc, media.MediaFile)
 				return ImageInfo{ID: id, Name: path.Base(location), Format: media.Format, Location: location}, nil
@@ -184,6 +196,9 @@ func (r *Reader) Image(ctx context.Context, id string) (ImageInfo, error) {
 		return ImageInfo{}, err
 	}
 	for _, item := range items {
+		if err := ctx.Err(); err != nil {
+			return ImageInfo{}, err
+		}
 		if imageResourceKey(item.ID) == imageResourceKey(id) {
 			return item, nil
 		}

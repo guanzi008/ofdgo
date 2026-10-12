@@ -15,11 +15,8 @@
 package ofdgo
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"fmt"
-	"io"
 	"maps"
 	"slices"
 )
@@ -40,37 +37,38 @@ func compactResourceProfiles(ctx context.Context, reader *Reader, parts map[stri
 	seen := make(map[[32]byte]string)
 	aliases := make(map[string]string)
 	indexes := make(map[string]map[string]string)
-	buffer := make([]byte, 32*1024)
-	for _, name := range slices.Sorted(maps.Keys(profiles)) {
+	ordered := slices.Sorted(maps.Keys(profiles))
+	sizes := make(map[string]uint64, len(profiles))
+	counts := make(map[uint64]int)
+	for _, name := range ordered {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if protected[name] {
 			continue
 		}
-		var input io.ReadCloser
-		if data, ok := parts[name]; ok {
-			input = io.NopCloser(bytes.NewReader(data))
-		} else {
-			if reader == nil {
-				return fmt.Errorf("file not found: %s", name)
-			}
-			var err error
-			input, err = reader.openFile(name)
-			if err != nil {
-				return err
-			}
-		}
-		hash := sha256.New()
-		_, err := io.CopyBuffer(hash, imageInput{ReadCloser: input, context: ctx}, buffer)
-		closeErr := input.Close()
+		size, err := outputResourceSize(reader, parts, name)
 		if err != nil {
 			return err
 		}
-		if closeErr != nil {
-			return closeErr
+		sizes[name] = size
+		counts[size]++
+	}
+	var buffer []byte
+	for _, name := range ordered {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		key := [32]byte(hash.Sum(nil))
+		if protected[name] || counts[sizes[name]] < 2 {
+			continue
+		}
+		if buffer == nil {
+			buffer = make([]byte, 32*1024)
+		}
+		key, err := outputResourceDigest(ctx, reader, parts, name, buffer)
+		if err != nil {
+			return err
+		}
 		first, found := seen[key]
 		if !found {
 			seen[key] = name

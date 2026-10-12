@@ -106,14 +106,18 @@ func (r *Renderer) PageText(page *PageContent) (*PageText, error) {
 // 入参: index 页面索引，从0开始
 // 返回: *PageText 页面文字, error 错误信息
 func (r *Renderer) PageTextByIndex(index int) (*PageText, error) {
-	doc, err := r.Reader.Doc()
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	doc, err := r.Reader.DocContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if index < 0 || index >= len(doc.Pages.Page) {
 		return nil, fmt.Errorf("page index %d out of range", index)
 	}
-	page, err := r.Reader.readPageContent(doc.Pages.Page[index], true, false)
+	page, err := r.Reader.readPageContent(ctx, doc.Pages.Page[index], true, false)
 	if err != nil {
 		return nil, err
 	}

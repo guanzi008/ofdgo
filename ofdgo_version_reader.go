@@ -104,11 +104,19 @@ func (r *Reader) DocumentVersionID() (string, error) {
 // 入参: id 版本标识，空值显式选择主入口；Document可重新按Current选择默认版本
 // 返回: *Reader 版本阅读器, error 选择或读取错误
 func (r *Reader) DocumentVersion(id string) (*Reader, error) {
+	return r.DocumentVersionContext(context.Background(), id)
+}
+
+// DocumentVersionContext 创建指定版本的独立阅读器，读取版本及关联内容时响应取消
+// 返回值不关闭输入文件，使用期间不得关闭持有输入文件的原阅读器
+// 入参: ctx 取消上下文, id 版本标识，空值选择主入口
+// 返回: *Reader 版本阅读器, error 读取或取消错误
+func (r *Reader) DocumentVersionContext(ctx context.Context, id string) (*Reader, error) {
 	next := &Reader{Path: r.Path, Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: r.documentIndex, selectedVersion: &id}
-	if err := next.initRoot(); err != nil {
+	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}
-	if _, err := next.Doc(); err != nil {
+	if _, err := next.DocContext(ctx); err != nil {
 		return nil, err
 	}
 	return next, nil

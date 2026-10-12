@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"slices"
 	"sync"
 
 	"github.com/xiaoqidun/pdfgo"
@@ -49,11 +50,58 @@ type pdfMeshSample struct {
 	patch int
 }
 
+// pdfLinearMeshKey 定位源网格中需分段展开的三角形，不包含输出变换
+type pdfLinearMeshKey struct {
+	mesh  *pdfgo.MeshGradient
+	index int
+}
+
+// linearMeshTriangles 在单页内复用只读分区，固定布局计量内存并丢弃超预算缓存
+// 入参: mesh 源网格, index 源三角形索引
+// 返回: []pdfgo.MeshTriangle 只读分区结果, error 转换或取消错误
+func (p *pdfImporter) linearMeshTriangles(mesh *pdfgo.MeshGradient, index int) ([]pdfgo.MeshTriangle, error) {
+	if err := p.ctx.Err(); err != nil {
+		return nil, err
+	}
+	cache := p.compositingCache()
+	if cache.linearMeshes == nil {
+		cache.linearMeshes = &renderCache[pdfLinearMeshKey, []pdfgo.MeshTriangle]{limit: 8 << 20}
+	}
+	key := pdfLinearMeshKey{mesh: mesh, index: index}
+	if triangles, ok := cache.linearMeshes.get(key); ok {
+		return triangles, nil
+	}
+	triangles, err := mesh.LinearTrianglesContext(p.ctx, index)
+	if err != nil {
+		return nil, err
+	}
+	if len(triangles) > (cache.linearMeshes.limit-64)/216 {
+		return triangles, nil
+	}
+	stored := make([]pdfgo.MeshTriangle, len(triangles))
+	colors := make([][3][4]float64, len(triangles))
+	for i, triangle := range triangles {
+		if err := p.ctx.Err(); err != nil {
+			return nil, err
+		}
+		stored[i].Points = triangle.Points
+		for j, values := range triangle.Colors {
+			copy(colors[i][j][:], values)
+			stored[i].Colors[j] = colors[i][j][:len(values):len(values)]
+		}
+	}
+	if err := p.ctx.Err(); err != nil {
+		return nil, err
+	}
+	cache.linearMeshes.put(key, stored, 64+len(stored)*216)
+	return stored, nil
+}
+
 // meshColor 将线性三角网格映射为OFD高洛德渐变，保留顶点和覆盖顺序
 // 入参: paint PDF网格画刷, box 对象边界
 // 返回: *FillColor OFD渐变, error 不可线性表达的颜色或坐标错误
 func (p *pdfImporter) meshColor(paint pdfgo.Paint, box Box) (*FillColor, error) {
-	if err := pdfGradientError(paint); err != nil {
+	if err := p.gradientError(paint); err != nil {
 		return nil, err
 	}
 	mesh := paint.Mesh
@@ -67,40 +115,99 @@ func (p *pdfImporter) meshColor(paint pdfgo.Paint, box Box) (*FillColor, error) 
 			return nil, err
 		}
 	}
-	for _, triangle := range mesh.Triangles {
+	var previous pdfgo.MeshTriangle
+	var previousColors [3][4]float64
+	var colors [3][4]float64
+	for i := range previous.Colors {
+		previous.Colors[i] = previousColors[i][:mesh.Space.Components()]
+	}
+	for index, triangle := range mesh.Triangles {
 		if err := p.ctx.Err(); err != nil {
 			return nil, err
 		}
-		for i, point := range triangle.Points {
-			point = matrix.Apply(point)
-			if !finite(point.X) || !finite(point.Y) {
-				return nil, fmt.Errorf("nonfinite mesh vertex")
-			}
-			values := triangle.Colors[i]
-			if icc != "" {
-				value, err := pdfICCValues(values, mesh.Space.Components())
-				if err != nil {
-					return nil, err
-				}
-				shading.Point = append(shading.Point, ShdPoint{X: point.X - box.X, Y: point.Y - box.Y, Color: ShdColor{Value: value, ColorSpace: icc}})
-				continue
-			}
-			rgb, err := mesh.Space.RGB(values[:mesh.Space.Components()], mesh.Intent)
+		var err error
+		colors, err = mesh.LinearColors(index)
+		var triangles []pdfgo.MeshTriangle
+		if err != nil {
+			triangles, err = p.linearMeshTriangles(mesh, index)
 			if err != nil {
 				return nil, err
 			}
-			color := pdfgo.Paint{RGB: rgb, Alpha: 1}
-			if mesh.Space.Model == "DeviceCMYK" && !mesh.Space.Calibrated() {
-				color.CMYK = (*[4]float64)(values)
+		} else {
+			for i := range triangle.Colors {
+				triangle.Colors[i] = colors[i][:mesh.Space.Components()]
 			}
-			converted := p.color(color)
-			shading.Point = append(shading.Point, ShdPoint{X: point.X - box.X, Y: point.Y - box.Y, Color: ShdColor{Value: converted.Value, ColorSpace: converted.ColorSpace}})
+			triangles = []pdfgo.MeshTriangle{triangle}
 		}
+		for _, triangle := range triangles {
+			if err := p.ctx.Err(); err != nil {
+				return nil, err
+			}
+			first, flag := 0, 0
+			if len(shading.Point) > 0 {
+				flag = pdfMeshEdge(previous, triangle)
+				if flag != 0 {
+					first = 2
+				}
+			}
+			for i := first; i < len(triangle.Points); i++ {
+				point := triangle.Points[i]
+				point = matrix.Apply(point)
+				if !finite(point.X) || !finite(point.Y) {
+					return nil, fmt.Errorf("nonfinite mesh vertex")
+				}
+				values := triangle.Colors[i]
+				if icc != "" {
+					value, err := pdfICCValues(values, mesh.Space.Components())
+					if err != nil {
+						return nil, err
+					}
+					shading.Point = append(shading.Point, ShdPoint{X: point.X - box.X, Y: point.Y - box.Y, EdgeFlag: flag, Color: ShdColor{Value: value, ColorSpace: icc}})
+					continue
+				}
+				rgb, err := mesh.Space.RGB(values[:mesh.Space.Components()], mesh.Intent)
+				if err != nil {
+					return nil, err
+				}
+				color := pdfgo.Paint{RGB: rgb, Alpha: 1}
+				if mesh.Space.Model == "DeviceCMYK" && !mesh.Space.Calibrated() {
+					color.CMYK = (*[4]float64)(values)
+				}
+				converted := p.color(color)
+				shading.Point = append(shading.Point, ShdPoint{X: point.X - box.X, Y: point.Y - box.Y, EdgeFlag: flag, Color: ShdColor{Value: converted.Value, ColorSpace: converted.ColorSpace}})
+			}
+			previous.Points = triangle.Points
+			for i := range previous.Colors {
+				copy(previous.Colors[i], triangle.Colors[i])
+			}
+		}
+	}
+	if mesh.Background != nil {
+		background, err := p.gradientBackgroundColor(*mesh.Background, mesh.Space, mesh.Intent)
+		if err != nil {
+			return nil, err
+		}
+		shading.Extend, shading.BackColor = 1, &background
 	}
 	color := p.color(paint)
 	color.Value = ""
 	color.GouraudShd = shading
 	return color, nil
+}
+
+// pdfMeshEdge 按坐标及颜色分量匹配相邻三角形的共享边，不改变顶点顺序
+// 入参: previous 前一三角形, current 当前三角形
+// 返回: int OFD共享边标志，零表示独立三角形
+func pdfMeshEdge(previous, current pdfgo.MeshTriangle) int {
+	if previous.Points[2] != current.Points[1] || !slices.Equal(previous.Colors[2], current.Colors[1]) {
+		return 0
+	}
+	for _, index := range [2]int{1, 0} {
+		if previous.Points[index] == current.Points[0] && slices.Equal(previous.Colors[index], current.Colors[0]) {
+			return 2 - index
+		}
+	}
+	return 0
 }
 
 // meshTriangles 按曲面二阶导数界细分，将几何误差控制在输出像素的十六分之一内

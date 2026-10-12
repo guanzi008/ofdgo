@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"math"
 	"strconv"
-	"strings"
 )
 
 // semanticCompiler 将公共页面语义编译为路径和原始图片，绘制、搜索和度量共享定位
@@ -296,8 +295,9 @@ func (c *semanticCompiler) objectStyle(object PathObject, defaults *DrawParam, l
 		if defaults.Join != "" {
 			style.options.Join = defaults.Join
 		}
-		if defaults.MiterLimit > 0 {
+		if defaults.MiterLimit > 0 || defaults.MiterLimitSet {
 			style.options.MiterLimit = defaults.MiterLimit
+			style.options.MiterLimitSet = defaults.MiterLimitSet
 		}
 		style.options.Dashes = parseFloats(defaults.DashPattern)
 		if defaults.DashOffset != nil {
@@ -319,8 +319,9 @@ func (c *semanticCompiler) objectStyle(object PathObject, defaults *DrawParam, l
 	if object.Join != "" {
 		style.options.Join = object.Join
 	}
-	if object.MiterLimit > 0 {
+	if object.MiterLimit > 0 || object.MiterLimitSet {
 		style.options.MiterLimit = object.MiterLimit
+		style.options.MiterLimitSet = object.MiterLimitSet
 	}
 	if object.DashPattern != "" || object.dashPatternSet {
 		style.options.Dashes = parseFloats(object.DashPattern)
@@ -337,9 +338,7 @@ func (c *semanticCompiler) objectStyle(object PathObject, defaults *DrawParam, l
 			style.options.Dashes[i] *= scale
 		}
 	}
-	if style.options.Width == 0 {
-		style.options.Width = 25.4 / c.renderer.DPI
-	}
+	style.options.Width = c.renderer.deviceLineWidth(style.options.Width)
 	return style
 }
 
@@ -354,24 +353,11 @@ func (c *semanticCompiler) pathObject(object PathObject, state RenderState) erro
 	local := object
 	local.Boundary = "0 0 1 1"
 	local.CTM = ""
-	var path GeometryPath
-	var err error
-	tinyMatrix := matrix
-	if state.BoundaryInCTM && state.Parent != nil {
-		tinyMatrix, _ = renderObjectMatrix(object.Boundary, NewMatrix(object.CTM), RenderState{})
+	path, err := c.geometry.Path(local)
+	if err != nil {
+		return err
 	}
-	path = tinyFillRectPath(object, tinyMatrix)
-	if path != nil {
-		if state.BoundaryInCTM && state.Parent != nil {
-			path, err = c.geometry.Transform(path, *state.Parent)
-		}
-	} else {
-		path, err = c.geometry.Path(local)
-		if err != nil {
-			return err
-		}
-		path, err = c.geometry.Transform(path, matrix)
-	}
+	path, err = c.geometry.Transform(path, matrix)
 	if err != nil {
 		return err
 	}
@@ -427,7 +413,7 @@ func (c *semanticCompiler) textObject(object TextObject, state RenderState) erro
 		return nil
 	}
 	_, linear := renderObjectMatrix(object.Boundary, NewMatrix(object.CTM), state)
-	style := c.objectStyle(PathObject{DrawParam: object.DrawParam, FillColor: object.FillColor, StrokeColor: object.StrokeColor, Alpha: object.Alpha, LineWidth: object.LineWidth, LineWidthSet: object.LineWidthSet, Join: object.Join, MiterLimit: object.MiterLimit}, state.Defaults, linear)
+	style := c.objectStyle(object.pathStyle(), state.Defaults, linear)
 	if style.fill == nil {
 		style.fill = withFillAlpha(&FillColor{}, object.Alpha)
 	}
@@ -510,40 +496,4 @@ func (c *semanticCompiler) fillPattern(clip GeometryPath, pattern *PatternPaint,
 		}
 	}
 	return nil
-}
-
-// tinyFillRectPath 保留历史文档中微小填充块的缺省末端处理
-// 入参: object 路径对象, matrix 不含外层变换的页面矩阵
-// 返回: GeometryPath 修正路径，非匹配格式时为空
-func tinyFillRectPath(object PathObject, matrix Matrix) GeometryPath {
-	if object.Fill == nil || !*object.Fill || object.Stroke == nil || *object.Stroke {
-		return nil
-	}
-	box, err := ParseBox(object.Boundary)
-	if err != nil || box.W <= 0 || box.H <= 0 || box.W > .6 || box.H > .6 {
-		return nil
-	}
-	tokens := strings.Fields(object.AbbreviatedData)
-	if len(tokens) != 11 || tokens[0] != "M" || tokens[3] != "L" || tokens[6] != "L" || tokens[9] != "L" || tokens[10] != "C" {
-		return nil
-	}
-	var minX, minY, maxX, maxY float64
-	for i := 1; i < 10; i += 3 {
-		x, errX := strconv.ParseFloat(tokens[i], 64)
-		y, errY := strconv.ParseFloat(tokens[i+1], 64)
-		if errX != nil || errY != nil {
-			return nil
-		}
-		x, y = matrix.Transform(x, y)
-		if i == 1 {
-			minX, maxX, minY, maxY = x, x, y, y
-		} else {
-			minX = math.Min(minX, x)
-			maxX = math.Max(maxX, x)
-			minY = math.Min(minY, y)
-			maxY = math.Max(maxY, y)
-		}
-	}
-	expand := math.Min(box.W, box.H) * .08
-	return geometryRectangle(Box{X: minX - expand, Y: minY - expand, W: maxX - minX + 2*expand, H: maxY - minY + 2*expand})
 }
