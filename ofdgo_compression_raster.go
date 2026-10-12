@@ -123,10 +123,24 @@ func optimizeBMPResource(ctx context.Context, data []byte, options CompressionOp
 }
 
 // optimizeRasterResource 编码已解码的资源图片，同步降采样后的像素密度，仅采用更小结果
-// 绝对密度在降采样后量化为PNG整数，避免原始有理数密度被二次舍入
+// 绝对密度图片先降采样再编码，密度按最终尺寸换算后量化为PNG整数
 // 入参: ctx 取消上下文, data 原编码, pixels 像素, options 压缩选项, size 像素需求, density 像素密度
 // 返回: []byte 图片编码, error 编码或取消错误
 func optimizeRasterResource(ctx context.Context, data []byte, pixels image.Image, options CompressionOptions, size image.Point, density rasterDensity) ([]byte, error) {
+	hasDensity := density.x != 0 || density.y != 0
+	if hasDensity && density.unit == 1 {
+		before := pixels.Bounds()
+		if options.Mode == CompressionLossy {
+			var err error
+			pixels, err = pdfgo.ResizeImage(ctx, pixels, size)
+			if err != nil {
+				return nil, err
+			}
+		}
+		density.x *= float64(pixels.Bounds().Dx()) / float64(before.Dx())
+		density.y *= float64(pixels.Bounds().Dy()) / float64(before.Dy())
+		size = image.Point{}
+	}
 	var encoded bytes.Buffer
 	limit := &outputCompressionBuffer{buffer: &encoded, limit: outputOptimizationBufferLimit}
 	if err := pdfgo.EncodePNG(ctx, limit, pixels); err != nil {
@@ -136,19 +150,12 @@ func optimizeRasterResource(ctx context.Context, data []byte, pixels image.Image
 		return nil, err
 	}
 	input := encoded.Bytes()
-	hasDensity := density.x != 0 || density.y != 0
 	if hasDensity && density.unit == 1 {
 		var err error
 		input, err = pdfgo.OptimizeImageSize(ctx, input, options, size)
 		if err != nil {
 			return nil, err
 		}
-		config, _, err := image.DecodeConfig(bytes.NewReader(input))
-		if err != nil {
-			return nil, err
-		}
-		density.x *= float64(config.Width) / float64(pixels.Bounds().Dx())
-		density.y *= float64(config.Height) / float64(pixels.Bounds().Dy())
 	}
 	if hasDensity {
 		x, y := math.Round(density.x), math.Round(density.y)
