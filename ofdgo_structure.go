@@ -23,6 +23,12 @@ import (
 	"strings"
 )
 
+// 公文标引类型标识
+const structureTypeOfficial = "od"
+
+// 2013版电子公文标引命名空间
+const structureNamespaceEGov2013 = "http://www.nits.org.cn/eGovDoc/2013"
+
 // Structure 保存自定义标引入口及结构树，单个文件解析失败时通过Error报告，不影响其他标引
 type Structure struct {
 	TypeID    string         `json:"typeId,omitempty"`
@@ -188,7 +194,18 @@ func parseStructure(ctx context.Context, data []byte, tag CustomTag) (*Structure
 // 入参: tag 标引入口, namespace 内容根节点命名空间
 // 返回: bool 是否使用公文引用规则
 func structureOfficial(tag CustomTag, namespace string) bool {
-	return tag.TypeID == "od" || namespace == "http://www.nits.org.cn/eGovDoc/2013" && tag.NameSpace == namespace
+	if tag.TypeID == structureTypeOfficial {
+		return true
+	}
+	if tag.NameSpace != namespace {
+		return false
+	}
+	switch namespace {
+	case structureNamespaceEGov2013:
+		return true
+	default:
+		return false
+	}
 }
 
 // structureObjectIDs 按公文标引规则拆分图元标识，保留顺序和重复项
