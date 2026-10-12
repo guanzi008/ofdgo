@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"encoding/xml"
 	"fmt"
+	"io"
 	"iter"
 	"strconv"
 	"strings"
@@ -29,6 +30,32 @@ type graphicObjectTarget struct {
 	path      *[]PathObject
 	image     *[]ImageObject
 	composite *[]CompositeGraphicUnit
+}
+
+// graphicAttributeTokens 提供图形节点的起止令牌，仅用于解码无命名空间属性
+type graphicAttributeTokens struct {
+	start xml.StartElement
+	step  int
+}
+
+// Token 返回起始节点和结束节点，不读取图形子节点
+// 返回: xml.Token XML令牌, error 读取错误
+func (s *graphicAttributeTokens) Token() (xml.Token, error) {
+	s.step++
+	switch s.step {
+	case 1:
+		return s.start, nil
+	case 2:
+		return s.start.End(), nil
+	}
+	return nil, io.EOF
+}
+
+// decodeGraphicAttributes 按结构字段解析图形属性，忽略带命名空间的扩展属性
+// 入参: start 起始节点, value 不含自身解码方法的接收结构
+// 返回: error 解码错误
+func decodeGraphicAttributes(start xml.StartElement, value any) error {
+	return xml.NewTokenDecoder(&graphicAttributeTokens{start: ofdXMLStart(start)}).Decode(value)
 }
 
 // Actions 返回对象动作的独立副本，不修改原对象
@@ -57,17 +84,45 @@ func (clips *Clips) usesObjectMatrix() bool {
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解码错误
 func (clips *Clips) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	type plain Clips
-	var value plain
+	*clips = Clips{}
 	if classifyOFDNamespace(start.Name.Space) == ofdXMLLegacy {
 		transform := true
-		value.TransFlag = &transform
+		clips.TransFlag = &transform
 	}
-	if err := d.DecodeElement(&value, &start); err != nil {
-		return err
+	for _, attr := range start.Attr {
+		if attr.Name.Space == "" && attr.Name.Local == "TransFlag" {
+			transform, err := strconv.ParseBool(strings.TrimSpace(attr.Value))
+			if err != nil {
+				return err
+			}
+			clips.TransFlag = &transform
+		}
 	}
-	*clips = Clips(value)
-	return nil
+	return decodeOFDCollection(d, start, "Clip", &clips.Clip)
+}
+
+// UnmarshalXML 解析裁剪分区，不将外部同名节点作为裁剪区域
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (clip *Clip) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*clip = Clip{}
+	return decodeOFDCollection(d, start, "Area", &clip.Area)
+}
+
+// UnmarshalXML 解析裁剪区域的变换和路径或文字内容
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (area *ClipArea) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*area = ClipArea{DrawParam: attrValue(start, "DrawParam"), CTM: attrValue(start, "CTM")}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "Path":
+			return d.DecodeElement(&area.Path, &node)
+		case "Text":
+			return d.DecodeElement(&area.Text, &node)
+		}
+		return d.Skip()
+	})
 }
 
 // UnmarshalXML 解析路径并区分省略样式、显式实线与零值描边参数
@@ -75,27 +130,77 @@ func (clips *Clips) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 // 返回: error 错误信息
 func (p *PathObject) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	type plain PathObject
-	var value struct {
-		plain
-		DashPattern *string `xml:"DashPattern,attr"`
-	}
-	if err := d.DecodeElement(&value, &start); err != nil {
+	var value plain
+	if err := decodeGraphicAttributes(start, &value); err != nil {
 		return err
 	}
-	*p = PathObject(value.plain)
-	for _, attr := range start.Attr {
-		if attr.Name.Local == "LineWidth" {
+	*p = PathObject(value)
+	for _, attr := range ofdXMLStart(start).Attr {
+		switch attr.Name.Local {
+		case "LineWidth":
 			p.LineWidthSet = p.LineWidth == 0
-		}
-		if attr.Name.Local == "MiterLimit" {
+		case "MiterLimit":
 			p.MiterLimitSet = p.MiterLimit == 0
+		case "DashPattern":
+			p.dashPatternSet = p.DashPattern == ""
 		}
 	}
-	if value.DashPattern != nil {
-		p.DashPattern = *value.DashPattern
-		p.dashPatternSet = p.DashPattern == ""
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "FillColor":
+			return d.DecodeElement(&p.FillColor, &node)
+		case "StrokeColor":
+			return d.DecodeElement(&p.StrokeColor, &node)
+		case "AbbreviatedData":
+			return d.DecodeElement(&p.AbbreviatedData, &node)
+		case "Clips":
+			return d.DecodeElement(&p.Clips, &node)
+		case "Actions":
+			return decodeOFDActions(d, node, &p.Actions)
+		}
+		return d.Skip()
+	})
+}
+
+// UnmarshalXML 解析图片及其边框、裁剪和动作，忽略外部同名内容
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (image *ImageObject) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type plain ImageObject
+	var value plain
+	if err := decodeGraphicAttributes(start, &value); err != nil {
+		return err
 	}
-	return nil
+	*image = ImageObject(value)
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "Border":
+			return d.DecodeElement(&image.Border, &node)
+		case "Clips":
+			return d.DecodeElement(&image.Clips, &node)
+		case "Actions":
+			return decodeOFDActions(d, node, &image.Actions)
+		}
+		return d.Skip()
+	})
+}
+
+// UnmarshalXML 解析图片边框，保留省略线宽与显式零值的区别
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (border *ImageBorder) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type plain ImageBorder
+	var value plain
+	if err := decodeGraphicAttributes(start, &value); err != nil {
+		return err
+	}
+	*border = ImageBorder(value)
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local == "BorderColor" {
+			return d.DecodeElement(&border.BorderColor, &node)
+		}
+		return d.Skip()
+	})
 }
 
 // UnmarshalXML 解析绘制参数并保留显式实线和零值参数对基础参数的覆盖

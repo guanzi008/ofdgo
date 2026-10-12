@@ -26,19 +26,25 @@ import (
 
 // editorFontDocument 保存一个文档的字体声明与完整内容引用，不进入附件和签名封装
 type editorFontDocument struct {
-	reader *Reader
-	index  int
-	files  map[string]*editorFontXML
-	fonts  map[string]*editorFontDeclaration
-	unsafe bool
+	reader    *Reader
+	index     int
+	files     map[string]*editorFontXML
+	fonts     map[string]*editorFontDeclaration
+	texts     map[string][]editorFontText
+	fontCache editorBindingFontCache
+	unsafe    bool
 }
 
 // editorFontXML 保存字体声明及文字引用所在的XML
 type editorFontXML struct {
-	name  string
-	data  []byte
-	root  *editorXML
-	texts []*editorXML
+	name string
+	data []byte
+}
+
+// editorFontText 关联文字节点及其原始文件，按字体标识归集
+type editorFontText struct {
+	file *editorFontXML
+	node *editorXML
 }
 
 // editorFontDeclaration 关联字体声明、所属资源文件及嵌入数据路径
@@ -53,7 +59,7 @@ type editorFontDeclaration struct {
 // 入参: ctx 取消上下文, reader 包快照, index 文档索引
 // 返回: *editorFontDocument 字体引用, error 读取或结构错误
 func scanEditorFonts(ctx context.Context, reader *Reader, index int) (*editorFontDocument, error) {
-	scan := &editorFontDocument{reader: reader, index: index, files: make(map[string]*editorFontXML), fonts: make(map[string]*editorFontDeclaration)}
+	scan := &editorFontDocument{reader: reader, index: index, files: make(map[string]*editorFontXML), fonts: make(map[string]*editorFontDeclaration), texts: make(map[string][]editorFontText)}
 	entry, err := reader.documentEntryContext(ctx, index)
 	if err != nil {
 		return nil, err
@@ -76,7 +82,7 @@ func scanEditorFonts(ctx context.Context, reader *Reader, index int) (*editorFon
 		if err != nil {
 			return nil, err
 		}
-		file := &editorFontXML{name: name, data: data, root: root}
+		file := &editorFontXML{name: name, data: data}
 		scan.files[name] = file
 		base := ""
 		if root.matchesOFD("Res") {
@@ -122,8 +128,9 @@ func scanEditorFonts(ctx context.Context, reader *Reader, index int) (*editorFon
 				scan.fonts[id] = &editorFontDeclaration{font: font, file: file, node: node, location: location}
 			}
 			if node.matchesOFD("TextObject") || node.matchesOFD("Text") && node.parent != nil && node.parent.matchesOFD("Area") {
-				file.texts = append(file.texts, node)
-				if node.attr("Font") == "" {
+				id := editorResourceID(node.attr("Font"))
+				scan.texts[id] = append(scan.texts[id], editorFontText{file: file, node: node})
+				if id == "" {
 					scan.unsafe = true
 				}
 			}

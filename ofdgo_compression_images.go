@@ -167,7 +167,7 @@ func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, 
 	return result, ctx.Err()
 }
 
-// DrawObject 汇总图片、替换图及文字和路径底纹的尺寸，不使用裁剪后的局部面积
+// DrawObject 汇总图片、替换图及文字、路径和图像边框底纹的尺寸，不使用裁剪后的局部面积
 // 入参: object 图形对象, state 继承状态
 // 返回: error 取消或几何错误
 func (v *compressionImages) DrawObject(object *GraphicObject, state RenderState) error {
@@ -192,6 +192,12 @@ func (v *compressionImages) DrawObject(object *GraphicObject, state RenderState)
 	box, err := ParseBox(img.Boundary)
 	if err != nil {
 		return err
+	}
+	if border := img.Border; border != nil && border.BorderColor != nil && border.BorderColor.Pattern != nil {
+		matrix, _ := renderObjectMatrix(img.Boundary, IdentityMatrix, state)
+		if err := v.patternImages((*FillColor)(border.BorderColor), matrix); err != nil {
+			return err
+		}
 	}
 	local := NewMatrix(img.CTM)
 	if img.CTM == "" {

@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -55,6 +56,22 @@ type FontChange struct {
 type FontProcessOptions struct {
 	Mode       FontMode
 	OnProgress func(stage string, completed, total int) error
+}
+
+// editorFontChange 汇总同一文档的字体修改，XML偏移均基于修改前的文件
+type editorFontChange struct {
+	patches map[string][]editorXMLPatch
+	files   map[string][]byte
+}
+
+// editorBindingFontCache 仅保留当前文档最近读取的字体文件及最近解析结果，操作结束后释放
+type editorBindingFontCache struct {
+	source   string
+	data     []byte
+	checksum [32]byte
+	name     string
+	index    int
+	font     *FontResource
 }
 
 // EmbedFont 嵌入当前文档指定字体，保留资源标识及全部使用位置，成功后可撤销
@@ -149,6 +166,7 @@ func (e *Editor) ProcessFontsWithOptions(ctx context.Context, options FontProces
 		if err != nil {
 			return nil, err
 		}
+		pending := &editorFontChange{patches: make(map[string][]editorXMLPatch), files: make(map[string][]byte)}
 		ids := slices.Sorted(maps.Keys(scan.fonts))
 		ids = slices.DeleteFunc(ids, func(id string) bool {
 			return (mode == FontEmbed) == (scan.fonts[id].location != "")
@@ -166,12 +184,19 @@ func (e *Editor) ProcessFontsWithOptions(ctx context.Context, options FontProces
 				return nil, err
 			}
 			item := FontChange{Document: document, ID: id, Name: declaration.font.FontName}
-			item.Changed, err = e.changeFontSnapshot(ctx, scan, id, mode, FontFile{}, 0)
+			change, err := e.prepareFontBinding(ctx, scan, id, mode, FontFile{}, 0, pending.files)
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
 				item.Reason = err.Error()
+			}
+			item.Changed = change != nil
+			if change != nil {
+				for name, patches := range change.patches {
+					pending.patches[name] = append(pending.patches[name], patches...)
+				}
+				maps.Copy(pending.files, change.files)
 			}
 			report = append(report, item)
 			if err := progress("fonts", len(report), total); err != nil {
@@ -182,11 +207,10 @@ func (e *Editor) ProcessFontsWithOptions(ctx context.Context, options FontProces
 				if mode == FontExternal {
 					externalFiles = append(externalFiles, declaration.location)
 				}
-				scan, err = scanEditorFonts(ctx, reader, document)
-				if err != nil {
-					return nil, err
-				}
 			}
+		}
+		if err := pending.apply(ctx, scan); err != nil {
+			return nil, err
 		}
 	}
 	if err := progress("fonts", len(report), len(report)); err != nil {
@@ -208,26 +232,40 @@ func (e *Editor) ProcessFontsWithOptions(ctx context.Context, options FontProces
 // 入参: ctx 取消上下文, scan 文档引用, id 字体标识, mode 保存方式, file 字体文件, index 集合索引
 // 返回: bool 是否修改, error 字体或结构错误
 func (e *Editor) changeFontSnapshot(ctx context.Context, scan *editorFontDocument, id string, mode FontMode, file FontFile, index int) (bool, error) {
+	change, err := e.prepareFontBinding(ctx, scan, id, mode, file, index, nil)
+	if err != nil || change == nil {
+		return false, err
+	}
+	if err := change.apply(ctx, scan); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// prepareFontBinding 校验单个字体并生成独立修改集，不改变文档及已准备的资源
+// 入参: ctx 取消上下文, scan 文档引用, id 字体标识, mode 保存方式, file 字体文件, index 集合索引, pending 已准备的资源文件
+// 返回: *editorFontChange 字体修改，无需处理时为nil, error 字体或结构错误
+func (e *Editor) prepareFontBinding(ctx context.Context, scan *editorFontDocument, id string, mode FontMode, file FontFile, index int, pending map[string][]byte) (*editorFontChange, error) {
 	declaration := scan.fonts[editorResourceID(id)]
 	if declaration == nil {
-		return false, fmt.Errorf("font not found: %s", id)
+		return nil, fmt.Errorf("font not found: %s", id)
 	}
 	if (mode == FontEmbed) == (declaration.location != "") {
-		return false, nil
+		return nil, nil
 	}
 	if scan.unsafe {
-		return false, fmt.Errorf("font references include unsupported content")
+		return nil, fmt.Errorf("font references include unsupported content")
 	}
 	if e.backends.FontResources == nil {
-		return false, ErrBackendUnavailable
+		return nil, ErrBackendUnavailable
 	}
 	var data []byte
 	var err error
 	explicit := mode == FontEmbed && len(file.Data) != 0
 	if mode == FontExternal {
-		data, err = scan.reader.readFile(declaration.location)
+		data, err = scan.fontCache.read(ctx, scan.reader, declaration.location)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
 		file = FontFile{Data: data}
 		if bytes.HasPrefix(data, []byte("ttcf")) {
@@ -236,136 +274,207 @@ func (e *Editor) changeFontSnapshot(ctx context.Context, scan *editorFontDocumen
 	} else if len(file.Data) == 0 {
 		file, err = e.resolveBindingFont(scan, declaration)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
 		index = 0
 	}
-	parsed, err := e.backends.FontResources.OpenFontResource(file, index)
+	parsed, err := scan.fontCache.open(ctx, e.backends.FontResources, file, index)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if mode == FontEmbed {
 		if err := validateFontEmbedding(parsed.Data); err != nil {
-			return false, err
+			return nil, err
 		}
 	}
-	changes := make(map[string][]byte)
+	change := &editorFontChange{patches: make(map[string][]editorXMLPatch), files: make(map[string][]byte)}
 	verifiedGlyphs := false
-	for _, name := range slices.Sorted(maps.Keys(scan.files)) {
+	for _, text := range scan.texts[editorResourceID(id)] {
 		if err := ctx.Err(); err != nil {
-			return false, err
+			return nil, err
 		}
-		file := scan.files[name]
-		var patches []editorXMLPatch
-		for _, node := range file.texts {
-			if editorResourceID(node.attr("Font")) != editorResourceID(id) {
-				continue
+		file, node := text.file, text.node
+		var object TextObject
+		if err := xml.Unmarshal(file.data[node.start:node.end], &object); err != nil {
+			return nil, err
+		}
+		if err := checkFontBinding(object, parsed, mode); err != nil {
+			return nil, err
+		}
+		if explicit && len(object.CGTransform) != 0 && !verifiedGlyphs {
+			source, err := e.resolveBindingFont(scan, declaration)
+			if err != nil || !sameBindingFont(source.Data, parsed.Data) {
+				return nil, fmt.Errorf("font glyph mapping requires the original font")
 			}
-			var object TextObject
-			if err := xml.Unmarshal(file.data[node.start:node.end], &object); err != nil {
-				return false, err
-			}
-			if err := checkFontBinding(object, parsed, mode); err != nil {
-				return false, err
-			}
-			if explicit && len(object.CGTransform) != 0 && !verifiedGlyphs {
-				source, err := e.resolveBindingFont(scan, declaration)
-				if err != nil || !sameBindingFont(source.Data, parsed.Data) {
-					return false, fmt.Errorf("font glyph mapping requires the original font")
-				}
-				verifiedGlyphs = true
-			}
-			if mode == FontExternal {
-				for _, child := range node.children {
-					if child.matchesOFD("CGTransform") {
-						patches = append(patches, editorXMLPatch{start: child.start, end: child.end})
-					}
+			verifiedGlyphs = true
+		}
+		if mode == FontExternal {
+			for _, child := range node.children {
+				if child.matchesOFD("CGTransform") {
+					change.patches[file.name] = append(change.patches[file.name], editorXMLPatch{start: child.start, end: child.end})
 				}
 			}
-		}
-		if len(patches) != 0 {
-			changes[name] = editorPatchXML(file.data, patches)
 		}
 	}
 	data = declaration.file.data
 	node := declaration.node
-	if modified, ok := changes[declaration.file.name]; ok {
-		data = modified
-		node, err = fontBindingNode(data, id)
-		if err != nil {
-			return false, err
-		}
-	}
 	fontFile := node.child("FontFile")
+	var fragment []byte
 	if mode == FontEmbed {
 		digest := sha256.Sum256(parsed.Data)
-		name := fmt.Sprintf("Fonts/%x%s", digest, parsed.Extension)
-		if existing, err := scan.reader.readFile(name); err != nil || !bytes.Equal(existing, parsed.Data) {
-			name = packageAvailableName(scan.reader, changes, name)
-			changes[name] = bytes.Clone(parsed.Data)
+		name, reused, err := fontBindingFile(ctx, scan.reader, pending, fmt.Sprintf("Fonts/%x%s", digest, parsed.Extension), parsed.Data)
+		if err != nil {
+			return nil, err
+		}
+		if !reused {
+			change.files[name] = bytes.Clone(parsed.Data)
 		}
 		content := node.textXML("FontFile", "/"+name)
 		if fontFile != nil {
-			data = editorPatchXML(data, []editorXMLPatch{{fontFile.start, fontFile.end, content}})
+			fragment = editorPatchXML(data[node.start:node.end], []editorXMLPatch{{fontFile.start - node.start, fontFile.end - node.start, content}})
 		} else if node.open == node.end {
-			data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, node, content)})
+			patch := editorXMLContent(data, node, content)
+			patch.start -= node.start
+			patch.end -= node.start
+			fragment = editorPatchXML(data[node.start:node.end], []editorXMLPatch{patch})
 		} else {
-			data = editorPatchXML(data, []editorXMLPatch{{node.close, node.close, content}})
+			fragment = editorPatchXML(data[node.start:node.end], []editorXMLPatch{{node.close - node.start, node.close - node.start, content}})
 		}
 	} else {
 		if fontFile == nil {
-			return false, fmt.Errorf("font file declaration is missing")
+			return nil, fmt.Errorf("font file declaration is missing")
 		}
-		fragment := editorPatchXML(data[node.start:node.end], []editorXMLPatch{{fontFile.start - node.start, fontFile.end - node.start, nil}})
+		fragment = editorPatchXML(data[node.start:node.end], []editorXMLPatch{{fontFile.start - node.start, fontFile.end - node.start, nil}})
 		for _, field := range []string{"FontName", "FamilyName"} {
 			root, err := parseEditorXML(fragment)
 			if err != nil {
-				return false, err
+				return nil, err
 			}
 			value := root.attr(field)
 			if stripped := externalFontName(value); stripped != value {
 				fragment, err = editorXMLAttribute(fragment, root, field, stripped)
 				if err != nil {
-					return false, err
+					return nil, err
 				}
 			}
 		}
-		data = editorPatchXML(data, []editorXMLPatch{{node.start, node.end, fragment}})
 	}
 	if explicit {
 		for _, field := range []struct{ name, value string }{{"FontName", parsed.Font.FontName}, {"FamilyName", parsed.Font.FamilyName}, {"Charset", "unicode"}} {
-			node, err := fontBindingNode(data, id)
+			root, err := parseEditorXML(fragment)
 			if err != nil {
-				return false, err
+				return nil, err
 			}
-			fragment, err := editorXMLAttribute(data, node, field.name, field.value)
+			fragment, err = editorXMLAttribute(fragment, root, field.name, field.value)
 			if err != nil {
-				return false, err
+				return nil, err
 			}
-			data = editorPatchXML(data, []editorXMLPatch{{node.start, node.end, fragment}})
 		}
 	}
-	changes[declaration.file.name] = data
-	if err := scan.apply(ctx, changes); err != nil {
-		return false, err
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	return true, nil
+	change.patches[declaration.file.name] = append(change.patches[declaration.file.name], editorXMLPatch{node.start, node.end, fragment})
+	return change, nil
 }
 
-// fontBindingNode 在修改后的资源XML中重新定位字体声明
-// 入参: data 资源XML, id 字体标识
-// 返回: *editorXML 字体节点, error 解析或查找错误
-func fontBindingNode(data []byte, id string) (*editorXML, error) {
-	root, err := parseEditorXML(data)
+// apply 合并同一文档的XML修改，再统一隔离其他文档及版本使用的文件
+// 入参: ctx 取消上下文, scan 修改前的文档引用
+// 返回: error 取消、引用或结构错误
+func (c *editorFontChange) apply(ctx context.Context, scan *editorFontDocument) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(c.patches) == 0 && len(c.files) == 0 {
+		return nil
+	}
+	changes := maps.Clone(c.files)
+	for name, patches := range c.patches {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		changes[name] = editorPatchXML(scan.files[name].data, patches)
+	}
+	return scan.apply(ctx, changes)
+}
+
+// read 复用当前文档最近读取的字体，避免共享引用重复解压，不缓存错误或取消结果
+// 入参: ctx 取消上下文, reader 包快照, name 字体路径
+// 返回: []byte 只读字体数据, error 读取或取消错误
+func (c *editorBindingFontCache) read(ctx context.Context, reader *Reader, name string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	name = cleanPackagePath(name)
+	if c.source == name && c.data != nil {
+		return c.data, nil
+	}
+	c.source, c.data = "", nil
+	data, err := reader.readFileViewContext(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	for node := range editorResourceNodes(root, "Fonts", "Font") {
-		if editorResourceID(node.attr("ID")) == editorResourceID(id) {
-			return node, nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.source, c.data = name, data
+	return data, nil
+}
+
+// open 按字体内容、名称及集合索引复用最近的解析结果，不缓存错误或取消结果
+// 入参: ctx 取消上下文, backend 字体资源后端, file 字体文件, index 集合索引
+// 返回: *FontResource 只读字体资源, error 解析或取消错误
+func (c *editorBindingFontCache) open(ctx context.Context, backend FontResourceBackend, file FontFile, index int) (*FontResource, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	checksum := sha256.Sum256(file.Data)
+	if c.font != nil && c.checksum == checksum && c.name == file.Name && c.index == index {
+		return c.font, ctx.Err()
+	}
+	c.font = nil
+	font, err := backend.OpenFontResource(file, index)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.checksum, c.name, c.index, c.font = checksum, file.Name, index, font
+	return font, nil
+}
+
+// fontBindingFile 查找未占用的字体路径，同名内容一致时复用已有文件或本次待写资源
+// 入参: ctx 取消上下文, reader 包快照, pending 待写资源, name 期望路径, data 字体内容
+// 返回: string 包内路径, bool 是否复用, error 取消错误
+func fontBindingFile(ctx context.Context, reader *Reader, pending map[string][]byte, name string, data []byte) (string, bool, error) {
+	base, extension := strings.TrimSuffix(name, path.Ext(name)), path.Ext(name)
+	for i := 0; ; i++ {
+		if err := ctx.Err(); err != nil {
+			return "", false, err
+		}
+		candidate := name
+		if i != 0 {
+			candidate = base + "_" + strconv.Itoa(i) + extension
+		}
+		existing, occupied := pending[candidate]
+		if !occupied {
+			existing, occupied = reader.files[candidate]
+			if !occupied {
+				_, occupied = reader.packageFile(candidate)
+				if occupied {
+					var err error
+					existing, err = reader.readFileViewContext(ctx, candidate)
+					if err != nil {
+						continue
+					}
+				}
+			}
+		}
+		if !occupied || bytes.Equal(existing, data) {
+			return candidate, occupied, ctx.Err()
 		}
 	}
-	return nil, fmt.Errorf("font declaration is missing")
 }
 
 // sameBindingFont 比较独立字体的全部数据表，忽略重新封装产生的校验和差异

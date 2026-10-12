@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // Annotations 注释集合
@@ -91,6 +93,106 @@ type Appearance struct {
 	PathObject           []PathObject           `xml:"PathObject"`
 	ImageObject          []ImageObject          `xml:"ImageObject"`
 	CompositeGraphicUnit []CompositeGraphicUnit `xml:"CompositeGraphicUnit"`
+}
+
+// UnmarshalXML 解析注释入口，按命名空间读取直接页面引用
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (a *Annotations) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if start.Name.Local != "Annotations" {
+		return fmt.Errorf("expected Annotations root, got %s", start.Name.Local)
+	}
+	*a = Annotations{XMLName: start.Name}
+	return decodeOFDCollection(d, start, "Page", &a.Page)
+}
+
+// UnmarshalXML 读取注释所属页面及文件路径，忽略扩展中的同名字段
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (page *AnnPage) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*page = AnnPage{PageID: attrValue(start, "PageID")}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local == "FileLoc" {
+			return d.DecodeElement(&page.FileLoc, &node)
+		}
+		return d.Skip()
+	})
+}
+
+// UnmarshalXML 解析分页注释文件，不将外部同名节点作为注释
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (page *PageAnnot) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if start.Name.Local != "PageAnnot" {
+		return fmt.Errorf("expected PageAnnot root, got %s", start.Name.Local)
+	}
+	*page = PageAnnot{XMLName: start.Name}
+	return decodeOFDCollection(d, start, "Annot", &page.Annot)
+}
+
+// UnmarshalXML 解析注释属性、说明、参数和外观，保留未指定可见性的默认语义
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (a *Annotation) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*a = Annotation{
+		ID: attrValue(start, "ID"), Type: attrValue(start, "Type"), Subtype: attrValue(start, "Subtype"),
+		Creator: attrValue(start, "Creator"), LastModDate: attrValue(start, "LastModDate"),
+	}
+	for _, attr := range start.Attr {
+		if attr.Name.Space != "" {
+			continue
+		}
+		var target *bool
+		switch attr.Name.Local {
+		case "Visible":
+			a.Visible = new(bool)
+			target = a.Visible
+		case "NoZoom":
+			target = &a.NoZoom
+		case "NoRotate":
+			target = &a.NoRotate
+		default:
+			continue
+		}
+		value, err := strconv.ParseBool(strings.TrimSpace(attr.Value))
+		if err != nil {
+			return err
+		}
+		*target = value
+	}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "Remark":
+			return d.DecodeElement(&a.Remark, &node)
+		case "Parameters":
+			return d.DecodeElement(&a.Parameters, &node)
+		case "Appearance":
+			return d.DecodeElement(&a.Appearance, &node)
+		}
+		return d.Skip()
+	})
+}
+
+// UnmarshalXML 读取标准注释参数，保留参数顺序和重复名称
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (p *AnnotationParameters) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*p = AnnotationParameters{}
+	return decodeOFDCollection(d, start, "Parameter", &p.Parameter)
+}
+
+// UnmarshalXML 读取参数名称与文本，不采用带命名空间的名称属性
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (p *AnnotationParameter) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type plain AnnotationParameter
+	var value plain
+	start = ofdXMLStart(start)
+	if err := d.DecodeElement(&value, &start); err != nil {
+		return err
+	}
+	*p = AnnotationParameter(value)
+	return nil
 }
 
 // AnnotationInfos 按页面顺序获取注释信息，包含不可见注释

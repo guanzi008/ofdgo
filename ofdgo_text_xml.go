@@ -14,74 +14,101 @@
 
 package ofdgo
 
-import "encoding/xml"
-
-// textObjectTokens 记录字形变换所属TextCode，供解码后转换为对象内索引
-type textObjectTokens struct {
-	decoder     *xml.Decoder
-	start       *xml.StartElement
-	depth, code int
-	transforms  []int
-}
+import (
+	"encoding/xml"
+	"strconv"
+	"strings"
+)
 
 // UnmarshalXML 解析字形变换，省略的字符数和字形数均取1
 // 入参: decoder XML解码器, start 变换起始节点
 // 返回: error 解码错误
 func (transform *CGTransform) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
-	type plain CGTransform
-	value := plain{CodeCount: 1, GlyphCount: 1}
+	*transform = CGTransform{CodeCount: 1, GlyphCount: 1}
+	for _, attr := range start.Attr {
+		if attr.Name.Space != "" {
+			continue
+		}
+		var target *int
+		switch attr.Name.Local {
+		case "CodePosition":
+			target = &transform.CodePosition
+		case "CodeCount":
+			target = &transform.CodeCount
+		case "GlyphCount":
+			target = &transform.GlyphCount
+		}
+		if target != nil {
+			value, err := strconv.Atoi(strings.TrimSpace(attr.Value))
+			if err != nil {
+				return err
+			}
+			*target = value
+		}
+	}
+	return decodeOFDChildren(decoder, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local == "Glyphs" {
+			return d.DecodeElement(&transform.Glyphs, &node)
+		}
+		return d.Skip()
+	})
+}
+
+// UnmarshalXML 解析文字定位及原文，不使用带外部命名空间的定位属性
+// 入参: decoder XML解码器, start 文字节点
+// 返回: error 解码错误
+func (code *TextCode) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
+	type plain TextCode
+	var value plain
+	start = ofdXMLStart(start)
 	if err := decoder.DecodeElement(&value, &start); err != nil {
 		return err
 	}
-	*transform = CGTransform(value)
+	*code = TextCode(value)
 	return nil
 }
 
-// Token 转发XML令牌并记录直接子节点顺序
-// 返回: xml.Token XML令牌, error 解码错误
-func (s *textObjectTokens) Token() (xml.Token, error) {
-	if s.start != nil {
-		start := *s.start
-		s.start = nil
-		return start, nil
-	}
-	token, err := s.decoder.Token()
-	switch value := token.(type) {
-	case xml.StartElement:
-		if s.depth == 0 && value.Name.Local == "CGTransform" {
-			s.transforms = append(s.transforms, s.code)
-		}
-		s.depth++
-	case xml.EndElement:
-		s.depth--
-		if s.depth == 0 && value.Name.Local == "TextCode" {
-			s.code++
-		}
-	}
-	return token, err
-}
-
-// UnmarshalXML 将各TextCode前的局部字形位置统一为对象内索引
+// UnmarshalXML 解析标准文字节点，将各TextCode前的局部字形位置统一为对象内索引
 // 入参: decoder XML解码器, start 对象起始节点
 // 返回: error 解码错误
 func (obj *TextObject) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
 	type plain TextObject
-	stream := &textObjectTokens{decoder: decoder, start: &start}
 	var value plain
-	if err := xml.NewTokenDecoder(stream).Decode(&value); err != nil {
+	if err := decodeGraphicAttributes(start, &value); err != nil {
 		return err
 	}
-	offsets := make([]int, len(value.TextCode))
-	for i := 1; i < len(offsets); i++ {
-		offsets[i] = offsets[i-1] + len(textCodeRunes(value.TextCode[i-1].Value))
-	}
-	for i, code := range stream.transforms {
-		if code < len(offsets) {
-			value.CGTransform[i].CodePosition += offsets[code]
+	offset, pending := 0, 0
+	if err := decodeOFDChildren(decoder, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "FillColor":
+			return d.DecodeElement(&value.FillColor, &node)
+		case "StrokeColor":
+			return d.DecodeElement(&value.StrokeColor, &node)
+		case "Clips":
+			return d.DecodeElement(&value.Clips, &node)
+		case "Actions":
+			return decodeOFDActions(d, node, &value.Actions)
+		case "CGTransform":
+			return d.DecodeElement(&value.CGTransform, &node)
+		case "TextCode":
+			var code TextCode
+			if err := d.DecodeElement(&code, &node); err != nil {
+				return err
+			}
+			for i := pending; i < len(value.CGTransform); i++ {
+				value.CGTransform[i].CodePosition += offset
+			}
+			pending = len(value.CGTransform)
+			offset += len(textCodeRunes(code.Value))
+			value.TextCode = append(value.TextCode, code)
+			return nil
 		}
+		return d.Skip()
+	}); err != nil {
+		return err
 	}
 	*obj = TextObject(value)
-	for _, attr := range start.Attr {
+	for _, attr := range ofdXMLStart(start).Attr {
 		if attr.Name.Local == "LineWidth" {
 			obj.LineWidthSet = obj.LineWidth == 0
 		}
