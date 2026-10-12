@@ -140,7 +140,8 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ma
 	return p
 }
 
-// buildClipAreaPath 按绘制参数展开裁剪路径的填充及描边，再应用区域变换
+// buildClipAreaPath 构建裁剪轮廓，再应用区域变换
+// 未启用填充和勾边的路径按填充规则确定内部区域，勾边路径仍按绘制参数展开
 // 入参: obj 裁剪路径, drawParam 区域绘制参数, parent 区域变换, pageH 页面高度, bx 横向位移, by 纵向位移
 // 返回: *canvas.Path 裁剪轮廓
 func (r *Renderer) buildClipAreaPath(obj PathObject, drawParam string, parent Matrix, pageH, bx, by float64) *canvas.Path {
@@ -154,7 +155,8 @@ func (r *Renderer) buildClipAreaPath(obj PathObject, drawParam string, parent Ma
 	obj.Boundary = ""
 	p := r.buildPath(obj, 0, IdentityMatrix, false)
 	var result *canvas.Path
-	if obj.Fill != nil && *obj.Fill {
+	stroke := obj.Stroke == nil || *obj.Stroke
+	if !stroke || obj.Fill != nil && *obj.Fill {
 		paths := canvas.Paths(p.Copy().Split())
 		for _, path := range paths {
 			path.Close()
@@ -164,7 +166,7 @@ func (r *Renderer) buildClipAreaPath(obj PathObject, drawParam string, parent Ma
 			result = result.Settle(canvas.EvenOdd)
 		}
 	}
-	if obj.Stroke == nil || *obj.Stroke {
+	if stroke {
 		dp := r.drawParamDefaults(obj.DrawParam, r.drawParamDefaults(drawParam, nil))
 		if dp != nil {
 			copy := *dp
