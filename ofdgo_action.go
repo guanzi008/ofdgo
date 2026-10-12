@@ -156,7 +156,51 @@ func decodeOFDActions(d *xml.Decoder, start xml.StartElement, actions *[]Action)
 	})
 }
 
-// UnmarshalXML 解析跳转目标
+// UnmarshalXML 读取事件、区域和动作内容，忽略外部同名节点
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (action *Action) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*action = Action{Event: attrValue(start, "Event")}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		var target any
+		switch node.Name.Local {
+		case "Region":
+			target = &action.Region
+		case "Goto":
+			target = &action.Goto
+		case "URI":
+			target = &action.URI
+		case "GotoA":
+			target = &action.GotoA
+		case "Sound":
+			target = &action.Sound
+		case "Movie":
+			target = &action.Movie
+		default:
+			return d.Skip()
+		}
+		return d.DecodeElement(target, &node)
+	})
+}
+
+// UnmarshalXML 读取文档内跳转目标或书签，不采用外部扩展中的同名目标
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (action *Goto) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*action = Goto{}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "Dest":
+			return d.DecodeElement(&action.Dest, &node)
+		case "Bookmark":
+			return d.DecodeElement(&action.Bookmark, &node)
+		default:
+			return d.Skip()
+		}
+	})
+}
+
+// UnmarshalXML 解析跳转目标，忽略外部坐标字段
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
 func (dest *Dest) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
@@ -196,7 +240,24 @@ func (dest *Dest) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 			*target = v
 		}
 	}
-	if err := d.DecodeElement(&value, &start); err != nil {
+	if err := decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		var target **float64
+		switch node.Name.Local {
+		case "Left":
+			target = &value.Left
+		case "Right":
+			target = &value.Right
+		case "Top":
+			target = &value.Top
+		case "Bottom":
+			target = &value.Bottom
+		case "Zoom":
+			target = &value.Zoom
+		default:
+			return d.Skip()
+		}
+		return d.DecodeElement(target, &node)
+	}); err != nil {
 		return err
 	}
 	if value.Left != nil {
@@ -231,6 +292,7 @@ func (dest *Dest) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 func (m *Movie) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	type movie Movie
 	value := movie{Operator: "Play"}
+	start = ofdXMLStart(start)
 	if err := d.DecodeElement(&value, &start); err != nil {
 		return err
 	}
@@ -238,39 +300,39 @@ func (m *Movie) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	return nil
 }
 
-// UnmarshalXML 解析动作区域分路径并保留指令顺序
+// UnmarshalXML 读取动作区域中的OFD分路径，跳过外部扩展区域
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (region *Region) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*region = Region{}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local != "Area" {
+			return d.Skip()
+		}
+		return d.DecodeElement(&region.Area, &node)
+	})
+}
+
+// UnmarshalXML 按原顺序读取区域指令，外部同名节点不参与路径绘制
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
 func (a *RegionArea) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	*a = RegionArea{Start: attrValue(start, "Start")}
-	for {
-		tok, err := d.Token()
-		if err != nil {
-			return err
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		command := RegionCommand{
+			Type:           node.Name.Local,
+			Point1:         attrValue(node, "Point1"),
+			Point2:         attrValue(node, "Point2"),
+			Point3:         attrValue(node, "Point3"),
+			EllipseSize:    attrValue(node, "EllipseSize"),
+			RotationAngle:  attrValue(node, "RotationAngle"),
+			LargeArc:       attrValue(node, "LargeArc"),
+			SweepDirection: attrValue(node, "SweepDirection"),
+			EndPoint:       attrValue(node, "EndPoint"),
 		}
-		switch node := tok.(type) {
-		case xml.StartElement:
-			command := RegionCommand{
-				Type:           node.Name.Local,
-				Point1:         attrValue(node, "Point1"),
-				Point2:         attrValue(node, "Point2"),
-				Point3:         attrValue(node, "Point3"),
-				EllipseSize:    attrValue(node, "EllipseSize"),
-				RotationAngle:  attrValue(node, "RotationAngle"),
-				LargeArc:       attrValue(node, "LargeArc"),
-				SweepDirection: attrValue(node, "SweepDirection"),
-				EndPoint:       attrValue(node, "EndPoint"),
-			}
-			a.Command = append(a.Command, command)
-			if err := d.Skip(); err != nil {
-				return err
-			}
-		case xml.EndElement:
-			if node.Name.Local == start.Name.Local {
-				return nil
-			}
-		}
-	}
+		a.Command = append(a.Command, command)
+		return d.Skip()
+	})
 }
 
 // gotoDest 获取文档内跳转目标

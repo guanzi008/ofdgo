@@ -18,6 +18,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 )
 
@@ -388,17 +389,81 @@ func (a *Attachment) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 	return nil
 }
 
-// UnmarshalXML 解析大纲节点并应用默认值
+// UnmarshalXML 读取OFD书签列表，跳过外部同名条目
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (bookmarks *Bookmarks) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*bookmarks = Bookmarks{}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local != "Bookmark" {
+			return d.Skip()
+		}
+		return d.DecodeElement(&bookmarks.Bookmark, &node)
+	})
+}
+
+// UnmarshalXML 读取书签名称及目标，不使用外部扩展中的跳转信息
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (bookmark *Bookmark) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*bookmark = Bookmark{Name: attrValue(start, "Name")}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local != "Dest" {
+			return d.Skip()
+		}
+		return d.DecodeElement(&bookmark.Dest, &node)
+	})
+}
+
+// UnmarshalXML 读取OFD大纲列表，跳过外部同名节点
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (outlines *Outlines) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*outlines = Outlines{}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local != "OutlineElem" {
+			return d.Skip()
+		}
+		return d.DecodeElement(&outlines.OutlineElem, &node)
+	})
+}
+
+// UnmarshalXML 解析大纲节点、子大纲和动作，并应用默认展开状态
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
 func (o *OutlineElem) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	type outlineElem OutlineElem
-	value := outlineElem{Expanded: true}
-	if err := d.DecodeElement(&value, &start); err != nil {
-		return err
+	*o = OutlineElem{Title: attrValue(start, "Title"), Expanded: true}
+	for _, attr := range start.Attr {
+		if attr.Name.Space != "" {
+			continue
+		}
+		value := strings.TrimSpace(attr.Value)
+		var err error
+		switch attr.Name.Local {
+		case "Count":
+			if value != "" {
+				o.Count, err = strconv.Atoi(value)
+			}
+		case "Expanded":
+			o.Expanded = false
+			if value != "" {
+				o.Expanded, err = strconv.ParseBool(value)
+			}
+		}
+		if err != nil {
+			return err
+		}
 	}
-	*o = OutlineElem(value)
-	return nil
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "Actions":
+			return decodeOFDActions(d, node, &o.Actions)
+		case "OutlineElem":
+			return d.DecodeElement(&o.OutlineElem, &node)
+		default:
+			return d.Skip()
+		}
+	})
 }
 
 // UnmarshalXML 解析文档权限并应用默认值

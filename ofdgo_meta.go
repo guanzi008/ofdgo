@@ -106,3 +106,65 @@ func (body *DocBody) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 		return d.Skip()
 	})
 }
+
+// UnmarshalXML 读取文档元数据，不将外部同名字段作为OFD信息
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (info *DocInfo) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*info = DocInfo{}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		var target any
+		switch node.Name.Local {
+		case "DocID":
+			target = &info.DocID
+		case "Title":
+			target = &info.Title
+		case "Author":
+			target = &info.Author
+		case "Subject":
+			target = &info.Subject
+		case "Abstract":
+			target = &info.Abstract
+		case "CreationDate":
+			target = &info.CreationDate
+		case "ModDate":
+			target = &info.ModDate
+		case "Creator":
+			target = &info.Creator
+		case "CreatorVersion":
+			target = &info.CreatorVersion
+		case "CustomDatas":
+			target = &info.CustomDatas
+		default:
+			return d.Skip()
+		}
+		return d.DecodeElement(target, &node)
+	})
+}
+
+// UnmarshalXML 按原顺序读取OFD自定义字段，跳过外部扩展条目
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (data *CustomDatas) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*data = CustomDatas{}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local != "CustomData" {
+			return d.Skip()
+		}
+		return d.DecodeElement(&data.CustomData, &node)
+	})
+}
+
+// UnmarshalXML 读取自定义字段的名称和文本，忽略带命名空间的属性
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (data *CustomData) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type customData CustomData
+	var value customData
+	start = ofdXMLStart(start)
+	if err := d.DecodeElement(&value, &start); err != nil {
+		return err
+	}
+	*data = CustomData(value)
+	return nil
+}
