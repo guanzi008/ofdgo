@@ -26,6 +26,7 @@ import (
 	"image"
 	"io"
 	"maps"
+	"path"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -216,14 +217,18 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 			return nil, false, err
 		}
 		buffer := bufio.NewReader(imageInput{ReadCloser: input, context: ctx})
-		header, _ := buffer.Peek(512)
-		header = bytes.TrimSpace(bytes.TrimPrefix(header, []byte{0xef, 0xbb, 0xbf}))
-		if structured || len(header) > 0 && header[0] == '<' {
+		found, err := editorXMLPrefix(buffer)
+		if err != nil || !found && (structured || strings.EqualFold(path.Ext(name), ".xml")) {
+			safe = false
+		}
+		if safe && found {
 			decoder := xml.NewDecoder(buffer)
 			var stack []xml.Name
+			seen := false
 			for {
 				token, err := decoder.Token()
 				if err == io.EOF {
+					safe = seen && len(stack) == 0
 					break
 				}
 				if err != nil {
@@ -232,6 +237,11 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 				}
 				switch element := token.(type) {
 				case xml.StartElement:
+					if len(stack) == 0 && seen {
+						safe = false
+						break
+					}
+					seen = true
 					if len(stack) != 0 && classifyOFDNamespace(element.Name.Space) == ofdXMLUnknown && element.Name.Space != stack[len(stack)-1].Space {
 						safe = false
 						break
@@ -267,6 +277,10 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 					}
 				case xml.EndElement:
 					stack = stack[:len(stack)-1]
+				case xml.CharData:
+					if len(stack) == 0 && len(bytes.Trim(element, " \t\r\n")) != 0 {
+						safe = false
+					}
 				case xml.Directive:
 					safe = false
 				}
