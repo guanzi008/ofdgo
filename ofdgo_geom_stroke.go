@@ -144,18 +144,18 @@ func (p GeometryPath) strokePolylines(tolerance float64) ([]geometryPolyline, er
 		if depth == 24 {
 			return fmt.Errorf("stroke curve tolerance cannot be met")
 		}
-		work := append([]Point(nil), points...)
-		left, right := make([]Point, len(points)), make([]Point, len(points))
+		var work, left, right [4]Point
+		copy(work[:], points)
 		for n := len(points); n > 0; n-- {
 			left[len(points)-n], right[n-1] = work[0], work[n-1]
 			for i := 0; i < n-1; i++ {
 				work[i] = geometryLerp(work[i], work[i+1], .5)
 			}
 		}
-		if err := flatten(left, budget/2, depth+1); err != nil {
+		if err := flatten(left[:len(points)], budget/2, depth+1); err != nil {
 			return err
 		}
-		return flatten(right, budget/2, depth+1)
+		return flatten(right[:len(points)], budget/2, depth+1)
 	}
 	for _, s := range curves {
 		switch s.Verb {
@@ -175,7 +175,8 @@ func (p GeometryPath) strokePolylines(tolerance float64) ([]geometryPolyline, er
 			line.points = []Point{current}
 		default:
 			drawn = true
-			points := []Point{current}
+			var buffer [4]Point
+			points := append(buffer[:0], current)
 			if s.Verb == GeometryQuad || s.Verb == GeometryCubic {
 				points = append(points, s.Control1)
 			}
