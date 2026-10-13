@@ -96,6 +96,13 @@ func fontFaceNames(file io.ReaderAt, offset int64) []string {
 // 返回: []string 字体名称列表
 func NamesFromTable(data []byte) []string {
 	records, values := fontNameValues(data)
+	return fontNamesFromValues(records, values)
+}
+
+// fontNamesFromValues 从已解码记录生成去重名称，保留原有顺序及样式匹配
+// 入参: records 名称记录, values 已解码的名称文本
+// 返回: []string 字体名称列表
+func fontNamesFromValues(records []fontNameRecord, values map[[4]uint16]string) []string {
 	var names []string
 	seen := make(map[string]bool)
 	for _, record := range records {

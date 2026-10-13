@@ -49,7 +49,7 @@ func FaceInfo(data []byte, index int) Face {
 		}
 		return ""
 	}
-	return Face{Index: index, FullName: name(4, 6, 16, 1), Family: name(16, 1), Style: name(17, 2), PostScriptName: name(6), Names: NamesFromTable(data)}
+	return Face{Index: index, FullName: name(4, 6, 16, 1), Family: name(16, 1), Style: name(17, 2), PostScriptName: name(6), Names: fontNamesFromValues(records, values)}
 }
 
 // FileCount 校验字体或集合头并读取字体数量
