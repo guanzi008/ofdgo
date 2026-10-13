@@ -1565,6 +1565,12 @@ body[data-hide-meta] .meta-panel {
 .resource-heading {
 	background: #eef1f4;
 	border: 1px solid var(--line);
+	overflow: hidden;
+}
+
+.resource-heading,
+.resource-list {
+	scrollbar-gutter: stable;
 }
 
 .resource-list-container {
