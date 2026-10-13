@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 )
@@ -53,7 +54,8 @@ func (e *Editor) AddStructure(tag CustomTag, root StructureNode) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if err := e.validateStructureReferences(tree, tag); err != nil {
+	objects, err := e.validateStructureReferences(tree, tag, nil)
+	if err != nil {
 		return 0, err
 	}
 	base := e.source
@@ -70,7 +72,7 @@ func (e *Editor) AddStructure(tag CustomTag, root StructureNode) (int, error) {
 		}
 		tag.SchemaLoc = "/" + name
 	}
-	name, index, container, entries, err := editorStructureIndex(base)
+	name, index, container, entries, err := editorStructureIndex(base, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -107,7 +109,7 @@ func (e *Editor) AddStructure(tag CustomTag, root StructureNode) (int, error) {
 			return 0, err
 		}
 	}
-	return len(entries), e.commitAnnotationParts(base, parts)
+	return len(entries), e.commitStructureParts(base, parts, objects, len(entries))
 }
 
 // DeleteStructure 删除标引入口，不删除正文或其他入口共享的资源
@@ -117,7 +119,7 @@ func (e *Editor) DeleteStructure(index int) error {
 	if e.source == nil {
 		return fmt.Errorf("custom tag structure not found: %d", index)
 	}
-	name, data, _, entries, err := editorStructureIndex(e.source)
+	name, data, _, entries, err := editorStructureIndex(e.source, nil)
 	if err != nil {
 		return err
 	}
@@ -125,7 +127,16 @@ func (e *Editor) DeleteStructure(index int) error {
 		return fmt.Errorf("custom tag structure not found: %d", index)
 	}
 	node := entries[index]
-	return e.commitAnnotationParts(e.source, map[string][]byte{name: editorPatchXML(data, []editorXMLPatch{{node.start, node.end, nil}})})
+	base := *e.source
+	base.structureStarts = make(map[int]map[string]int, len(e.source.structureStarts))
+	for entry, starts := range e.source.structureStarts {
+		if entry < index {
+			base.structureStarts[entry] = starts
+		} else if entry > index {
+			base.structureStarts[entry-1] = starts
+		}
+	}
+	return e.commitAnnotationParts(&base, map[string][]byte{name: editorPatchXML(data, []editorXMLPatch{{node.start, node.end, nil}})})
 }
 
 // AddStructureNode 在指定父节点末尾添加子树，空路径表示根节点
@@ -242,16 +253,20 @@ func (e *Editor) SetStructureReferences(index int, path []int, references []Stru
 }
 
 // editorStructureIndex 读取或准备当前文档的标引索引，保留内联入口和未知扩展
-// 入参: base 编辑包快照
+// 入参: base 编辑包快照, parts 本次输出条目，可为nil
 // 返回: string 索引文件路径, []byte 原文, *editorXML 容器, []*editorXML 标引入口, error 读取错误
-func editorStructureIndex(base *editorSource) (string, []byte, *editorXML, []*editorXML, error) {
+func editorStructureIndex(base *editorSource, parts map[string][]byte) (string, []byte, *editorXML, []*editorXML, error) {
 	name := base.reader.documentRoot
 	if base.document.CustomTags.Path != "" {
 		name = base.reader.ResPath(base.document.CustomTags.Path)
 	}
-	data, err := base.reader.readFile(name)
-	if err != nil {
-		return "", nil, nil, nil, err
+	data, ok := parts[name]
+	if !ok {
+		var err error
+		data, err = base.reader.readFile(name)
+		if err != nil {
+			return "", nil, nil, nil, err
+		}
 	}
 	root, err := parseEditorXML(data)
 	if err != nil {
@@ -341,13 +356,14 @@ func (e *Editor) editStructure(index int, edit func([]byte, *editorXML, CustomTa
 	if err != nil {
 		return err
 	}
-	if err := e.validateStructureReferences(tree, tag); err != nil {
+	objects, err := e.validateStructureReferences(tree, tag, snapshot)
+	if err != nil {
 		return err
 	}
 	parts := make(map[string][]byte)
 	for i, other := range tags {
 		if i != index && e.source.reader.ResPath(other.FileLoc) == name {
-			indexName, indexData, _, entries, err := editorStructureIndex(e.source)
+			indexName, indexData, _, entries, err := editorStructureIndex(e.source, nil)
 			if err != nil {
 				return err
 			}
@@ -363,13 +379,38 @@ func (e *Editor) editStructure(index int, edit func([]byte, *editorXML, CustomTa
 		}
 	}
 	parts[name] = updated
-	return e.commitAnnotationParts(e.source, parts)
+	return e.commitStructureParts(e.source, parts, objects, index)
+}
+
+// commitStructureParts 提交标引并记录有效目标及已应用的编号迁移，供后续编辑维护引用
+// 入参: base 原包, parts 修改条目, objects 按页面编号记录的有效图元, index 标引入口序号
+// 返回: error 提交错误
+func (e *Editor) commitStructureParts(base *editorSource, parts map[string][]byte, objects map[string]map[string]bool, index int) error {
+	next := *base
+	if len(e.structureRemaps) != 0 {
+		next.structureStarts = maps.Clone(base.structureStarts)
+		if next.structureStarts == nil {
+			next.structureStarts = make(map[int]map[string]int)
+		}
+		next.structureStarts[index] = e.structureRemapStarts()
+	}
+	next.structureObjects = maps.Clone(base.structureObjects)
+	if len(objects) != 0 && next.structureObjects == nil {
+		next.structureObjects = make(map[string]map[string]bool)
+	}
+	for page, ids := range objects {
+		known := make(map[string]bool, len(next.structureObjects[page])+len(ids))
+		maps.Copy(known, next.structureObjects[page])
+		maps.Copy(known, ids)
+		next.structureObjects[page] = known
+	}
+	return e.commitAnnotationParts(&next, parts)
 }
 
 // validateStructureReferences 检查标引目标是否位于当前文档和版本，不依赖字体或图像解码
-// 入参: root 待提交标引树, tag 标引入口
-// 返回: error 页面或图元缺失错误
-func (e *Editor) validateStructureReferences(root *StructureNode, tag CustomTag) error {
+// 入参: root 待提交标引树, tag 标引入口, r 当前操作的编辑快照，为nil时按需创建
+// 返回: map[string]map[string]bool 已校验目标, error 页面或图元缺失错误
+func (e *Editor) validateStructureReferences(root *StructureNode, tag CustomTag, r *Reader) (map[string]map[string]bool, error) {
 	var refs []StructureReference
 	var collect func(*StructureNode, bool) error
 	collect = func(node *StructureNode, official bool) error {
@@ -386,46 +427,55 @@ func (e *Editor) validateStructureReferences(root *StructureNode, tag CustomTag)
 		return nil
 	}
 	if err := collect(root, structureOfficial(tag, root.Namespace)); err != nil {
-		return err
+		return nil, err
 	}
 	if len(refs) == 0 {
-		return nil
+		return nil, nil
 	}
-	r, err := e.Reader()
-	if err != nil {
-		return err
+	if r == nil {
+		var err error
+		r, err = e.Reader()
+		if err != nil {
+			return nil, err
+		}
+		defer r.Close()
 	}
-	defer r.Close()
 	doc, err := r.Doc()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	renderer := e.newRenderer(r)
 	pages := signaturePageNumbers(doc)
 	checked := make(map[int]map[string]bool)
+	result := make(map[string]map[string]bool)
 	for _, ref := range refs {
 		page, _ := resourceValue(pages, ref.PageID)
 		if page == 0 {
-			return fmt.Errorf("custom tag page not found: %s", ref.PageID)
+			return nil, fmt.Errorf("custom tag page not found: %s", ref.PageID)
 		}
 		objects := checked[page]
 		if objects == nil {
 			content, err := r.PageContentByIndex(page - 1)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			visitor := &structureObjectVisitor{objects: make(map[string]bool)}
 			if err := renderer.WalkPage(content, visitor); err != nil {
-				return err
+				return nil, err
 			}
 			objects = visitor.objects
 			checked[page] = objects
 		}
 		for _, id := range ref.ObjectIDs {
 			if !objects[editorResourceID(id)] {
-				return fmt.Errorf("custom tag object not found: %s/%s", ref.PageID, id)
+				return nil, fmt.Errorf("custom tag object not found: %s/%s", ref.PageID, id)
 			}
+			key := editorResourceID(ref.PageID)
+			if result[key] == nil {
+				result[key] = make(map[string]bool)
+			}
+			result[key][editorResourceID(id)] = true
 		}
 	}
-	return nil
+	return result, nil
 }

@@ -66,6 +66,7 @@ type Editor struct {
 	source           *editorSource
 	origins          map[string]*editorObjectOrigin
 	removedPages     map[string]bool
+	structureRemaps  map[string][]map[string]string
 	outlines         []byte
 	encryption       *encryptionState
 	output           *outputOptimization
@@ -82,6 +83,7 @@ type editorResource struct {
 	composite    string
 	vectorKey    [32]byte
 	vectorStates map[string]editorCompositeState
+	objectIDs    map[string]string
 	references   []string
 	usage        *editorVectorUsage
 	subset       *editorFontSubset
@@ -120,9 +122,7 @@ func (e *Editor) SetFontFS(fsys ...fs.FS) {
 // 入参: compiler 页面编译器
 func (e *Editor) SetPageCompiler(compiler PageCompiler) {
 	e.backends.Compiler = compiler
-	if e.fontRenderer != nil {
-		WithRenderBackends(e.backends)(e.fontRenderer)
-	}
+	e.fontRenderer = nil
 }
 
 // SetRenderBackends 设置完整后端组合，字体能力变化时更新度量，不改变文档或撤销历史
@@ -130,15 +130,10 @@ func (e *Editor) SetPageCompiler(compiler PageCompiler) {
 func (e *Editor) SetRenderBackends(backends RenderBackends) {
 	fontsChanged := !sameBackend(e.backends.Fonts, backends.Fonts)
 	if !sameBackend(e.backends.FontResources, backends.FontResources) {
-		e.fonts = make(map[string]*FontResource)
-		for i := range e.resources {
-			e.resources[i].subset = nil
-		}
+		e.clearFontResourceCache()
 	}
 	e.backends = backends
-	if e.fontRenderer != nil {
-		WithRenderBackends(backends)(e.fontRenderer)
-	}
+	e.fontRenderer = nil
 	if fontsChanged {
 		e.fontMetrics = make(map[string]FontMetrics)
 	}

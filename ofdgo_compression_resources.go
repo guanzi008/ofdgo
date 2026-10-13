@@ -50,7 +50,7 @@ func (e *Editor) compressResourceParts(parts map[string][]byte, reader *Reader, 
 }
 
 // compressResourceReferences 优化资源，复用自产页面引用并流式读取暂存页面
-// 图片优化结果仅在本次写出内复用，失败时保留原始编码
+// 版本文件隔离当前入口，其他文档仅优化未受版本保护的资源；结果仅在本次写出内复用
 // 入参: parts 输出改动, reader 原包, removed 已移除条目, generated 本次自产页面及引用
 // 返回: error 读取或取消错误
 func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Reader, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
@@ -58,7 +58,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		return nil
 	}
 	generated = e.generatedVectorReferences(parts, generated)
-	scope, err := reader.versionResourceFiles(e.output.ctx, parts, generated)
+	selected, scope, err := reader.versionResourceFiles(e.output.ctx, parts, generated)
 	if err != nil {
 		return err
 	}
@@ -107,7 +107,22 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 	if err != nil || !safe {
 		return err
 	}
+	if selected != nil && reader.DocumentCount() > 1 {
+		preserved, err := reader.versionPreservedFiles(e.output.ctx)
+		if err != nil {
+			return err
+		}
+		for name := range preserved {
+			if !selected[name] {
+				refs.files[name], refs.versions[name] = true, true
+			}
+		}
+	}
 	type resourceFile struct{ key, role string }
+	type resourceScope struct {
+		role     string
+		selected bool
+	}
 	type resourceSize struct {
 		role string
 		size uint64
@@ -147,6 +162,9 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 					return err
 				}
 				key := editorResourceLocation(name, root.attr("BaseLoc"), value)
+				if selected != nil && !selected[cleanPackagePath(name)] && selected[key] {
+					continue
+				}
 				if preserved || field == "MediaFile" && node.attr("Type") != "Image" {
 					refs.files[key] = true
 					continue
@@ -174,7 +192,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		reserved[key] = true
 	}
 	formats := make(map[string]string)
-	seen := make(map[string]map[[32]byte]string)
+	seen := make(map[resourceScope]map[[32]byte]string)
 	imageResults := make(map[outputImageKey][]byte)
 	imageSources := make(map[string]outputImageSource)
 	ordered := slices.Sorted(maps.Keys(actual))
@@ -321,18 +339,19 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 					}
 				}
 			}
-			if seen[role] == nil {
-				seen[role] = make(map[[32]byte]string)
+			scope := resourceScope{role, selected[key]}
+			if seen[scope] == nil {
+				seen[scope] = make(map[[32]byte]string)
 			}
 			hash := source.key.hash
-			if first, ok := seen[role][hash]; ok {
+			if first, ok := seen[scope][hash]; ok {
 				aliases[key] = first
 				removed[key] = true
 				if locations[key] != actual[key] {
 					delete(parts, locations[key])
 				}
 			} else {
-				seen[role][hash] = key
+				seen[scope][hash] = key
 			}
 		}
 	}
@@ -367,6 +386,9 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 						return err
 					}
 					key := editorResourceLocation(name, root.attr("BaseLoc"), value)
+					if selected != nil && !selected[cleanPackagePath(name)] && selected[key] {
+						continue
+					}
 					location := locations[key]
 					if first, ok := aliases[key]; ok {
 						location = locations[first]

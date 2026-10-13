@@ -28,18 +28,26 @@ import (
 // errTIFFRandomAccess 表示目录链需要回读，仅流式输入需重新打开资源
 var errTIFFRandomAccess = errors.New("TIFF directory requires random access")
 
-// tiffImageLayout 保存单页TIFF的尺寸、方向、采样及压缩参数
+// tiffImageLayout 保存TIFF目录的图像布局及关联透明蒙版
 type tiffImageLayout struct {
 	width, height int
+	tileWidth     int
+	tileHeight    int
 	orientation   int
 	offset, next  uint32
 	reduced, mask bool
 	planar        bool
+	auxiliary     bool
 	samples       uint32
 	depth         uint32
 	fillOrder     uint32
 	compression   uint32
+	predictor     uint32
+	photometric   uint32
+	profileOffset uint32
+	profileSize   uint32
 	t4, t6        uint32
+	transparency  *tiffImageLayout
 }
 
 // tiffDirectoryInput 只替换解码视图中的首目录偏移，不复制或改写原始资源
@@ -62,11 +70,21 @@ func isTIFFData(data []byte) bool {
 	return len(data) >= 4 && (string(data[:4]) == "II\x2a\x00" || string(data[:4]) == "MM\x00\x2a")
 }
 
-// readTIFFLayout 选择单页TIFF的主图，允许缩略图目录并拒绝循环和多个主图
+// readTIFFLayout 选择主图及其蒙版，允许缩略图并拒绝循环和多个主图
 // 入参: input 从文件头开始的输入流
 // 返回: tiffImageLayout 存储尺寸与方向, error 文件结构或方向错误
 func readTIFFLayout(input io.Reader) (tiffImageLayout, error) {
+	return readTIFFLayoutContext(context.Background(), input)
+}
+
+// readTIFFLayoutContext 扫描目录链并选择主图，读取期间响应取消
+// 入参: ctx 取消上下文, input 从文件头开始的输入流
+// 返回: tiffImageLayout 存储尺寸与方向, error 结构、读取或取消错误
+func readTIFFLayoutContext(ctx context.Context, input io.Reader) (tiffImageLayout, error) {
 	var result tiffImageLayout
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	var header [8]byte
 	if _, err := io.ReadFull(input, header[:]); err != nil {
 		return result, err
@@ -81,18 +99,23 @@ func readTIFFLayout(input io.Reader) (tiffImageLayout, error) {
 	offset := int64(order.Uint32(header[4:]))
 	position := int64(8)
 	var seen map[uint32]bool
+	var transparency *tiffImageLayout
 	for offset != 0 {
 		if seen != nil && seen[uint32(offset)] {
 			return result, fmt.Errorf("cyclic TIFF directory chain")
 		}
-		layout, end, err := readTIFFDirectory(input, order, offset, position)
+		layout, end, err := readTIFFDirectory(ctx, input, order, offset, position)
 		if err != nil {
 			return result, err
 		}
 		if layout.mask {
-			return result, fmt.Errorf("TIFF transparency mask directories are not supported")
-		}
-		if !layout.reduced || layout.next == 0 && seen == nil {
+			if !layout.reduced {
+				if transparency != nil {
+					return result, fmt.Errorf("multiple TIFF transparency masks")
+				}
+				transparency = &layout
+			}
+		} else if !layout.reduced || layout.next == 0 && seen == nil {
 			if result.offset != 0 {
 				return result, fmt.Errorf("multiple TIFF pages are not supported in OFD resources")
 			}
@@ -106,17 +129,30 @@ func readTIFFLayout(input io.Reader) (tiffImageLayout, error) {
 		}
 		offset, position = int64(layout.next), end
 	}
+	if err := ctx.Err(); err != nil {
+		return tiffImageLayout{}, err
+	}
 	if result.offset == 0 {
 		return result, fmt.Errorf("missing TIFF main image")
+	}
+	result.transparency = transparency
+	if transparency != nil {
+		size := result.displaySize()
+		if size.X > int(^uint(0)>>1)/8/size.Y {
+			return tiffImageLayout{}, fmt.Errorf("TIFF mask image dimensions exceed capacity")
+		}
 	}
 	return result, nil
 }
 
 // readTIFFDirectory 读取目录中的图像布局和子文件类型，不读取像素
-// 入参: input 输入流, order 字节序, offset 目录偏移, position 当前流位置
-// 返回: tiffImageLayout 目录布局, int64 读取后的流位置, error 结构或读取错误
-func readTIFFDirectory(input io.Reader, order binary.ByteOrder, offset, position int64) (tiffImageLayout, int64, error) {
+// 入参: ctx 取消上下文, input 输入流, order 字节序, offset 目录偏移, position 当前流位置
+// 返回: tiffImageLayout 目录布局, int64 读取后的流位置, error 结构、读取或取消错误
+func readTIFFDirectory(ctx context.Context, input io.Reader, order binary.ByteOrder, offset, position int64) (tiffImageLayout, int64, error) {
 	var result tiffImageLayout
+	if err := ctx.Err(); err != nil {
+		return result, position, err
+	}
 	var header [4]byte
 	if offset < 8 {
 		return result, position, fmt.Errorf("invalid TIFF directory offset")
@@ -129,7 +165,8 @@ func readTIFFDirectory(input io.Reader, order binary.ByteOrder, offset, position
 		if offset < position {
 			return result, position, errTIFFRandomAccess
 		}
-		if _, err := io.CopyN(io.Discard, input, offset-position); err != nil {
+		reader := imageInput{ReadCloser: io.NopCloser(input), context: ctx}
+		if _, err := io.CopyN(io.Discard, reader, offset-position); err != nil {
 			return result, position, err
 		}
 	}
@@ -140,11 +177,16 @@ func readTIFFDirectory(input io.Reader, order binary.ByteOrder, offset, position
 	result.orientation, result.offset, result.samples, result.fillOrder = 1, uint32(offset), 1, 1
 	result.depth = 1
 	result.compression = 1
+	result.predictor = 1
 	var entry [12]byte
 	var previous uint16
 	var subfile, legacy uint32
 	var hasSubfile bool
+	var invalidMaskDepth bool
 	for i := range count {
+		if err := ctx.Err(); err != nil {
+			return result, position, err
+		}
 		if _, err := io.ReadFull(input, entry[:]); err != nil {
 			return result, position, err
 		}
@@ -153,20 +195,33 @@ func readTIFFDirectory(input io.Reader, order binary.ByteOrder, offset, position
 			return result, position, fmt.Errorf("invalid TIFF directory order")
 		}
 		previous = tag
-		if tag == 258 && kind == 3 && number == 1 {
-			result.depth = uint32(order.Uint16(entry[8:10]))
+		if tag == 338 {
+			result.auxiliary = kind != 3 || number != 1 || order.Uint16(entry[8:]) == 0
 		}
-		if tag != 254 && tag != 255 && tag != 256 && tag != 257 && tag != 259 && tag != 262 && tag != 266 && tag != 274 && tag != 277 && tag != 284 && tag != 292 && tag != 293 {
+		if tag == 34675 {
+			if kind != 7 || number < 132 {
+				return result, position, fmt.Errorf("invalid TIFF color profile")
+			}
+			result.profileOffset, result.profileSize = order.Uint32(entry[8:]), number
 			continue
 		}
-		if number != 1 || kind != 3 && kind != 4 || (tag == 255 || tag == 259 || tag == 262 || tag == 266 || tag == 274 || tag == 277 || tag == 284) && kind != 3 || (tag == 254 || tag == 292 || tag == 293) && kind != 4 {
+		if tag == 258 {
+			invalidMaskDepth = kind != 3 || number != 1
+			if !invalidMaskDepth {
+				result.depth = uint32(order.Uint16(entry[8:10]))
+			}
+		}
+		if tag != 254 && tag != 255 && tag != 256 && tag != 257 && tag != 259 && tag != 262 && tag != 266 && tag != 274 && tag != 277 && tag != 284 && tag != 292 && tag != 293 && tag != 317 && tag != 322 && tag != 323 {
+			continue
+		}
+		if number != 1 || kind != 3 && kind != 4 || (tag == 255 || tag == 259 || tag == 262 || tag == 266 || tag == 274 || tag == 277 || tag == 284 || tag == 317) && kind != 3 || (tag == 254 || tag == 292 || tag == 293) && kind != 4 {
 			return result, position, fmt.Errorf("invalid TIFF image layout")
 		}
 		value := uint64(order.Uint32(entry[8:12]))
 		if kind == 3 {
 			value = uint64(order.Uint16(entry[8:10]))
 		}
-		if (tag == 256 || tag == 257) && (value == 0 || value > uint64(int(^uint(0)>>1))) {
+		if (tag == 256 || tag == 257 || tag == 322 || tag == 323) && (value == 0 || value > uint64(int(^uint(0)>>1))) {
 			return result, position, fmt.Errorf("invalid TIFF dimensions")
 		}
 		switch tag {
@@ -181,6 +236,7 @@ func readTIFFDirectory(input io.Reader, order binary.ByteOrder, offset, position
 		case 259:
 			result.compression = uint32(value)
 		case 262:
+			result.photometric = uint32(value)
 			result.mask = value == 4
 		case 266:
 			if value != 1 && value != 2 {
@@ -206,6 +262,12 @@ func readTIFFDirectory(input io.Reader, order binary.ByteOrder, offset, position
 			result.t4 = uint32(value)
 		case 293:
 			result.t6 = uint32(value)
+		case 317:
+			result.predictor = uint32(value)
+		case 322:
+			result.tileWidth = int(value)
+		case 323:
+			result.tileHeight = int(value)
 		}
 	}
 	if _, err := io.ReadFull(input, header[:4]); err != nil {
@@ -219,6 +281,12 @@ func readTIFFDirectory(input io.Reader, order binary.ByteOrder, offset, position
 	}
 	if result.width == 0 || result.height == 0 {
 		return result, position, fmt.Errorf("missing TIFF dimensions")
+	}
+	if (result.tileWidth == 0) != (result.tileHeight == 0) || result.tileWidth%16 != 0 || result.tileHeight%16 != 0 {
+		return result, position, fmt.Errorf("invalid TIFF tile dimensions")
+	}
+	if result.mask && (invalidMaskDepth || result.photometric != 4 || result.samples != 1 || result.depth != 1) {
+		return result, position, fmt.Errorf("invalid TIFF transparency mask")
 	}
 	return result, offset + 6 + int64(count)*12, nil
 }
@@ -283,6 +351,17 @@ func (l tiffImageLayout) size() image.Point {
 		return image.Pt(l.height, l.width)
 	}
 	return image.Pt(l.width, l.height)
+}
+
+// displaySize 返回同时保留主图和透明蒙版分辨率的显示尺寸
+// 返回: image.Point 保留高分辨率蒙版边缘的像素宽高
+func (l tiffImageLayout) displaySize() image.Point {
+	size := l.size()
+	if l.transparency != nil {
+		mask := l.transparency.size()
+		size.X, size.Y = max(size.X, mask.X), max(size.Y, mask.Y)
+	}
+	return size
 }
 
 // Bounds 返回从零开始的显示区域

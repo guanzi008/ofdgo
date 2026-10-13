@@ -42,8 +42,11 @@ func encodeStructureNode(node StructureNode) ([]byte, error) {
 			return err
 		}
 		start := xml.StartElement{Name: xml.Name{Space: node.Namespace, Local: node.Name}}
-		if node.Namespace == "" {
+		switch node.Namespace {
+		case "":
 			start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Local: "xmlns"}, Value: ""})
+		case "http://www.w3.org/XML/1998/namespace":
+			start.Name = xml.Name{Local: "xml:" + node.Name}
 		}
 		for _, attr := range node.Attributes {
 			start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Space: attr.Namespace, Local: attr.Name}, Value: attr.Value})

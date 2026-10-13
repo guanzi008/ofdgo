@@ -32,7 +32,7 @@ type compressionImages struct {
 	patternVisits map[compressionPatternKey]bool
 }
 
-// compressionImagePlan 为有损输出分文档分析图片，按共享路径合并最大尺寸和保护条件
+// compressionImagePlan 分文档合并图片需求，版本文件的当前入口独立于其他文档处理
 // 入参: ctx 取消上下文, options 压缩配置
 // 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
 func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOptions) (map[string]bool, map[string]image.Point, error) {
@@ -42,9 +42,15 @@ func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOp
 	images := make(map[string]bool)
 	sizes := make(map[string]image.Point)
 	blocked := make(map[string]bool)
-	for index := 0; index < r.DocumentCount(); index++ {
+	isolated := r.OFD.DocBody[r.documentIndex].versioned
+	current := make(map[string]bool)
+	for offset := 0; offset < r.DocumentCount(); offset++ {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
+		}
+		index := offset
+		if isolated {
+			index = (r.documentIndex + offset) % r.DocumentCount()
 		}
 		document := r
 		if index != r.DocumentIndex() {
@@ -80,6 +86,13 @@ func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOp
 		}
 		for _, img := range catalog {
 			name := cleanPackagePath(img.Location)
+			if isolated {
+				if index == r.documentIndex {
+					current[name] = true
+				} else if current[name] {
+					continue
+				}
+			}
 			if old, ok := images[name]; !ok || old {
 				images[name] = !masks[name]
 			}

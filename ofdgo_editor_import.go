@@ -307,7 +307,7 @@ func (e *Editor) importPages(ctx context.Context, source *Reader, indexes []int,
 	if at < 0 || at > len(e.pages) {
 		return nil, fmt.Errorf("page index %d out of range", at)
 	}
-	doc, err := source.Doc()
+	doc, err := source.DocContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1795,7 +1795,7 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 	if err := reader.initRoot(); err != nil {
 		return nil, err
 	}
-	doc, err := reader.Doc()
+	doc, err := reader.DocContext(m.ctx)
 	if err != nil {
 		return nil, err
 	}

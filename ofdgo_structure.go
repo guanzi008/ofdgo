@@ -41,6 +41,7 @@ type Structure struct {
 }
 
 // StructureNode 保存标引节点的名称、属性、直接文本和有序子节点，不改变原始XML
+// Text按文档顺序汇总直接文本并保留空白，不包含子节点文本
 // References仅解释公文标引中的ObjectRef；未知扩展保留结构，不推定其引用语义
 type StructureNode struct {
 	Name       string               `json:"name"`
@@ -88,38 +89,48 @@ func (r *Reader) StructureContext(ctx context.Context) ([]Structure, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	tags, err := r.CustomTags()
+	tags, err := r.CustomTagsContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	result := make([]Structure, len(tags))
 	for i, tag := range tags {
-		item := &result[i]
-		*item = Structure{TypeID: tag.TypeID, Namespace: tag.NameSpace, FileLoc: tag.FileLoc}
-		data, err := r.readFileViewContext(ctx, r.ResPath(tag.FileLoc))
-		if err == nil {
-			item.Root, err = parseStructure(ctx, data, tag)
-			if err == nil {
-				item.CanBind = structureOfficial(tag, item.Root.Namespace)
-			}
-		}
+		item, err := r.readStructureContext(ctx, tag)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		if err != nil {
 			item.Error = err.Error()
 		}
+		result[i] = item
 	}
 	return result, nil
+}
+
+// readStructureContext 读取单个标引文件，解析失败时保留入口信息及原始错误
+// 入参: ctx 取消上下文, tag 标引入口
+// 返回: Structure 标引结构, error 文件读取、解析或取消错误
+func (r *Reader) readStructureContext(ctx context.Context, tag CustomTag) (Structure, error) {
+	item := Structure{TypeID: tag.TypeID, Namespace: tag.NameSpace, FileLoc: tag.FileLoc}
+	data, err := r.readFileViewContext(ctx, r.ResPath(tag.FileLoc))
+	if err == nil {
+		item.Root, err = parseStructure(ctx, data, tag)
+	}
+	if err != nil {
+		return item, fmt.Errorf("read custom tag %s: %w", tag.FileLoc, err)
+	}
+	item.CanBind = structureOfficial(tag, item.Root.Namespace)
+	return item, nil
 }
 
 // parseStructure 解析有界XML结构，按GB/T33476.3的ObjectRef规则识别公文引用
 // 入参: ctx 取消上下文, data 标引XML, tag 标引入口
 // 返回: *StructureNode 根节点, error 解析、限额或取消错误
 func parseStructure(ctx context.Context, data []byte, tag CustomTag) (*StructureNode, error) {
-	d := xml.NewDecoder(bytes.NewReader(data))
+	d := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
 	var root *StructureNode
 	var stack []*StructureNode
+	var text []*strings.Builder
 	count := 0
 	for {
 		if err := ctx.Err(); err != nil {
@@ -137,6 +148,9 @@ func parseStructure(ctx context.Context, data []byte, tag CustomTag) (*Structure
 			count++
 			if len(stack) >= 128 || count > 100000 {
 				return nil, fmt.Errorf("custom tag structure limit exceeded")
+			}
+			if len(stack) == len(text) {
+				text = append(text, new(strings.Builder))
 			}
 			node := StructureNode{Name: token.Name.Local, Namespace: token.Name.Space}
 			for _, attr := range token.Attr {
@@ -157,13 +171,15 @@ func parseStructure(ctx context.Context, data []byte, tag CustomTag) (*Structure
 			}
 		case xml.CharData:
 			if len(stack) > 0 {
-				stack[len(stack)-1].Text += string(token)
-			} else if strings.TrimSpace(string(token)) != "" {
+				text[len(stack)-1].Write(token)
+			} else if strings.Trim(string(token), " \t\r\n") != "" {
 				return nil, fmt.Errorf("text outside custom tag root")
 			}
 		case xml.EndElement:
 			node := stack[len(stack)-1]
-			node.Text = strings.TrimSpace(node.Text)
+			builder := text[len(stack)-1]
+			node.Text = builder.String()
+			builder.Reset()
 			official := structureOfficial(tag, root.Namespace)
 			for _, parent := range stack {
 				official = official && parent.Namespace == root.Namespace
@@ -227,23 +243,50 @@ func (r *Renderer) StructureTargets(index int, path []int) ([]StructureTarget, e
 	return r.StructureTargetsContext(context.Background(), index, path)
 }
 
-// StructureTargetsContext 在当前文档和版本内解析标引目标，不搜索其他文档的同名图元
+// StructureTargetsContext 仅读取所选标引，在当前文档和版本内定位目标，不搜索其他文档的同名图元
 // 入参: ctx 取消上下文, index 标引清单索引, path 子节点索引路径
 // 返回: []StructureTarget 有序目标, error 解析、渲染或取消错误
 func (r *Renderer) StructureTargetsContext(ctx context.Context, index int, path []int) ([]StructureTarget, error) {
-	structures, err := r.Reader.StructureContext(ctx)
+	tags, err := r.Reader.CustomTagsContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if index < 0 || index >= len(structures) || structures[index].Root == nil {
+	if index < 0 || index >= len(tags) {
 		return nil, fmt.Errorf("custom tag structure not found: %d", index)
 	}
-	node := structures[index].Root
+	structure, err := r.Reader.readStructureContext(ctx, tags[index])
+	if err != nil {
+		return nil, err
+	}
+	node := structure.Root
 	for _, i := range path {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if i < 0 || i >= len(node.Children) {
 			return nil, fmt.Errorf("custom tag node not found")
 		}
 		node = &node.Children[i]
+	}
+	var references []StructureReference
+	var collect func(*StructureNode) error
+	collect = func(node *StructureNode) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		references = append(references, node.References...)
+		for i := range node.Children {
+			if err := collect(&node.Children[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := collect(node); err != nil {
+		return nil, err
+	}
+	if len(references) == 0 {
+		return nil, ctx.Err()
 	}
 	doc, err := r.Reader.DocContext(ctx)
 	if err != nil {
@@ -251,21 +294,20 @@ func (r *Renderer) StructureTargetsContext(ctx context.Context, index int, path 
 	}
 	pages := signaturePageNumbers(doc)
 	var result []StructureTarget
-	var collect func(*StructureNode)
-	collect = func(node *StructureNode) {
-		for _, ref := range node.References {
-			for _, id := range ref.ObjectIDs {
-				page, _ := resourceValue(pages, ref.PageID)
-				result = append(result, StructureTarget{Page: page, PageID: ref.PageID, ID: id})
+	for _, ref := range references {
+		page, _ := resourceValue(pages, ref.PageID)
+		for _, id := range ref.ObjectIDs {
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
-		}
-		for i := range node.Children {
-			collect(&node.Children[i])
+			result = append(result, StructureTarget{Page: page, PageID: ref.PageID, ID: id})
 		}
 	}
-	collect(node)
 	byPage := make(map[int]map[string]*StructureTarget)
 	for i := range result {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		target := &result[i]
 		if target.Page == 0 {
 			target.Error = "custom tag page not found"
@@ -277,6 +319,8 @@ func (r *Renderer) StructureTargetsContext(ctx context.Context, index int, path 
 		byPage[target.Page][editorResourceID(target.ID)] = target
 		target.Error = "custom tag object not found"
 	}
+	view := *r
+	view.RenderAnnotations, view.pageContext = true, ctx
 	for page, targets := range byPage {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -285,12 +329,15 @@ func (r *Renderer) StructureTargetsContext(ctx context.Context, index int, path 
 		if err != nil {
 			return nil, err
 		}
-		visitor := &structureVisitor{ctx: ctx, renderer: r, targets: targets}
-		if err := r.WalkPage(content, visitor); err != nil {
+		visitor := &structureVisitor{ctx: ctx, renderer: &view, targets: targets}
+		if err := view.WalkPage(content, visitor); err != nil {
 			return nil, err
 		}
 	}
 	for i, target := range result {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if source := byPage[target.Page][editorResourceID(target.ID)]; source != nil {
 			result[i] = *source
 		}

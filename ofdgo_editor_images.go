@@ -114,7 +114,7 @@ func (e *Editor) addImagePage(ctx context.Context, data []byte, options ImagePag
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	config, format, err := decodeImageConfigData(data)
+	config, format, err := decodeImageConfigDataContext(ctx, data)
 	if err != nil {
 		return 0, err
 	}
@@ -133,7 +133,7 @@ func (e *Editor) addImagePage(ctx context.Context, data []byte, options ImagePag
 	if err != nil {
 		return 0, err
 	}
-	metadata, err := imagePageMetadata(data, format, options.DPI)
+	metadata, err := imagePageMetadataContext(ctx, data, format, options.DPI)
 	if err != nil {
 		return 0, err
 	}

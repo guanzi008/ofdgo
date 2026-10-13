@@ -548,23 +548,37 @@ func (r *Reader) AttachmentData(id string) ([]byte, error) {
 // 返回的文件路径可直接传入ResData读取
 // 返回: []CustomTag 自定义标引列表, error 错误信息
 func (r *Reader) CustomTags() ([]CustomTag, error) {
-	doc, err := r.Doc()
+	return r.CustomTagsContext(context.Background())
+}
+
+// CustomTagsContext 读取当前文档及版本的标引清单，取消或失败时不缓存未完成的清单
+// 不加载标引内容、页面、注解或签名；返回的文件路径可直接传入ResData读取
+// 入参: ctx 取消上下文
+// 返回: []CustomTag 自定义标引列表, error 读取、解析或取消错误
+func (r *Reader) CustomTagsContext(ctx context.Context) ([]CustomTag, error) {
+	doc, err := r.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(doc.CustomTags.Path) != "" && doc.CustomTags.CustomTag == nil {
 		var customTags CustomTags
-		partPath, err := r.readDocumentPart(doc.CustomTags.Path, &customTags)
+		partPath, err := r.readDocumentPartContext(ctx, doc.CustomTags.Path, &customTags)
 		if err != nil {
 			return nil, err
 		}
 		for i := range customTags.CustomTag {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			tag := &customTags.CustomTag[i]
 			tag.SchemaLoc = r.resourceLocation(partPath, "", tag.SchemaLoc)
 			tag.FileLoc = r.resourceLocation(partPath, "", tag.FileLoc)
 		}
 		if customTags.CustomTag == nil {
 			customTags.CustomTag = []CustomTag{}
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		doc.CustomTags.CustomTag = customTags.CustomTag
 	}
@@ -1124,13 +1138,24 @@ func (r *Reader) resolvePageAreaContext(ctx context.Context, area PageArea, temp
 // 入参: loc 文件位置, value 文档结构
 // 返回: string 文件路径, error 错误信息
 func (r *Reader) readDocumentPart(loc string, value any) (string, error) {
+	return r.readDocumentPartContext(context.Background(), loc, value)
+}
+
+// readDocumentPartContext 读取并解析文档关联文件，传递取消信号到文件读取和XML解码
+// 入参: ctx 取消上下文, loc 文件位置, value 文档结构
+// 返回: string 文件路径, error 读取、解析或取消错误
+func (r *Reader) readDocumentPartContext(ctx context.Context, loc string, value any) (string, error) {
 	fullPath := r.ResPath(strings.TrimSpace(loc))
-	data, err := r.readFile(fullPath)
+	data, err := r.readFileViewContext(ctx, fullPath)
 	if err != nil {
 		return "", err
 	}
-	if err := xml.Unmarshal(data, value); err != nil {
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	if err := decoder.Decode(value); err != nil {
 		return "", fmt.Errorf("failed to unmarshal %s: %w", path.Base(fullPath), err)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	return fullPath, nil
 }

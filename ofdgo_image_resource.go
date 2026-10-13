@@ -48,6 +48,13 @@ type encodedImageResult struct {
 	err   error
 }
 
+// resampledImageMask 按替换图尺寸读取已校验的二值蒙版，不分配缩放像素
+type resampledImageMask struct {
+	source   image.Image
+	original image.Rectangle
+	bounds   image.Rectangle
+}
+
 // NewEncodedImage 读取PNG或JPEG头信息，不解码像素，复制输入数据
 // 入参: data 原始编码
 // 返回: *EncodedImage 惰性图片, error 头信息或格式错误
@@ -236,30 +243,58 @@ func (r *Renderer) imageObjectMask(object ImageObject, target image.Image) (imag
 	if err != nil {
 		return nil, err
 	}
-	bounds := mask.Bounds()
-	result := image.NewGray(image.Rectangle{Max: size})
-	for y := range size.Y {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		sy := bounds.Min.Y + int((int64(y)*2+1)*int64(bounds.Dy())/(2*int64(size.Y)))
-		for x := range size.X {
-			sx := bounds.Min.X + int((int64(x)*2+1)*int64(bounds.Dx())/(2*int64(size.X)))
-			value, err := imageMaskAlpha(mask, sx, sy)
-			if err != nil {
-				return nil, err
-			}
-			result.SetGray(x, y, color.Gray{Y: value})
-		}
+	return &resampledImageMask{source: mask, original: mask.Bounds(), bounds: image.Rectangle{Max: size}}, ctx.Err()
+}
+
+// Bounds 返回替换图对应的蒙版范围
+// 返回: image.Rectangle 像素区域
+func (s *resampledImageMask) Bounds() image.Rectangle { return s.bounds }
+
+// ColorModel 返回二值蒙版的灰度颜色模型
+// 返回: color.Model 灰度模型
+func (s *resampledImageMask) ColorModel() color.Model { return color.GrayModel }
+
+// GrayAt 按像素中心读取原蒙版，区域外返回黑色
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.Gray 二值灰度
+func (s *resampledImageMask) GrayAt(x, y int) color.Gray {
+	if !image.Pt(x, y).In(s.bounds) {
+		return color.Gray{}
 	}
-	return result, ctx.Err()
+	bounds, size := s.original, s.bounds.Size()
+	sx := bounds.Min.X + int((uint64(x-s.bounds.Min.X)*uint64(bounds.Dx())+uint64(bounds.Dx()/2))/uint64(size.X))
+	sy := bounds.Min.Y + int((uint64(y-s.bounds.Min.Y)*uint64(bounds.Dy())+uint64(bounds.Dy()/2))/uint64(size.Y))
+	return imageGrayAt(s.source, sx, sy)
+}
+
+// At 返回采样后的二值灰度
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.Color 像素颜色
+func (s *resampledImageMask) At(x, y int) color.Color { return s.GrayAt(x, y) }
+
+// RGBA64At 返回不透明的十六位灰度颜色，供蒙版合成直接读取
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.RGBA64 像素颜色
+func (s *resampledImageMask) RGBA64At(x, y int) color.RGBA64 {
+	value := uint16(s.GrayAt(x, y).Y) * 257
+	return color.RGBA64{R: value, G: value, B: value, A: 65535}
 }
 
 // newEncodedImage 接管编码数据并读取头信息
 // 入参: data 原始编码
 // 返回: *EncodedImage 惰性图片, error 头信息或格式错误
 func newEncodedImage(data []byte) (*EncodedImage, error) {
-	config, format, err := image.DecodeConfig(bytes.NewReader(data))
+	return newEncodedImageContext(context.Background(), data)
+}
+
+// newEncodedImageContext 读取PNG或JPEG头信息，元数据扫描期间响应取消，不复制输入或解码像素
+// 入参: ctx 取消上下文, data 只读图片编码
+// 返回: *EncodedImage 惰性图片, error 头信息、格式或取消错误
+func newEncodedImageContext(ctx context.Context, data []byte) (*EncodedImage, error) {
+	config, format, err := image.DecodeConfig(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		return nil, cancelErr
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +326,7 @@ func (r *Renderer) cachedImageResource(resPath string) (image.Image, error) {
 	return img, nil
 }
 
-// imageResourceCost 预留十六位像素空间，并计入编码、像素缓冲及补边源图的可见容量
+// imageResourceCost 预留十六位像素空间，并计入编码、调色板与底层像素缓冲容量
 // 入参: img 图片资源, limit 缓存预算
 // 返回: int 估算字节数或超预算标记
 func imageResourceCost(img image.Image, limit int) int {
@@ -307,7 +342,7 @@ func imageResourceCost(img image.Image, limit int) int {
 		}
 		return cost + pixels + cap(encoded.data)
 	}
-	var buffers [4]int
+	var buffers [5]int
 	switch source := img.(type) {
 	case *image.RGBA:
 		buffers[0] = cap(source.Pix)
@@ -333,9 +368,47 @@ func imageResourceCost(img image.Image, limit int) int {
 		}
 		buffers[0], buffers[1] = cap(source.Pix), cap(source.Palette)*16
 	case *image.YCbCr:
-		buffers = [4]int{cap(source.Y), cap(source.Cb), cap(source.Cr)}
+		buffers = [5]int{cap(source.Y), cap(source.Cb), cap(source.Cr)}
 	case *image.NYCbCrA:
-		buffers = [4]int{cap(source.Y), cap(source.Cb), cap(source.Cr), cap(source.A)}
+		buffers = [5]int{cap(source.Y), cap(source.Cb), cap(source.Cr), cap(source.A)}
+	case *planarTIFFImage:
+		if cap(source.palette) > (limit-cost)/8 {
+			return limit + 1
+		}
+		cost += cap(source.palette) * 8
+		if cap(source.planes) > (limit-cost)/16 || len(source.planes) > len(buffers) {
+			return limit + 1
+		}
+		cost += cap(source.planes) * 16
+		for i, plane := range source.planes {
+			switch plane := plane.(type) {
+			case *image.Gray:
+				buffers[i] = cap(plane.Pix)
+			case *image.Gray16:
+				buffers[i] = cap(plane.Pix)
+			default:
+				buffers[i] = imageResourceCost(plane, limit-cost)
+			}
+		}
+	case *tiffFaxImage:
+		if cap(source.blocks) > (limit-cost)/16 {
+			return limit + 1
+		}
+		cost += cap(source.blocks) * 16
+		for _, block := range source.blocks {
+			size := imageResourceCost(block, limit-cost)
+			if size > limit-cost {
+				return limit + 1
+			}
+			cost += size
+		}
+	case *orientedTIFFImage:
+		buffers[0] = imageResourceCost(source.source, limit-cost)
+	case *maskedTIFFImage:
+		buffers[0] = imageResourceCost(source.source, limit-cost)
+		buffers[1] = imageResourceCost(source.mask, limit-cost)
+	case *resampledImageMask:
+		buffers[0] = imageResourceCost(source.source, limit-cost)
 	case *transparentEdgeImage:
 		buffers[0] = imageResourceCost(source.source, limit-cost)
 	case *transparentEdgeImage64:
@@ -349,6 +422,9 @@ func imageResourceCost(img image.Image, limit int) int {
 			return limit + 1
 		}
 		storage += size
+	}
+	if pixels > limit-cost {
+		return limit + 1
 	}
 	return cost + max(pixels, storage)
 }

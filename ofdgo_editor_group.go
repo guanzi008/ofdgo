@@ -165,7 +165,7 @@ func (e *Editor) UngroupObject(page int, id string) ([]string, error) {
 	}
 	defer reader.Close()
 	var result []string
-	err = e.ungroupCompositeNode(renderer, root, func(objects []GraphicObject) error {
+	err = e.ungroupCompositeNode(renderer, root, func(objects []GraphicObject, remaps []map[string]string) error {
 		origins := make(map[string]*editorObjectOrigin, len(objects))
 		for i := range objects {
 			object := &objects[i]
@@ -176,8 +176,10 @@ func (e *Editor) UngroupObject(page int, id string) ([]string, error) {
 			origins[id] = &copy
 			result = append(result, id)
 		}
-		e.replaceGroup(page, indexes, objects, origins)
-		return nil
+		return e.remapStructureObjects(page, remaps, func() error {
+			e.replaceGroup(page, indexes, objects, origins)
+			return nil
+		})
 	})
 	return result, err
 }

@@ -1245,7 +1245,11 @@ el.structureForm.addEventListener("submit", async event => {
 	if (!state.editing || document.body.hasAttribute("aria-busy")) return;
 	const index = Number(el.structureEntry.value), path = JSON.parse(el.structureNodeSelect.value || "[]");
 	const action = index < 0 ? "create" : el.structureAction.value;
-	const node = { name: el.structureName.value, namespace: el.structureNamespace.value, text: el.structureText.value,
+	let original = state.doc.structures?.[index]?.root;
+	for (const part of path) original = original?.children?.[part];
+	const text = action === "update" && original?.text?.replace(/\r\n?/g, "\n") === el.structureText.value
+		? original.text : el.structureText.value;
+	const node = { name: el.structureName.value, namespace: el.structureNamespace.value, text,
 		attributes: [...el.structureAttributes.children].map(row => ({ name: row.querySelector('[name="name"]').value, namespace: row.querySelector('[name="namespace"]').value, value: row.querySelector('[name="value"]').value })) };
 	const references = [...el.structureReferences.children].map(row => ({ pageId: row.querySelector('[name="page"]').value,
 		objectIds: row.querySelector('[name="ids"]').value.split(/[,\s]+/u).filter(Boolean) })).filter(ref => ref.objectIds.length);
@@ -8443,7 +8447,7 @@ function structureNode(node, index, path) {
 		content.className = "structure-content";
 		details.append(content);
 		for (const attr of node.attributes || []) appendInfoLine(content, attr.name, attr.value);
-		if (node.text && !node.references?.length) appendInfoLine(content, "原文", node.text);
+		if (node.text?.trim() && !node.references?.length) appendInfoLine(content, "原文", node.text);
 		const children = node.children || [];
 		const references = node.references?.length || children.some(child => child.references?.length);
 		for (const [i, child] of children.entries()) {

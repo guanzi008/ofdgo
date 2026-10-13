@@ -156,14 +156,14 @@ func decodeImageDataContext(ctx context.Context, data []byte) (img image.Image, 
 		}
 	}()
 	if isJPEGData(data) || isPNGData(data) {
-		img, err := newEncodedImage(data)
+		img, err := newEncodedImageContext(ctx, data)
 		if err != nil {
 			return nil, "", err
 		}
 		return img, img.format, nil
 	}
 	if isTIFFData(data) {
-		layout, err := readTIFFLayout(bytes.NewReader(data))
+		layout, err := readTIFFLayoutContext(ctx, bytes.NewReader(data))
 		if err != nil {
 			return nil, "tiff", err
 		}
@@ -201,28 +201,61 @@ func isPNGData(data []byte) bool {
 // 入参: data 图片数据
 // 返回: image.Config 图片尺寸, string 图片格式, error 错误信息
 func decodeImageConfigData(data []byte) (image.Config, string, error) {
+	return decodeImageConfigDataContext(context.Background(), data)
+}
+
+// decodeImageConfigDataContext 读取图片尺寸和颜色模型，传递布局解析中的取消状态
+// 入参: ctx 取消上下文, data 图片数据
+// 返回: image.Config 图片配置, string 图片格式, error 读取或取消错误
+func decodeImageConfigDataContext(ctx context.Context, data []byte) (config image.Config, format string, err error) {
+	if err := ctx.Err(); err != nil {
+		return image.Config{}, "", err
+	}
+	defer func() {
+		if cancelErr := ctx.Err(); cancelErr != nil {
+			config, err = image.Config{}, cancelErr
+		}
+	}()
 	if isTIFFData(data) {
-		layout, err := readTIFFLayout(bytes.NewReader(data))
+		layout, err := readTIFFLayoutContext(ctx, bytes.NewReader(data))
 		if err != nil {
 			return image.Config{}, "tiff", err
 		}
-		if layout.planar && layout.samples > 1 || layout.samples == 1 && (layout.depth == 2 || layout.depth == 4) {
-			img, _, err := tiffPlaneDirectories(nil, data, layout)
+		profile, err := readTIFFColorProfile(ctx, data, layout)
+		if err != nil {
+			return image.Config{}, "tiff", err
+		}
+		var cfg image.Config
+		if layout.needsSampleView() {
+			img, _, err := tiffPlaneDirectories(ctx, data, layout)
 			if err != nil {
 				return image.Config{}, "tiff", err
 			}
-			size := layout.size()
-			return image.Config{ColorModel: img.ColorModel(), Width: size.X, Height: size.Y}, "tiff", nil
+			cfg.ColorModel = img.ColorModel()
+		} else {
+			input := newTIFFDirectoryInput(data, layout.offset)
+			input.ctx = ctx
+			cfg, err = tiff.DecodeConfig(input)
+			if err != nil {
+				return image.Config{}, "tiff", err
+			}
 		}
-		cfg, err := tiff.DecodeConfig(newTIFFDirectoryInput(data, layout.offset))
-		if err != nil {
-			return image.Config{}, "tiff", err
+		if profile != nil || layout.transparency != nil {
+			cfg.ColorModel = color.NRGBA64Model
 		}
-		size := layout.size()
+		if layout.transparency != nil {
+			if _, err := readTIFFColorProfile(ctx, data, *layout.transparency); err != nil {
+				return image.Config{}, "tiff", err
+			}
+			if _, _, err := tiffPlaneDirectories(ctx, data, *layout.transparency); err != nil {
+				return image.Config{}, "tiff", err
+			}
+		}
+		size := layout.displaySize()
 		cfg.Width, cfg.Height = size.X, size.Y
 		return cfg, "tiff", nil
 	}
-	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
+	cfg, format, err := image.DecodeConfig(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
 	if err == nil {
 		return cfg, normalizeSealType(format), nil
 	}
@@ -386,10 +419,12 @@ func imageWithEffects(ctx context.Context, img, mask image.Image, alpha *int) (i
 	if imageHighPrecision(source) {
 		out := image.NewNRGBA64(bounds)
 		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
 			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				if (x-bounds.Min.X)&255 == 0 {
+					if err := ctx.Err(); err != nil {
+						return nil, err
+					}
+				}
 				opacity := a
 				if mask != nil {
 					value, err := imageMaskAlpha(mask, maskBounds.Min.X+x-bounds.Min.X, maskBounds.Min.Y+y-bounds.Min.Y)
@@ -419,10 +454,20 @@ func imageWithEffects(ctx context.Context, img, mask image.Image, alpha *int) (i
 			copy(row, src.Pix[offset:offset+len(row)])
 		} else {
 			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				if (x-bounds.Min.X)&255 == 0 {
+					if err := ctx.Err(); err != nil {
+						return nil, err
+					}
+				}
 				out.SetNRGBA(x, y, imageNRGBAAt(source, x, y))
 			}
 		}
 		for x := 0; x < bounds.Dx(); x++ {
+			if x&255 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			opacity := a
 			if mask != nil {
 				value, err := imageMaskAlpha(mask, maskBounds.Min.X+x, maskBounds.Min.Y+y-bounds.Min.Y)
@@ -470,10 +515,12 @@ func validateImageMask(ctx context.Context, mask image.Image, size image.Point) 
 	}
 	bounds := mask.Bounds()
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			if (x-bounds.Min.X)&255 == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
 			if _, err := imageMaskAlpha(mask, x, y); err != nil {
 				return err
 			}
@@ -541,12 +588,16 @@ func imageGrayAt(img image.Image, x, y int) color.Gray {
 	return color.GrayModel.Convert(img.At(x, y)).(color.Gray)
 }
 
-// imageNRGBAAt 获取图片NRGBA像素
+// imageNRGBAAt 读取八位非预乘像素，缩减位深时保留原始颜色分量
 // 入参: img 图片对象, x X坐标, y Y坐标
 // 返回: color.NRGBA NRGBA像素
 func imageNRGBAAt(img image.Image, x, y int) color.NRGBA {
-	if src, ok := img.(*image.NRGBA); ok {
+	if src, ok := img.(interface{ NRGBAAt(int, int) color.NRGBA }); ok {
 		return src.NRGBAAt(x, y)
+	}
+	if src, ok := img.(interface{ NRGBA64At(int, int) color.NRGBA64 }); ok {
+		c := src.NRGBA64At(x, y)
+		return color.NRGBA{R: uint8(c.R >> 8), G: uint8(c.G >> 8), B: uint8(c.B >> 8), A: uint8(c.A >> 8)}
 	}
 	if src, ok := img.(*image.YCbCr); ok {
 		r, g, b, _ := src.YCbCrAt(x, y).RGBA()
@@ -565,7 +616,11 @@ func imageNRGBAAt(img image.Image, x, y int) color.NRGBA {
 		}
 		return color.NRGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8)}
 	}
-	return color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
+	value := img.At(x, y)
+	if c, ok := value.(color.NRGBA64); ok {
+		return color.NRGBA{R: uint8(c.R >> 8), G: uint8(c.G >> 8), B: uint8(c.B >> 8), A: uint8(c.A >> 8)}
+	}
+	return color.NRGBAModel.Convert(value).(color.NRGBA)
 }
 
 // imageAlphaAt 读取十六位透明度，原生图像避免颜色装箱
@@ -579,15 +634,28 @@ func imageAlphaAt(img image.Image, x, y int) uint32 {
 	return alpha
 }
 
-// imageHighPrecision 判断颜色模型是否保留十六位采样
+// imageHighPrecision 判断颜色模型及调色板是否需要保留十六位采样
 // 入参: img 图片对象
 // 返回: bool 是否使用十六位颜色或透明度
 func imageHighPrecision(img image.Image) bool {
 	model := img.ColorModel()
+	if palette, ok := model.(color.Palette); ok {
+		for _, value := range palette {
+			switch value.(type) {
+			case color.RGBA, color.NRGBA, color.Gray, color.Alpha, color.CMYK, color.YCbCr, color.NYCbCrA:
+			default:
+				pixel := color.NRGBA64Model.Convert(value).(color.NRGBA64)
+				if pixel.R%257 != 0 || pixel.G%257 != 0 || pixel.B%257 != 0 || pixel.A%257 != 0 {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	return model == color.NRGBA64Model || model == color.RGBA64Model || model == color.Gray16Model || model == color.Alpha16Model
 }
 
-// imageNRGBA64At 读取十六位非预乘像素，原生图像避免颜色装箱
+// imageNRGBA64At 读取十六位非预乘像素，保留透明像素颜色，原生图像避免颜色装箱
 // 入参: img 图片对象, x X坐标, y Y坐标
 // 返回: color.NRGBA64 NRGBA64像素
 func imageNRGBA64At(img image.Image, x, y int) color.NRGBA64 {
@@ -597,6 +665,9 @@ func imageNRGBA64At(img image.Image, x, y int) color.NRGBA64 {
 	case *image.NRGBA:
 		c := src.NRGBAAt(x, y)
 		return color.NRGBA64{R: uint16(c.R) * 257, G: uint16(c.G) * 257, B: uint16(c.B) * 257, A: uint16(c.A) * 257}
+	case *image.Gray:
+		v := uint16(src.GrayAt(x, y).Y) * 257
+		return color.NRGBA64{R: v, G: v, B: v, A: 0xffff}
 	case *image.Gray16:
 		c := src.Gray16At(x, y)
 		return color.NRGBA64{R: c.Y, G: c.Y, B: c.Y, A: 0xffff}
@@ -619,7 +690,11 @@ func imageNRGBA64At(img image.Image, x, y int) color.NRGBA64 {
 		}
 		return color.NRGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: c.A}
 	}
-	return color.NRGBA64Model.Convert(img.At(x, y)).(color.NRGBA64)
+	value := img.At(x, y)
+	if c, ok := value.(color.NRGBA); ok {
+		return color.NRGBA64{R: uint16(c.R) * 257, G: uint16(c.G) * 257, B: uint16(c.B) * 257, A: uint16(c.A) * 257}
+	}
+	return color.NRGBA64Model.Convert(value).(color.NRGBA64)
 }
 
 // transparentEdgeColor 获取透明像素相邻的可见颜色
@@ -731,6 +806,11 @@ func imageWithTransparentEdge(ctx context.Context, img image.Image) (image.Image
 			}
 			offset := y*stride + step - 1
 			for x := 0; x < w; x++ {
+				if x&255 == 0 {
+					if err := ctx.Err(); err != nil {
+						return nil, 0, err
+					}
+				}
 				if (pixels[offset] == 0) != hasZero {
 					hasZero, hasVisible = true, true
 					break scan
@@ -744,6 +824,11 @@ func imageWithTransparentEdge(ctx context.Context, img image.Image) (image.Image
 				return nil, 0, err
 			}
 			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				if (x-bounds.Min.X)&255 == 0 {
+					if err := ctx.Err(); err != nil {
+						return nil, 0, err
+					}
+				}
 				if imageAlphaAt(source, x, y) == 0 {
 					hasZero = true
 				} else {

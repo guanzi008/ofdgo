@@ -70,6 +70,7 @@ type editorCompositeNode struct {
 	patches       []editorXMLPatch
 	index         int
 	states        map[string]editorCompositeState
+	remaps        []map[string]string
 }
 
 // editorCompositeState 保存内部对象的会话排版及可还原裁剪，不写入OFD
@@ -828,7 +829,9 @@ func (e *Editor) editCompositeScope(page int, path ObjectPath, edit func(*Render
 		return err
 	}
 	if path.Annotation != "" {
-		return e.writeAnnotationScope(page, path.Annotation, data, root.states)
+		return e.remapStructureObjects(page, root.remaps, func() error {
+			return e.writeAnnotationScope(page, path.Annotation, data, root.states)
+		})
 	}
 	next, err := newEditorCompositeNode(data)
 	if err != nil {
@@ -842,7 +845,9 @@ func (e *Editor) editCompositeScope(page int, path ObjectPath, edit func(*Render
 		next.node.parent = origin.node.parent
 		updated.page = origin.page
 	}
-	return e.updateObjectOrigins(page, []GraphicObject{next.object}, true, map[string]*editorObjectOrigin{path.ID: updated})
+	return e.remapStructureObjects(page, root.remaps, func() error {
+		return e.updateObjectOrigins(page, []GraphicObject{next.object}, true, map[string]*editorObjectOrigin{path.ID: updated})
+	})
 }
 
 // transformCompositeMember 将页面变换换算至成员坐标，保留边框及旧式边界约定
@@ -983,6 +988,7 @@ func (e *Editor) writeCompositeNode(node *editorCompositeNode) ([]byte, bool, er
 		}
 		if changed {
 			patches = append(patches, editorXMLPatch{child.span.start, child.span.end, data})
+			node.remaps = append(node.remaps, child.remaps...)
 			removeCompositeStates(states, child.node)
 			maps.Copy(states, child.states)
 		}
@@ -996,10 +1002,12 @@ func (e *Editor) writeCompositeNode(node *editorCompositeNode) ([]byte, bool, er
 			return nil, false, err
 		}
 		if dirty {
+			node.remaps = append(node.remaps, node.ref.remaps...)
 			id, err := e.addCompositeResource(fragment, node.ref.states)
 			if err != nil {
 				return nil, false, err
 			}
+			node.remaps = append(node.remaps, e.resources[len(e.resources)-1].objectIDs)
 			root, err := parseEditorXML(data)
 			if err != nil {
 				return nil, false, err
@@ -1049,6 +1057,7 @@ func (e *Editor) addCompositeResource(data []byte, states map[string]editorCompo
 		return "", err
 	}
 	resource.states = remapCompositeStates(states, ids)
+	resource.objectIDs = ids
 	e.resources = append(e.resources, resource)
 	return id, nil
 }

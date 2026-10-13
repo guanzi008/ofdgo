@@ -430,6 +430,17 @@ func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader) error 
 	if e.source != nil && e.documentRoot() == reader.documentRoot && current == version && e.Info.DocID == reader.OFD.DocBody[reader.documentIndex].DocInfo.DocID {
 		source := *e.source
 		source.reader = reader
+		if len(e.structureRemaps) != 0 {
+			tags, err := reader.CustomTagsContext(ctx)
+			if err != nil {
+				return err
+			}
+			source.structureStarts = make(map[int]map[string]int, len(tags))
+			starts := e.structureRemapStarts()
+			for index := range tags {
+				source.structureStarts[index] = starts
+			}
+		}
 		e.source = &source
 	} else {
 		next, err := reader.EditorContext(ctx)

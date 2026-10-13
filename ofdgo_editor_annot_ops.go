@@ -42,10 +42,11 @@ func (e *Editor) CaptureAnnotations(page int, ids []string) (*AnnotationSelectio
 	selection := &AnnotationSelection{editor: e, document: e.documentIdentity(), states: make(map[string]map[string]editorCompositeState)}
 	seen := make(map[string]bool)
 	for _, id := range ids {
-		if seen[id] {
+		key := editorResourceID(id)
+		if seen[key] {
 			return nil, fmt.Errorf("duplicate annotation ID %q", id)
 		}
-		seen[id] = true
+		seen[key] = true
 		data, err := e.annotationXML(page, id)
 		if err != nil {
 			return nil, err
@@ -58,7 +59,7 @@ func (e *Editor) CaptureAnnotations(page int, ids []string) (*AnnotationSelectio
 			return nil, fmt.Errorf("annotation contains unsupported identifiers")
 		}
 		selection.data = append(selection.data, data)
-		selection.states[id] = maps.Clone(e.source.annotationStates[e.pages[page].ID+"/"+id])
+		selection.states[key] = maps.Clone(e.source.annotationStates[e.pages[page].ID+"/"+key])
 	}
 	if e.originalPage(page) {
 		origin := e.source.pages[e.pages[page].ID]
@@ -106,7 +107,7 @@ func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, 
 				return err
 			}
 			id := ids[editorResourceID(root.attr("ID"))]
-			states[edit.pages[page].ID+"/"+id] = remapCompositeStates(selection.states[root.attr("ID")], ids)
+			states[edit.pages[page].ID+"/"+id] = remapCompositeStates(selection.states[editorResourceID(root.attr("ID"))], ids)
 			data, err = editorXMLRemapIDs(data, root, ids)
 			if err != nil {
 				return err

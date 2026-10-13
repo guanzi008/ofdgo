@@ -299,6 +299,7 @@ func (e *Editor) isolateCompositeDefaultPaint(node *editorCompositeNode) error {
 					if err != nil {
 						return err
 					}
+					node.remaps = append(node.remaps, e.resources[len(e.resources)-1].objectIDs)
 				}
 				cache[key] = replacement
 			}

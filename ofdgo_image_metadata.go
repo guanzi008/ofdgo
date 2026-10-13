@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -27,20 +28,27 @@ type imagePageInfo struct {
 	xdpi, ydpi  float64
 }
 
-// imagePageMetadata 读取图片方向与密度，TIFF方向由解码器处理，JPEG的EXIF密度优先于JFIF
-// 入参: data 图片数据, format 图像格式, dpi 缺少物理密度时使用的DPI
-// 返回: imagePageInfo 方向与横纵DPI, error 元数据错误
-func imagePageMetadata(data []byte, format string, dpi float64) (imagePageInfo, error) {
+// imagePageMetadataContext 读取图片方向与密度，扫描目录或数据段时响应取消
+// TIFF方向由解码器处理，JPEG的EXIF密度优先于JFIF
+// 入参: ctx 取消上下文, data 图片数据, format 图像格式, dpi 缺少物理密度时使用的DPI
+// 返回: imagePageInfo 方向与横纵DPI, error 元数据或取消错误
+func imagePageMetadataContext(ctx context.Context, data []byte, format string, dpi float64) (imagePageInfo, error) {
 	info := imagePageInfo{orientation: 1, xdpi: dpi, ydpi: dpi}
+	if err := ctx.Err(); err != nil {
+		return info, err
+	}
 	var exif []byte
 	var directory uint32
+	scaleX, scaleY := 1.0, 1.0
 	if format == "tiff" {
-		layout, err := readTIFFLayout(bytes.NewReader(data))
+		layout, err := readTIFFLayoutContext(ctx, bytes.NewReader(data))
 		if err != nil {
 			return info, err
 		}
 		directory = layout.offset
 		exif = data
+		original, display := layout.size(), layout.displaySize()
+		scaleX, scaleY = float64(display.X)/float64(original.X), float64(display.Y)/float64(original.Y)
 	}
 	if format == "bmp" && len(data) >= 54 && binary.LittleEndian.Uint32(data[14:18]) >= 40 {
 		x := int32(binary.LittleEndian.Uint32(data[38:42]))
@@ -51,6 +59,9 @@ func imagePageMetadata(data []byte, format string, dpi float64) (imagePageInfo, 
 	}
 	if format == "png" {
 		for offset := 8; offset+12 <= len(data); {
+			if err := ctx.Err(); err != nil {
+				return info, err
+			}
 			n := uint64(binary.BigEndian.Uint32(data[offset:]))
 			if n > uint64(len(data)-offset-12) {
 				return info, fmt.Errorf("truncated PNG chunk")
@@ -81,6 +92,9 @@ func imagePageMetadata(data []byte, format string, dpi float64) (imagePageInfo, 
 		}
 	} else if format == "jpeg" {
 		for offset := 2; offset < len(data); {
+			if err := ctx.Err(); err != nil {
+				return info, err
+			}
 			if data[offset] != 0xff {
 				return info, fmt.Errorf("invalid JPEG marker")
 			}
@@ -140,7 +154,8 @@ func imagePageMetadata(data []byte, format string, dpi float64) (imagePageInfo, 
 			info.orientation = 1
 		}
 	}
-	return info, nil
+	info.xdpi, info.ydpi = info.xdpi*scaleX, info.ydpi*scaleY
+	return info, ctx.Err()
 }
 
 // imageExifMetadata 只读取主图IFD中的方向和密度，不跟随缩略图与其他目录

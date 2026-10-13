@@ -74,7 +74,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 		ctx = e.output.ctx
 	}
 	progress = progress.withContext(ctx)
-	scope, err := reader.versionResourceFiles(ctx, parts, generated)
+	_, scope, err := reader.versionResourceFiles(ctx, parts, generated)
 	if err != nil {
 		return nil, err
 	}
@@ -351,14 +351,14 @@ func (r *editorResourceRefs) reference(name, base, key, value string, resource b
 	if kind == editorReferenceNone {
 		return
 	}
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return
-	}
 	if kind == editorReferenceID {
 		if id := editorResourceID(value); id != "" {
 			r.ids[id] = true
 		}
+		return
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
 		return
 	}
 	r.files[editorResourceLocation(name, base, value)] = true
@@ -389,7 +389,7 @@ func editorResourceReferenceKind(key string, resource bool) int {
 // 入参: value 标识文本
 // 返回: string 标准十进制标识，无效时为空
 func editorResourceID(value string) string {
-	id, err := strconv.ParseUint(strings.TrimSpace(value), 10, 32)
+	id, err := strconv.ParseUint(strings.Trim(value, " \t\r\n"), 10, 32)
 	if err != nil || id == 0 {
 		return ""
 	}

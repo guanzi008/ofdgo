@@ -41,7 +41,7 @@ func decodeImageConfig(input io.Reader) (image.Config, string, error) {
 		if err != nil {
 			return image.Config{}, "tiff", err
 		}
-		size := layout.size()
+		size := layout.displaySize()
 		return image.Config{Width: size.X, Height: size.Y}, "tiff", nil
 	}
 	if len(prefix) == 34 && string(prefix[:2]) == "BM" {

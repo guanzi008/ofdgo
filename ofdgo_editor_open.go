@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/xml"
@@ -45,6 +46,8 @@ type editorSource struct {
 	annotationPages    map[string]bool
 	retiredAttachments map[string]bool
 	removedAttachments map[string]bool
+	structureObjects   map[string]map[string]bool
+	structureStarts    map[int]map[string]int
 }
 
 // editorObjectOrigin 保留原对象的XML语义，供复制和局部更新复用
@@ -298,9 +301,6 @@ func (e *Editor) sourceMaxID(progress editorProgress) (int, error) {
 	}
 	maximum := e.maxID
 	for name := range names {
-		if !strings.EqualFold(path.Ext(name), ".xml") {
-			continue
-		}
 		input, err := reader.openFile(name)
 		if err != nil {
 			return 0, err
@@ -315,11 +315,35 @@ func (e *Editor) sourceMaxID(progress editorProgress) (int, error) {
 	return maximum, nil
 }
 
-// editorXMLMaxID 流式读取OFD结构中的最大标识，跳过非OFD的XML附件
-// 入参: input XML输入流
+// editorXMLMaxID 按内容识别OFD结构并读取最大标识，跳过二进制及非OFD内容
+// 入参: input 包内文件流
 // 返回: int 最大标识, error 错误信息
 func editorXMLMaxID(input io.Reader) (int, error) {
-	decoder := xml.NewDecoder(input)
+	buffer := bufio.NewReader(input)
+	header, err := buffer.Peek(3)
+	if err != nil && err != io.EOF {
+		return 0, err
+	}
+	if bytes.Equal(header, []byte{0xef, 0xbb, 0xbf}) {
+		buffer.Discard(3)
+	}
+	for {
+		header, err := buffer.Peek(1)
+		if err == io.EOF {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		if !strings.ContainsRune(" \t\r\n", rune(header[0])) {
+			if header[0] != '<' {
+				return 0, nil
+			}
+			break
+		}
+		buffer.Discard(1)
+	}
+	decoder := xml.NewDecoder(buffer)
 	maximum, started := 0, false
 	for {
 		token, err := decoder.Token()
@@ -344,7 +368,7 @@ func editorXMLMaxID(input io.Reader) (int, error) {
 		}
 		for _, attr := range node.Attr {
 			if attr.Name.Space == "" && attr.Name.Local == "ID" {
-				id, err := strconv.Atoi(attr.Value)
+				id, err := strconv.Atoi(editorResourceID(attr.Value))
 				if err == nil {
 					maximum = max(maximum, id)
 				}

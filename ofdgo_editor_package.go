@@ -76,9 +76,13 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 			}
 		} else {
 			name := e.packageName(packagePagePath("", page.ID))
+			bound := len(source.structureObjects[editorResourceID(page.ID)]) != 0
 			var scan *editorReferenceScan
 			if generated != nil {
 				scan = &editorReferenceScan{refs: &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}, name: name, safe: true}
+				if bound {
+					scan.graphicIDs = make(map[string]bool)
+				}
 			}
 			if stage && generated != nil && !e.sourcePagePreserved(page) {
 				data, err := stager.encode(e, page, scan)
@@ -89,9 +93,10 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 				known := editorGeneratedReferences{staged: data}
 				if scan != nil && scan.safe && scan.seen && len(scan.stack) == 0 {
 					known.refs = scan.refs
+					known.objects = scan.graphicIDs
 				}
 				generated[name] = known
-				if (reader.DocumentCount() > 1 || reader.OFD.DocBody[reader.documentIndex].versioned) && !known.stagedLeaf(nil) {
+				if (reader.DocumentCount() > 1 || reader.OFD.DocBody[reader.documentIndex].versioned) && !known.stagedLeaf(nil) || bound && known.objects == nil {
 					input := data.open()
 					if e.output != nil {
 						input = imageInput{ReadCloser: input, context: e.output.ctx}
@@ -101,7 +106,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 					if err != nil {
 						return nil, err
 					}
-					generated[name] = editorGeneratedReferences{data: parts[name], refs: known.refs}
+					generated[name] = editorGeneratedReferences{data: parts[name], refs: known.refs, objects: known.objects}
 				}
 			} else {
 				data, err := e.sourcePageData(page, scan)
@@ -110,7 +115,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 				}
 				parts[name] = data
 				if scan != nil && scan.safe && scan.seen && len(scan.stack) == 0 {
-					generated[name] = editorGeneratedReferences{data: data, refs: scan.refs}
+					generated[name] = editorGeneratedReferences{data: data, refs: scan.refs, objects: scan.graphicIDs}
 				}
 			}
 			pageRefs[i] = Page{ID: page.ID, BaseLoc: "/" + name}
@@ -272,7 +277,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 			return nil, err
 		}
 	}
-	if err := e.pruneStructureReferences(parts); err != nil {
+	if err := e.pruneStructureReferences(parts, generated); err != nil {
 		return nil, err
 	}
 	for name, data := range maps.Clone(parts) {

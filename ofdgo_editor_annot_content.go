@@ -213,12 +213,16 @@ func (e *Editor) AnnotationTexts(index int, id string) ([]string, error) {
 	return texts, nil
 }
 
-// annotationXML 读取唯一注解的独立原文，不以类型、大小或可见性筛选
+// annotationXML 按ST_ID数值读取唯一注解的原文，不以类型、大小或可见性筛选
 // 入参: index 页面索引, id 注解标识
 // 返回: []byte 注解XML, error 错误信息
 func (e *Editor) annotationXML(index int, id string) ([]byte, error) {
 	if index < 0 || index >= len(e.pages) {
 		return nil, fmt.Errorf("page index %d out of range", index)
+	}
+	key := editorResourceID(id)
+	if key == "" {
+		return nil, fmt.Errorf("invalid annotation ID %q", id)
 	}
 	if e.source == nil || e.source.document.Annotations == "" {
 		return nil, fmt.Errorf("page has no annotations")
@@ -252,7 +256,7 @@ func (e *Editor) annotationXML(index int, id string) ([]byte, error) {
 			return nil, err
 		}
 		for _, node := range page.children {
-			if !node.matchesOFD("Annot") || node.attr("ID") != id {
+			if !node.matchesOFD("Annot") || editorResourceID(node.attr("ID")) != key {
 				continue
 			}
 			if result != nil {
@@ -521,7 +525,7 @@ func (e *Editor) annotationScope(page int, path ObjectPath) (*Reader, *Renderer,
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	root.setStates(e.source.annotationStates[e.pages[page].ID+"/"+path.Annotation])
+	root.setStates(e.source.annotationStates[e.pages[page].ID+"/"+editorResourceID(path.Annotation)])
 	reader, err := e.Reader()
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -578,7 +582,7 @@ func (e *Editor) writeAnnotationScope(page int, id string, data []byte, states m
 		if statesByID == nil {
 			statesByID = make(map[string]map[string]editorCompositeState)
 		}
-		statesByID[e.pages[page].ID+"/"+id] = maps.Clone(states)
+		statesByID[e.pages[page].ID+"/"+editorResourceID(id)] = maps.Clone(states)
 		e.source.annotationStates = statesByID
 	}
 	return err

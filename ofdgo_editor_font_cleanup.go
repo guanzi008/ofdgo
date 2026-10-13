@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"maps"
@@ -83,21 +84,12 @@ func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byt
 					continue
 				}
 				seen[name] = true
-				input, err := view.openFile(name)
+				candidate, err := view.fontCleanupCandidate(ctx, name)
 				if err != nil {
 					return err
 				}
-				var header [4]byte
-				n, err := io.ReadFull(input, header[:])
-				input.Close()
-				if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-					return err
-				}
-				if n == len(header) {
-					switch string(header[:]) {
-					case "\x00\x01\x00\x00", "OTTO", "ttcf":
-						candidates[name] = true
-					}
+				if candidate {
+					candidates[name] = true
 				}
 			}
 		}
@@ -120,6 +112,91 @@ func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byt
 		}
 	}
 	return nil
+}
+
+// fontCleanupCandidate 检查字体目录与文件范围，仅将可识别字体交给引用清理流程
+// 入参: ctx 取消上下文, name 包内文件路径
+// 返回: bool 是否为候选字体, error 读取或取消错误
+func (r *Reader) fontCleanupCandidate(ctx context.Context, name string) (bool, error) {
+	input, err := r.openFile(name)
+	if err != nil {
+		return false, err
+	}
+	defer input.Close()
+	var size uint64
+	if data, ok := r.files[cleanPackagePath(name)]; ok {
+		size = uint64(len(data))
+	} else if file, ok := r.packageFile(name); ok {
+		size = file.UncompressedSize64
+	}
+	candidate, err := fontCleanupDirectory(imageInput{ReadCloser: input, context: ctx}, size)
+	if err == io.EOF || err == io.ErrUnexpectedEOF {
+		err = nil
+	}
+	if canceled := ctx.Err(); canceled != nil {
+		return false, canceled
+	}
+	return candidate, err
+}
+
+// fontCleanupDirectory 检查SFNT表目录或字体集合索引，不读取字形数据
+// 入参: input 文件流, size 文件长度
+// 返回: bool 是否具有有效目录, error 读取错误
+func fontCleanupDirectory(input io.Reader, size uint64) (bool, error) {
+	var header [12]byte
+	if _, err := io.ReadFull(input, header[:]); err != nil {
+		return false, err
+	}
+	if size < uint64(len(header)) {
+		return false, nil
+	}
+	if string(header[:4]) == "ttcf" {
+		version := binary.BigEndian.Uint32(header[4:])
+		count := uint64(binary.BigEndian.Uint32(header[8:]))
+		if version != 0x00010000 && version != 0x00020000 || count == 0 || count > (size-12)/4 {
+			return false, nil
+		}
+		end := 12 + count*4
+		if version == 0x00020000 {
+			end += 12
+		}
+		var entry [4]byte
+		for range count {
+			if _, err := io.ReadFull(input, entry[:]); err != nil {
+				return false, err
+			}
+			offset := uint64(binary.BigEndian.Uint32(entry[:]))
+			if offset < end || offset > size-12 {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+	switch string(header[:4]) {
+	case "\x00\x01\x00\x00", "OTTO", "true":
+	default:
+		return false, nil
+	}
+	count := uint64(binary.BigEndian.Uint16(header[4:]))
+	if count == 0 || count > (size-12)/16 {
+		return false, nil
+	}
+	end := 12 + count*16
+	seen := make(map[uint32]bool, count)
+	var entry [16]byte
+	for range count {
+		if _, err := io.ReadFull(input, entry[:]); err != nil {
+			return false, err
+		}
+		tag := binary.BigEndian.Uint32(entry[:])
+		offset := uint64(binary.BigEndian.Uint32(entry[8:]))
+		length := uint64(binary.BigEndian.Uint32(entry[12:]))
+		if seen[tag] || offset < end || offset > size || length > size-offset {
+			return false, nil
+		}
+		seen[tag] = true
+	}
+	return true, nil
 }
 
 // subsetPackageFonts 按文档作用域收集用字，合并共享字体需求并保留字形编号

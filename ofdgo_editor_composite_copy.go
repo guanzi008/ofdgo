@@ -47,7 +47,7 @@ func (e *Editor) PasteCompositeSelection(page int, selection *CompositeSelection
 		return nil, err
 	}
 	var result []string
-	err := e.pasteCompositeSelection(selection, func(objects []GraphicObject) error {
+	err := e.pasteCompositeSelection(selection, func(objects []GraphicObject, _ []map[string]string) error {
 		var err error
 		result, err = e.CopyObjects(page, objects, dx, dy)
 		return err
@@ -124,7 +124,7 @@ func (e *Editor) PasteCompositeObjects(page int, path ObjectPath, selection *Com
 	}
 	if e.pages[page].ID != selection.page || path.ID != selection.path.ID || path.Annotation != selection.path.Annotation || !slices.Equal(path.Children, selection.path.Children) {
 		var result []int
-		err := e.pasteCompositeSelection(selection, func(objects []GraphicObject) error {
+		err := e.pasteCompositeSelection(selection, func(objects []GraphicObject, _ []map[string]string) error {
 			var err error
 			result, err = e.CopyObjectsToComposite(page, path, objects, dx, dy)
 			return err
@@ -198,7 +198,7 @@ func (e *Editor) PasteCompositeObjects(page int, path ObjectPath, selection *Com
 // pasteCompositeSelection 固定内部快照的页面几何和外观，粘贴失败时回收新增绘制资源
 // 入参: selection 独立内部快照, paste 目标范围粘贴操作
 // 返回: error 错误信息
-func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste func([]GraphicObject) error) (err error) {
+func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste func([]GraphicObject, []map[string]string) error) (err error) {
 	if selection == nil || selection.editor != e || !e.documentIdentity().matches(selection.document) {
 		return fmt.Errorf("composite selection belongs to another document or editor")
 	}
@@ -223,6 +223,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 	defer reader.Close()
 	renderer := e.newRenderer(reader)
 	var objects []GraphicObject
+	var remaps []map[string]string
 	for _, source := range selection.nodes {
 		copy, err := newEditorCompositeNode(source.data)
 		if err != nil {
@@ -327,8 +328,9 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 		}
 		object.origin = &editorObjectOrigin{editor: e, document: e.documentIdentity(), page: selection.source, data: copy.data, node: copy.node, object: copy.object}
 		objects = append(objects, object)
+		remaps = append(remaps, copy.remaps...)
 	}
-	return paste(objects)
+	return paste(objects, remaps)
 }
 
 // preserveActionRegions 将默认点击范围固定到对象坐标，保留动作原文及显式区域

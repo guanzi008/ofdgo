@@ -70,12 +70,12 @@ func decodeTIFFFax(ctx context.Context, data []byte, layout tiffImageLayout) (im
 	}
 	for _, tag := range []uint16{258, 317, 339} {
 		v, err := value(tag, 1)
-		if err != nil || v != 1 {
+		if err != nil || v != 1 || entries[tag] != nil && order.Uint16(entries[tag][2:]) != 3 {
 			return nil, fmt.Errorf("invalid TIFF fax sample field %d", tag)
 		}
 	}
 	photo, err := value(262, 2)
-	if err != nil || photo > 1 || entries[338] != nil {
+	if err != nil || photo > 1 && photo != 4 || entries[338] != nil {
 		return nil, fmt.Errorf("invalid TIFF fax color model")
 	}
 	width := uint32(layout.width)
@@ -150,7 +150,7 @@ func decodeTIFFFax(ctx context.Context, data []byte, layout tiffImageLayout) (im
 		params := pdfgo.Dictionary{
 			"K": k, "Columns": pdfgo.Integer(width), "Rows": pdfgo.Integer(rows),
 			"EndOfBlock": pdfgo.Boolean(false), "EndOfLine": pdfgo.Boolean(layout.compression == 3),
-			"EncodedByteAlign": pdfgo.Boolean(layout.compression == 2), "BlackIs1": pdfgo.Boolean(photo == 1),
+			"EncodedByteAlign": pdfgo.Boolean(layout.compression == 2), "BlackIs1": pdfgo.Boolean(photo == 1 || photo == 4),
 		}
 		object := &pdfgo.Image{Width: int(width), Height: int(rows), BitsPerComponent: 1, ColorSpace: pdfgo.Name("DeviceGray"), Stream: &pdfgo.Stream{Dictionary: pdfgo.Dictionary{"Filter": pdfgo.Name("CCITTFaxDecode"), "DecodeParms": params}, Data: encoded}}
 		pixels, err := object.DecodeSamplesContext(ctx)

@@ -23,18 +23,19 @@ import (
 )
 
 // optimizeTIFFResource 压缩单目录TIFF，保留方向、透明度、采样精度及像素密度
+// 主图或单个瓦片的预计缓冲超限时保留原编码
 // 入参: ctx 取消上下文, data TIFF编码, options 压缩选项, size 显示像素需求
 // 返回: []byte 图片编码，不可完整转换时保留原文, error 编码或取消错误
 func optimizeTIFFResource(ctx context.Context, data []byte, options CompressionOptions, size image.Point) ([]byte, error) {
-	layout, err := readTIFFLayout(bytes.NewReader(data))
+	layout, err := readTIFFLayoutContext(ctx, bytes.NewReader(data))
 	if err != nil {
 		return data, ctx.Err()
 	}
-	pixelSize := int64(8)
-	if layout.planar {
-		pixelSize = 16
-	}
+	pixelSize := int64(layout.decodedPixelBytes())
 	if int64(layout.width) > outputOptimizationBufferLimit/pixelSize/int64(layout.height) {
+		return data, ctx.Err()
+	}
+	if layout.tileWidth != 0 && int64(layout.tileWidth) > outputOptimizationBufferLimit/pixelSize/int64(layout.tileHeight) {
 		return data, ctx.Err()
 	}
 	density, ok := tiffCompressionDensity(data, layout)
@@ -73,7 +74,11 @@ func tiffCompressionDensity(data []byte, layout tiffImageLayout) (rasterDensity,
 			value = uint32(order.Uint16(entry[8:]))
 		}
 		switch tag {
-		case 256, 257, 258, 259, 262, 273, 274, 277, 278, 279, 320, 322, 323, 324, 325:
+		case 256, 257, 258, 259, 273, 274, 277, 278, 279, 320, 322, 323, 324, 325:
+		case 262:
+			if value == 5 {
+				return density, false
+			}
 		case 254:
 			if value != 0 {
 				return density, false

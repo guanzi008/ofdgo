@@ -647,6 +647,9 @@ func (e *Editor) restoreFontSnapshot(state Editor) {
 	state = state.transactionSnapshot()
 	state.history, state.historyIndex, state.historyLimit = e.history, e.historyIndex, e.historyLimit
 	state.serial, state.revision = e.serial, e.revision
+	if !sameBackend(state.backends.FontResources, e.backends.FontResources) {
+		state.clearFontResourceCache()
+	}
 	state.backends, state.fontDirs, state.fontFS = e.backends, e.fontDirs, e.fontFS
 	state.encryption, state.output, state.OnWriteProgress = e.encryption, e.output, e.OnWriteProgress
 	state.fontRenderer, state.fontSourcesCache = nil, nil

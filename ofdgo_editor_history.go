@@ -29,6 +29,7 @@ type editorChange struct {
 
 // Transaction 将多项修改作为一次原子操作提交，失败时保留原文档及历史
 // 回调仅操作传入的编辑器，不可保留该实例供后续使用
+// 后端、字体来源和撤销配置仅用于本次回调，不随事务提交
 // 入参: edit 批量修改回调
 // 返回: error 修改错误
 func (e *Editor) Transaction(edit func(*Editor) error) error {
@@ -48,9 +49,12 @@ func (e *Editor) Transaction(edit func(*Editor) error) error {
 	}
 	changed := e.revision != before.revision
 	e.history, e.historyIndex, e.historyLimit = before.history, before.historyIndex, before.historyLimit
+	if !sameBackend(e.backends.FontResources, before.backends.FontResources) {
+		e.clearFontResourceCache()
+	}
 	e.backends, e.fontDirs, e.fontFS = before.backends, before.fontDirs, before.fontFS
 	e.fontSourcesCache = before.fontSourcesCache
-	if e.sameDocument(&before) {
+	if e.sameResourceView(&before) {
 		e.fontRenderer, e.fontMetrics = before.fontRenderer, before.fontMetrics
 	} else {
 		e.fontRenderer, e.fontMetrics = nil, make(map[string]FontMetrics)
@@ -140,6 +144,7 @@ func (e *Editor) transactionSnapshot() Editor {
 	next.fonts, next.images, next.resourceID = maps.Clone(e.fonts), maps.Clone(e.images), maps.Clone(e.resourceID)
 	next.origins = maps.Clone(e.origins)
 	next.removedPages = maps.Clone(e.removedPages)
+	next.structureRemaps = maps.Clone(e.structureRemaps)
 	next.fontMetrics = maps.Clone(e.fontMetrics)
 	if e.source != nil {
 		source := *e.source
@@ -149,16 +154,19 @@ func (e *Editor) transactionSnapshot() Editor {
 	return next
 }
 
-// restoreTransaction 恢复文档状态，保留历史和配置，仅在同一文档内共享资源
+// restoreTransaction 恢复文档状态，保留历史和配置，仅在同一资源视图内共享缓存
 // 入参: state 文档状态
 func (e *Editor) restoreTransaction(state Editor) {
 	state = state.transactionSnapshot()
 	state.retainDocumentResources(e)
-	if !e.sameDocument(&state) {
+	if !e.sameResourceView(&state) {
 		state.fontRenderer, state.fontMetrics = nil, make(map[string]FontMetrics)
 	}
 	state.history, state.historyIndex, state.historyLimit = e.history, e.historyIndex, e.historyLimit
 	state.serial = max(e.serial, state.serial)
+	if !sameBackend(state.backends.FontResources, e.backends.FontResources) {
+		state.clearFontResourceCache()
+	}
 	state.backends, state.fontDirs, state.fontFS = e.backends, e.fontDirs, e.fontFS
 	state.fontSourcesCache = e.fontSourcesCache
 	state.validatedPaths = e.validatedPaths
@@ -166,10 +174,26 @@ func (e *Editor) restoreTransaction(state Editor) {
 	*e = state
 }
 
-// retainDocumentResources 保留同一文档后续注册的资源，不跨文档混用编号和字体缓存
+// sameResourceView 判断文档和资源来源是否一致，新建文档首次封装不改变已注册资源
+// 入参: other 编辑快照
+// 返回: bool 是否可共享注册资源和字体缓存
+func (e *Editor) sameResourceView(other *Editor) bool {
+	if !e.sameDocument(other) {
+		return false
+	}
+	if e.source == nil {
+		return other.source == nil || other.source.fromNew
+	}
+	if other.source == nil {
+		return e.source.fromNew
+	}
+	return e.source.reader == other.source.reader
+}
+
+// retainDocumentResources 保留同一资源视图中后续注册的资源，不跨包快照混用编号和字体缓存
 // 入参: source 当前文档状态
 func (e *Editor) retainDocumentResources(source *Editor) {
-	if !e.sameDocument(source) {
+	if !e.sameResourceView(source) {
 		return
 	}
 	if len(source.resources) > len(e.resources) {
@@ -182,7 +206,7 @@ func (e *Editor) retainDocumentResources(source *Editor) {
 	e.fontRenderer, e.fontMetrics = source.fontRenderer, source.fontMetrics
 }
 
-// recordTransaction 记录事务快照，跨文档撤销前保留各文档后续注册的资源
+// recordTransaction 记录事务快照，在各自资源视图中保留后续注册的资源
 // 入参: before 修改前的文档状态
 func (e *Editor) recordTransaction(before Editor) {
 	if change := e.recordChange(); change != nil {

@@ -126,23 +126,57 @@ func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, e
 }
 
 // outputImageWorkingSet 按原图尺寸估算解码和重采样缓冲，不以降采样目标代替原图
-// 按两份16位RGBA像素缓冲分批，不代表实际内存上限；格式或尺寸不明时单独处理
+// 通常预留两份16位RGBA缓冲，TIFF另计分量、瓦片及蒙版存储；格式或尺寸不明时单独处理
 // 入参: ctx 取消上下文, data 原始图像编码
 // 返回: int 编码及像素缓冲的估算字节数，上限为单批预算
 func outputImageWorkingSet(ctx context.Context, data []byte) int {
 	if len(data) >= outputImageWorkingSetLimit {
 		return outputImageWorkingSetLimit
 	}
-	input := imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx}
-	config, _, err := decodeImageConfig(input)
+	input := bytes.NewReader(data)
+	available := outputImageWorkingSetLimit - len(data)
+	if isTIFFData(data) {
+		layout, err := readTIFFLayoutContext(ctx, input)
+		if err != nil {
+			return outputImageWorkingSetLimit
+		}
+		return len(data) + tiffImageWorkingSet(layout, available)
+	}
+	config, _, err := decodeImageConfig(imageInput{ReadCloser: io.NopCloser(input), context: ctx})
 	if err != nil || config.Width <= 0 || config.Height <= 0 {
 		return outputImageWorkingSetLimit
 	}
-	available := outputImageWorkingSetLimit - len(data)
 	if config.Width > available/16/config.Height {
 		return outputImageWorkingSetLimit
 	}
 	return len(data) + config.Width*config.Height*16
+}
+
+// tiffImageWorkingSet 分别估算显示缓冲及主图、蒙版的完整瓦片存储，超预算时返回上限
+// 入参: layout 已校验的主图布局, limit 可用字节数
+// 返回: int 不超过limit的估算值
+func tiffImageWorkingSet(layout tiffImageLayout, limit int) int {
+	size := layout.displaySize()
+	if size.X <= 0 || size.Y <= 0 || size.X > limit/16/size.Y {
+		return limit
+	}
+	cost := size.X * size.Y * 16
+	for source := &layout; source != nil; source = source.transparency {
+		width, height := uint64(source.width), uint64(source.height)
+		if source.tileWidth != 0 {
+			x, y := uint64(source.tileWidth), uint64(source.tileHeight)
+			width, height = ((width-1)/x+1)*x, ((height-1)/y+1)*y
+		}
+		pixelSize := max(uint64(16), source.decodedPixelBytes())
+		if !source.planar {
+			pixelSize = max(pixelSize, uint64(source.samples)*4)
+		}
+		if width > uint64(limit-cost)/pixelSize/height {
+			return limit
+		}
+		cost += int(width * height * pixelSize)
+	}
+	return cost
 }
 
 // runOutputImages 等待整批结束后记录更小候选，失败图片保留原始编码

@@ -49,6 +49,14 @@ type editorSourceFontKey struct {
 // editorSourceFontCache 在单次资源处理中复用裁剪结果，空值表示无体积收益
 type editorSourceFontCache map[editorSourceFontKey][]byte
 
+// clearFontResourceCache 清除字体后端生成的解析与裁剪缓存，保留原始资源
+func (e *Editor) clearFontResourceCache() {
+	e.fonts = make(map[string]*FontResource)
+	for i := range e.resources {
+		e.resources[i].subset = nil
+	}
+}
+
 // subset 按原字体和用字复用安全子集，不缓存错误、取消结果或原始字体
 // 入参: ctx 取消上下文, backend 字体资源后端, data 原字体, usage 用字记录
 // 返回: []byte 更小的字体子集，无收益时为nil, error 裁剪或取消错误

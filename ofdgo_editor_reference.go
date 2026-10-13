@@ -26,11 +26,12 @@ import (
 // editorVectorUsageLimit 限制单个矢量引用快照的记录数，不限制资源内容
 const editorVectorUsageLimit = 4096
 
-// editorGeneratedReferences 保存本次输出条目及其引用，不跨写出复用
+// editorGeneratedReferences 保存本次输出条目、资源引用及完整图元编号，不跨写出复用
 type editorGeneratedReferences struct {
-	data   []byte
-	refs   *editorResourceRefs
-	staged *editorStagedPage
+	data    []byte
+	refs    *editorResourceRefs
+	staged  *editorStagedPage
+	objects map[string]bool
 }
 
 // editorVectorUsage 保存自产矢量资源的引用快照，内容和路径变化时失效
@@ -40,19 +41,20 @@ type editorVectorUsage struct {
 	refs   *editorResourceRefs
 }
 
-// editorReferenceScan 按XML事件收集资源和字体用字，未知内容保持完整扫描
+// editorReferenceScan 按XML事件收集资源、字体用字和图元编号，未知内容保持完整扫描
 type editorReferenceScan struct {
-	refs     *editorResourceRefs
-	objects  map[string]bool
-	name     string
-	base     string
-	stack    []string
-	fonts    []*editorFontUsage
-	text     strings.Builder
-	resource bool
-	capture  bool
-	safe     bool
-	seen     bool
+	refs       *editorResourceRefs
+	objects    map[string]bool
+	graphicIDs map[string]bool
+	name       string
+	base       string
+	stack      []string
+	fonts      []*editorFontUsage
+	text       strings.Builder
+	resource   bool
+	capture    bool
+	safe       bool
+	seen       bool
 }
 
 // matches 判断条目仍为本次编码结果，空条目与暂存占位不混用
@@ -159,6 +161,10 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			}
 		}
 		var usage *editorFontUsage
+		switch token.Name.Local {
+		case "Template", "PageRes", "CompositeObject", "CompositeGraphicUnit", "PageBlock":
+			s.graphicIDs = nil
+		}
 		if len(s.fonts) != 0 {
 			usage = s.fonts[len(s.fonts)-1]
 			if usage != nil && (s.stack[len(s.stack)-1] == "TextCode" || s.stack[len(s.stack)-1] == "Glyphs") {
@@ -175,6 +181,13 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			}
 			if attr.Name.Local != "ID" {
 				s.refs.reference(s.name, s.base, attr.Name.Local, attr.Value, s.resource)
+			} else if s.graphicIDs != nil {
+				switch token.Name.Local {
+				case "TextObject", "PathObject", "ImageObject":
+					if id := editorResourceID(attr.Value); id != "" {
+						s.graphicIDs[id] = true
+					}
+				}
 			}
 			root, parent := token.Name.Local, ""
 			if len(s.stack) != 0 {

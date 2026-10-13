@@ -152,10 +152,11 @@ func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *edi
 	}
 	wanted := make(map[string]bool, len(ids))
 	for _, id := range ids {
-		if id == "" || wanted[id] {
+		key := editorResourceID(id)
+		if key == "" || wanted[key] {
 			return fmt.Errorf("missing or duplicate annotation ID %q", id)
 		}
-		wanted[id] = true
+		wanted[key] = true
 	}
 	if len(wanted) == 0 {
 		return nil
@@ -212,7 +213,7 @@ func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *edi
 				continue
 			}
 			count++
-			id := node.attr("ID")
+			id := editorResourceID(node.attr("ID"))
 			if !wanted[id] {
 				continue
 			}
@@ -262,7 +263,7 @@ func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *edi
 		parts[file] = editorPatchXML(content, changes)
 	}
 	for _, id := range ids {
-		if !found[id] {
+		if !found[editorResourceID(id)] {
 			return fmt.Errorf("annotation %q not found", id)
 		}
 	}
@@ -290,5 +291,9 @@ func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *edi
 	if len(parts) == 0 {
 		return nil
 	}
-	return e.commitAnnotationParts(e.source, parts)
+	base, err := e.annotationStructureSource(index, wanted)
+	if err != nil {
+		return err
+	}
+	return e.commitAnnotationParts(base, parts)
 }

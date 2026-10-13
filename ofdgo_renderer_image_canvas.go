@@ -273,6 +273,12 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 				return img
 			}
 			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				if (x-bounds.Min.X)&255 == 0 {
+					if err := work.Err(); err != nil {
+						r.renderError = err
+						return img
+					}
+				}
 				pixel := imageNRGBA64At(img, x, y)
 				alpha := imageAlphaAt(result, maskBounds.Min.X+x-bounds.Min.X, maskBounds.Min.Y+y-bounds.Min.Y)
 				opaque = opaque && alpha == 65535
@@ -295,14 +301,39 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 	mask, ok := result.(*image.RGBA)
 	if !ok {
 		mask = image.NewRGBA(image.Rect(0, 0, w, h))
-		draw.Draw(mask, mask.Bounds(), result, result.Bounds().Min, draw.Src)
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; {
+				if err := work.Err(); err != nil {
+					r.renderError = err
+					return img
+				}
+				end := x + min(256, w-x)
+				draw.Draw(mask, image.Rect(x, y, end, y+1), result, result.Bounds().Min.Add(image.Pt(x, y)), draw.Src)
+				x = end
+			}
+		}
 	}
 	if mask.Rect.Min != (image.Point{}) {
 		normalized := *mask
 		normalized.Rect = mask.Rect.Sub(mask.Rect.Min)
 		mask = &normalized
 	}
-	opaque := mask.Opaque()
+	opaque := true
+	for y := 0; y < h && opaque; y++ {
+		row := mask.Pix[y*mask.Stride : y*mask.Stride+w*4]
+		for x := 3; x < len(row); x += 4 {
+			if (x-3)&1023 == 0 {
+				if err := work.Err(); err != nil {
+					r.renderError = err
+					return img
+				}
+			}
+			if row[x] != 255 {
+				opaque = false
+				break
+			}
+		}
+	}
 	if err := work.Err(); err != nil {
 		r.renderError = err
 		return img
@@ -325,6 +356,12 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 			row := out.Pix[y*out.Stride : y*out.Stride+w*4]
 			pixels := src.Pix[offset : offset+w*4]
 			for x := 0; x < len(row); x += 4 {
+				if x&1023 == 0 {
+					if err := work.Err(); err != nil {
+						r.renderError = err
+						return img
+					}
+				}
 				copy(row[x:x+3], pixels[x:x+3])
 				row[x+3] = uint8(int(pixels[x+3]) * int(row[x+3]) / 255)
 			}
@@ -341,6 +378,12 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 			return img
 		}
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			if (x-bounds.Min.X)&255 == 0 {
+				if err := work.Err(); err != nil {
+					r.renderError = err
+					return img
+				}
+			}
 			c := imageNRGBAAt(source, x, y)
 			a := mask.RGBAAt(x-bounds.Min.X, y-bounds.Min.Y).A
 			c.A = uint8(int(c.A) * int(a) / 255)

@@ -144,6 +144,28 @@ func (r *Reader) versionEditGraph(ctx context.Context, entry string, parts map[s
 // 入参: ctx 取消上下文
 // 返回: map[string]bool 受保护路径, error 读取或结构错误
 func (r *Reader) versionSharedFiles(ctx context.Context) (map[string]bool, error) {
+	shared, err := r.versionPreservedFiles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var indexes []int
+	for index := range r.DocumentCount() {
+		if index != r.documentIndex {
+			indexes = append(indexes, index)
+		}
+	}
+	files, err := r.documentFiles(ctx, indexes...)
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(shared, files)
+	return shared, nil
+}
+
+// versionPreservedFiles 汇总当前文档封面、未选版本及原始入口依赖，不包含其他文档
+// 入参: ctx 取消上下文
+// 返回: map[string]bool 需要保留的文件, error 读取或取消错误
+func (r *Reader) versionPreservedFiles(ctx context.Context) (map[string]bool, error) {
 	shared := make(map[string]bool)
 	data, err := r.readFileViewContext(ctx, "OFD.xml")
 	if err != nil {
@@ -163,17 +185,6 @@ func (r *Reader) versionSharedFiles(ctx context.Context) (map[string]bool, error
 			shared[name] = true
 		}
 	}
-	var indexes []int
-	for index := range r.DocumentCount() {
-		if index != r.documentIndex {
-			indexes = append(indexes, index)
-		}
-	}
-	files, err := r.documentFiles(ctx, indexes...)
-	if err != nil {
-		return nil, err
-	}
-	maps.Copy(shared, files)
 	versions, err := r.DocumentVersionsContext(ctx)
 	if err != nil {
 		return nil, err
@@ -204,21 +215,22 @@ func (r *Reader) versionSharedFiles(ctx context.Context) (map[string]bool, error
 	return shared, nil
 }
 
-// versionResourceFiles 限定当前版本的资源扫描范围，合并其他文档依赖以保护跨文档引用
+// versionResourceFiles 分别记录当前入口依赖与完整扫描范围，其他文档和版本清单用于保护共享引用
 // 入参: ctx 取消上下文, parts 待写入条目, generated 本次自产页面及引用
-// 返回: map[string]bool 扫描路径，非版本文档返回nil, error 读取或结构错误
-func (r *Reader) versionResourceFiles(ctx context.Context, parts map[string][]byte, generated map[string]editorGeneratedReferences) (map[string]bool, error) {
+// 返回: map[string]bool 当前入口依赖, map[string]bool 扫描范围，非版本文档均为nil, error 读取或结构错误
+func (r *Reader) versionResourceFiles(ctx context.Context, parts map[string][]byte, generated map[string]editorGeneratedReferences) (map[string]bool, map[string]bool, error) {
 	if r == nil || !r.OFD.DocBody[r.documentIndex].versioned {
-		return nil, nil
+		return nil, nil, nil
 	}
 	entry, err := r.DocumentRootContext(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	files, err := r.versionFileDependencies(ctx, entry, parts, generated)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	selected := maps.Clone(files)
 	if r.versionInfo != nil {
 		for _, file := range r.versionInfo.Files {
 			files[file.Location] = true
@@ -232,10 +244,10 @@ func (r *Reader) versionResourceFiles(ctx context.Context, parts map[string][]by
 	}
 	other, err := r.documentFiles(ctx, indexes...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	maps.Copy(files, other)
-	return files, nil
+	return selected, files, nil
 }
 
 // versionChanges 隔离当前文档或版本修改涉及的共享文件，同步版本清单，不修改输入包或修改集

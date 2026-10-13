@@ -77,7 +77,10 @@ func resourceFontUsage(ctx context.Context, resources []string, scoped map[strin
 			alternate := cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))
 			id, charset := editorResourceID(font.attr("ID")), font.attr("Charset")
 			unsafe := id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != alternate
-			for _, path := range []string{location, alternate} {
+			for i, path := range [2]string{location, alternate} {
+				if i == 1 && path == location {
+					continue
+				}
 				if result[path] == nil {
 					result[path] = newEditorFontUsage()
 				}

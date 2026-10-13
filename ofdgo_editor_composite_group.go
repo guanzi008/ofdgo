@@ -63,6 +63,7 @@ func (e *Editor) GroupCompositeObjects(page int, path ObjectPath, indexes []int)
 		if err != nil {
 			return err
 		}
+		nodes[0].owner.remaps = append(nodes[0].owner.remaps, group.remaps...)
 		for i, node := range nodes {
 			var replacement []byte
 			if i == 0 {
@@ -119,9 +120,11 @@ func (e *Editor) vectorInstance(renderer *Renderer, nodes []*editorCompositeNode
 	hash.Write(content)
 	key := [32]byte(hash.Sum(nil))
 	var resource string
+	var ids map[string]string
 	for _, candidate := range e.resources {
 		if candidate.vectorKey == key && maps.Equal(candidate.vectorStates, states) {
 			resource = candidate.composite
+			ids = candidate.objectIDs
 			break
 		}
 	}
@@ -136,12 +139,17 @@ func (e *Editor) vectorInstance(renderer *Renderer, nodes []*editorCompositeNode
 		}
 		added := &e.resources[len(e.resources)-1]
 		added.vectorKey, added.vectorStates = key, maps.Clone(states)
+		ids = added.objectIDs
 	}
 	data, err := editorXMLContainer("CompositeObject", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: e.nextID()}, {Name: xml.Name{Local: "Boundary"}, Value: editorBoxString(extent)}, {Name: xml.Name{Local: "ResourceID"}, Value: resource}}, nil)
 	if err != nil {
 		return nil, err
 	}
-	return newEditorCompositeNode(data)
+	group, err := newEditorCompositeNode(data)
+	if err == nil {
+		group.remaps = []map[string]string{ids}
+	}
+	return group, err
 }
 
 // UngroupCompositeObject 展开内部组合，隔离引用资源并保留父容器的样式和裁剪
@@ -154,7 +162,8 @@ func (e *Editor) UngroupCompositeObject(page int, path ObjectPath, index int) ([
 		if !members[0].Capabilities.Order {
 			return fmt.Errorf("composite container cannot be reordered")
 		}
-		return e.ungroupCompositeNode(renderer, node, func(objects []GraphicObject) error {
+		return e.ungroupCompositeNode(renderer, node, func(objects []GraphicObject, remaps []map[string]string) error {
+			node.owner.remaps = append(node.owner.remaps, remaps...)
 			var content []byte
 			for i, object := range objects {
 				content = append(content, object.origin.data...)
@@ -173,7 +182,7 @@ func (e *Editor) UngroupCompositeObject(page int, path ObjectPath, index int) ([
 // ungroupCompositeNode 将组合展开至所在坐标系，祖先透明度和裁剪仅由原父级应用一次
 // 入参: renderer 当前读取器, node 待展开组合, replace 原子替换回调
 // 返回: error 错误信息
-func (e *Editor) ungroupCompositeNode(renderer *Renderer, node *editorCompositeNode, replace func([]GraphicObject) error) error {
+func (e *Editor) ungroupCompositeNode(renderer *Renderer, node *editorCompositeNode, replace func([]GraphicObject, []map[string]string) error) error {
 	if !e.compositeUngroupable(node.node) {
 		return fmt.Errorf("group container cannot be removed without losing attributes")
 	}
@@ -201,7 +210,7 @@ func (e *Editor) ungroupCompositeNode(renderer *Renderer, node *editorCompositeN
 			return fmt.Errorf("group member cannot be expanded")
 		}
 	}
-	return e.pasteCompositeSelection(&CompositeSelection{editor: e, document: e.documentIdentity(), nodes: members}, func(objects []GraphicObject) error {
+	return e.pasteCompositeSelection(&CompositeSelection{editor: e, document: e.documentIdentity(), nodes: members}, func(objects []GraphicObject, remaps []map[string]string) error {
 		ids := make(map[string]string)
 		if copy.ref != nil {
 			for _, object := range objects {
@@ -247,7 +256,13 @@ func (e *Editor) ungroupCompositeNode(renderer *Renderer, node *editorCompositeN
 			member.object.origin = &editorObjectOrigin{editor: e, document: e.documentIdentity(), data: member.data, node: member.node, object: member.object}
 			objects[i] = member.object
 		}
-		return replace(objects)
+		if len(ids) != 0 {
+			remaps = append(remaps, ids)
+		}
+		for _, object := range objects {
+			remaps = append(remaps, map[string]string{editorResourceID(editorObjectID(node.object)): editorResourceID(editorObjectID(object))})
+		}
+		return replace(objects, remaps)
 	})
 }
 
