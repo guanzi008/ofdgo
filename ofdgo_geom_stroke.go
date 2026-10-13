@@ -26,7 +26,7 @@ type geometryPolyline struct {
 	direction Point
 }
 
-// Stroke 将曲线、虚线及线帽连接转换为非零填充轮廓
+// Stroke 按端点和转角样式将曲线、虚线转换为非零填充轮廓
 // 曲线按Tolerance展开，默认误差为0.001毫米，重叠轮廓保持同向绕数
 // 结果未做布尔整理，按非零规则填充，区域运算需能处理重叠子路径的后端
 // 入参: options 描边样式
@@ -283,7 +283,7 @@ func (line geometryPolyline) dash(pattern []float64, total, offset float64) ([]g
 
 // stroke 追加同向矩形、连接楔形及圆盘组成的非零填充区域
 // 入参: result 已有轮廓, options 描边样式
-// 返回: GeometryPath 填充轮廓, error 不支持的退化方形线帽
+// 返回: GeometryPath 填充轮廓, error 不支持的退化方头端点
 func (line geometryPolyline) stroke(result GeometryPath, options StrokeOptions) (GeometryPath, error) {
 	half := options.Width / 2
 	polygon := func(points ...Point) {

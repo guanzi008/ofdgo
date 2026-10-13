@@ -37,7 +37,7 @@ func (r *Renderer) ResolveColor(value string, index *int, space string, alpha *i
 
 // GradientStops 解析OFD渐变分段的位置与透明度，返回独立数据并保留原分段顺序
 // 入参: segments 渐变分段, alpha 透明度
-// 返回: []ColorStop 后端无关的渐变分段
+// 返回: []ColorStop 后端无关的渐变色标
 func (r *Renderer) GradientStops(segments []ShdSegment, alpha *int) []ColorStop {
 	var gradient []ColorStop
 	positions := gradientPositions(segments)
@@ -49,7 +49,7 @@ func (r *Renderer) GradientStops(segments []ShdSegment, alpha *int) []ColorStop 
 }
 
 // parseColorWithAlpha 解析带透明度的颜色
-// 入参: value 颜色值, index 调色板索引, space 颜色空间标识, alpha 透明度
+// 入参: value 色值, index 调色板索引, space 颜色空间标识, alpha 透明度
 // 返回: color.Color 颜色对象
 func (r *Renderer) parseColorWithAlpha(value string, index *int, space string, alpha *int) color.Color {
 	kind, values := r.colorComponents(value, index, space)
@@ -89,7 +89,7 @@ func (r *Renderer) parseColorWithAlpha(value string, index *int, space string, a
 }
 
 // colorComponents 读取颜色空间及归一化分量，保留源位深供渐变插值
-// 入参: value 颜色值, index 调色板索引, space 颜色空间标识
+// 入参: value 色值, index 调色板索引, space 颜色空间标识
 // 返回: string 颜色模型, [4]float64 单位分量
 func (r *Renderer) colorComponents(value string, index *int, space string) (string, [4]float64) {
 	cs := r.colorDefinition(space)

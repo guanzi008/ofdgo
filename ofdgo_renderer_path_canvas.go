@@ -75,9 +75,9 @@ func (s *pathStyle) applyStrokeColor(r *Renderer, stroke *StrokeColor, bx, by, p
 	s.strokePaint = r.parseStrokePaint(strokeColorNode, bx, by, pageH)
 }
 
-// pathLineCap 转换线帽样式
-// 入参: cap 线帽名称, fallback 默认线帽
-// 返回: canvas.Capper 线帽样式
+// pathLineCap 转换端点样式
+// 入参: cap 端点样式名称, fallback 默认端点样式
+// 返回: canvas.Capper 端点样式
 func pathLineCap(cap string, fallback canvas.Capper) canvas.Capper {
 	switch cap {
 	case "Butt":
@@ -90,8 +90,8 @@ func pathLineCap(cap string, fallback canvas.Capper) canvas.Capper {
 	return fallback
 }
 
-// applyLineJoin 应用线连接样式及尖角限制
-// 入参: join 线连接名称, limit 尖角限制, explicit 是否显式指定零截断值
+// applyLineJoin 应用转角样式及尖角截断值
+// 入参: join 转角样式名称, limit 尖角截断值, explicit 是否显式指定零截断值
 func (s *pathStyle) applyLineJoin(join string, limit float64, explicit bool) {
 	if limit > 0 || explicit {
 		s.miterLimit = limit

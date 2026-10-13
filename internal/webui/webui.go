@@ -39,7 +39,7 @@ type OpenOptions struct {
 // FontFile 字体文件
 type FontFile = ofdgo.FontFile
 
-// FontInfo OFD字体信息
+// FontInfo 文档字体信息
 type FontInfo = ofdgo.FontInfo
 
 // Session WebUI文档会话

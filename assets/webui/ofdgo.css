@@ -1214,7 +1214,7 @@ button:not(:disabled):hover {
 }
 
 .info-custom-row input,
-.gradient-stop-row input,
+.gradient-stop-row input[type="number"],
 .structure-attribute > input,
 .form-row input[type="text"],
 .form-row input[type="password"],
@@ -1260,8 +1260,8 @@ button:not(:disabled):hover {
 .info-custom-row {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) var(--control-height);
-	gap: 6px;
-	margin: 6px 0;
+	gap: 8px;
+	margin: 8px 0;
 }
 
 #infoCustomRows > :first-child {
@@ -1271,8 +1271,8 @@ button:not(:disabled):hover {
 .gradient-stop-row {
 	display: grid;
 	grid-template-columns: 44px minmax(0, 1fr) minmax(0, 1fr) var(--control-height);
-	gap: 6px;
-	margin: 6px 0;
+	gap: 8px;
+	margin: 8px 0;
 	align-items: center;
 }
 
@@ -1280,9 +1280,27 @@ button:not(:disabled):hover {
 	font-size: 12px;
 }
 
+.gradient-stop-head,
+#gradientStops {
+	overflow-y: auto;
+	scrollbar-gutter: stable;
+}
+
 #gradientStops {
 	max-height: 180px;
-	overflow-y: auto;
+	margin-bottom: 8px;
+}
+
+#gradientStops > :first-child {
+	margin-top: 0;
+}
+
+#gradientStops > :last-child {
+	margin-bottom: 0;
+}
+
+.gradient-stop-row .color-input {
+	width: 100%;
 }
 
 #infoCustomRows :focus-visible,

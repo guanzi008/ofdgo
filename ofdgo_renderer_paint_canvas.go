@@ -49,8 +49,8 @@ func (r *Renderer) parseStrokePaint(strokeColor *StrokeColor, x, y, pageH float6
 }
 
 // canvasGradient 将公共颜色节点转换为Canvas渐变
-// 入参: stops 渐变分段
-// 返回: canvas.Grad 渐变分段
+// 入参: stops 渐变色标
+// 返回: canvas.Grad 渐变色标
 func canvasGradient(stops []ColorStop) canvas.Grad {
 	var gradient canvas.Grad
 	for _, stop := range stops {

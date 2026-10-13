@@ -35,7 +35,7 @@ const (
 	FontStatusMissing = "missing"
 )
 
-// FontInfo OFD字体诊断信息，MatchedFace为实际匹配字体及原文件中的零起始索引，无法读取时为空
+// FontInfo 文档字体诊断信息，MatchedFace为实际匹配字体及原文件中的零起始索引，无法读取时为空
 type FontInfo struct {
 	ID          string    `json:"id"`
 	FontName    string    `json:"fontName"`
@@ -141,7 +141,7 @@ func (r *Reader) fontDefinition(id string) *Font {
 	return font
 }
 
-// FontInfos 获取OFD字体诊断信息
+// FontInfos 获取文档字体诊断信息
 // 返回: []FontInfo 字体诊断列表, error 错误信息
 func (r *Renderer) FontInfos() ([]FontInfo, error) {
 	scanner, err := r.ScanFontInfos()
@@ -202,7 +202,7 @@ func (s *FontInfoScanner) Infos() ([]FontInfo, error) {
 	return s.renderer.fontInfos(s.usage)
 }
 
-// FontInfosFromPages 从页面内容获取OFD字体诊断信息
+// FontInfosFromPages 从页面内容获取文档字体诊断信息
 // 入参: pages 页面内容列表
 // 返回: []FontInfo 字体诊断列表, error 错误信息
 func (r *Renderer) FontInfosFromPages(pages []*PageContent) ([]FontInfo, error) {
@@ -291,7 +291,7 @@ func (r *Renderer) fontInfoDocument() (*Document, error) {
 	return doc, nil
 }
 
-// fontInfos 获取OFD字体诊断信息
+// fontInfos 获取文档字体诊断信息
 // 入参: usage 字体使用次数
 // 返回: []FontInfo 字体诊断列表, error 错误信息
 func (r *Renderer) fontInfos(usage map[string]int) ([]FontInfo, error) {

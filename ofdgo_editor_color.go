@@ -109,7 +109,7 @@ func (e *Editor) AddColorSpace(space ColorSpace, profile []byte) (string, error)
 
 // GradientStops 解析当前文档的渐变分段，保留顺序并合并透明度
 // 入参: segments 渐变分段, alpha 外层透明度
-// 返回: []ColorStop 后端无关的色标, error 颜色解析错误
+// 返回: []ColorStop 后端无关的渐变色标, error 颜色解析错误
 func (e *Editor) GradientStops(segments []ShdSegment, alpha *int) ([]ColorStop, error) {
 	positions := gradientPositions(segments)
 	stops := make([]ColorStop, len(segments))

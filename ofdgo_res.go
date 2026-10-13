@@ -84,6 +84,7 @@ type DrawParams struct {
 }
 
 // DrawParam 绘制参数
+// Cap为端点样式，Join为转角样式，MiterLimit为尖角截断值，DashPattern为虚线间隔序列
 // MiterLimitSet为true时，零截断值覆盖继承值，否则零值表示未指定
 type DrawParam struct {
 	ID             string       `xml:"ID,attr"`

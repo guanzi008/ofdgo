@@ -175,7 +175,7 @@ func (e *Editor) wrapCompositePath(renderer *Renderer, node *editorCompositeNode
 	return e.vectorInstance(renderer, []*editorCompositeNode{node})
 }
 
-// isolateCompositeStyle 固定对象的绘制参数，避免目标容器改变颜色、虚线和线帽
+// isolateCompositeStyle 固定对象的绘制参数，避免目标容器改变颜色、虚线和端点样式
 // 入参: node 页面坐标中的对象节点
 // 返回: error 错误信息
 func (e *Editor) isolateCompositeStyle(node *editorCompositeNode) error {

@@ -24,6 +24,7 @@ import (
 
 // ObjectStyle 对象外观，nil字段保持原值，颜色的Alpha为nil时保留原颜色透明度
 // StyleObjects使用对象坐标毫米，StyleCompositeObjects的线宽、虚线长度及偏移使用页面毫米
+// Cap为端点样式，Join为转角样式，MiterLimit为尖角截断值，DashPattern为虚线间隔序列
 type ObjectStyle struct {
 	Alpha       *int
 	Fill        *bool

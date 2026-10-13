@@ -887,7 +887,7 @@ function addCustomDataRow(field = {Name: "", Value: ""}, sourceIndex) {
 	}
 	const remove = document.createElement("button");
 	remove.type = "button";
-	remove.className = "small-button";
+	remove.className = "icon-button";
 	remove.textContent = "×";
 	remove.title = "删除字段";
 	remove.setAttribute("aria-label", "删除字段");
@@ -2045,6 +2045,7 @@ function addGradientStop(position, color, transparency, source) {
 	for (const [type, value, label] of [["color", color, "色标颜色"], ["number", position, "色标位置"], ["number", transparency, "色标透明度"]]) {
 		const input = document.createElement("input");
 		input.type = type;
+		if (type === "color") input.className = "color-input";
 		input.value = value;
 		input.disabled = el.gradientKind.value === "keep";
 		input.setAttribute("aria-label", label);
@@ -2054,7 +2055,7 @@ function addGradientStop(position, color, transparency, source) {
 	}
 	const remove = document.createElement("button");
 	remove.type = "button";
-	remove.className = "small-button";
+	remove.className = "icon-button";
 	remove.textContent = "×";
 	remove.title = "删除色标";
 	remove.setAttribute("aria-label", "删除色标");
@@ -5619,8 +5620,8 @@ function renderStyleResourceSettings(kind) {
 		}
 		settingsField(content, "斜体", "Italic", value.Italic, "checkbox");
 		settingsSelect(content, "端点", "Cap", [["", "继承"], ["Butt", "平头"], ["Round", "圆头"], ["Square", "方头"]], value.Cap || "");
-		settingsSelect(content, "连接", "Join", [["", "继承"], ["Miter", "尖角"], ["Round", "圆角"], ["Bevel", "斜角"]], value.Join || "");
-		settingsField(content, "虚线", "DashPattern", value.DashPattern || "");
+		settingsSelect(content, "转角", "Join", [["", "继承"], ["Miter", "尖角"], ["Round", "圆角"], ["Bevel", "斜角"]], value.Join || "");
+		settingsField(content, "间隔", "DashPattern", value.DashPattern || "").title = "虚线间隔";
 		settingsField(content, "偏移", "DashOffset", value.DashOffset ?? "", "number", "mm");
 		for (const [key, label] of [["FillColor", "填充"], ["StrokeColor", "描边"]]) {
 			settingsSelect(content, label, key + "Mode", [["keep", "原有"], ["inherit", "继承"], ["solid", "颜色"]], "keep");
@@ -5641,7 +5642,7 @@ function renderStyleResourceSettings(kind) {
 	if (kind === "ColorSpace") {
 		settingsSelect(binding, "应用", "PaintTarget", [["fill", "填充"], ["stroke", "描边"]], "fill");
 		settingsSelect(binding, "方式", "PaintMode", [["value", "分量"], ["index", "索引"]], "value");
-		settingsField(binding, "颜色值", "PaintValue", value.Type === "CMYK" ? `0 0 0 ${2 ** (value.BitsPerComponent || 8) - 1}` : value.Type === "GRAY" ? "0" : "0 0 0");
+		settingsField(binding, "色值", "PaintValue", value.Type === "CMYK" ? `0 0 0 ${2 ** (value.BitsPerComponent || 8) - 1}` : value.Type === "GRAY" ? "0" : "0 0 0");
 	}
 	const apply = settingsButton("应用", () => applyStyleResource(kind), !objects.value, "Apply", group.actions);
 	const unbind = kind === "DrawParam" ? settingsButton("解绑", () => applyStyleResource(kind, true), !objects.value, "Unbind", group.actions) : null;
@@ -5784,7 +5785,8 @@ function renderTemplateSettings() {
 		settingsElements.Content.append(source);
 	}
 	settingsPages(source, "SourcePage", settings.page);
-	document.querySelector("#settingsSourcePage").closest("label").firstElementChild.textContent = "来源页";
+	document.querySelector("#settingsSourcePage").closest("label").firstElementChild.textContent = "来源";
+	document.querySelector("#settingsSourcePage").setAttribute("aria-label", "来源页");
 	const write = async (operation, order = 0) => {
 		if (operation === "replace" && !window.confirm("替换模板内容？当前文档中引用此模板的页面将同步更新。")) return;
 		const selected = settings.selected;
@@ -6626,7 +6628,7 @@ function updateSignPlacement() {
 		input.disabled = !stamp;
 		input.required = stamp;
 	}
-	document.querySelector('label[for="signX"]').textContent = el.signPlacement.value === "seam" ? "右侧内缩" : "横坐标";
+	document.querySelector('label[for="signX"]').textContent = el.signPlacement.value === "seam" ? "右侧内缩" : "横向";
 	el.signX.setAttribute("aria-label", el.signPlacement.value === "seam" ? "右侧内缩（毫米）" : "横坐标（毫米）");
 }
 
@@ -7354,7 +7356,7 @@ function createFlowShell(page) {
 	surface.className = "page-surface";
 	const placeholder = document.createElement("div");
 	placeholder.className = "page-placeholder";
-	placeholder.textContent = `第 ${page.index + 1} 页`;
+	placeholder.textContent = `第${page.index + 1}页`;
 	shell.append(surface, placeholder);
 	layoutPageShell(shell, page);
 	return shell;
@@ -8728,7 +8730,7 @@ function renderSearchResults() {
 		button.dataset.matchIndex = String(i);
 		const page = document.createElement("span");
 		page.className = "search-page";
-		page.textContent = `第 ${match.page + 1} 页`;
+		page.textContent = `第${match.page + 1}页`;
 		const text = document.createElement("span");
 		const mark = document.createElement("mark");
 		mark.textContent = match.text;
@@ -8922,7 +8924,7 @@ function createOutlineList(outlines, path = []) {
 			const page = document.createElement("span");
 			page.className = "outline-page";
 			page.textContent = String(outline.page);
-			page.setAttribute("aria-label", `第 ${outline.page} 页`);
+			page.setAttribute("aria-label", `第${outline.page}页`);
 			link.append(page);
 		}
 		if (outline.actionCount || outline.page || state.editing) {
@@ -9168,7 +9170,7 @@ function createThumbnail(page) {
 
 	const label = document.createElement("span");
 	label.className = "thumb-label";
-	label.textContent = `第 ${page.index + 1} 页`;
+	label.textContent = `第${page.index + 1}页`;
 
 	const size = document.createElement("span");
 	size.className = "thumb-size";

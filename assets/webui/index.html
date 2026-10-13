@@ -227,19 +227,19 @@
 				<details id="objectGradientFields" hidden>
 					<summary>渐变</summary>
 					<div class="form-pair">
-						<div class="form-row"><label for="gradientTarget">作用</label><select id="gradientTarget"><option value="fill">填充</option><option value="stroke">描边</option></select></div>
+						<div class="form-row"><label for="gradientTarget">应用</label><select id="gradientTarget"><option value="fill">填充</option><option value="stroke">描边</option></select></div>
 						<div class="form-row"><label for="gradientKind">类型</label><select id="gradientKind"><option value="keep">保持</option><option value="linear">线性</option><option value="radial">径向</option></select></div>
 					</div>
 					<div id="gradientControls" hidden>
 						<div class="form-row"><label for="gradientAngle">角度</label><div class="form-unit"><input id="gradientAngle" type="number" step="any" value="0"><span>°</span></div></div>
 						<div class="gradient-stop-row gradient-stop-head"><span>颜色</span><span>位置%</span><span>透明%</span><span></span></div>
 						<div id="gradientStops"></div>
-						<button id="gradientAdd" class="small-button" type="button" title="添加色标" aria-label="添加色标">+</button>
+						<button id="gradientAdd" class="icon-button" type="button" title="添加色标" aria-label="添加色标">+</button>
 					</div>
 				</details>
 				<details id="objectPatternFields" hidden>
 					<summary>图案</summary>
-					<div class="form-row"><label for="patternTarget">作用</label><select id="patternTarget"><option value="fill">填充</option><option value="stroke">描边</option></select></div>
+					<div class="form-row"><label for="patternTarget">应用</label><select id="patternTarget"><option value="fill">填充</option><option value="stroke">描边</option></select></div>
 					<div class="form-pair">
 						<div class="form-row"><label for="patternWidth">宽度</label><div class="form-unit"><input id="patternWidth" type="number" min="0" step="any"><span>mm</span></div></div>
 						<div class="form-row"><label for="patternHeight">高度</label><div class="form-unit"><input id="patternHeight" type="number" min="0" step="any"><span>mm</span></div></div>
@@ -437,7 +437,7 @@
 				<label class="form-row"><span>标题</span><input id="infoTitle" type="text" autofocus></label>
 				<label class="form-row"><span>主题</span><input id="infoSubject" type="text"></label>
 				<label class="form-row"><span>作者</span><input id="infoAuthor" type="text"></label>
-				<details class="info-custom"><summary>扩展</summary><div id="infoCustomRows"></div><button id="infoCustomAdd" class="small-button" type="button" title="添加字段" aria-label="添加字段">+</button></details>
+				<details class="info-custom"><summary>扩展</summary><div id="infoCustomRows"></div><button id="infoCustomAdd" class="icon-button" type="button" title="添加字段" aria-label="添加字段">+</button></details>
 				<div class="form-actions"><div id="infoStatus" class="form-status" role="status"></div><button id="infoCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
@@ -559,8 +559,8 @@
 					<div class="form-row"><span>预览</span><div class="seal-position-options"><button id="signPick" class="button" type="button">定位</button><label><input id="signKeepRatio" type="checkbox" checked>等比</label></div></div>
 					<div class="form-row"><label for="signPlacement">位置</label><select id="signPlacement"><option value="normal">页面</option><option value="seam">骑缝</option></select></div>
 					<div class="form-row"><label for="signPages">页码</label><input id="signPages" type="text" autocomplete="off" spellcheck="false"></div>
-					<div class="form-row"><label for="signX">横坐标</label><div class="form-unit"><input id="signX" type="number" min="0" step="any" value="10" aria-label="横坐标（毫米）"><span>mm</span></div></div>
-					<div class="form-row"><label for="signY">纵坐标</label><div class="form-unit"><input id="signY" type="number" min="0" step="any" value="10" aria-label="纵坐标（毫米）"><span>mm</span></div></div>
+					<div class="form-row"><label for="signX">横向</label><div class="form-unit"><input id="signX" type="number" min="0" step="any" value="10" aria-label="横坐标（毫米）"><span>mm</span></div></div>
+					<div class="form-row"><label for="signY">纵向</label><div class="form-unit"><input id="signY" type="number" min="0" step="any" value="10" aria-label="纵坐标（毫米）"><span>mm</span></div></div>
 					<div class="form-row"><label for="signWidth">宽度</label><div class="form-unit"><input id="signWidth" type="number" min="0.01" step="any" value="40" aria-label="宽度（毫米）"><span>mm</span></div></div>
 					<div class="form-row"><label for="signHeight">高度</label><div class="form-unit"><input id="signHeight" type="number" min="0.01" step="any" value="40" aria-label="高度（毫米）"><span>mm</span></div></div>
 				</div>
@@ -788,7 +788,7 @@
 				</section>
 				<section class="doc-font-panel" aria-labelledby="docFontPanelTitle">
 					<div class="panel-row">
-						<div id="docFontPanelTitle" class="panel-title compact">OFD 字体</div>
+						<div id="docFontPanelTitle" class="panel-title compact">文档字体</div>
 						<span id="docFontSummary" class="count-pill">0</span>
 					</div>
 					<div id="docFontList" class="doc-font-list"></div>

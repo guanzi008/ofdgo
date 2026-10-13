@@ -443,7 +443,7 @@ func resourceColorNode(node *editorXML) bool {
 
 // validateResourceColors 校验显式及默认颜色空间的既有颜色，防止位深或调色板更新使引用失效
 // 入参: ctx 取消上下文, catalog 当前资源目录, space 替换后的颜色空间
-// 返回: error 不兼容的颜色值或调色板索引
+// 返回: error 不兼容的色值或调色板索引
 func validateResourceColors(ctx context.Context, catalog *resourceCatalog, space ColorSpace) error {
 	doc, err := catalog.scan.reader.DocContext(ctx)
 	if err != nil {

@@ -207,7 +207,7 @@ func canvasNativeStroke(geometry GeometryBackend) bool {
 }
 
 // canvasStrokeOptions 转换Canvas描边样式，虚线由调用方传入
-// 入参: width 描边宽度, cap 线帽, join 连接, tolerance 展开误差
+// 入参: width 线宽, cap 端点样式, join 转角样式, tolerance 展开误差
 // 返回: StrokeOptions 公共描边样式
 func canvasStrokeOptions(width float64, cap canvas.Capper, join canvas.Joiner, tolerance float64) StrokeOptions {
 	options := StrokeOptions{Width: width, Cap: "Butt", Join: "Miter", MiterLimit: defaultMiterLimit, Tolerance: tolerance}
@@ -274,14 +274,14 @@ func canvasFillClip(clip *canvas.Path) bool {
 }
 
 // strokeCanvasPath 将文字和复杂画刷的描边交给配置的几何后端
-// 入参: path Canvas路径, width 描边宽度, cap 线帽, join 连接
+// 入参: path Canvas路径, width 线宽, cap 端点样式, join 转角样式
 // 返回: *canvas.Path 描边轮廓
 func (r *Renderer) strokeCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner) *canvas.Path {
 	return r.strokeDashedCanvasPath(path, width, cap, join, 0, nil, false)
 }
 
-// strokeDashedCanvasPath 通过公共几何后端展开虚线和线帽，保留零长度绘制段
-// 入参: path 路径, width 线宽, cap 线帽, join 连接, offset 虚线偏移, dashes 虚线数组, fill 是否直接填充或凸窗口裁剪
+// strokeDashedCanvasPath 通过公共几何后端展开虚线和端点样式，保留零长度绘制段
+// 入参: path 路径, width 线宽, cap 端点样式, join 转角样式, offset 虚线偏移, dashes 虚线间隔序列, fill 是否直接填充或凸窗口裁剪
 // 返回: *canvas.Path 描边填充轮廓
 func (r *Renderer) strokeDashedCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner, offset float64, dashes []float64, fill bool) *canvas.Path {
 	geometry, err := r.Geometry()

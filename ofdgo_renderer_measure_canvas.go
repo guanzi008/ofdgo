@@ -99,7 +99,7 @@ func (r *boundsRenderer) Size() (float64, float64) {
 	return 0, 0
 }
 
-// RenderPath 收集填充与描边范围，保持线帽、连接和虚线语义
+// RenderPath 收集填充与描边范围，保持端点、转角和虚线语义
 // 入参: path 路径, style 绘制样式, m 变换矩阵
 func (r *boundsRenderer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix) {
 	if style.HasFill() {
