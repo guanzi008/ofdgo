@@ -62,8 +62,8 @@ github.com/xiaoqidun/j2kgo v1.0.0 h1:n7F3s0H8/4x8ET0d65FGScRgTfiqbYuiiiJF/5HFI1I
 github.com/xiaoqidun/j2kgo v1.0.0/go.mod h1:DCwAfuDzCDYqUiAlZ7BDwigTjaXw7o9L1FtEma/D1aA=
 github.com/xiaoqidun/jbig2 v1.1.5 h1:QcqjDBe/Zp+JlxYtmhsiYG+Ft36jjPB6+INPlmaI/ls=
 github.com/xiaoqidun/jbig2 v1.1.5/go.mod h1:9jromqVwMqlptUDEt6Yip8vqYA5I1YjhG7FgMl/Z2dA=
-github.com/xiaoqidun/pdfgo v0.0.0-20261012150156-647733ab0dae h1:8iQdSdXA4sVofF+wIcmFJB63P5Uy4uQeltj2PpP/hzE=
-github.com/xiaoqidun/pdfgo v0.0.0-20261012150156-647733ab0dae/go.mod h1:UWsVkKkd37a3wEa/tGLUOSwccKGArwmrvEAYlmnEz0U=
+github.com/xiaoqidun/pdfgo v0.0.0-20261013134201-f88d759ae672 h1:/hCY94wuMGivF6IX6GeoPkC+sEyblNnZjUxIrb9ZqY8=
+github.com/xiaoqidun/pdfgo v0.0.0-20261013134201-f88d759ae672/go.mod h1:UWsVkKkd37a3wEa/tGLUOSwccKGArwmrvEAYlmnEz0U=
 github.com/xyproto/randomstring v1.0.5 h1:YtlWPoRdgMu3NZtP45drfy1GKoojuR7hmRcnhZqKjWU=
 github.com/xyproto/randomstring v1.0.5/go.mod h1:rgmS5DeNXLivK7YprL0pY+lTuhNQW3iGxZ18UQApw/E=
 github.com/yuin/goldmark v1.8.5 h1:r6N5afV5qj/5S4UTch8agZHJ8UxNCMwX7WjkkJam2NA=

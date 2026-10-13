@@ -9,7 +9,7 @@ require (
 	github.com/tdewolff/canvas v0.0.0-20260923214215-09804640d00c
 	github.com/xiaoqidun/j2kgo v1.0.0
 	github.com/xiaoqidun/jbig2 v1.1.5
-	github.com/xiaoqidun/pdfgo v0.0.0-20261012150156-647733ab0dae
+	github.com/xiaoqidun/pdfgo v0.0.0-20261013134201-f88d759ae672
 	golang.org/x/crypto v0.58.0
 	golang.org/x/image v0.47.0
 	golang.org/x/text v0.43.0
