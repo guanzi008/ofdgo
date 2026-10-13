@@ -15,8 +15,14 @@
 package ofdgo
 
 import (
+	"fmt"
+	"unicode/utf8"
+
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
+
+// FontFace 字体文件中的字体名称与零起始索引，不依赖文件名
+type FontFace = basefont.Face
 
 // FixFontDataAggressive 激进修复字体数据
 // 尝试修复缺失表(OS/2, cmap等)的TrueType字体或包装CFF裸数据
@@ -25,4 +31,39 @@ import (
 // 返回: bool 是否修复, []byte 修复后数据, map[rune]uint16 字符映射, bool 是否缺失cmap, error 错误信息
 func FixFontDataAggressive(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uint16, bool, error) {
 	return basefont.FixDataAggressive(data, fixCmap, fixName)
+}
+
+// Faces 读取字体名称表，集合文件按原顺序列出各项，不解析字形轮廓
+// 返回: []FontFace 字体列表, error 格式或名称表错误
+func (f FontFile) Faces() ([]FontFace, error) {
+	data, err := decodeFontContainer(f.Data)
+	if err != nil {
+		return nil, err
+	}
+	return basefont.ReadFaces(data)
+}
+
+// Face 提取指定字体，返回独立的OpenType数据，可用于预览或AddFont，且不修改原文件
+// 入参: index 零起始字体索引，非集合文件只能为0
+// 返回: []byte 独立字体数据, error 格式或索引错误
+func (f FontFile) Face(index int) ([]byte, error) {
+	data, err := decodeFontContainer(f.Data)
+	if err != nil {
+		return nil, err
+	}
+	return basefont.ExtractFace(data, index)
+}
+
+// MissingGlyphs 检查指定字体的字符覆盖，不注册资源或修改文档，忽略段落换行
+// 入参: index 零起始字体索引, text 待检查文字
+// 返回: string 按首次出现顺序去重的缺失字符, error 字体或文字格式错误
+func (f FontFile) MissingGlyphs(index int, text string) (string, error) {
+	if !utf8.ValidString(text) {
+		return "", fmt.Errorf("text must be UTF-8")
+	}
+	data, err := f.Face(index)
+	if err != nil {
+		return "", err
+	}
+	return basefont.MissingGlyphs(data, text)
 }
