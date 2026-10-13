@@ -1312,6 +1312,14 @@ button:not(:disabled):hover {
 	border: 0;
 }
 
+#borderColor {
+	width: 100%;
+}
+
+#borderColorOriginal {
+	grid-column: 2;
+}
+
 .form-row input[type="file"] {
 	padding: 0;
 	color: var(--text-muted);
@@ -1763,6 +1771,11 @@ body[data-hide-meta] .meta-panel {
 
 .settings-dialog .info-line {
 	grid-template-columns: 4em minmax(0, 1fr);
+	align-items: center;
+	gap: 12px;
+	min-height: var(--control-height);
+	margin-bottom: 12px;
+	font-size: inherit;
 }
 
 .settings-dialog .info-label {
