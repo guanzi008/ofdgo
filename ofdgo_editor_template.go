@@ -21,6 +21,14 @@ import (
 	"path"
 )
 
+// TemplateReference 普通页面的模板引用，保留原始模板标识及绑定层次。
+// PageIndex为当前文档的零基页面索引，PageID为页面标识；ZOrder为空表示沿用模板默认层次。
+type TemplateReference struct {
+	PageIndex int
+	PageID    string
+	Template
+}
+
 // Templates 返回当前文档及所选版本的模板定义副本，省略的ZOrder返回Background。
 // 返回: []TemplatePage 独立模板清单, error 文档读取错误
 func (e *Editor) Templates() ([]TemplatePage, error) {
@@ -57,6 +65,44 @@ func (e *Editor) PageTemplates(page int) ([]Template, error) {
 		return nil, err
 	}
 	return append([]Template{}, p.Template...), nil
+}
+
+// TemplateReferences 返回当前文档及所选版本全部普通页面的模板引用副本，不包含模板页自身引用。
+// 清单按页面索引及页内引用文件顺序排列，无引用时返回空切片，读取失败时不返回部分结果。
+// 返回: []TemplateReference 引用定位及绑定层次清单, error 页面读取错误
+func (e *Editor) TemplateReferences() ([]TemplateReference, error) {
+	result := []TemplateReference{}
+	for i := range e.pages {
+		refs, err := e.PageTemplates(i)
+		if err != nil {
+			return nil, err
+		}
+		for _, ref := range refs {
+			result = append(result, TemplateReference{PageIndex: i, PageID: e.pages[i].ID, Template: ref})
+		}
+	}
+	return result, nil
+}
+
+// TemplateReferences 只读枚举当前文档及所选版本全部普通页面的模板引用，不创建编辑器或遍历其他文档、版本。
+// 返回独立副本，按页面索引及页内引用文件顺序排列；无引用时返回空切片，读取失败时不返回部分结果。
+// 返回: []TemplateReference 引用定位及绑定层次清单, error 文档或页面读取错误
+func (r *Reader) TemplateReferences() ([]TemplateReference, error) {
+	doc, err := r.Doc()
+	if err != nil {
+		return nil, err
+	}
+	result := []TemplateReference{}
+	for i, item := range doc.Pages.Page {
+		page, err := r.PageContentByIndex(i)
+		if err != nil {
+			return nil, err
+		}
+		for _, ref := range page.Template {
+			result = append(result, TemplateReference{PageIndex: i, PageID: item.ID, Template: ref})
+		}
+	}
+	return result, nil
 }
 
 // BindTemplate 在页面末尾绑定模板，空ZOrder沿用模板默认层次，重复绑定拒绝。

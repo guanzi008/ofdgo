@@ -26,7 +26,7 @@ const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name"
 const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Kind", "List", "Empty", "Reference", "Actions", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "BindingActions", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
 const resourceManager = { items: [], selected: null, targets: [], pick: null, busy: false, sequence: 0, url: null, font: null, fileAction: null };
 const settingsElements = Object.fromEntries(["Button", "Panel", "Form", "Title", "Kind", "Context", "Content", "Actions", "Status"].map(name => [name, document.querySelector(`#settings${name}`)]));
-const settings = { sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [] };
+const settings = { sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false };
 
 let wasmPromise = null;
 let remoteDownload = null;
@@ -1499,10 +1499,22 @@ el.annotationsFilter.addEventListener("input", renderAnnotationSummary);
 el.annotationsKind.addEventListener("change", renderAnnotationSummary);
 el.versionExport.addEventListener("click", exportManagedVersion);
 editorClick(settingsElements.Button, openDocumentSettings);
-settingsElements.Kind.addEventListener("change", () => { settings.selected = -1; loadDocumentSettings(); });
+settingsElements.Kind.addEventListener("change", () => { rememberSettingsDraft(); settings.selected = -1; loadDocumentSettings(); });
 settingsElements.Form.addEventListener("submit", event => event.preventDefault());
-settingsElements.Panel.addEventListener("cancel", event => { if (settings.busy) event.preventDefault(); });
-settingsElements.Panel.addEventListener("close", () => { settings.sequence++; });
+settingsElements.Panel.addEventListener("cancel", event => { event.preventDefault(); closeDocumentSettings(); });
+settingsElements.Panel.addEventListener("close", () => { if (!settings.suspended) { settings.sequence++; settings.drafts.clear(); settings.view = ""; } });
+document.querySelector("#objectActionsButton").addEventListener("click", async () => {
+	const item = canvasEditor.selected;
+	if (!item || item.scoped || item.items) return;
+	const original = state.objectLinkOriginal;
+	if ((el.objectLinkKind.value !== original.kind || el.objectLinkAddress.value !== original.address || el.objectLinkPage.value !== original.page)
+		&& !window.confirm("链接尚未应用，放弃链接更改？")) return;
+	syncObjectLink(item);
+	settings.scope = "object";
+	settingsElements.Kind.value = "actions";
+	await openDocumentSettings();
+	settingsElements.Kind.disabled = true;
+});
 el.outlinesTab.addEventListener("click", () => showNavigation(el.outlinesTab));
 el.searchTab.addEventListener("click", focusSearch);
 el.navigationTabs.addEventListener("keydown", (event) => {
@@ -1785,7 +1797,7 @@ function handleKeyDown(event) {
 }
 
 function formDialogOpen() {
-	return Boolean(sealPreview || resourceManager.pick) || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
+	return Boolean(sealPreview || resourceManager.pick) || settingsElements.Panel.open || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
 		|| resourceElements.Panel.open || el.structureDialog.open || el.versionPanel.open || el.batchPagesPanel.open || el.objectStylePanel.open || el.sourceTextPanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
 
@@ -1825,6 +1837,18 @@ function canCopyStyle(item) {
 	return item.type === "ImageObject" && canEditObject(item, "transform");
 }
 
+function syncObjectLink(item) {
+	const link = item.link ? JSON.parse(item.link) : null;
+	const targetPage = link?.Goto?.Dest ? pageIndexByID(state.doc.pages, link.Goto.Dest.PageID) : -1;
+	el.objectLinkKind.value = item.linkCount > 1 ? "keep" : link?.URI ? "uri" : targetPage >= 0 ? "page" : link ? "keep" : "none";
+	el.objectLinkKind.disabled = item.linkCount > 1;
+	el.objectLinkAddress.value = link?.URI?.URI || "";
+	el.objectLinkPage.value = String(targetPage >= 0 ? targetPage + 1 : 1);
+	el.objectLinkPage.max = String(state.doc?.pages.length || 1);
+	state.objectLinkOriginal = {kind: el.objectLinkKind.value, address: el.objectLinkAddress.value, page: el.objectLinkPage.value, link};
+	updateObjectLinkFields();
+}
+
 function openObjectStyle() {
 	const items = canvasEditor.items();
 	if (!items.length) return;
@@ -1835,15 +1859,7 @@ function openObjectStyle() {
 	el.pasteStyleButton.disabled = !state.styleClipboard || !items.every(item => item.type === state.styleClipboard && canCopyStyle(item));
 	const shared = (key, fallback) => items.every(item => (item[key] ?? fallback) === (items[0][key] ?? fallback)) ? items[0][key] ?? fallback : null;
 	el.objectLinkFields.hidden = items.length !== 1 || items[0].scoped;
-	const link = items[0].link ? JSON.parse(items[0].link) : null;
-	const targetPage = link?.Goto?.Dest ? pageIndexByID(state.doc.pages, link.Goto.Dest.PageID) : -1;
-	el.objectLinkKind.value = items[0].linkCount > 1 ? "keep" : link?.URI ? "uri" : targetPage >= 0 ? "page" : link ? "keep" : "none";
-	el.objectLinkKind.disabled = items[0].linkCount > 1;
-	el.objectLinkAddress.value = link?.URI?.URI || "";
-	el.objectLinkPage.value = String(targetPage >= 0 ? targetPage + 1 : 1);
-	el.objectLinkPage.max = String(state.doc?.pages.length || 1);
-	state.objectLinkOriginal = { kind: el.objectLinkKind.value, address: el.objectLinkAddress.value, page: el.objectLinkPage.value, link };
-	updateObjectLinkFields();
+	syncObjectLink(items[0]);
 	el.objectBorderFields.hidden = items.length !== 1 || items[0].scoped || items[0].type !== "ImageObject";
 	const border = items[0].borderStyle ? JSON.parse(items[0].borderStyle) : null;
 	el.borderEnabled.checked = Boolean(border);
@@ -5161,22 +5177,109 @@ function settingsSelect(container, label, id, choices, value, change) {
 	field.setAttribute("aria-label", label);
 	field.replaceChildren(...choices.map(([value, text]) => new Option(text, String(value))));
 	if (value != null && choices.some(([key]) => String(key) === String(value))) field.value = String(value);
-	if (change) field.addEventListener("change", () => change(field.value));
+	if (change) field.addEventListener("change", () => { rememberSettingsDraft(); change(field.value); });
 	row.append(title, field);
 	container.append(row);
 	return field;
 }
 
-function settingsButton(label, action, disabled = false, id = "") {
+function settingsButton(label, action, disabled = false, id = "", container = settingsElements.Actions, reason = "") {
 	const button = document.createElement("button");
 	button.type = "button";
 	button.className = "button";
 	button.textContent = label;
 	button.disabled = disabled;
+	if (disabled && reason) button.title = reason;
 	if (id) button.id = `settings${id}`;
-	button.addEventListener("click", action);
-	settingsElements.Actions.append(button);
+	button.addEventListener("click", async () => {
+		try { await action(); }
+		catch (error) { settingsElements.Status.textContent = error.message; }
+	});
+	container.append(button);
 	return button;
+}
+
+function settingsSection(label) {
+	const section = document.createElement("section"), title = document.createElement("div"), actions = document.createElement("div");
+	section.className = "settings-section";
+	title.className = "settings-section-title";
+	title.textContent = label;
+	actions.className = "settings-section-actions";
+	section.append(title);
+	settingsElements.Content.append(section);
+	return {section, actions};
+}
+
+function settingsSnapshot() {
+	return Object.fromEntries([...settingsElements.Content.querySelectorAll("input,select,textarea")].filter(field => field.id).map(field => [field.id,
+		field.type === "checkbox" ? field.checked : field.type === "file" ? [...field.files] : field.multiple ? [...field.selectedOptions].map(option => option.value) : field.value]));
+}
+
+function rememberSettingsDraft() {
+	if (!state.editing || !settings.view || settings.busy) return;
+	const values = settingsSnapshot();
+	const changed = Object.keys(values).some(id => {
+		if (["settingsTemplateReference", "settingsLayerObjects", "settingsTargetPage", "settingsTargetObject"].includes(id)) return false;
+		const value = values[id], before = settings.baseline[id];
+		return Array.isArray(value) ? value.length !== (before?.length || 0) || value.some((entry, index) => entry !== before?.[index]) : value !== before;
+	});
+	if (!changed) { settings.drafts.delete(settings.view); return; }
+	settings.drafts.set(settings.view, {values, scroll: document.querySelector("#settingsBody")?.scrollTop || 0,
+		expanded: [...settingsElements.Content.querySelectorAll("details")].map(node => node.open)});
+}
+
+function restoreSettingsDraft() {
+	const kind = settingsElements.Kind.value;
+	const entry = kind === "bookmarks" ? settings.data.bookmarks?.[settings.selected]?.Name
+		: kind === "templates" ? settings.data.page.templates?.[settings.selected]?.ID
+		: kind === "layers" ? settings.data.page.layers?.[settings.selected]?.ID : settings.selected;
+	settings.view = JSON.stringify([kind, settings.resource?.id || "", kind === "actions" ? [settings.scope, settings.page, settings.object, settings.path] : ["templates", "layers"].includes(kind) ? settings.page : "", entry ?? -1]);
+	settings.baseline = settingsSnapshot();
+	const draft = settings.drafts.get(settings.view);
+	if (!draft) return;
+	if (kind === "actions" && draft.values.settingsActionType) {
+		renderActionFields(draft.values.settingsActionType, settings.actions[settings.selected] || {});
+	}
+	for (const [id, value] of Object.entries(draft.values)) {
+		const field = document.getElementById(id);
+		if (!field || !settingsElements.Content.contains(field)) continue;
+		if (field.type === "checkbox") field.checked = value;
+		else if (field.type === "file") {
+			const transfer = new DataTransfer();
+			for (const file of value) transfer.items.add(file);
+			field.files = transfer.files;
+		} else if (field.multiple) for (const option of field.options) option.selected = value.includes(option.value);
+		else if (field.tagName !== "SELECT" || [...field.options].some(option => option.value === value)) field.value = value;
+	}
+	if (document.querySelector("#settingsDestType")) updateDestinationFields();
+	for (const key of ["FillColor", "StrokeColor"]) {
+		const field = document.querySelector(`#settings${key}`);
+		if (field) field.closest("label").hidden = settingsValue(key + "Mode") !== "solid";
+	}
+	const body = document.querySelector("#settingsBody");
+	for (const [index, node] of [...settingsElements.Content.querySelectorAll("details")].entries()) node.open = draft.expanded?.[index] || false;
+	if (body) body.scrollTop = draft.scroll;
+}
+
+function closeDocumentSettings() {
+	if (settings.busy) return;
+	rememberSettingsDraft();
+	if (settings.drafts.size && !window.confirm("配置尚未应用，放弃更改？")) return;
+	settingsElements.Panel.close();
+}
+
+function renderReadonlySettings() {
+	for (const field of settingsElements.Content.querySelectorAll("input,select,textarea")) {
+		field.disabled = true;
+		if (field.id === "settingsTemplateReference") { field.disabled = false; continue; }
+		const row = field.closest(".form-row");
+		if (!row || row.hidden || field.type === "file") { if (field.type === "file" && row) row.hidden = true; continue; }
+		const value = document.createElement("span");
+		value.className = "settings-readonly";
+		value.textContent = field.tagName === "SELECT" ? field.selectedOptions[0]?.textContent || "—" : field.type === "checkbox" ? field.checked ? "是" : "否" : field.value || field.placeholder || "—";
+		field.hidden = true;
+		field.after(value);
+	}
 }
 
 function settingsValue(id) {
@@ -5186,10 +5289,13 @@ function settingsValue(id) {
 
 async function openDocumentSettings() {
 	if (!state.doc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy")) return;
+	if (resourceManager.pick?.settings) { finishResourcePick(); return; }
 	settings.page = state.pageIndex;
 	settings.object = canvasEditor.selected?.index === settings.page && !canvasEditor.selected.scoped ? canvasEditor.selected.id : "";
 	settings.path = state.outlineSelection || [];
 	settings.selected = -1;
+	settings.drafts.clear();
+	settings.view = "";
 	settings.resource = null;
 	settingsElements.Kind.disabled = false;
 	for (const option of settingsElements.Kind.options) option.hidden = option.value === "actions" && !state.editing || ["ColorSpace", "DrawParam"].includes(option.value);
@@ -5201,6 +5307,9 @@ async function openDocumentSettings() {
 async function openResourceSettings(kind, id) {
 	if (!state.doc || !state.ready || document.body.hasAttribute("aria-busy")) return;
 	settings.resource = {kind, id};
+	settings.selected = -1;
+	settings.drafts.clear();
+	settings.view = "";
 	const page = Number(resourceElements.Page.value);
 	settings.page = resourceElements.Page.value !== "" && Number.isInteger(page) && page >= 0 && page < state.doc.pages.length ? page : state.pageIndex;
 	settings.object = resourceElements.Object.value || "";
@@ -5233,7 +5342,7 @@ async function loadDocumentSettings() {
 			data.actions = (settings.scope === "object" && !settings.object || settings.scope === "outline" && !settings.path.length) ? [] : await callWASM("ofdgoActionList", settings.scope, settings.page, settings.object, settings.path) || [];
 		}
 		if (kind === "templates" || kind === "layers") {
-			data.page = await callWASM("ofdgoPageSettings", settings.page);
+			data.page = await callWASM("ofdgoPageSettings", settings.page, kind);
 			if (kind === "layers" && state.editing) {
 				const page = await loadPageData(settings.page);
 				data.objects = (page.objects || []).filter(item => item.type !== "Annotation" && !item.scoped);
@@ -5255,7 +5364,7 @@ async function loadDocumentSettings() {
 		if (sequence === settings.sequence && openSeq === state.openSeq) {
 			settingsElements.Content.replaceChildren();
 			settingsElements.Actions.replaceChildren();
-			settingsButton("关闭", () => settingsElements.Panel.close());
+			settingsButton("关闭", closeDocumentSettings);
 			settingsElements.Status.textContent = error.message;
 		}
 	} finally {
@@ -5268,6 +5377,12 @@ function renderDocumentSettings() {
 	settingsElements.Content.replaceChildren();
 	settingsElements.Actions.replaceChildren();
 	const kind = settingsElements.Kind.value;
+	const location = document.querySelector("#settingsLocation"), doc = state.doc;
+	if (location) {
+		const current = doc?.documents?.find(entry => entry.index === doc.documentIndex) || doc?.documents?.[doc?.documentIndex || 0];
+		location.textContent = `${current?.title || current?.name || `文档${(doc?.documentIndex || 0) + 1}`}${doc?.documentVersion ? ` · 版本${doc.documentVersion}` : ""}`;
+		location.hidden = !(doc?.documents?.length > 1 || doc?.documentVersion);
+	}
 	settingsElements.Title.textContent = {ColorSpace: "色彩设置", DrawParam: "样式设置"}[kind] || "文档配置";
 	if (kind === "actions") renderActionSettings();
 	else if (kind === "bookmarks") renderBookmarkSettings();
@@ -5275,7 +5390,15 @@ function renderDocumentSettings() {
 	else if (kind === "templates") renderTemplateSettings();
 	else if (kind === "layers") renderLayerSettings();
 	else if (kind === "ColorSpace" || kind === "DrawParam") renderStyleResourceSettings(kind);
-	settingsButton("关闭", () => settingsElements.Panel.close(), false, "Close").classList.add("settings-close");
+	if (!state.editing) renderReadonlySettings();
+	restoreSettingsDraft();
+	const move = document.querySelector("#settingsMoveObjects");
+	if (move) move.disabled = !document.querySelector("#settingsLayerObjects").selectedOptions.length;
+	const target = document.querySelector("#settingsTargetObject");
+	if (target) target.dispatchEvent(new Event("change"));
+	const lastActions = settingsElements.Content.querySelector(".settings-section:last-child > .settings-section-actions");
+	if (lastActions) settingsElements.Actions.append(lastActions);
+	settingsButton("关闭", closeDocumentSettings, false, "Close").classList.add("settings-close");
 }
 
 function settingsPages(container, id, value, change) {
@@ -5306,8 +5429,12 @@ function renderActionSettings() {
 	const context = settingsElements.Context, content = settingsElements.Content;
 	settingsSelect(context, "归属", "Scope", [["document", "文档"], ["page", "页面"], ["object", "图元"], ["outline", "目录"]], settings.scope, value => { settings.scope = value; settings.selected = -1; loadDocumentSettings(); });
 	if (settings.scope === "page" || settings.scope === "object") settingsPages(context, "Page", settings.page, value => { settings.page = Number(value); settings.selected = -1; loadDocumentSettings(); });
-	if (settings.scope === "object") settingsSelect(context, "图元", "Object", (settings.data.objects || []).map(item => [item.id, `${item.id} · ${item.text || ({TextObject: "文字", PathObject: "图形", ImageObject: "图片"}[item.type] || "组合")}`]), settings.object, value => { settings.object = value; settings.selected = -1; loadDocumentSettings(); });
+	if (settings.scope === "object") {
+		const objects = settingsSelect(context, "图元", "Object", (settings.data.objects || []).map(item => [item.id, `${item.id} · ${item.text || ({TextObject: "文字", PathObject: "图形", ImageObject: "图片"}[item.type] || "组合")}`]), settings.object, value => { settings.object = value; settings.selected = -1; loadDocumentSettings(); });
+		if (!el.objectStylePanel.open) settingsPickControl(objects, "action");
+	}
 	if (settings.scope === "outline") settingsSelect(context, "目录", "Outline", outlineSettingsChoices(), JSON.stringify(settings.path), value => { settings.path = JSON.parse(value); settings.selected = -1; loadDocumentSettings(); });
+	if (el.objectStylePanel.open) for (const field of context.querySelectorAll("select")) field.disabled = true;
 	if (settings.selected >= settings.actions.length) settings.selected = -1;
 	settingsSelect(context, "动作", "Entry", [[-1, "新增"], ...settings.actions.map((item, index) => [index, `${index + 1} · ${actionSettingsLabel(item)}`])], settings.selected, value => { settings.selected = Number(value); renderDocumentSettings(); });
 	const action = settings.actions[settings.selected] || {};
@@ -5379,21 +5506,56 @@ function destinationFromSettings() {
 
 async function commitSettings(name, ...args) {
 	if (!state.editing || settings.busy || document.body.hasAttribute("aria-busy")) return false;
+	rememberSettingsDraft();
+	const pending = settings.drafts.get(settings.view), baseline = settings.baseline;
 	settings.busy = true;
 	settingsElements.Form.inert = true;
 	settingsElements.Status.textContent = "正在保存修改";
+	const view = settings.view, focus = document.activeElement?.id, body = document.querySelector("#settingsBody"), scroll = body?.scrollTop || 0;
 	try {
 		if (!await changeDocument(name, null, ...args)) {
 			if (settingsElements.Status.textContent === "正在保存修改") settingsElements.Status.textContent = el.statusText.textContent;
 			return false;
 		}
+		settings.drafts.delete(view);
+		if (pending) {
+			const fields = settingsCommittedFields(name, args, Object.keys(pending.values));
+			const values = Object.fromEntries(Object.entries(pending.values).filter(([id, value]) => !fields.includes(id) && JSON.stringify(value) !== JSON.stringify(baseline[id])));
+			if (Object.keys(values).length) settings.drafts.set(view, {...pending, values});
+		}
 		await loadDocumentSettings();
+		if (name === "ofdgoChangeActions" && el.objectStylePanel.open && settings.scope === "object") {
+			const item = canvasEditor.pageItems(settings.page).find(item => item.id === settings.object && !item.scoped);
+			if (item) { canvasEditor.select(item); syncObjectLink(item); }
+		}
+		if (body) body.scrollTop = scroll;
+		document.getElementById(focus)?.focus({preventScroll: true});
 		return true;
 	} finally { settings.busy = false; settingsElements.Form.inert = false; }
 }
 
+function settingsCommittedFields(name, args, fields) {
+	const binding = ["settingsTargetPage", "settingsTargetObject", "settingsPaintTarget", "settingsPaintMode", "settingsPaintValue"];
+	if (name === "ofdgoChangeTemplate") {
+		if (args[0] === "update") return ["settingsName", "settingsTemplateOrder"];
+		if (args[0] === "replace") return ["settingsSourcePage"];
+		if (["bind", "order", "unbind"].includes(args[0])) return ["settingsBindingOrder"];
+		if (args[0] === "move") return [];
+	}
+	if (name === "ofdgoChangeLayer") {
+		if (args[0] === "update") return ["settingsLayerType", "settingsDrawParam"];
+		if (args[0] === "objects") return ["settingsLayerObjects"];
+		if (args[0] === "move") return [];
+	}
+	if (name === "ofdgoChangeStyleResource") return fields.filter(id => !binding.includes(id));
+	if (name === "ofdgoApplyStyleResource") return binding;
+	return fields;
+}
+
 async function writeActionSettings(operation) {
-	if (!settingsElements.Form.reportValidity()) return;
+	if (operation === "save" && !settingsElements.Form.reportValidity()) return;
+	rememberSettingsDraft();
+	const drafts = new Map(settings.drafts), view = settings.view;
 	const actions = structuredClone(settings.actions), index = settings.selected;
 	if (operation === "save") {
 		const original = actions[index] || {};
@@ -5413,11 +5575,27 @@ async function writeActionSettings(operation) {
 		[actions[index], actions[next]] = [actions[next], actions[index]];
 		settings.selected = next;
 	}
-	if (!await commitSettings("ofdgoChangeActions", settings.scope, settings.page, settings.object, settings.path, JSON.stringify(actions))) settings.selected = index;
+	if (!await commitSettings("ofdgoChangeActions", settings.scope, settings.page, settings.object, settings.path, JSON.stringify(actions))) { settings.selected = index; return; }
+	if (operation !== "save") {
+		const context = JSON.parse(view).slice(0, -1), prefix = JSON.stringify(context);
+		for (const key of settings.drafts.keys()) if (JSON.stringify(JSON.parse(key).slice(0, -1)) === prefix) settings.drafts.delete(key);
+		for (const [key, draft] of drafts) {
+			const parts = JSON.parse(key);
+			if (JSON.stringify(parts.slice(0, -1)) !== prefix) continue;
+			let position = parts.at(-1);
+			if (operation === "delete") {
+				if (position === index) continue;
+				if (position > index) position--;
+			} else if (position === index) position = settings.selected;
+			else if (position === settings.selected) position = index;
+			settings.drafts.set(JSON.stringify([...context, position]), draft);
+		}
+		renderDocumentSettings();
+	}
 }
 
 function renderStyleResourceSettings(kind) {
-	const content = settingsElements.Content, value = settings.data.resource || {};
+	const properties = settingsSection("属性"), content = properties.section, value = settings.data.resource || {};
 	const existing = Boolean(settings.resource.id);
 	if (kind === "ColorSpace") {
 		settingsSelect(content, "模型", "ColorType", [["RGB", "RGB"], ["GRAY", "GRAY"], ["CMYK", "CMYK"]], value.Type || "RGB");
@@ -5453,20 +5631,22 @@ function renderStyleResourceSettings(kind) {
 	}
 	content.querySelectorAll("input,select,textarea").forEach(field => { field.disabled = !state.editing; });
 	if (!state.editing) return;
-	settingsButton(existing ? "修改" : "添加", () => writeStyleResource(kind), false, "Save");
+	settingsButton(existing ? "修改" : "添加", () => writeStyleResource(kind), false, "Save", properties.actions);
+	content.append(properties.actions);
 	if (!existing) return;
-	const binding = document.createElement("div");
-	binding.className = "settings-binding";
-	content.append(binding);
+	const group = settingsSection("绑定"), binding = group.section;
 	settingsPages(binding, "TargetPage", settings.page, value => { settings.page = Number(value); loadSettingsObjects(); });
-	settingsSelect(binding, "图元", "TargetObject", [["", "选择图元"], ...(settings.data.objects || []).map(item => [item.id, `${item.id} · ${item.text || "图元"}`])], settings.object);
+	const objects = settingsSelect(binding, "图元", "TargetObject", [["", "选择图元"], ...(settings.data.objects || []).map(item => [item.id, `${item.id} · ${item.text || "图元"}`])], settings.object);
+	settingsPickControl(objects, "style");
 	if (kind === "ColorSpace") {
 		settingsSelect(binding, "应用", "PaintTarget", [["fill", "填充"], ["stroke", "描边"]], "fill");
 		settingsSelect(binding, "方式", "PaintMode", [["value", "分量"], ["index", "索引"]], "value");
-		settingsField(binding, "颜色值", "PaintValue", value.Type === "CMYK" ? "0 0 0 255" : value.Type === "GRAY" ? "0" : "0 0 0");
+		settingsField(binding, "颜色值", "PaintValue", value.Type === "CMYK" ? `0 0 0 ${2 ** (value.BitsPerComponent || 8) - 1}` : value.Type === "GRAY" ? "0" : "0 0 0");
 	}
-	settingsButton("应用", () => applyStyleResource(kind), false, "Apply");
-	if (kind === "DrawParam") settingsButton("解绑", () => applyStyleResource(kind, true), false, "Unbind");
+	const apply = settingsButton("应用", () => applyStyleResource(kind), !objects.value, "Apply", group.actions);
+	const unbind = kind === "DrawParam" ? settingsButton("解绑", () => applyStyleResource(kind, true), !objects.value, "Unbind", group.actions) : null;
+	objects.addEventListener("change", () => { apply.disabled = !objects.value; if (unbind) unbind.disabled = !objects.value; });
+	binding.append(group.actions);
 }
 
 async function loadSettingsObjects() {
@@ -5478,7 +5658,7 @@ async function loadSettingsObjects() {
 		if (sequence !== settings.sequence || page !== settings.page || openSeq !== state.openSeq) return;
 		field.replaceChildren(new Option("选择图元", ""), ...(data.objects || []).filter(item => ["TextObject", "PathObject", "CompositeObject", "CompositeGraphicUnit"].includes(item.type) && !item.scoped).map(item => new Option(`${item.id} · ${item.text || "图元"}`, item.id)));
 	} catch (error) { if (sequence === settings.sequence) settingsElements.Status.textContent = error.message; }
-	finally { if (sequence === settings.sequence) field.disabled = false; }
+	finally { if (sequence === settings.sequence) { field.disabled = false; field.dispatchEvent(new Event("change")); } }
 }
 
 async function writeStyleResource(kind) {
@@ -5530,7 +5710,7 @@ async function applyStyleResource(kind, clear = false) {
 }
 
 function renderLayerSettings() {
-	const entries = settings.data.page.layers || [], content = settingsElements.Content;
+	const entries = settings.data.page.layers || [];
 	settingsPages(settingsElements.Context, "Page", settings.page, value => { settings.page = Number(value); settings.selected = -1; loadDocumentSettings(); });
 	if (settings.selected >= entries.length) settings.selected = -1;
 	if (!state.editing && settings.selected < 0 && entries.length) settings.selected = 0;
@@ -5540,30 +5720,37 @@ function renderLayerSettings() {
 	settingsSelect(settingsElements.Context, "图层", "Entry", options, settings.selected, value => { settings.selected = Number(value); renderDocumentSettings(); });
 	const entry = entries[settings.selected];
 	if (!entry && !state.editing) { settingsElements.Status.textContent = "暂无图层"; return; }
+	const properties = settingsSection("属性"), content = properties.section;
 	settingsSelect(content, "类型", "LayerType", Object.entries(types), entry?.Type || "Body");
 	settingsSelect(content, "样式", "DrawParam", [["", "无"], ...settings.data.resources.filter(item => item.kind === "DrawParam").map(item => [item.id, item.name])], referenceIDKey(entry?.DrawParam));
 	content.querySelectorAll("select").forEach(field => { field.disabled = !state.editing; });
+	if (state.editing) settingsButton("定位", () => locateSettingsObjects(entry?.ObjectIDs || []), !entry?.ObjectCount, "LocateLayer", properties.actions, "图层没有可定位的图元");
+	content.append(properties.actions);
 	if (!state.editing) return;
 	const write = async (operation, order = 0, objects = []) => {
 		const selected = settings.selected;
 		if (!entry && operation === "add") settings.selected = entries.length;
 		if (!await commitSettings("ofdgoChangeLayer", operation, settings.page, entry?.ID || "", settingsValue("LayerType"), settingsValue("DrawParam"), order, objects)) settings.selected = selected;
 	};
-	settingsButton(entry ? "修改" : "添加", () => write(entry ? "update" : "add"), false, "Save");
-	settingsButton("删除", () => write("delete"), !entry || entry.ObjectCount > 0, "Delete");
-	settingsButton("上移", () => write("move", entry.Order - 1), !entry || entry.Order === 0, "Up");
-	settingsButton("下移", () => write("move", entry.Order + 1), !entry || entry.Order >= entries.filter(item => item.Type === entry.Type).length - 1, "Down");
+	settingsButton(entry ? "修改" : "添加", () => write(entry ? "update" : "add"), false, "Save", properties.actions);
+	settingsButton("删除", () => write("delete"), !entry || entry.ObjectCount > 0, "Delete", properties.actions, entry?.ObjectCount ? "图层仍有图元" : "未选择图层");
+	settingsButton("上移", () => write("move", entry.Order - 1), !entry || entry.Order === 0, "Up", properties.actions);
+	settingsButton("下移", () => write("move", entry.Order + 1), !entry || entry.Order >= entries.filter(item => item.Type === entry.Type).length - 1, "Down", properties.actions);
 	if (entry) {
-		const objects = settingsSelect(content, "图元", "LayerObjects", (settings.data.objects || []).map(item => [item.id, `${item.id} · ${item.text || "图元"}`]), null);
+		const binding = settingsSection("图元");
+		const objects = settingsSelect(binding.section, "图元", "LayerObjects", (settings.data.objects || []).filter(item => !entry.ObjectIDs?.includes(item.id)).map(item => [item.id, `${item.id} · ${item.text || "图元"}`]), null);
 		objects.multiple = true;
 		objects.size = Math.min(4, Math.max(2, objects.options.length));
 		for (const option of objects.options) option.selected = canvasEditor.items().some(item => item.index === settings.page && item.id === option.value && !item.scoped);
-		settingsButton("移入", () => write("objects", 0, [...objects.selectedOptions].map(option => option.value)), !objects.options.length, "MoveObjects");
+		settingsButton("选取", () => beginSettingsPick("layer"), Boolean(state.composite), "PickLayer", binding.actions);
+		const move = settingsButton("移入", () => write("objects", 0, [...objects.selectedOptions].map(option => option.value)), !objects.selectedOptions.length, "MoveObjects", binding.actions);
+		objects.addEventListener("change", () => { move.disabled = !objects.selectedOptions.length; });
+		binding.section.append(binding.actions);
 	}
 }
 
 function renderTemplateSettings() {
-	const entries = settings.data.page.templates || [], bindings = settings.data.page.bindings || [], content = settingsElements.Content;
+	const entries = settings.data.page.templates || [], bindings = settings.data.page.bindings || [];
 	settingsPages(settingsElements.Context, "Page", settings.page, value => { settings.page = Number(value); loadDocumentSettings(); });
 	if (settings.selected >= entries.length) settings.selected = -1;
 	if (!state.editing && settings.selected < 0 && entries.length) settings.selected = 0;
@@ -5572,17 +5759,31 @@ function renderTemplateSettings() {
 	settingsSelect(settingsElements.Context, "模板", "Entry", options, settings.selected, value => { settings.selected = Number(value); renderDocumentSettings(); });
 	const entry = entries[settings.selected];
 	if (!entry && !state.editing) { settingsElements.Status.textContent = "暂无模板"; return; }
+	const properties = settingsSection("属性"), content = properties.section;
 	settingsField(content, "名称", "Name", entry?.Name);
 	settingsSelect(content, "层次", "TemplateOrder", [["Background", "背景"], ["Foreground", "前景"]], entry?.ZOrder || "Background");
 	if (entry) appendInfoLine(content, "文件", entry.BaseLoc);
 	content.querySelectorAll("input,select").forEach(field => { field.disabled = !state.editing; });
 	const bound = entry ? bindings.findIndex(binding => referenceIDKey(binding.TemplateID) === referenceIDKey(entry.ID)) : -1;
-	if (entry && bound >= 0) {
-		const order = bindings[bound].ZOrder;
-		if (!state.editing) appendInfoLine(content, "绑定层次", {Background: "背景", Foreground: "前景"}[order] || "默认");
+	const references = (settings.data.page.templateReferences || []).filter(reference => referenceIDKey(reference.TemplateID) === referenceIDKey(entry?.ID));
+	if (references.length) {
+		const reference = settingsSelect(content, "引用", "TemplateReference", references.map((ref, index) => [index, `第${ref.PageIndex + 1}页`]), 0);
+		settingsButton("定位", () => locateSettingsPage(references[Number(reference.value)].PageIndex), false, "LocateTemplate", properties.actions);
 	}
-	if (!state.editing) return;
-	settingsPages(content, "SourcePage", settings.page);
+	content.append(properties.actions);
+	if (!state.editing) {
+		if (bound >= 0) appendInfoLine(content, "绑定层次", {Background: "背景", Foreground: "前景"}[bindings[bound].ZOrder] || "默认");
+		return;
+	}
+	const source = entry ? document.createElement("details") : content;
+	if (entry) {
+		source.className = "settings-section";
+		const title = document.createElement("summary");
+		title.textContent = "内容";
+		source.append(title);
+		settingsElements.Content.append(source);
+	}
+	settingsPages(source, "SourcePage", settings.page);
 	document.querySelector("#settingsSourcePage").closest("label").firstElementChild.textContent = "来源页";
 	const write = async (operation, order = 0) => {
 		if (operation === "replace" && !window.confirm("替换模板内容？当前文档中引用此模板的页面将同步更新。")) return;
@@ -5590,15 +5791,18 @@ function renderTemplateSettings() {
 		if (operation === "add") settings.selected = entries.length;
 		if (!await commitSettings("ofdgoChangeTemplate", operation, ["add", "replace"].includes(operation) ? Number(settingsValue("SourcePage")) : settings.page, entry?.ID || "", settingsValue("Name"), ["bind", "order"].includes(operation) ? settingsValue("BindingOrder") : settingsValue("TemplateOrder"), order)) settings.selected = selected;
 	};
-	settingsButton(entry ? "修改" : "添加", () => write(entry ? "update" : "add"), false, "Save");
-	settingsButton("替换", () => write("replace"), !entry, "Replace");
-	settingsButton("删除", () => write("delete"), !entry || bound >= 0, "Delete");
+	settingsButton(entry ? "修改" : "添加", () => write(entry ? "update" : "add"), false, "Save", properties.actions);
+	if (!entry) content.append(properties.actions);
+	if (entry) settingsButton("替换", () => write("replace"), false, "Replace", source);
+	settingsButton("删除", () => write("delete"), !entry || references.length > 0, "Delete", properties.actions, references.length ? "模板仍被页面引用" : "未选择模板");
 	if (entry) {
-		settingsSelect(content, "绑定层次", "BindingOrder", [["", "默认"], ["Background", "背景"], ["Foreground", "前景"]], bound < 0 ? "" : bindings[bound].ZOrder || "");
-		settingsButton(bound < 0 ? "绑定" : "应用", () => write(bound < 0 ? "bind" : "order"), false, "Bind");
-		settingsButton("解绑", () => write("unbind"), bound < 0, "Unbind");
-		settingsButton("上移", () => write("move", bound - 1), bound <= 0, "Up");
-		settingsButton("下移", () => write("move", bound + 1), bound < 0 || bound >= bindings.length - 1, "Down");
+		const binding = settingsSection("绑定");
+		settingsSelect(binding.section, "层次", "BindingOrder", [["", "默认"], ["Background", "背景"], ["Foreground", "前景"]], bound < 0 ? "" : bindings[bound].ZOrder || "");
+		settingsButton(bound < 0 ? "绑定" : "应用", () => write(bound < 0 ? "bind" : "order"), false, "Bind", binding.actions);
+		settingsButton("解绑", () => write("unbind"), bound < 0, "Unbind", binding.actions, "当前页未绑定此模板");
+		settingsButton("上移", () => write("move", bound - 1), bound <= 0, "Up", binding.actions);
+		settingsButton("下移", () => write("move", bound + 1), bound < 0 || bound >= bindings.length - 1, "Down", binding.actions);
+		binding.section.append(binding.actions);
 	}
 }
 
@@ -5648,6 +5852,85 @@ function renderExtensionSettings() {
 		}
 		settingsElements.Content.append(section);
 	}
+}
+
+function settingsPickControl(field, kind) {
+	const wrapper = document.createElement("span");
+	wrapper.className = "form-unit settings-pick";
+	field.replaceWith(wrapper);
+	wrapper.append(field);
+	settingsButton("选取", () => beginSettingsPick(kind), Boolean(state.composite), "PickObject", wrapper);
+}
+
+async function beginSettingsPick(kind) {
+	if (!state.editing || settings.busy || state.composite) return;
+	rememberSettingsDraft();
+	const page = kind === "style" ? Number(settingsValue("TargetPage")) : settings.page, sequence = state.openSeq;
+	if (!await renderPage(page, {fit: false}) || sequence !== state.openSeq || !settingsElements.Panel.open) return;
+	suspendSettings(kind);
+}
+
+function suspendSettings(kind) {
+	settings.suspended = true;
+	const parents = [resourceElements.Panel, el.objectStylePanel].filter(panel => panel.open);
+	resourceManager.pick = {sequence: state.openSeq, status: el.statusText.textContent, settings: kind, parents};
+	settingsElements.Panel.close();
+	for (const panel of parents) panel.close();
+	canvasEditor.enabled = false;
+	el.viewerPanel.classList.add("resource-picking");
+	setBusy(false);
+	setStatus(kind === "locate" ? "定位" : "选取图元");
+	el.viewerPanel.focus({preventScroll: true});
+}
+
+async function pickSettingsObject(event, picking) {
+	if (picking.settings === "locate") { finishResourcePick(); return; }
+	const available = canvasEditor.itemsAt(event).filter(item => !item.scoped && !item.draft && item.type !== "Annotation"
+		&& (picking.settings !== "style" || ["TextObject", "PathObject", "CompositeObject", "CompositeGraphicUnit"].includes(item.type))
+		&& (picking.settings !== "layer" || item.index === settings.page && !settings.data.page.layers[settings.selected]?.ObjectIDs?.includes(item.id)));
+	if (!available.length) return;
+	const choose = async item => {
+		if (resourceManager.pick !== picking || picking.sequence !== state.openSeq) return;
+		finishResourcePick();
+		if (picking.settings === "action") {
+			settings.page = item.index;
+			settings.object = item.id;
+			settings.selected = -1;
+			await loadDocumentSettings();
+		} else if (picking.settings === "style") {
+			settings.page = item.index;
+			settings.object = item.id;
+			document.querySelector("#settingsTargetPage").value = String(item.index);
+			await loadSettingsObjects();
+			document.querySelector("#settingsTargetObject").value = item.id;
+			document.querySelector("#settingsTargetObject").dispatchEvent(new Event("change"));
+		} else {
+			const field = document.querySelector("#settingsLayerObjects");
+			for (const option of field.options) if (option.value === item.id) option.selected = true;
+			field.dispatchEvent(new Event("change"));
+		}
+	};
+	if (available.length === 1) await choose(available[0]);
+	else resourceChoices(available, item => `${item.id} · ${(item.text || "图元").slice(0, 50)}`, choose);
+}
+
+async function locateSettingsObjects(ids) {
+	if (settings.busy) return;
+	const sequence = settings.sequence, data = await loadPageData(settings.page);
+	if (sequence !== settings.sequence || !settingsElements.Panel.open) return;
+	const objects = (data.objects || []).filter(item => ids.includes(item.id) && !item.scoped);
+	if (!objects.length) { settingsElements.Status.textContent = "暂无可见位置"; return; }
+	const box = selectionBounds(objects);
+	rememberSettingsDraft();
+	suspendSettings("locate");
+	await focusPageRegion({page: settings.page + 1, ...box}, "图层", "center");
+}
+
+async function locateSettingsPage(page) {
+	rememberSettingsDraft();
+	suspendSettings("locate");
+	const area = state.doc.pages[page];
+	await focusPageRegion({page: page + 1, x: 0, y: 0, width: area.width, height: area.height}, "模板", "center");
 }
 
 async function openResourceManagement() {
@@ -5852,11 +6135,24 @@ function finishResourcePick(reopen = true) {
 	if (!picking) return;
 	resourceManager.pick = null;
 	el.viewerPanel.classList.remove("resource-picking");
+	if (picking.settings && (!reopen || picking.sequence !== state.openSeq)) {
+		settings.suspended = false;
+		settings.drafts.clear();
+		settings.view = "";
+		settings.sequence++;
+	}
 	if (picking.sequence === state.openSeq) {
 		updateEditorTools();
 		setBusy(document.body.hasAttribute("aria-busy"));
 		setStatus(picking.status);
-		if (reopen && !resourceElements.Panel.open) {
+		if (picking.settings) {
+			if (reopen) {
+				for (const panel of picking.parents) if (!panel.open) panel.showModal();
+				settingsElements.Panel.showModal();
+				(document.querySelector("#settingsPickObject") || document.querySelector("#settingsPickLayer"))?.focus();
+			}
+			settings.suspended = false;
+		} else if (reopen && !resourceElements.Panel.open) {
 			resourceElements.Panel.showModal();
 			resourceElements.Pick.focus();
 		}
@@ -5869,6 +6165,7 @@ function pickResourceObject(event) {
 	event.preventDefault();
 	event.stopImmediatePropagation();
 	if (resourceManager.busy || document.body.hasAttribute("aria-busy")) return;
+	if (picking.settings) { pickSettingsObject(event, picking).catch(error => { finishResourcePick(); settingsElements.Status.textContent = error.message; }); return; }
 	const items = canvasEditor.itemsAt(event).filter(item => !item.scoped && !item.draft);
 	if (!items.length) { setStatus("未选中图元"); return; }
 	resourceTask(async () => {
@@ -5882,7 +6179,7 @@ function pickResourceObject(event) {
 			finishResourcePick();
 			resourceElements.Page.value = String(item.index);
 			await loadResourceTargets(item.id);
-			resourceElements.Status.textContent = "已选取";
+			resourceElements.Status.textContent = "";
 		};
 		if (available.length === 1) await choose(available[0]);
 		else resourceChoices(available, item => `${item.id} · ${(item.text || "图元").slice(0, 50)}`, item => resourceTask(() => choose(item)));

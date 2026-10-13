@@ -3830,12 +3830,19 @@ func applyStyleResource(args []js.Value) (any, error) {
 	})
 }
 
-// pageSettings 获取当前页的图层、模板定义和绑定信息，不修改文档
-// 入参: args 页面索引
+// pageSettings 获取当前页设置，图层视图跳过全部普通页模板引用查询，不修改文档
+// 入参: args 页面索引及可选类型layers或templates，省略类型时返回全量数据
 // 返回: any 页面设置, error 读取错误
 func pageSettings(args []js.Value) (any, error) {
-	if currentSession == nil || len(args) != 1 {
+	if currentSession == nil || len(args) < 1 || len(args) > 2 {
 		return nil, fmt.Errorf("invalid page settings")
+	}
+	kind := "templates"
+	if len(args) == 2 {
+		kind = args[1].String()
+		if kind != "layers" && kind != "templates" {
+			return nil, fmt.Errorf("invalid page settings type %q", kind)
+		}
 	}
 	reader := currentSession.Reader
 	layers, err := reader.Layers(args[0].Int())
@@ -3850,7 +3857,14 @@ func pageSettings(args []js.Value) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"layers": layers, "templates": templates, "bindings": page.Template}, nil
+	references := []ofdgo.TemplateReference{}
+	if kind == "templates" {
+		references, err = reader.TemplateReferences()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"layers": layers, "templates": templates, "bindings": page.Template, "templateReferences": references}, nil
 }
 
 // changeLayer 调用图层管理接口，组合修改使用同一次事务

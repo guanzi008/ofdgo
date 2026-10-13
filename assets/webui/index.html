@@ -207,7 +207,7 @@
 				<div class="form-row"><span>格式</span><div class="form-format"><button id="copyStyleButton" class="button" type="button" aria-label="复制格式">复制</button><button id="pasteStyleButton" class="button" type="button" aria-label="粘贴格式">粘贴</button></div></div>
 				<details id="objectLinkFields" hidden>
 					<summary>链接</summary>
-					<div class="form-row"><label for="objectLinkKind">目标</label><select id="objectLinkKind"><option value="none">不设</option><option value="uri">网址</option><option value="page">页面</option><option value="keep">原有</option></select></div>
+					<div class="form-row"><label for="objectLinkKind">目标</label><div class="form-unit object-link-target"><select id="objectLinkKind"><option value="none">不设</option><option value="uri">网址</option><option value="page">页面</option><option value="keep">原有</option></select><button id="objectActionsButton" class="button" type="button" title="管理动作" aria-label="管理动作">动作</button></div></div>
 					<div class="form-row" id="objectLinkAddressRow" hidden><label for="objectLinkAddress">地址</label><input id="objectLinkAddress" type="text"></div>
 					<div class="form-row" id="objectLinkPageRow" hidden><label for="objectLinkPage">页码</label><input id="objectLinkPage" type="number" min="1" step="1"></div>
 				</details>
@@ -401,10 +401,15 @@
 		</dialog>
 		<dialog id="settingsPanel" class="form-dialog settings-dialog" aria-labelledby="settingsTitle">
 			<form id="settingsForm">
-				<h2 id="settingsTitle" class="form-title">文档配置</h2>
+				<header class="settings-header">
+					<h2 id="settingsTitle" class="form-title">文档配置</h2>
+					<span id="settingsLocation" class="settings-location"></span>
+				</header>
 				<label class="form-row"><span>类型</span><select id="settingsKind"><option value="bookmarks">书签</option><option value="actions">动作</option><option value="templates">模板</option><option value="layers">图层</option><option value="extensions">扩展</option><option value="ColorSpace" hidden>色彩</option><option value="DrawParam" hidden>样式</option></select></label>
-				<div id="settingsContext"></div>
-				<div id="settingsContent"></div>
+				<div id="settingsBody" class="settings-body">
+					<div id="settingsContext"></div>
+					<div id="settingsContent"></div>
+				</div>
 				<div id="settingsStatus" class="form-status" role="status"></div>
 				<div id="settingsActions" class="form-actions"></div>
 			</form>

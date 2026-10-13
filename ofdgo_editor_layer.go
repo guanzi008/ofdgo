@@ -24,12 +24,14 @@ import (
 )
 
 // LayerInfo 描述普通页面图层，Order为同类型零基顺序，ObjectCount包含页块中的图元。
+// ObjectIDs按层内文件顺序列出图元标识，包含PageBlock成员但不展开复合图元，空层返回空切片。
 type LayerInfo struct {
 	ID          string
 	Type        string
 	DrawParam   string
 	Order       int
 	ObjectCount int
+	ObjectIDs   []string
 }
 
 // Layers 按文件顺序返回普通页面图层，省略的类型规范化为Body，不包含模板图层。
@@ -62,7 +64,11 @@ func editorLayerInfos(p *PageContent) []LayerInfo {
 	orders := make(map[string]int)
 	for _, layer := range p.Content.Layer {
 		kind := editorLayerType(layer.Type)
-		result = append(result, LayerInfo{layer.ID, kind, layer.DrawParam, orders[kind], len(layer.Objects)})
+		ids := make([]string, len(layer.Objects))
+		for i, object := range layer.Objects {
+			ids[i] = editorObjectID(object)
+		}
+		result = append(result, LayerInfo{ID: layer.ID, Type: kind, DrawParam: layer.DrawParam, Order: orders[kind], ObjectCount: len(ids), ObjectIDs: ids})
 		orders[kind]++
 	}
 	return result
