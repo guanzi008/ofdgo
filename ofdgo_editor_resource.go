@@ -17,7 +17,6 @@ package ofdgo
 import (
 	"bytes"
 	"context"
-	"encoding/xml"
 	"fmt"
 	"image"
 	"path"
@@ -386,23 +385,11 @@ func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, i
 					changed = changed || affected[editorResourceID(node.attr("Relative"))]
 				}
 				if node.matchesOFD("ImageObject") && primary && node.hasAttr("Substitution") {
-					fragment, err := editorXMLStandalone(data[node.start:node.end], node)
+					patch, err := editorXMLAttributeChange(data, node, "Substitution", nil)
 					if err != nil {
 						return false, err
 					}
-					var object ImageObject
-					if err := xml.Unmarshal(fragment, &object); err != nil {
-						return false, err
-					}
-					before := GraphicObject{Type: "ImageObject", ImageObject: object}
-					after := before
-					after.ImageObject.Substitution = ""
-					updated, err := editorXMLObject(data, node, before, after)
-					if err != nil {
-						return false, err
-					}
-					patches = append(patches, editorXMLPatch{node.start, node.end, updated})
-					return true, nil
+					patches = append(patches, patch)
 				}
 				for _, child := range node.children {
 					used, err := visit(child)
