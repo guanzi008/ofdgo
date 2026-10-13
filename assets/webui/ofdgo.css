@@ -1563,19 +1563,23 @@ body[data-hide-meta] .meta-panel {
 }
 
 .resource-heading {
+	position: sticky;
+	top: 0;
+	z-index: 1;
 	background: #eef1f4;
-	border: 1px solid var(--line);
-	overflow: hidden;
-}
-
-.resource-heading,
-.resource-list {
-	scrollbar-gutter: stable;
+	border-bottom: 1px solid var(--line);
 }
 
 .resource-list-container {
-	position: relative;
+	max-height: 260px;
+	overflow: auto;
+	scroll-padding-top: 40px;
+	border: 1px solid var(--line);
 	margin-bottom: 12px;
+}
+
+.resource-list-body {
+	position: relative;
 }
 
 .resource-empty {
@@ -1592,11 +1596,7 @@ body[data-hide-meta] .meta-panel {
 }
 
 .resource-list {
-	max-height: 220px;
 	min-height: 80px;
-	overflow: auto;
-	border: 1px solid var(--line);
-	border-top: 0;
 }
 
 .resource-option {

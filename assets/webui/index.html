@@ -357,10 +357,12 @@
 			<form id="resourceForm">
 				<h2 id="resourceTitle" class="form-title">资源管理</h2>
 				<div class="form-row"><label for="resourceKind">类型</label><select id="resourceKind"><option value="Font">字体</option><option value="Image">图片</option><option value="Audio">音频</option><option value="Video">视频</option><option value="Attachment">附件</option></select></div>
-				<div class="resource-heading" aria-hidden="true"><span>名称</span><span>大小</span><span>引用</span></div>
 				<div class="resource-list-container">
-					<div id="resourceList" class="resource-list" role="listbox" aria-label="资源列表"></div>
-					<div id="resourceEmpty" class="resource-empty" hidden>暂无资源</div>
+					<div class="resource-heading" aria-hidden="true"><span>名称</span><span>大小</span><span>引用</span></div>
+					<div class="resource-list-body">
+						<div id="resourceList" class="resource-list" role="listbox" aria-label="资源列表"></div>
+						<div id="resourceEmpty" class="resource-empty" hidden>暂无资源</div>
+					</div>
 				</div>
 				<div class="form-row"><label for="resourceReference">引用</label><select id="resourceReference" aria-label="引用位置"></select></div>
 				<div class="resource-actions">
