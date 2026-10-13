@@ -236,6 +236,7 @@ func RunWASM() {
 	registerCallback("ofdgoResources", documentResources)
 	registerCallback("ofdgoResourceTargets", resourceTargets)
 	registerCallback("ofdgoResourceLocations", resourceLocations)
+	registerCallback("ofdgoFontPreview", fontPreview)
 	registerCallback("ofdgoChangeResource", changeResource)
 	registerAsyncCallback("ofdgoExportResource", exportResource)
 	registerCallback("ofdgoImages", documentImages)
@@ -839,6 +840,20 @@ func resourceLocations(args []js.Value) (any, error) {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
 	return currentSession.Renderer.ResourceLocations(context.Background(), args[0].String(), args[1].String(), args[2].Int())
+}
+
+// fontPreview 使用当前文档和版本的字形轮廓生成独立预览
+// 入参: args 字体资源标识
+// 返回: any SVG数据, error 字体或绘制错误
+func fontPreview(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) != 1 {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	var output bytes.Buffer
+	if err := currentSession.Renderer.RenderFontPreview(context.Background(), args[0].String(), &output); err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{"bytes": bytesToJS(output.Bytes())}), nil
 }
 
 // changeResource 调用库层资源编辑，浏览器不改写资源声明和包路径

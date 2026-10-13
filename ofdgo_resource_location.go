@@ -102,9 +102,14 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 			if slices.Contains([]string{"Thumbnail", "Substitution"}, node.name.Local) {
 				add(node.name.Local, strings.TrimSpace(editorImportText(file.data, node)))
 			}
-			if owner != "" && node.parent != nil && node.parent.matchesOFD("Layer") {
-				layer := editorResourceID(node.parent.attr("ID"))
-				users[layer] = append(users[layer], owner)
+			parent := node.parent
+			for parent != nil && parent.matchesOFD("PageBlock") {
+				parent = parent.parent
+			}
+			if owner != "" && parent != nil && parent.matchesOFD("Layer") {
+				if layer := editorResourceID(parent.attr("ID")); layer != "" && layer != owner {
+					users[layer] = append(users[layer], owner)
+				}
 			}
 			for _, child := range node.children {
 				if err := visit(child, object); err != nil {

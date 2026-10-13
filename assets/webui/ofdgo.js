@@ -24,7 +24,7 @@ const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "A
 const fontBinding = { font: null, choices: [], sequence: 0 };
 const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name", "SourceRow", "Source", "File", "Hint", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#fontBinding${name}`)]));
 const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Kind", "List", "Empty", "Reference", "Actions", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "BindingActions", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
-const resourceManager = { items: [], selected: null, targets: [], pick: null, busy: false, sequence: 0, url: null, font: null, fileAction: null };
+const resourceManager = { items: [], selected: null, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
 const settingsElements = Object.fromEntries(["Button", "Panel", "Form", "Title", "Kind", "Context", "Content", "Actions", "Status"].map(name => [name, document.querySelector(`#settings${name}`)]));
 const settings = { sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false };
 
@@ -6216,8 +6216,7 @@ function releaseResourcePreview() {
 	resourceElements.Viewer.replaceChildren();
 	resourceElements.Viewer.hidden = true;
 	if (resourceManager.url) URL.revokeObjectURL(resourceManager.url);
-	if (resourceManager.font) document.fonts.delete(resourceManager.font);
-	resourceManager.url = resourceManager.font = null;
+	resourceManager.url = null;
 }
 
 async function previewManagedResource() {
@@ -6232,33 +6231,29 @@ async function previewManagedResource() {
 	const sequence = resourceManager.sequence, openSeq = state.openSeq;
 	let result;
 	try {
-		result = await callWASM("ofdgoExportResource", JSON.stringify([item.kind, item.id]), null);
+		result = item.kind === "Font"
+			? await callWASM("ofdgoFontPreview", item.id)
+			: await callWASM("ofdgoExportResource", JSON.stringify([item.kind, item.id]), null);
+	} catch (error) {
+		if (sequence !== resourceManager.sequence || openSeq !== state.openSeq || !resourceElements.Panel.open) return;
+		if (item.kind === "Font") throw new Error("字体无法预览", {cause: error});
+		throw error;
 	} finally {
 		state.exportRequestID = 0;
 		el.cancelExportButton.hidden = true;
 	}
 	if (sequence !== resourceManager.sequence || openSeq !== state.openSeq || !resourceElements.Panel.open) return;
-	const format = item.format.toLowerCase();
-	const mime = {mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", m4a: "audio/mp4", mp4: "video/mp4", webm: "video/webm", png: "image/png", jpeg: "image/jpeg", jpg: "image/jpeg", bmp: "image/bmp"}[format] || "application/octet-stream";
-	resourceManager.url = URL.createObjectURL(new Blob([result.blob], {type: mime}));
-	let element;
-	if (item.kind === "Font") {
-		const font = new FontFace("OFDResourcePreview", `url("${resourceManager.url}")`);
-		await font.load();
-		if (sequence !== resourceManager.sequence) return;
-		document.fonts.add(font);
-		resourceManager.font = font;
-		element = document.createElement("span");
-		element.style.fontFamily = '"OFDResourcePreview"';
-		element.style.fontSize = "24px";
-		element.textContent = "Aa 0123 字体预览";
-	} else {
-		element = document.createElement(item.kind === "Image" ? "img" : item.kind === "Audio" ? "audio" : "video");
-		element.src = resourceManager.url;
-		if (item.kind === "Image") element.alt = item.name;
-		else { element.controls = true; element.preload = "metadata"; }
-		element.addEventListener("error", () => { resourceElements.Status.textContent = "浏览器无法预览此格式"; });
-	}
+	const format = item.kind === "Font" ? "svg" : item.format.toLowerCase();
+	const mime = {svg: "image/svg+xml", mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", m4a: "audio/mp4", mp4: "video/mp4", webm: "video/webm", png: "image/png", jpeg: "image/jpeg", jpg: "image/jpeg", bmp: "image/bmp"}[format] || "application/octet-stream";
+	resourceManager.url = URL.createObjectURL(new Blob([result.bytes || result.blob], {type: mime}));
+	const image = item.kind === "Image" || item.kind === "Font";
+	const element = document.createElement(image ? "img" : item.kind === "Audio" ? "audio" : "video");
+	element.src = resourceManager.url;
+	if (image) element.alt = item.name;
+	else { element.controls = true; element.preload = "metadata"; }
+	element.addEventListener("error", () => {
+		if (sequence === resourceManager.sequence && openSeq === state.openSeq) resourceElements.Status.textContent = "浏览器无法预览此格式";
+	});
 	resourceElements.Viewer.append(element);
 	resourceElements.Viewer.hidden = false;
 }
