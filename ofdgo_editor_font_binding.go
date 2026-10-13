@@ -62,6 +62,7 @@ type FontProcessOptions struct {
 type editorFontChange struct {
 	patches map[string][]editorXMLPatch
 	files   map[string][]byte
+	fonts   []string
 }
 
 // editorBindingFontCache 仅保留当前文档最近读取的字体文件及最近解析结果，操作结束后释放
@@ -197,6 +198,7 @@ func (e *Editor) ProcessFontsWithOptions(ctx context.Context, options FontProces
 					pending.patches[name] = append(pending.patches[name], patches...)
 				}
 				maps.Copy(pending.files, change.files)
+				pending.fonts = append(pending.fonts, change.fonts...)
 			}
 			report = append(report, item)
 			if err := progress("fonts", len(report), total); err != nil {
@@ -378,6 +380,7 @@ func (e *Editor) prepareFontBinding(ctx context.Context, scan *editorFontDocumen
 		return nil, err
 	}
 	change.patches[declaration.file.name] = append(change.patches[declaration.file.name], editorXMLPatch{node.start, node.end, fragment})
+	change.fonts = append(change.fonts, editorResourceID(id))
 	return change, nil
 }
 
@@ -397,6 +400,9 @@ func (c *editorFontChange) apply(ctx context.Context, scan *editorFontDocument) 
 			return err
 		}
 		changes[name] = editorPatchXML(scan.files[name].data, patches)
+	}
+	if err := invalidateResourcePreviews(ctx, scan, changes, c.fonts...); err != nil {
+		return err
 	}
 	return scan.apply(ctx, changes)
 }

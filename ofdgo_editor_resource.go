@@ -274,7 +274,7 @@ func (e *Editor) changeResource(ctx context.Context, kind, id string, replace fu
 		return nil
 	}
 	if replace != nil && kind == "Image" {
-		if err := invalidateResourcePreviews(ctx, catalog.scan, item.ID, changes); err != nil {
+		if err := invalidateResourcePreviews(ctx, catalog.scan, changes, item.ID); err != nil {
 			return err
 		}
 	}
@@ -346,16 +346,30 @@ func validateResourceImageMask(ctx context.Context, catalog *resourceCatalog, id
 	return ctx.Err()
 }
 
-// invalidateResourcePreviews 沿颜色、绘制参数和复合引用移除资源变化后失效的替换图及底纹预览
-// 入参: ctx 取消上下文, scan 当前文档结构, id 资源标识, changes 待提交文件
+// invalidateResourcePreviews 沿字体、颜色、绘制参数和复合引用移除资源变化后失效的替换图及底纹预览
+// 入参: ctx 取消上下文, scan 当前文档结构, changes 待提交文件, ids 资源标识
 // 返回: error 解析或取消错误
-func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, id string, changes map[string][]byte) error {
-	doc, err := scan.reader.DocContext(ctx)
+func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, changes map[string][]byte, ids ...string) error {
+	if len(ids) == 0 {
+		return ctx.Err()
+	}
+	reader := scan.reader
+	if scan.index != reader.DocumentIndex() {
+		var err error
+		reader, err = reader.DocumentContext(ctx, scan.index)
+		if err != nil {
+			return err
+		}
+	}
+	doc, err := reader.DocContext(ctx)
 	if err != nil {
 		return err
 	}
 	defaultCS := strconv.Itoa(doc.CommonData.DefaultCS)
-	affected := map[string]bool{id: true}
+	affected := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		affected[editorResourceID(id)] = true
+	}
 	for {
 		count := len(affected)
 		for name, file := range scan.files {
@@ -378,6 +392,7 @@ func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, i
 				}
 				primary := affected[editorResourceID(node.attr("ResourceID"))] || affected[editorResourceID(node.attr("ImageMask"))]
 				changed := primary || affected[editorResourceID(node.attr("Substitution"))] || affected[editorResourceID(node.attr("DrawParam"))] || affected[editorResourceID(node.attr("ColorSpace"))]
+				changed = changed || affected[editorResourceID(node.attr("Font"))]
 				if resourceColorNode(node) && node.attr("ColorSpace") == "" {
 					changed = changed || affected[defaultCS]
 				}

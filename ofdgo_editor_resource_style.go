@@ -431,7 +431,7 @@ func replaceResourceStyle(ctx context.Context, catalog *resourceCatalog, item Re
 	if err := validateResourceStyleGraph(ctx, catalog, item.ID, changes); err != nil {
 		return err
 	}
-	return invalidateResourcePreviews(ctx, catalog.scan, item.ID, changes)
+	return invalidateResourcePreviews(ctx, catalog.scan, changes, item.ID)
 }
 
 // resourceColorNode 判断可携带基本颜色或复杂填充的标准节点
