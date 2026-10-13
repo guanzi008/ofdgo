@@ -604,19 +604,14 @@ func imageGrayAt(img image.Image, x, y int) color.Gray {
 // 入参: img 图片对象, x X坐标, y Y坐标
 // 返回: color.NRGBA NRGBA像素
 func imageNRGBAAt(img image.Image, x, y int) color.NRGBA {
-	if src, ok := img.(interface{ NRGBAAt(int, int) color.NRGBA }); ok {
+	switch src := img.(type) {
+	case interface{ NRGBAAt(int, int) color.NRGBA }:
 		return src.NRGBAAt(x, y)
-	}
-	if src, ok := img.(interface{ NRGBA64At(int, int) color.NRGBA64 }); ok {
+	case interface{ NRGBA64At(int, int) color.NRGBA64 }:
 		c := src.NRGBA64At(x, y)
 		return color.NRGBA{R: uint8(c.R >> 8), G: uint8(c.G >> 8), B: uint8(c.B >> 8), A: uint8(c.A >> 8)}
-	}
-	if src, ok := img.(*image.YCbCr); ok {
-		r, g, b, _ := src.YCbCrAt(x, y).RGBA()
-		return color.NRGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: 255}
-	}
-	if src, ok := img.(*image.RGBA); ok {
-		c := src.RGBA64At(x, y)
+	case *image.RGBA, *image.RGBA64, *image.Gray, *image.Gray16, *image.Alpha, *image.Alpha16, *image.CMYK, *image.YCbCr, *image.NYCbCrA:
+		c := src.(image.RGBA64Image).RGBA64At(x, y)
 		if c.A == 0 {
 			return color.NRGBA{}
 		}
@@ -683,13 +678,13 @@ func imageNRGBA64At(img image.Image, x, y int) color.NRGBA64 {
 	case *image.Gray16:
 		c := src.Gray16At(x, y)
 		return color.NRGBA64{R: c.Y, G: c.Y, B: c.Y, A: 0xffff}
-	case *image.Alpha16:
-		c := src.Alpha16At(x, y)
+	case *image.Alpha, *image.Alpha16:
+		c := src.(image.RGBA64Image).RGBA64At(x, y)
 		if c.A == 0 {
 			return color.NRGBA64{}
 		}
 		return color.NRGBA64{R: 0xffff, G: 0xffff, B: 0xffff, A: c.A}
-	case *image.RGBA, *image.RGBA64:
+	case *image.RGBA, *image.RGBA64, *image.CMYK, *image.YCbCr, *image.NYCbCrA:
 		c := src.(image.RGBA64Image).RGBA64At(x, y)
 		if c.A == 0 {
 			return color.NRGBA64{}
