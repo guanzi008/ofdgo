@@ -367,6 +367,7 @@
 					<button id="resourceAdd" class="button" type="button" title="添加资源" aria-label="添加资源">添加</button>
 					<button id="resourcePreview" class="button" type="button">预览</button>
 					<button id="resourceExport" class="button" type="button">导出</button>
+					<button id="resourceRename" class="button" type="button" hidden>改名</button>
 					<button id="resourceReplace" class="button" type="button">替换</button>
 					<button id="resourceDelete" class="button" type="button">删除</button>
 					<button id="resourceLocate" class="button" type="button">定位</button>
@@ -744,15 +745,11 @@
 				</dl>
 				<details id="conversionNotice" class="conversion-notice" hidden>
 					<summary>提示</summary>
-					<div id="conversionWarnings" class="attachment-detail"></div>
+					<div id="conversionWarnings" class="panel-detail"></div>
 				</details>
 				<section id="securityPanel" class="security-panel" aria-labelledby="securityPanelTitle" hidden>
 					<div class="panel-row"><div id="securityPanelTitle" class="panel-title compact">安全</div><div class="panel-actions"><button id="encryptSaveButton" class="small-button" type="button" title="加密文档" aria-label="加密文档" aria-haspopup="dialog" aria-controls="encryptionPanel" disabled>加密</button><button id="signButton" class="small-button" type="button" aria-haspopup="dialog" aria-controls="signPanel" disabled>签章</button><button id="verifyButton" class="small-button" type="button" aria-haspopup="dialog" aria-controls="verifyPanel" disabled>验签</button></div></div>
 					<dl class="meta-list"><div><dt>加密</dt><dd id="securityEncryption">未加密</dd></div><div id="securitySchemeRow" hidden><dt>方式</dt><dd id="securityScheme"></dd></div><div id="securityMethodRow" hidden><dt>算法</dt><dd id="securityMethod"></dd></div></dl>
-				</section>
-				<section id="attachmentPanel" class="attachment-panel" aria-labelledby="attachmentPanelTitle" hidden>
-					<div class="panel-row"><div id="attachmentPanelTitle" class="panel-title compact">附件</div><div class="panel-actions"><button id="attachmentAdd" class="small-button" type="button" title="添加附件" aria-haspopup="dialog" aria-controls="attachmentDialog" hidden>添加</button></div></div>
-					<div id="attachmentList" class="attachment-list"></div>
 				</section>
 				<section id="structurePanel" class="structure-panel" aria-labelledby="structurePanelTitle" hidden>
 					<div class="panel-row"><div id="structurePanelTitle" class="panel-title compact">结构</div><div class="panel-actions"><span id="structureSummary" class="count-pill">0</span><button id="structureManage" class="small-button" type="button" title="管理标引" aria-haspopup="dialog" aria-controls="structureDialog" hidden>管理</button></div></div>

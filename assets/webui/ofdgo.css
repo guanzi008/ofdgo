@@ -2838,53 +2838,12 @@ audio.page-media {
 
 .font-panel,
 .doc-font-panel,
-.attachment-panel,
 .signature-panel,
 .structure-panel,
 .security-panel {
 	margin-top: 18px;
 	padding-top: 12px;
 	border-top: 1px solid var(--line);
-}
-
-.attachment-list {
-	display: grid;
-	gap: 8px;
-}
-
-.attachment-row {
-	display: grid;
-	grid-template-columns: minmax(0, 1fr) auto;
-	align-items: center;
-	gap: 8px;
-}
-
-.attachment-row .attachment-item {
-	min-width: 0;
-}
-
-.attachment-actions {
-	flex-wrap: nowrap;
-}
-
-.attachment-item {
-	width: 100%;
-	padding: 4px 0;
-	border: 0;
-	background: transparent;
-	color: var(--accent-strong);
-	font-size: 13px;
-	line-height: 1.4;
-	text-align: left;
-	overflow-wrap: anywhere;
-}
-
-.attachment-item:not(:disabled):hover {
-	background: transparent;
-}
-
-.attachment-item:hover .attachment-name {
-	text-decoration: underline;
 }
 
 .conversion-notice {
@@ -2900,7 +2859,7 @@ audio.page-media {
 	overflow-wrap: anywhere;
 }
 
-.attachment-detail {
+.panel-detail {
 	color: var(--text-muted);
 	font-size: 12px;
 }
