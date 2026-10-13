@@ -320,28 +320,8 @@ func (e *Editor) sourceMaxID(progress editorProgress) (int, error) {
 // 返回: int 最大标识, error 错误信息
 func editorXMLMaxID(input io.Reader) (int, error) {
 	buffer := bufio.NewReader(input)
-	header, err := buffer.Peek(3)
-	if err != nil && err != io.EOF {
+	if found, err := editorXMLPrefix(buffer); err != nil || !found {
 		return 0, err
-	}
-	if bytes.Equal(header, []byte{0xef, 0xbb, 0xbf}) {
-		buffer.Discard(3)
-	}
-	for {
-		header, err := buffer.Peek(1)
-		if err == io.EOF {
-			return 0, nil
-		}
-		if err != nil {
-			return 0, err
-		}
-		if !strings.ContainsRune(" \t\r\n", rune(header[0])) {
-			if header[0] != '<' {
-				return 0, nil
-			}
-			break
-		}
-		buffer.Discard(1)
 	}
 	decoder := xml.NewDecoder(buffer)
 	maximum, started := 0, false

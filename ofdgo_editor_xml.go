@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/xml"
@@ -37,6 +38,39 @@ type editorXML struct {
 type editorXMLPatch struct {
 	start, end int
 	data       []byte
+}
+
+// editorXMLPrefix 跳过UTF-8字节序标记和XML空白，探测后保留首个内容字节
+// 入参: input 带缓冲的输入流，读取错误及取消信号由底层传递
+// 返回: bool 是否以XML标记起始, error 读取错误
+func editorXMLPrefix(input *bufio.Reader) (bool, error) {
+	header, err := input.Peek(3)
+	if err != nil && err != io.EOF {
+		return false, err
+	}
+	if bytes.Equal(header, []byte{0xef, 0xbb, 0xbf}) {
+		input.Discard(3)
+	}
+	for {
+		if _, err := input.Peek(1); err != nil {
+			if err == io.EOF {
+				return false, nil
+			}
+			return false, err
+		}
+		chunk, _ := input.Peek(input.Buffered())
+		count := 0
+		for count < len(chunk) {
+			switch chunk[count] {
+			case ' ', '\t', '\r', '\n':
+				count++
+			default:
+				input.Discard(count)
+				return chunk[count] == '<', nil
+			}
+		}
+		input.Discard(count)
+	}
 }
 
 // parseEditorXML 解析节点位置，保留命名空间、注释和原始格式

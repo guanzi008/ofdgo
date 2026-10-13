@@ -1215,6 +1215,7 @@ button:not(:disabled):hover {
 
 .info-custom-row input,
 .gradient-stop-row input,
+.structure-attribute > input,
 .form-row input[type="text"],
 .form-row input[type="password"],
 .form-row input[type="number"],
@@ -3049,26 +3050,55 @@ audio.page-media {
 	text-align-last: justify;
 }
 
+.structure-dialog .panel-row {
+	margin-bottom: 0;
+}
+
+.structure-dialog .panel-row > span {
+	width: 4em;
+	text-align-last: justify;
+}
+
+.structure-dialog .form-actions {
+	margin-top: 12px;
+}
+
 .structure-edit-list {
 	display: grid;
-	gap: 8px;
+	gap: 12px;
 	margin-top: 8px;
+}
+
+.structure-edit-list:empty {
+	display: none;
 }
 
 .structure-attribute {
 	display: grid;
-	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 28px;
-	gap: 6px;
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) var(--control-height);
+	gap: 8px;
 }
 
 .structure-attribute .structure-attribute-value {
-	grid-column: 1 / 3;
+	grid-column: 1 / -1;
 }
 
 .structure-attribute > button {
-	grid-column: 3;
-	grid-row: 1 / 3;
-	align-self: center;
+	grid-column: -2;
+	grid-row: 1;
+	width: var(--control-height);
+	height: var(--control-height);
+	padding: 0;
+}
+
+@media (max-width: 480px) {
+	.structure-attribute {
+		grid-template-columns: minmax(0, 1fr) var(--control-height);
+	}
+
+	.structure-attribute > input[name="namespace"] {
+		grid-column: 1 / -1;
+	}
 }
 
 .structure-reference + .structure-reference {

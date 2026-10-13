@@ -8342,6 +8342,7 @@ function addStructureAttribute(attribute = {}) {
 	row.className = "structure-attribute";
 	for (const [name, label] of [["name", "属性名称"], ["namespace", "命名空间"], ["value", "属性内容"]]) {
 		const input = document.createElement("input");
+		input.type = "text";
 		input.name = name;
 		input.value = attribute[name] || "";
 		input.placeholder = label;
@@ -8365,6 +8366,7 @@ function addStructureReference(reference = {}) {
 	const row = document.createElement("div");
 	row.className = "structure-reference";
 	const page = document.createElement("select"), object = document.createElement("select"), ids = document.createElement("input");
+	ids.type = "text";
 	page.name = "page";
 	ids.name = "ids";
 	ids.value = (reference.objectIds || []).join(",");

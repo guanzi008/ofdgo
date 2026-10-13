@@ -16,7 +16,6 @@ package ofdgo
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/xml"
 	"fmt"
@@ -317,15 +316,11 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 // 返回: bool 是否资源索引, bool 是否可完整判断引用
 func (r *editorResourceRefs) scan(input io.Reader, name string) (bool, bool) {
 	buffer := bufio.NewReader(input)
-	header, err := buffer.Peek(512)
-	if err != nil && err != io.EOF {
+	found, err := editorXMLPrefix(buffer)
+	if err != nil {
 		return false, false
 	}
-	header = bytes.TrimSpace(bytes.TrimPrefix(header, []byte{0xef, 0xbb, 0xbf}))
-	if len(header) == 0 {
-		return false, err == io.EOF && !strings.EqualFold(path.Ext(name), ".xml")
-	}
-	if header[0] != '<' {
+	if !found {
 		return false, !strings.EqualFold(path.Ext(name), ".xml")
 	}
 	decoder := xml.NewDecoder(buffer)
