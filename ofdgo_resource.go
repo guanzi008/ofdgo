@@ -51,31 +51,43 @@ type ResourceReference struct {
 
 // resourceCatalog 保存当前资源声明和原文位置，供查询及隔离修改复用
 type resourceCatalog struct {
-	scan  *editorFontDocument
-	items []ResourceInfo
-	nodes map[string]editorFontText
+	scan   *editorFontDocument
+	items  []ResourceInfo
+	nodes  map[string]editorFontText
+	images []editorFontText
 }
 
 // Resources 列出当前文档及所选版本的资源，标记缺失文件，不读取二进制内容或执行媒体动作
+// 重复查询复用已完成的扫描，返回值及引用位置与阅读器相互独立
 // 入参: ctx 取消上下文
 // 返回: []ResourceInfo 资源及引用位置, error 结构或读取错误
 func (r *Reader) Resources(ctx context.Context) ([]ResourceInfo, error) {
-	catalog, err := r.resourceCatalog(ctx)
+	items, err := r.resourceList(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return catalog.items, nil
+	result := slices.Clone(items)
+	for i := range result {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		result[i].References = slices.Clone(result[i].References)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // OpenResource 打开当前资源的原始文件，外部字体无可导出的内嵌文件
 // 入参: ctx 取消上下文, kind 资源类型, id 资源标识
 // 返回: io.ReadCloser 文件流，由调用方关闭, error 资源或文件错误
 func (r *Reader) OpenResource(ctx context.Context, kind, id string) (io.ReadCloser, error) {
-	catalog, err := r.resourceCatalog(ctx)
+	items, err := r.resourceList(ctx)
 	if err != nil {
 		return nil, err
 	}
-	item, err := catalog.find(kind, id)
+	item, err := findResource(items, kind, id)
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +99,24 @@ func (r *Reader) OpenResource(ctx context.Context, kind, id string) (io.ReadClos
 		return nil, err
 	}
 	return imageInput{ReadCloser: stream, context: ctx}, nil
+}
+
+// resourceList 缓存当前阅读视图的资源摘要，不保留扫描使用的XML树
+// 入参: ctx 取消上下文
+// 返回: []ResourceInfo 内部只读摘要, error 扫描或取消错误
+func (r *Reader) resourceList(ctx context.Context) ([]ResourceInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r.resourceInfoCache != nil {
+		return r.resourceInfoCache, nil
+	}
+	catalog, err := r.resourceCatalog(ctx)
+	if err != nil {
+		return nil, err
+	}
+	r.resourceInfoCache = catalog.items
+	return r.resourceInfoCache, nil
 }
 
 // resourceCatalog 按标准内容路径收集资源声明及引用，不把任意数字属性作为资源引用
@@ -157,6 +187,9 @@ func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) 
 			}
 			if slices.Contains([]string{"TextObject", "PathObject", "ImageObject", "CompositeObject"}, node.name.Local) {
 				object = node.attr("ID")
+			}
+			if node.matchesOFD("ImageObject") {
+				catalog.images = append(catalog.images, editorFontText{file: file, node: node})
 			}
 			add := func(role, id string) {
 				key := editorResourceID(id)
@@ -238,11 +271,11 @@ func (c *resourceCatalog) add(item ResourceInfo, node editorFontText) error {
 	return nil
 }
 
-// find 查找当前视图内的资源，不接受调用方提供的任意包路径
-// 入参: kind 资源类型, id 资源标识
+// findResource 查找当前视图内的资源，不接受调用方提供的任意包路径
+// 入参: items 资源列表, kind 资源类型, id 资源标识
 // 返回: ResourceInfo 资源信息, error 未找到资源
-func (c *resourceCatalog) find(kind, id string) (ResourceInfo, error) {
-	for _, item := range c.items {
+func findResource(items []ResourceInfo, kind, id string) (ResourceInfo, error) {
+	for _, item := range items {
 		if item.Kind == kind && (item.ID == id || kind != "Attachment" && sameResourceID(item.ID, id)) {
 			return item, nil
 		}

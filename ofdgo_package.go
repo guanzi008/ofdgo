@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"bytes"
 	"context"
+	"io"
 	"path"
 	"slices"
 	"strconv"
@@ -40,6 +41,7 @@ func packagePagePath(directory, id string) string {
 }
 
 // packageName 为新增条目分配文档内路径，不覆盖原文件或本次资源
+// 无暂存资源冲突时直接返回路径，避免重复构建资源映射
 // 入参: relative 文档相对路径
 // 返回: string 未占用路径
 func (e *Editor) packageName(relative string) string {
@@ -47,11 +49,16 @@ func (e *Editor) packageName(relative string) string {
 	if e.source != nil {
 		reader = e.source.reader
 	}
+	name := path.Join(e.packageDirectory(), relative)
+	candidate := packageAvailableName(reader, nil, name)
+	if !slices.ContainsFunc(e.resources, func(resource editorResource) bool { return resource.name == candidate }) {
+		return candidate
+	}
 	files := make(map[string][]byte, len(e.resources))
 	for _, resource := range e.resources {
 		files[resource.name] = nil
 	}
-	return packageAvailableName(reader, files, path.Join(e.packageDirectory(), relative))
+	return packageAvailableName(reader, files, name)
 }
 
 // packageAvailableName 仅在包内同名条目冲突时添加序号，路径区分大小写
@@ -76,6 +83,51 @@ func packageAvailableName(reader *Reader, files map[string][]byte, name string) 
 			return candidate
 		}
 	}
+}
+
+// packageDataEqual 流式比较包内文件与给定数据，文件缺失时返回false
+// 入参: ctx 取消上下文, reader 原包, name 包内路径, data 待比较内容
+// 返回: bool 内容是否相同, error 读取或取消错误
+func packageDataEqual(ctx context.Context, reader *Reader, name string, data []byte) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	name = cleanPackagePath(name)
+	if current, ok := reader.files[name]; ok {
+		return bytes.Equal(current, data), ctx.Err()
+	}
+	if _, ok := reader.packageFile(name); !ok {
+		return false, nil
+	}
+	stream, err := reader.openFile(name)
+	if err != nil {
+		return false, err
+	}
+	defer stream.Close()
+	input := imageInput{ReadCloser: stream, context: ctx}
+	var buffer [32 << 10]byte
+	for len(data) != 0 {
+		block := buffer[:min(len(buffer), len(data))]
+		_, err := io.ReadFull(input, block)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return false, ctx.Err()
+		}
+		if err != nil {
+			return false, err
+		}
+		if !bytes.Equal(block, data[:len(block)]) {
+			return false, ctx.Err()
+		}
+		data = data[len(block):]
+	}
+	_, err = io.ReadFull(input, buffer[:1])
+	if err == io.EOF {
+		return true, ctx.Err()
+	}
+	if err == nil {
+		err = ctx.Err()
+	}
+	return false, err
 }
 
 // mergePackageResources 合并新增资源定义，保留原索引、路径基准与未知字段

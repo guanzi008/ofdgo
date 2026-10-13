@@ -842,6 +842,12 @@ func changeResource(args []js.Value) (any, error) {
 		case "delete":
 			return currentEditor.DeleteResource(ctx, kind, id)
 		case "bind", "unbind":
+			if kind == "Attachment" {
+				return currentEditor.BindAttachment(ctx, id, args[5].Int(), args[6].String(), action == "bind")
+			}
+			if kind != "Audio" && kind != "Video" {
+				return fmt.Errorf("resource does not support actions")
+			}
 			return currentEditor.BindMedia(ctx, id, args[5].Int(), args[6].String(), action == "bind")
 		case "add", "replace":
 			data, err := bytesFromJS(args[4])

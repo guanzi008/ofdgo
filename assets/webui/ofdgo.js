@@ -752,8 +752,8 @@ resourceElements.Locate.addEventListener("click", () => {
 resourceElements.Add.addEventListener("click", () => {
 	if (!state.editing) return;
 	const kind = resourceElements.Kind.value;
-	if (kind === "Font") { resourceElements.Panel.close(); openFontFile(el.fontInput); }
-	else if (kind === "Image") { resourceElements.Panel.close(); openInsertPanel(); }
+	if (kind === "Font") openFontFile(el.fontInput);
+	else if (kind === "Image") openInsertPanel();
 	else if (kind === "Attachment") openAttachmentDialog("add");
 	else chooseResourceFile("add");
 });
@@ -3144,6 +3144,7 @@ async function insertObject(event) {
 			return;
 		}
 		el.insertPanel.close();
+		if (!item && resourceElements.Panel.open) resourceElements.Panel.close();
 		if (item && doc.revision === state.editorInfo?.revision) {
 			canvasEditor.focus();
 			return;
@@ -4334,6 +4335,7 @@ async function openSelectedFonts(event) {
 		const { saved, changed } = await fontManager.add(fonts);
 		if (changed) {
 			await applyFontChange();
+			if (resourceElements.Panel.open) await resourceTask(loadManagedResources);
 		}
 		setStatus(saved ? "字体已保存" : "字体未保存，仅本次可用");
 	} catch (err) {
@@ -5098,6 +5100,8 @@ function resourceError(message) {
 	if (/still referenced/.test(message)) return "资源仍被引用";
 	if (/unsupported content/.test(message)) return "引用无法确认";
 	if (/empty media|nonempty Audio/.test(message)) return "文件内容为空";
+	if (/image mask .*dimensions differ from source/.test(message)) return "蒙版尺寸不符";
+	if (/image mask contains non-binary pixel/.test(message)) return "蒙版像素不符";
 	return message;
 }
 
@@ -5158,7 +5162,7 @@ function selectManagedResource(item) {
 function updateResourceControls() {
 	const item = resourceManager.selected, editing = state.editing;
 	const disabled = resourceManager.busy || !state.doc || document.body.hasAttribute("aria-busy");
-	const media = item && ["Audio", "Video"].includes(item.kind);
+	const actionable = item && ["Audio", "Video", "Attachment"].includes(item.kind);
 	resourceElements.Add.hidden = resourceElements.Replace.hidden = resourceElements.Delete.hidden = !editing;
 	resourceElements.Rename.hidden = !editing || item?.kind !== "Attachment";
 	resourceElements.Rename.disabled = disabled || item?.kind !== "Attachment";
@@ -5171,8 +5175,8 @@ function updateResourceControls() {
 	resourceElements.Delete.disabled = disabled || !item || item.kind !== "Attachment" && (!item.complete || Boolean(item.references?.length));
 	resourceElements.Delete.title = item?.kind === "Attachment" ? "删除附件" : item?.references?.length ? "资源仍被引用" : "删除资源";
 	resourceElements.Locate.disabled = disabled || !(item?.references?.[Number(resourceElements.Reference.value)]?.page >= 0);
-	resourceElements.Binding.hidden = !editing || !media;
-	resourceElements.Bind.disabled = resourceElements.Unbind.disabled = disabled || !media || !resourceElements.Object.value;
+	resourceElements.Binding.hidden = !editing || !actionable;
+	resourceElements.Bind.disabled = resourceElements.Unbind.disabled = disabled || !actionable || !resourceElements.Object.value;
 }
 
 async function loadResourceTargets() {
@@ -5198,7 +5202,7 @@ async function changeManagedResource(action, item, file) {
 	if (!item || !state.editing) return;
 	releaseResourcePreview();
 	const format = file?.name.includes(".") ? file.name.split(".").at(-1).toUpperCase() : "";
-	const changed = item.kind === "Attachment"
+	const changed = item.kind === "Attachment" && action !== "bind" && action !== "unbind"
 		? await changeDocument("ofdgoChangeAttachment", null, action, item.id, file ? [file.name] : [], file ? [file] : [])
 		: await changeDocument("ofdgoChangeResource", null, action, item.kind, item.id, format, file || null, Number(resourceElements.Page.value), resourceElements.Object.value);
 	if (changed) {

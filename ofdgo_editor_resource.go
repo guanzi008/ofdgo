@@ -17,9 +17,9 @@ package ofdgo
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/xml"
 	"fmt"
+	"image"
 	"path"
 	"slices"
 	"strconv"
@@ -106,30 +106,33 @@ func (e *Editor) ImportMedia(ctx context.Context, kind, format string, data []by
 
 // ReplaceResource 替换当前文档图片、音视频或附件的文件，保留标识和全部使用位置
 // 图片同时清除受影响对象的旧替换图、底纹缩略图及复合预览；字体须使用EmbedFont或ExternalizeFont
+// 图片替换须满足关联蒙版与主图尺寸一致、蒙版像素为不透明黑白二值的要求
 // 入参: ctx 取消上下文, kind 资源类型, id 资源标识, format 媒体格式，图片按实际数据确定, data 完整文件
 // 返回: error 校验或提交错误，失败时文档不变
 func (e *Editor) ReplaceResource(ctx context.Context, kind, id, format string, data []byte) error {
 	if kind == "Font" {
 		return fmt.Errorf("use font binding operations for fonts")
 	}
-	return e.changeResource(ctx, kind, id, func(reader *Reader, item ResourceInfo, target editorFontText, changes map[string][]byte) error {
+	return e.changeResource(ctx, kind, id, func(catalog *resourceCatalog, item ResourceInfo, changes map[string][]byte) error {
+		reader := catalog.scan.reader
+		target := catalog.nodes[item.Kind+"/"+item.ID]
 		if len(data) == 0 {
 			return fmt.Errorf("empty media data")
 		}
 		if kind == "Image" {
-			_, actual, err := decodeImageDataContext(ctx, data)
+			img, actual, err := decodeImagePixelsContext(ctx, data)
 			if err != nil {
+				return err
+			}
+			if err := validateResourceImageMask(ctx, catalog, item.ID, img); err != nil {
 				return err
 			}
 			format = actual
 		}
 		if item.Size == uint64(len(data)) && strings.EqualFold(item.Format, strings.TrimSpace(format)) {
-			digest, err := outputResourceDigest(ctx, reader, nil, item.File, make([]byte, 32<<10))
-			if err != nil {
+			equal, err := packageDataEqual(ctx, reader, item.File, data)
+			if err != nil || equal {
 				return err
-			}
-			if digest == sha256.Sum256(data) {
-				return nil
 			}
 		}
 		name := packageAvailableName(reader, changes, path.Join(e.packageDirectory(), "Res", "Media", "Media_"+item.ID))
@@ -167,7 +170,7 @@ func (e *Editor) DeleteResource(ctx context.Context, kind, id string) error {
 // changeResource 校验引用后在独立快照中修改声明，借用既有版本隔离和历史提交路径
 // 入参: ctx 取消上下文, kind 资源类型, id 标识, replace 替换操作，nil表示删除, data 附件替换数据
 // 返回: error 引用、结构或提交错误
-func (e *Editor) changeResource(ctx context.Context, kind, id string, replace func(*Reader, ResourceInfo, editorFontText, map[string][]byte) error, data []byte) error {
+func (e *Editor) changeResource(ctx context.Context, kind, id string, replace func(*resourceCatalog, ResourceInfo, map[string][]byte) error, data []byte) error {
 	reader, err := e.ReaderContext(ctx)
 	if err != nil {
 		return err
@@ -176,7 +179,7 @@ func (e *Editor) changeResource(ctx context.Context, kind, id string, replace fu
 	if err != nil {
 		return err
 	}
-	item, err := catalog.find(kind, id)
+	item, err := findResource(catalog.items, kind, id)
 	if err != nil {
 		return err
 	}
@@ -191,13 +194,17 @@ func (e *Editor) changeResource(ctx context.Context, kind, id string, replace fu
 		if err != nil {
 			return err
 		}
+		revision := working.Revision()
 		if replace == nil {
 			err = working.DeleteAttachment(item.ID)
 		} else {
-			err = working.ReplaceAttachment(item.ID, data)
+			err = working.replaceAttachment(ctx, item.ID, data)
 		}
 		if err != nil {
 			return err
+		}
+		if working.Revision() == revision {
+			return ctx.Err()
 		}
 		reader, err = working.ReaderContext(ctx)
 		if err != nil {
@@ -213,7 +220,7 @@ func (e *Editor) changeResource(ctx context.Context, kind, id string, replace fu
 			node = node.parent
 		}
 		changes[target.file.name] = editorPatchXML(target.file.data, []editorXMLPatch{{start: node.start, end: node.end}})
-	} else if err := replace(reader, item, target, changes); err != nil {
+	} else if err := replace(catalog, item, changes); err != nil {
 		return err
 	}
 	if len(changes) == 0 {
@@ -231,6 +238,65 @@ func (e *Editor) changeResource(ctx context.Context, kind, id string, replace fu
 		return err
 	}
 	return e.commitResourceSnapshot(ctx, reader)
+}
+
+// validateResourceImageMask 校验图片替换涉及的全部蒙版引用，复用尺寸和二值像素校验结果
+// 入参: ctx 取消上下文, catalog 当前文档资源, id 替换图片标识, replacement 新图片
+// 返回: error 资源、尺寸、像素或取消错误
+func validateResourceImageMask(ctx context.Context, catalog *resourceCatalog, id string, replacement image.Image) error {
+	sizes := map[string]image.Point{id: replacement.Bounds().Size()}
+	validated := make(map[string]image.Point)
+	read := func(id string) ([]byte, error) {
+		item, err := findResource(catalog.items, "Image", id)
+		if err != nil {
+			return nil, err
+		}
+		return catalog.scan.reader.readFileViewContext(ctx, item.File)
+	}
+	for _, entry := range catalog.images {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		source, mask := editorResourceID(entry.node.attr("ResourceID")), editorResourceID(entry.node.attr("ImageMask"))
+		if mask == "" || source != id && mask != id {
+			continue
+		}
+		size, ok := sizes[source]
+		if !ok {
+			data, err := read(source)
+			if err != nil {
+				return err
+			}
+			config, _, err := decodeImageConfigDataContext(ctx, data)
+			if err != nil {
+				return err
+			}
+			size = image.Pt(config.Width, config.Height)
+			sizes[source] = size
+		}
+		if previous, ok := validated[mask]; ok {
+			if previous != size {
+				return fmt.Errorf("image mask %s dimensions differ from source %s", mask, source)
+			}
+			continue
+		}
+		img := replacement
+		if mask != id {
+			data, err := read(mask)
+			if err != nil {
+				return err
+			}
+			img, _, err = decodeImageDataContext(ctx, data)
+			if err != nil {
+				return err
+			}
+		}
+		if err := validateImageMask(ctx, img, size); err != nil {
+			return fmt.Errorf("image object %s in %s: %w", entry.node.attr("ID"), entry.file.name, err)
+		}
+		validated[mask] = size
+	}
+	return ctx.Err()
 }
 
 // invalidateResourcePreviews 沿绘制参数和复合引用移除图片变化后失效的替换图及底纹预览
@@ -349,6 +415,46 @@ func (e *Editor) BindMedia(ctx context.Context, id string, page int, object stri
 	if kind == "" {
 		return fmt.Errorf("audio or video resource not found")
 	}
+	return e.bindResourceAction(ctx, kind, id, page, object, bind)
+}
+
+// BindAttachment 追加或移除指定图元的附件点击动作，附件标识须属于当前文档及所选版本
+// 保留其他动作及已有附件动作的区域和窗口设置，重复操作不产生修改
+// 入参: ctx 取消上下文, id 附件标识, page 零基页码, object 图元标识, bind 为false时移除该附件的点击动作
+// 返回: error 附件、对象或提交错误
+func (e *Editor) BindAttachment(ctx context.Context, id string, page int, object string, bind bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	attachments, err := e.Attachments()
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, attachment := range attachments {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if attachment.ID == id {
+			if found {
+				return fmt.Errorf("duplicate attachment ID: %s", id)
+			}
+			found = true
+		}
+	}
+	if !found {
+		return fmt.Errorf("attachment not found: %s", id)
+	}
+	return e.bindResourceAction(ctx, "Attachment", id, page, object, bind)
+}
+
+// bindResourceAction 修改单个资源的点击动作，沿用图元编辑的版本隔离及撤销机制
+// 入参: ctx 取消上下文, kind 资源类型, id 资源标识, page 零基页码, object 图元标识, bind 是否绑定
+// 返回: error 对象或提交错误
+func (e *Editor) bindResourceAction(ctx context.Context, kind, id string, page int, object string, bind bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	target, err := e.Object(page, object)
 	if err != nil {
 		return err
@@ -368,15 +474,29 @@ func (e *Editor) BindMedia(ctx context.Context, id string, page int, object stri
 	}
 	found := false
 	actions = slices.DeleteFunc(slices.Clone(actions), func(action Action) bool {
-		match := action.Event == "CLICK" && (action.Sound != nil && sameResourceID(action.Sound.ResourceID, id) || action.Movie != nil && sameResourceID(action.Movie.ResourceID, id) && (action.Movie.Operator == "" || action.Movie.Operator == "Play"))
+		if action.Event != "CLICK" {
+			return false
+		}
+		match := false
+		switch kind {
+		case "Attachment":
+			match = action.GotoA != nil && action.GotoA.AttachID == id
+		case "Audio":
+			match = action.Sound != nil && sameResourceID(action.Sound.ResourceID, id)
+		case "Video":
+			match = action.Movie != nil && sameResourceID(action.Movie.ResourceID, id) && (action.Movie.Operator == "" || action.Movie.Operator == "Play")
+		}
 		found = found || match
 		return match && !bind
 	})
 	if bind && !found {
 		action := Action{Event: "CLICK"}
-		if kind == "Audio" {
+		switch kind {
+		case "Attachment":
+			action.GotoA = &GotoA{AttachID: id}
+		case "Audio":
 			action.Sound = &Sound{ResourceID: id}
-		} else {
+		case "Video":
 			action.Movie = &Movie{ResourceID: id, Operator: "Play"}
 		}
 		actions = append(actions, action)

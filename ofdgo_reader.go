@@ -39,6 +39,7 @@ type Reader struct {
 	resourcesRead             map[string]bool
 	resourceFiles             map[string]string
 	imageCatalog              []ImageInfo
+	resourceInfoCache         []ResourceInfo
 	mediaCache                map[string]MultiMedia
 	fontCache                 map[string]*Font
 	fontResourcesRead         bool
@@ -658,6 +659,7 @@ func (r *Reader) initRootContext(ctx context.Context) error {
 	r.documentRoot, r.RootDir = "", ""
 	r.relatedPending, r.fontResourcesRead = false, false
 	r.imageCatalog = nil
+	r.resourceInfoCache = nil
 	r.Stamps, r.Annots, r.annotationFiles = nil, nil, nil
 	r.ResMap = make(map[string]string)
 	r.resourcesRead = make(map[string]bool)

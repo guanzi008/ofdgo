@@ -768,6 +768,9 @@ func (e *Editor) sourceReader(ctx context.Context, progress editorProgress) (*Re
 			reader.files = make(map[string][]byte)
 		}
 		maps.Copy(reader.files, parts)
+		if len(parts) != 0 {
+			reader.resourceInfoCache = nil
+		}
 		reader.encryption = e.encryption
 		for name := range reader.pageHeaderCache {
 			if _, changed := parts[name]; changed {

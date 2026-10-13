@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"maps"
@@ -163,11 +164,33 @@ func (e *Editor) RenameAttachment(id, name string) error {
 }
 
 // ReplaceAttachment 替换附件内容，使用独立资源避免影响共享引用，保留名称和格式，不新增日期
+// 内容相同时不修改文件及撤销记录
 // 入参: id 附件标识, data 文件数据，调用后可复用
 // 返回: error 附件结构或提交错误
 func (e *Editor) ReplaceAttachment(id string, data []byte) error {
+	return e.replaceAttachment(context.Background(), id, data)
+}
+
+// replaceAttachment 比较附件内容并提交替换，传递内容读取过程中的取消状态
+// 入参: ctx 取消上下文, id 附件标识, data 新文件数据
+// 返回: error 读取、取消或提交错误
+func (e *Editor) replaceAttachment(ctx context.Context, id string, data []byte) error {
 	var maximum int
+	changed := false
 	err := e.editAttachment(id, func(fragment []byte, node *editorXML, parts map[string][]byte) ([]byte, error) {
+		if child := node.child("FileLoc"); child != nil {
+			location := strings.TrimSpace(editorImportText(fragment, child))
+			if location != "" {
+				name := e.source.reader.documentRoot
+				if external := strings.TrimSpace(e.source.document.Attachments.Path); external != "" {
+					name = e.source.reader.ResPath(external)
+				}
+				equal, err := packageDataEqual(ctx, e.source.reader, resolveResourcePath(name, "", location), data)
+				if err != nil || equal {
+					return fragment, err
+				}
+			}
+		}
 		var err error
 		maximum, err = e.sourceMaxID(nil)
 		if err != nil {
@@ -194,12 +217,15 @@ func (e *Editor) ReplaceAttachment(id string, data []byte) error {
 			return nil, err
 		}
 		parts[file] = bytes.Clone(data)
+		changed = true
 		return fragment, nil
 	})
 	if err != nil {
 		return err
 	}
-	e.maxID, e.source.idsReady = maximum+1, true
+	if changed {
+		e.maxID, e.source.idsReady = maximum+1, true
+	}
 	return nil
 }
 

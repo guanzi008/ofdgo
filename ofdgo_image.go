@@ -183,6 +183,18 @@ func decodeImageDataContext(ctx context.Context, data []byte) (img image.Image, 
 	return nil, "", err
 }
 
+// decodeImagePixelsContext 完整解码图片，确保像素可读取并传递取消状态
+// 入参: ctx 取消上下文, data 图片编码数据
+// 返回: image.Image 解码像素, string 图片格式, error 解码或取消错误
+func decodeImagePixelsContext(ctx context.Context, data []byte) (image.Image, string, error) {
+	img, format, err := decodeImageDataContext(ctx, data)
+	if err != nil {
+		return nil, format, err
+	}
+	pixels, err := imagePixelDataContext(ctx, img)
+	return pixels, format, err
+}
+
 // isJPEGData 判断是否为JPEG图片数据
 // 入参: data 图片数据
 // 返回: bool 是否为JPEG图片数据

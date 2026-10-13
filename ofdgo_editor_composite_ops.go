@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"image"
 	"maps"
 	"slices"
 )
@@ -122,20 +121,20 @@ func (e *Editor) ReplaceCompositeImage(page int, path ObjectPath, index int, dat
 			return fmt.Errorf("composite member is not an image")
 		}
 		object := node.object
+		decoded, _, err := decodeImagePixelsContext(context.Background(), data)
+		if err != nil {
+			return err
+		}
 		if object.ImageObject.ImageMask != "" {
-			config, _, err := decodeImageConfigData(data)
-			if err != nil {
-				return err
-			}
 			mask, err := renderer.ImageResource(object.ImageObject.ImageMask)
 			if err != nil {
 				return err
 			}
-			if err := validateImageMask(context.Background(), mask, image.Pt(config.Width, config.Height)); err != nil {
+			if err := validateImageMask(context.Background(), mask, decoded.Bounds().Size()); err != nil {
 				return err
 			}
 		}
-		id, err := e.AddImage(data)
+		id, err := e.addDecodedImage(data, decoded)
 		if err != nil {
 			return err
 		}

@@ -665,6 +665,7 @@ func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) err
 
 // ReplaceImage 替换图片资源，保留对象标识和绘制顺序，一次撤销恢复资源及布局
 // 更换主图资源时清除旧替换图引用，保留蒙版及其他绘制属性
+// 完整校验图片像素，失败时不修改文档或注册新资源
 // 入参: page 页面索引, id 图片对象标识, data AddImage支持的图片数据, fit 为contain、cover或空，空值保留原变换和裁剪
 // 返回: error 错误信息
 func (e *Editor) ReplaceImage(page int, id string, data []byte, fit string) error {
@@ -675,29 +676,31 @@ func (e *Editor) ReplaceImage(page int, id string, data []byte, fit string) erro
 	if object.Type != "ImageObject" {
 		return fmt.Errorf("object %q is not an image", id)
 	}
-	if object.ImageObject.ImageMask != "" {
-		config, _, err := decodeImageConfigData(data)
-		if err != nil {
-			return err
-		}
-		if err := e.validateImageMask(object.ImageObject.ImageMask, image.Pt(config.Width, config.Height)); err != nil {
-			return err
-		}
-	}
-	resource, err := e.AddImage(data)
+	decoded, _, err := decodeImagePixelsContext(context.Background(), data)
 	if err != nil {
 		return err
 	}
-	if !sameResourceID(object.ImageObject.ResourceID, resource) {
-		object.ImageObject.Substitution = ""
-	}
-	object.ImageObject.ResourceID = resource
-	if fit != "" {
-		if err := e.fitImage(&object.ImageObject, fit); err != nil {
+	if object.ImageObject.ImageMask != "" {
+		if err := e.validateImageMask(object.ImageObject.ImageMask, decoded.Bounds().Size()); err != nil {
 			return err
 		}
 	}
-	return e.UpdateObject(page, id, object)
+	return e.Transaction(func(e *Editor) error {
+		resource, err := e.addDecodedImage(data, decoded)
+		if err != nil {
+			return err
+		}
+		if !sameResourceID(object.ImageObject.ResourceID, resource) {
+			object.ImageObject.Substitution = ""
+		}
+		object.ImageObject.ResourceID = resource
+		if fit != "" {
+			if err := e.fitImage(&object.ImageObject, fit); err != nil {
+				return err
+			}
+		}
+		return e.UpdateObject(page, id, object)
+	})
 }
 
 // AlignObject 将对象对齐页面，文字采用实际字形范围，路径和图片采用对象边界

@@ -15,12 +15,10 @@
 package ofdgo
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
 	"image"
-	"io"
 	"math"
 )
 
@@ -127,14 +125,7 @@ func (e *Editor) addImagePage(ctx context.Context, data []byte, options ImagePag
 	var decoded image.Image
 	checksum := sha256.Sum256(data)
 	if !verified[checksum] {
-		if format == "bmp" || format == "tiff" {
-			decoded, _, err = decodeImageDataContext(ctx, data)
-		} else {
-			decoded, _, err = image.Decode(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
-		}
-		if cancelErr := ctx.Err(); cancelErr != nil {
-			return 0, cancelErr
-		}
+		decoded, _, err = decodeImagePixelsContext(ctx, data)
 		if err != nil {
 			return 0, err
 		}
