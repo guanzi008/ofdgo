@@ -33,6 +33,14 @@ type ResourceTarget struct {
 	Bound bool   `json:"bound"`
 }
 
+// editorResourcePreview 记录失效传播节点及修改片段，不保留原始XML解析树
+type editorResourcePreview struct {
+	parent   *editorResourcePreview
+	resource string
+	file     string
+	patches  []editorXMLPatch
+}
+
 // Resources 获取当前编辑快照的资源，覆盖正文、模板、注解、图案和复合图元
 // 入参: ctx 取消上下文
 // 返回: []ResourceInfo 资源及引用位置, error 快照或结构错误
@@ -346,7 +354,7 @@ func validateResourceImageMask(ctx context.Context, catalog *resourceCatalog, id
 	return ctx.Err()
 }
 
-// invalidateResourcePreviews 沿字体、颜色、绘制参数和复合引用移除资源变化后失效的替换图及底纹预览
+// invalidateResourcePreviews 单次解析文档结构，沿资源引用传播失效状态并移除旧替换图及底纹预览
 // 入参: ctx 取消上下文, scan 当前文档结构, changes 待提交文件, ids 资源标识
 // 返回: error 解析或取消错误
 func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, changes map[string][]byte, ids ...string) error {
@@ -366,84 +374,123 @@ func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, c
 		return err
 	}
 	defaultCS := strconv.Itoa(doc.CommonData.DefaultCS)
-	affected := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		affected[editorResourceID(id)] = true
-	}
-	for {
-		count := len(affected)
-		for name, file := range scan.files {
-			data, exists := changes[name]
-			if !exists {
-				data = file.data
-			}
-			root, err := parseEditorXMLContext(ctx, data)
-			if err != nil {
+	references := make(map[string][]*editorResourcePreview)
+	for name, file := range scan.files {
+		data, exists := changes[name]
+		if !exists {
+			data = file.data
+		}
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			return err
+		}
+		var visit func(*editorXML, *editorResourcePreview) error
+		visit = func(node *editorXML, parent *editorResourcePreview) error {
+			if err := ctx.Err(); err != nil {
 				return err
 			}
-			var patches []editorXMLPatch
-			var visit func(*editorXML) (bool, error)
-			visit = func(node *editorXML) (bool, error) {
-				if err := ctx.Err(); err != nil {
-					return false, err
-				}
-				if !node.matchesOFD(node.name.Local) {
-					return false, nil
-				}
-				primary := affected[editorResourceID(node.attr("ResourceID"))] || affected[editorResourceID(node.attr("ImageMask"))]
-				changed := primary || affected[editorResourceID(node.attr("Substitution"))] || affected[editorResourceID(node.attr("DrawParam"))] || affected[editorResourceID(node.attr("ColorSpace"))]
-				changed = changed || affected[editorResourceID(node.attr("Font"))]
-				if resourceColorNode(node) && node.attr("ColorSpace") == "" {
-					changed = changed || affected[defaultCS]
-				}
-				if node.matchesOFD("DrawParam") {
-					changed = changed || affected[editorResourceID(node.attr("Relative"))]
-				}
-				if node.matchesOFD("ImageObject") && primary && node.hasAttr("Substitution") {
-					patch, err := editorXMLAttributeChange(data, node, "Substitution", nil)
-					if err != nil {
-						return false, err
-					}
-					patches = append(patches, patch)
-				}
-				for _, child := range node.children {
-					used, err := visit(child)
-					if err != nil {
-						return false, err
-					}
-					changed = changed || used
-				}
-				if changed && node.matchesOFD("CellContent") && node.parent != nil && node.parent.matchesOFD("Pattern") && node.hasAttr("Thumbnail") {
-					patch, err := editorXMLAttributeChange(data, node, "Thumbnail", nil)
-					if err != nil {
-						return false, err
-					}
-					patches = append(patches, patch)
-				}
-				if changed && node.matchesOFD("DrawParam") && node.parent != nil && node.parent.matchesOFD("DrawParams") {
-					affected[editorResourceID(node.attr("ID"))] = true
-				}
-				if changed && node.matchesOFD("CompositeGraphicUnit") && node.parent != nil && node.parent.matchesOFD("CompositeGraphicUnits") {
-					affected[editorResourceID(node.attr("ID"))] = true
+			if !node.matchesOFD(node.name.Local) {
+				return nil
+			}
+			current := parent
+			if node.parent != nil && (node.matchesOFD("DrawParam") && node.parent.matchesOFD("DrawParams") || node.matchesOFD("CompositeGraphicUnit") && node.parent.matchesOFD("CompositeGraphicUnits")) {
+				current = &editorResourcePreview{parent: parent, resource: node.attr("ID"), file: name}
+				if node.matchesOFD("CompositeGraphicUnit") {
 					for _, key := range []string{"Thumbnail", "Substitution"} {
 						if child := node.child(key); child != nil {
-							patches = append(patches, editorXMLPatch{start: child.start, end: child.end})
+							current.patches = append(current.patches, editorXMLPatch{start: child.start, end: child.end})
 						}
 					}
 				}
-				return changed, nil
 			}
-			if _, err := visit(root); err != nil {
-				return err
+			if node.matchesOFD("CellContent") && node.parent != nil && node.parent.matchesOFD("Pattern") && node.hasAttr("Thumbnail") {
+				patch, err := editorXMLAttributeChange(data, node, "Thumbnail", nil)
+				if err != nil {
+					return err
+				}
+				current = &editorResourcePreview{parent: parent, file: name, patches: []editorXMLPatch{patch}}
 			}
-			if len(patches) != 0 {
-				changes[name] = editorPatchXML(data, patches)
+			if node.matchesOFD("ImageObject") && node.hasAttr("Substitution") {
+				patch, err := editorXMLAttributeChange(data, node, "Substitution", nil)
+				if err != nil {
+					return err
+				}
+				preview := &editorResourcePreview{file: name, patches: []editorXMLPatch{patch}}
+				for _, key := range []string{"ResourceID", "ImageMask"} {
+					if id := editorResourceID(node.attr(key)); id != "" {
+						references[id] = append(references[id], preview)
+					}
+				}
 			}
-		}
-		if len(affected) == count {
+			if current != nil {
+				for _, key := range []string{"ResourceID", "ImageMask", "Substitution", "DrawParam", "ColorSpace", "Font"} {
+					if id := editorResourceID(node.attr(key)); id != "" {
+						references[id] = append(references[id], current)
+					}
+				}
+				if resourceColorNode(node) && node.attr("ColorSpace") == "" {
+					references[defaultCS] = append(references[defaultCS], current)
+				}
+				if node.matchesOFD("DrawParam") {
+					if id := editorResourceID(node.attr("Relative")); id != "" {
+						references[id] = append(references[id], current)
+					}
+				}
+			}
+			for _, child := range node.children {
+				if err := visit(child, current); err != nil {
+					return err
+				}
+			}
 			return nil
 		}
+		if err := visit(root, nil); err != nil {
+			return err
+		}
 	}
+	affected := make(map[*editorResourcePreview]bool)
+	patches := make(map[string][]editorXMLPatch)
+	visited := make(map[string]bool)
+	pending := slices.Clone(ids)
+	for len(pending) != 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		id := editorResourceID(pending[0])
+		pending = pending[1:]
+		if id == "" || visited[id] {
+			continue
+		}
+		visited[id] = true
+		for _, preview := range references[id] {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			for current := preview; current != nil && !affected[current]; current = current.parent {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				affected[current] = true
+				if current.resource != "" {
+					pending = append(pending, current.resource)
+				}
+				if len(current.patches) != 0 {
+					patches[current.file] = append(patches[current.file], current.patches...)
+				}
+			}
+		}
+	}
+	for name, edits := range patches {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		data, exists := changes[name]
+		if !exists {
+			data = scan.files[name].data
+		}
+		changes[name] = editorPatchXML(data, edits)
+	}
+	return ctx.Err()
 }
 
 // BindMedia 追加或移除指定图元的音视频点击播放动作，保留停止、暂停等其他动作
