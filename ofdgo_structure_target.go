@@ -14,14 +14,19 @@
 
 package ofdgo
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // structureVisitor 按引用收集图元及复合图元成员的原文和页面范围
 type structureVisitor struct {
-	ctx      context.Context
-	renderer *Renderer
-	targets  map[string]*StructureTarget
-	stack    []*StructureTarget
+	ctx        context.Context
+	renderer   *Renderer
+	targets    map[string]*StructureTarget
+	stack      []*StructureTarget
+	text       map[*StructureTarget]*strings.Builder
+	boundsOnly bool
 }
 
 // BeginObject 记录当前图元的标引目标，使复合图元引用覆盖其成员
@@ -58,7 +63,7 @@ func (v *structureVisitor) IncludeHidden() bool { return true }
 // 返回: bool 始终为false
 func (v *structureVisitor) SkipClips() bool { return false }
 
-// DrawObject 按继承变换和裁剪度量被引用的图元，不解码图片像素
+// DrawObject 按继承变换和裁剪度量被引用的图元，按需汇总原文，不解码图片像素
 // 入参: object 页面图元, state 继承状态
 // 返回: error 度量或取消错误
 func (v *structureVisitor) DrawObject(object *GraphicObject, state RenderState) error {
@@ -81,7 +86,7 @@ func (v *structureVisitor) DrawObject(object *GraphicObject, state RenderState) 
 		box = result.Bounds
 	}
 	var text string
-	if object.Type == "TextObject" {
+	if !v.boundsOnly && object.Type == "TextObject" {
 		text = object.TextObject.Text()
 	}
 	for _, target := range v.stack {
@@ -90,10 +95,22 @@ func (v *structureVisitor) DrawObject(object *GraphicObject, state RenderState) 
 		}
 		target.Bounds = unionTextBox(target.Bounds, box)
 		if text != "" {
-			if target.Text != "" {
-				target.Text += "\n"
+			if target.Text == "" {
+				target.Text = text
+				continue
 			}
-			target.Text += text
+			if v.text == nil {
+				v.text = make(map[*StructureTarget]*strings.Builder)
+			}
+			builder := v.text[target]
+			if builder == nil {
+				builder = new(strings.Builder)
+				builder.WriteString(target.Text)
+				v.text[target] = builder
+			}
+			builder.WriteByte('\n')
+			builder.WriteString(text)
+			target.Text = builder.String()
 		}
 	}
 	return nil

@@ -151,7 +151,7 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 		for id := range wanted {
 			targets[id] = &StructureTarget{ID: id}
 		}
-		visitor := &structureVisitor{ctx: ctx, renderer: &view, targets: targets}
+		visitor := &structureVisitor{ctx: ctx, renderer: &view, targets: targets, boundsOnly: true}
 		if err := view.WalkPage(content, visitor); err != nil {
 			return nil, err
 		}
