@@ -1758,7 +1758,19 @@ body[data-hide-meta] .meta-panel {
 }
 
 .settings-dialog .form-status:not(:empty) {
-	margin-top: 12px;
+	margin-bottom: 12px;
+}
+
+.settings-dialog .info-line {
+	grid-template-columns: 4em minmax(0, 1fr);
+}
+
+.settings-dialog .info-label {
+	text-align-last: justify;
+}
+
+.settings-dialog .info-value {
+	overflow-wrap: anywhere;
 }
 
 .settings-detail {
