@@ -353,6 +353,35 @@
 				<div class="form-actions"><div id="paragraphStatus" class="form-status" role="status"></div><button id="paragraphCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
+		<dialog id="resourcePanel" class="form-dialog resource-dialog" aria-labelledby="resourceTitle">
+			<form id="resourceForm">
+				<h2 id="resourceTitle" class="form-title">资源管理</h2>
+				<div class="form-row"><label for="resourceKind">类型</label><select id="resourceKind"><option value="Font">字体</option><option value="Image">图片</option><option value="Audio">音频</option><option value="Video">视频</option><option value="Attachment">附件</option></select></div>
+				<div class="resource-heading" aria-hidden="true"><span>名称</span><span>大小</span><span>引用</span></div>
+				<div class="resource-list-container">
+					<div id="resourceList" class="resource-list" role="listbox" aria-label="资源列表"></div>
+					<div id="resourceEmpty" class="resource-empty" hidden>暂无资源</div>
+				</div>
+				<div class="form-row"><label for="resourceReference">引用</label><select id="resourceReference" aria-label="引用位置"></select></div>
+				<div class="resource-actions">
+					<button id="resourceAdd" class="button" type="button" title="添加资源" aria-label="添加资源">添加</button>
+					<button id="resourcePreview" class="button" type="button">预览</button>
+					<button id="resourceExport" class="button" type="button">导出</button>
+					<button id="resourceReplace" class="button" type="button">替换</button>
+					<button id="resourceDelete" class="button" type="button">删除</button>
+					<button id="resourceLocate" class="button" type="button">定位</button>
+					<button id="resourceClose" class="button" type="button">关闭</button>
+				</div>
+				<div id="resourceBinding" class="resource-binding" hidden>
+					<div class="form-row"><label for="resourcePage">页码</label><select id="resourcePage"></select></div>
+					<div class="form-row"><label for="resourceObject">图元</label><select id="resourceObject"></select></div>
+					<div class="form-actions"><button id="resourceUnbind" class="button" type="button">解绑</button><button id="resourceBind" class="button" type="button">绑定</button></div>
+				</div>
+				<div id="resourceViewer" class="resource-viewer" hidden></div>
+				<div id="resourceStatus" class="form-status" role="status"></div>
+				<input id="resourceFile" type="file" hidden>
+			</form>
+		</dialog>
 		<dialog id="documentPanel" class="form-dialog document-dialog" aria-labelledby="documentTitle">
 			<form id="documentForm">
 				<h2 id="documentTitle" class="form-title">文档管理</h2>
@@ -658,6 +687,7 @@
 				<div class="panel-row">
 					<div class="panel-title compact">文档</div>
 					<div class="panel-actions">
+						<button id="resourceManageButton" class="small-button" type="button" title="资源管理" aria-label="资源管理" aria-haspopup="dialog" aria-controls="resourcePanel" disabled>资源</button>
 						<button id="versionManageButton" class="small-button" type="button" title="版本管理" aria-label="版本管理" aria-haspopup="dialog" aria-controls="versionPanel" hidden>版本</button>
 						<button id="documentManageButton" class="small-button" type="button" title="文档管理" aria-label="文档管理" aria-haspopup="dialog" aria-controls="documentPanel" hidden>管理</button>
 					</div>

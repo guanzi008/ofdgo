@@ -29,7 +29,7 @@ self.onmessage = ({ data }) => {
 		operations.get(data.id)?.abort();
 		return;
 	}
-	if (data.name === "ofdgoImportImages" || data.name === "ofdgoExportImages" || data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" || data.name === "ofdgoConvertPDF" || data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoExportMedia" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoSaveSigned" || data.name === "ofdgoImportPages") {
+	if (data.name === "ofdgoImportImages" || data.name === "ofdgoExportImages" || data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" || data.name === "ofdgoConvertPDF" || data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoExportResource" || data.name === "ofdgoExportMedia" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoSaveSigned" || data.name === "ofdgoImportPages") {
 		operations.set(data.id, new AbortController());
 	}
 	pending = pending.then(() => data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" ? handleBatchMessage(data) : handleMessage(data));
@@ -187,6 +187,9 @@ async function handleMessage({ id, name, args }) {
 				try { return { bytes: new Uint8Array(reader.readAsArrayBuffer(files[index])) }; }
 				catch (err) { return { error: err.message }; }
 			};
+		}
+		if (name === "ofdgoChangeResource" && (args[0] === "add" || args[0] === "replace")) {
+			args[4] = new Uint8Array(new FileReaderSync().readAsArrayBuffer(args[4]));
 		}
 		if (name === "ofdgoImportImages") {
 			const files = args[0], reader = new FileReaderSync();

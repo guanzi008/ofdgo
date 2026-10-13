@@ -110,11 +110,11 @@ func (e *Editor) changeFont(ctx context.Context, id string, mode FontMode, file 
 		return err
 	}
 	if mode == FontExternal {
-		if err := pruneExternalFontFiles(ctx, reader, scan.fonts[editorResourceID(id)].location); err != nil {
+		if err := pruneUnreferencedFiles(ctx, reader, scan.fonts[editorResourceID(id)].location); err != nil {
 			return err
 		}
 	}
-	return e.commitFontSnapshot(ctx, reader)
+	return e.commitResourceSnapshot(ctx, reader)
 }
 
 // ProcessFonts 处理包内各文档的字体，逐字体保留不能转换的资源，取消或包结构错误时整体不提交
@@ -220,10 +220,10 @@ func (e *Editor) ProcessFontsWithOptions(ctx context.Context, options FontProces
 		if err := progress("commit", 0, 1); err != nil {
 			return nil, err
 		}
-		if err := pruneExternalFontFiles(ctx, reader, externalFiles...); err != nil {
+		if err := pruneUnreferencedFiles(ctx, reader, externalFiles...); err != nil {
 			return nil, err
 		}
-		err = e.commitFontSnapshot(ctx, reader)
+		err = e.commitResourceSnapshot(ctx, reader)
 	}
 	return report, err
 }
@@ -613,10 +613,10 @@ func externalFontName(name string) string {
 	return name
 }
 
-// commitFontSnapshot 重新建立资源缓存并记录包快照，避免旧字体缓存跨撤销或重做复用
+// commitResourceSnapshot 重建资源缓存并记录包快照，避免旧缓存跨撤销或重做复用
 // 入参: ctx 取消上下文, reader 修改后的独立快照
 // 返回: error 重建错误
-func (e *Editor) commitFontSnapshot(ctx context.Context, reader *Reader) error {
+func (e *Editor) commitResourceSnapshot(ctx context.Context, reader *Reader) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -632,18 +632,18 @@ func (e *Editor) commitFontSnapshot(ctx context.Context, reader *Reader) error {
 		return err
 	}
 	before := e.transactionSnapshot()
-	e.restoreFontSnapshot(*next)
+	e.restoreResourceSnapshot(*next)
 	if change := e.recordChange(); change != nil {
 		after := e.transactionSnapshot()
-		change.undo = func(e *Editor) { e.restoreFontSnapshot(before) }
-		change.redo = func(e *Editor) { e.restoreFontSnapshot(after) }
+		change.undo = func(e *Editor) { e.restoreResourceSnapshot(before) }
+		change.redo = func(e *Editor) { e.restoreResourceSnapshot(after) }
 	}
 	return nil
 }
 
-// restoreFontSnapshot 恢复字体修改前后的包状态，保留运行配置与撤销队列
+// restoreResourceSnapshot 恢复资源修改前后的包状态，保留运行配置与撤销队列
 // 入参: state 包快照
-func (e *Editor) restoreFontSnapshot(state Editor) {
+func (e *Editor) restoreResourceSnapshot(state Editor) {
 	state = state.transactionSnapshot()
 	state.history, state.historyIndex, state.historyLimit = e.history, e.historyIndex, e.historyLimit
 	state.serial, state.revision = e.serial, e.revision
@@ -657,10 +657,10 @@ func (e *Editor) restoreFontSnapshot(state Editor) {
 	*e = state
 }
 
-// pruneExternalFontFiles 流式核对全包字体引用并同步版本清单，保留附件及无法确认的扩展引用
-// 入参: ctx 取消上下文, reader 包快照, candidates 待清理的字体路径
+// pruneUnreferencedFiles 流式核对全包文件引用并同步版本清单，保留附件及无法确认的扩展引用
+// 入参: ctx 取消上下文, reader 包快照, candidates 待清理的文件路径
 // 返回: error 取消或读取错误
-func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...string) error {
+func pruneUnreferencedFiles(ctx context.Context, reader *Reader, candidates ...string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -707,12 +707,12 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 			}
 			if classifyOFDNamespace(node.Name.Space) == ofdXMLUnknown || slices.Contains([]string{"CustomTags", "Extensions", "ExtendData", "Data"}, node.Name.Local) {
 				uncertain = true
-				return fmt.Errorf("unknown font file dependencies in %s", name)
+				return fmt.Errorf("unknown file dependencies in %s", name)
 			}
 			for _, attr := range node.Attr {
 				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != "http://www.w3.org/XML/1998/namespace" {
 					uncertain = true
-					return fmt.Errorf("unknown font file dependencies in %s", name)
+					return fmt.Errorf("unknown file dependencies in %s", name)
 				}
 			}
 			return nil

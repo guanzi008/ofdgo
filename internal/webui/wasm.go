@@ -221,6 +221,10 @@ func RunWASM() {
 	registerAsyncCallback("ofdgoExportDocument", exportDocument)
 	registerAsyncCallback("ofdgoExportAttachment", exportAttachment)
 	registerAsyncCallback("ofdgoExportMedia", exportMedia)
+	registerCallback("ofdgoResources", documentResources)
+	registerCallback("ofdgoResourceTargets", resourceTargets)
+	registerCallback("ofdgoChangeResource", changeResource)
+	registerAsyncCallback("ofdgoExportResource", exportResource)
 	registerCallback("ofdgoImages", documentImages)
 	registerAsyncCallback("ofdgoExportImages", exportImages)
 	registerCallback("ofdgoMatchFontFiles", matchFontFiles)
@@ -792,6 +796,93 @@ func exportMedia(args []js.Value) (any, error) {
 		return nil, err
 	}
 	return successResult(map[string]any{"format": media.Format, "kind": media.Type}), nil
+}
+
+// documentResources 读取当前文档和版本的资源及引用，不执行媒体动作
+// 入参: args 无参数
+// 返回: any 资源列表, error 读取错误
+func documentResources(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	return currentSession.Reader.Resources(context.Background())
+}
+
+// resourceTargets 列出当前页可由普通对象接口编辑动作的图元
+// 入参: args 零基页码
+// 返回: any 图元列表, error 页面读取错误
+func resourceTargets(args []js.Value) (any, error) {
+	if currentEditor == nil || len(args) != 1 {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	items, err := currentSession.Renderer.StructureObjects(args[0].Int())
+	if err != nil {
+		return nil, err
+	}
+	result := items[:0]
+	for _, item := range items {
+		if _, err := currentEditor.Object(args[0].Int(), item.ID); err == nil {
+			result = append(result, item)
+		}
+	}
+	return result, nil
+}
+
+// changeResource 调用库层资源编辑，浏览器不改写资源声明和包路径
+// 入参: args 操作、类型、标识、格式、数据、页码和图元标识
+// 返回: any 编辑状态, error 资源操作错误
+func changeResource(args []js.Value) (any, error) {
+	if len(args) != 7 {
+		return nil, fmt.Errorf("invalid resource arguments")
+	}
+	return changeAtomicObjects(func() error {
+		ctx := context.Background()
+		action, kind, id := args[0].String(), args[1].String(), args[2].String()
+		switch action {
+		case "delete":
+			return currentEditor.DeleteResource(ctx, kind, id)
+		case "bind", "unbind":
+			return currentEditor.BindMedia(ctx, id, args[5].Int(), args[6].String(), action == "bind")
+		case "add", "replace":
+			data, err := bytesFromJS(args[4])
+			if err != nil {
+				return err
+			}
+			if action == "add" {
+				_, err = currentEditor.ImportMedia(ctx, kind, args[3].String(), data)
+				return err
+			}
+			return currentEditor.ReplaceResource(ctx, kind, id, args[3].String(), data)
+		default:
+			return fmt.Errorf("unsupported resource action")
+		}
+	})
+}
+
+// exportResource 分块导出当前资源的原始文件，不接收任意包路径
+// 入参: args 类型及标识的JSON数组、分块接收函数
+// 返回: any 输出格式, error 读取或写入错误
+func exportResource(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) != 2 {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	var key [2]string
+	if err := json.Unmarshal([]byte(args[0].String()), &key); err != nil {
+		return nil, err
+	}
+	stream, err := currentSession.Reader.OpenResource(context.Background(), key[0], key[1])
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+	writer := bufio.NewWriterSize(exportWriter{write: args[1]}, 1<<20)
+	if _, err := io.Copy(writer, stream); err != nil {
+		return nil, err
+	}
+	if err := writer.Flush(); err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{"mime": "application/octet-stream"}), nil
 }
 
 // svgFontData 读取SVG字体资源

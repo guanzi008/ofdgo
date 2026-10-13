@@ -94,7 +94,7 @@ func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byt
 			}
 		}
 	}
-	if err := pruneExternalFontFiles(ctx, view, slices.Collect(maps.Keys(candidates))...); err != nil {
+	if err := pruneUnreferencedFiles(ctx, view, slices.Collect(maps.Keys(candidates))...); err != nil {
 		return err
 	}
 	if err := e.subsetPackageFonts(ctx, view, removed, generated); err != nil {

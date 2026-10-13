@@ -23,6 +23,8 @@ const batch = { items: [], formats: [], running: false, canceled: false, worker:
 const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Compression", "FontRow", "FontMode", "Destination", "DPIRow", "DPI", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
 const fontBinding = { font: null, choices: [], sequence: 0 };
 const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name", "SourceRow", "Source", "File", "Hint", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#fontBinding${name}`)]));
+const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Kind", "List", "Empty", "Reference", "Add", "Preview", "Export", "Replace", "Delete", "Locate", "Close", "Binding", "Page", "Object", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
+const resourceManager = { items: [], selected: null, busy: false, sequence: 0, url: null, font: null, fileAction: null };
 
 let wasmPromise = null;
 let remoteDownload = null;
@@ -732,6 +734,56 @@ editorClick(el.paragraphButton, () => {
 el.paragraphCancel.addEventListener("click", () => el.paragraphPanel.close());
 editorClick(el.documentAddButton, () => openCreatePanel(false, true));
 editorClick(el.documentManageButton, openDocumentManagement);
+resourceElements.ManageButton.addEventListener("click", openResourceManagement);
+resourceElements.Close.addEventListener("click", () => resourceElements.Panel.close());
+resourceElements.Form.addEventListener("submit", event => event.preventDefault());
+resourceElements.Panel.addEventListener("cancel", event => { if (resourceManager.busy) event.preventDefault(); });
+resourceElements.Panel.addEventListener("close", () => { resourceManager.sequence++; releaseResourcePreview(); });
+resourceElements.Kind.addEventListener("change", renderResourceList);
+resourceElements.Reference.addEventListener("change", updateResourceControls);
+resourceElements.Page.addEventListener("change", () => resourceTask(loadResourceTargets));
+resourceElements.Object.addEventListener("change", updateResourceControls);
+resourceElements.Preview.addEventListener("click", () => resourceTask(previewManagedResource));
+resourceElements.Export.addEventListener("click", () => {
+	const item = resourceManager.selected;
+	if (item) downloadResource({ id: JSON.stringify([item.kind, item.id]), fileName: resourceFileName(item) }, "ofdgoExportResource", "资源");
+});
+resourceElements.Locate.addEventListener("click", () => {
+	const reference = resourceManager.selected?.references?.[Number(resourceElements.Reference.value)];
+	if (reference?.page >= 0) { resourceElements.Panel.close(); renderPage(reference.page); }
+});
+resourceElements.Add.addEventListener("click", () => {
+	if (!state.editing) return;
+	const kind = resourceElements.Kind.value;
+	if (kind === "Font") { resourceElements.Panel.close(); openFontFile(el.fontInput); }
+	else if (kind === "Image") { resourceElements.Panel.close(); openInsertPanel(); }
+	else if (kind === "Attachment") openAttachmentDialog("add");
+	else chooseResourceFile("add");
+});
+resourceElements.Replace.addEventListener("click", async () => {
+	const item = resourceManager.selected;
+	if (!state.editing || !item) return;
+	if (item.kind === "Font") {
+		const font = state.doc.fonts?.find(font => font.id === item.id) || {id: item.id, fontName: item.name, embedded: Boolean(item.file)};
+		await openFontBinding(font);
+		if (!fontBindingElements.Panel.open) await resourceTask(loadManagedResources);
+	} else chooseResourceFile("replace");
+});
+resourceElements.Delete.addEventListener("click", () => resourceTask(async () => {
+	const item = resourceManager.selected;
+	if (item && window.confirm(`删除资源“${item.name}”？`)) await changeManagedResource("delete", item);
+}));
+for (const [button, action] of [[resourceElements.Bind, "bind"], [resourceElements.Unbind, "unbind"]]) {
+	button.addEventListener("click", () => resourceTask(() => changeManagedResource(action, resourceManager.selected)));
+}
+resourceElements.File.addEventListener("change", () => resourceTask(async () => {
+	const request = resourceManager.fileAction, file = resourceElements.File.files[0];
+	if (!file || !request || request.sequence !== state.openSeq || !state.editing) return;
+	await changeManagedResource(request.action, request.item, file);
+}));
+for (const dialog of [fontBindingElements.Panel, el.attachmentDialog]) {
+	dialog.addEventListener("close", () => { if (resourceElements.Panel.open) resourceTask(loadManagedResources); });
+}
 editorClick(el.versionManageButton, openVersionManagement);
 el.versionClose.addEventListener("click", () => el.versionPanel.close());
 el.versionPanel.addEventListener("cancel", event => { if (el.versionForm.inert) event.preventDefault(); });
@@ -1703,7 +1755,7 @@ function handleKeyDown(event) {
 
 function formDialogOpen() {
 	return Boolean(sealPreview) || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
-		|| el.structureDialog.open || el.versionPanel.open || el.batchPagesPanel.open || el.objectStylePanel.open || el.sourceTextPanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
+		|| resourceElements.Panel.open || el.structureDialog.open || el.versionPanel.open || el.batchPagesPanel.open || el.objectStylePanel.open || el.sourceTextPanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
 
 function setObjectDimension(input, value) {
@@ -3478,6 +3530,8 @@ async function changeDocument(name, item, ...args) {
 				el.versionStatus.textContent = err.message;
 			} else if (el.documentPanel.open) {
 				el.documentStatus.textContent = err.message;
+			} else if (resourceElements.Panel.open) {
+				resourceElements.Status.textContent = resourceError(err.message);
 			} else {
 				showError(err, false);
 			}
@@ -4155,6 +4209,7 @@ async function openOFD(file, remote = null) {
 		return;
 	}
 	remoteDownload?.abort();
+	resourceElements.Panel.close();
 	clearSecurityForms();
 	state.wasmRecoveries = 0;
 	const openSeq = ++state.openSeq;
@@ -5007,6 +5062,196 @@ async function renderPage(index, options = {}) {
 			if (!options.openAction) scheduleOpenActions();
 		}
 	}
+}
+
+async function openResourceManagement() {
+	if (!state.doc || !state.ready || document.body.hasAttribute("aria-busy")) return;
+	resourceElements.Panel.showModal();
+	resourceElements.Page.replaceChildren(...state.doc.pages.map((page, index) => new Option(`第${index + 1}页`, String(index))));
+	resourceElements.Page.value = String(state.pageIndex);
+	await resourceTask(async () => { await loadManagedResources(); if (state.editing) await loadResourceTargets(); });
+}
+
+async function resourceTask(action) {
+	if (resourceManager.busy) return;
+	resourceManager.busy = true;
+	resourceElements.Form.inert = true;
+	resourceElements.Status.textContent = "处理中";
+	resourceElements.Panel.setAttribute("aria-busy", "true");
+	try {
+		await action();
+		if (resourceElements.Status.textContent === "处理中") resourceElements.Status.textContent = "";
+	} catch (err) {
+		resourceElements.Status.textContent = resourceError(err.message);
+	} finally {
+		resourceManager.busy = false;
+		resourceElements.Form.inert = false;
+		resourceElements.Panel.removeAttribute("aria-busy");
+		updateResourceControls();
+	}
+}
+
+function resourceError(message) {
+	if (/still referenced/.test(message)) return "资源仍被引用";
+	if (/unsupported content/.test(message)) return "引用无法确认";
+	if (/empty media|nonempty Audio/.test(message)) return "文件内容为空";
+	return message;
+}
+
+async function loadManagedResources() {
+	const sequence = state.openSeq;
+	const items = await callWASM("ofdgoResources");
+	if (sequence !== state.openSeq || !resourceElements.Panel.open) return;
+	resourceManager.items = items || [];
+	renderResourceList();
+}
+
+function renderResourceList() {
+	const items = resourceManager.items.filter(item => item.kind === resourceElements.Kind.value);
+	const selected = items.find(item => item.id === resourceManager.selected?.id && item.kind === resourceManager.selected?.kind) || items[0];
+	resourceElements.List.replaceChildren();
+	resourceElements.Empty.hidden = items.length !== 0;
+	for (const item of items) {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.className = "resource-option";
+		button.setAttribute("role", "option");
+		button.setAttribute("aria-selected", String(item === selected));
+		button.title = item.file || item.name;
+		for (const value of [item.name, item.file ? formatBytes(item.size) : "外部", item.complete ? String(item.references?.length || 0) : "未知"]) {
+			const span = document.createElement("span");
+			span.textContent = value;
+			button.append(span);
+		}
+		button.addEventListener("click", () => selectManagedResource(item));
+		button.addEventListener("keydown", event => {
+			const index = items.indexOf(item);
+			const target = { ArrowDown: Math.min(items.length - 1, index + 1), ArrowUp: Math.max(0, index - 1), Home: 0, End: items.length - 1 }[event.key];
+			if (target == null) return;
+			event.preventDefault();
+			selectManagedResource(items[target]);
+			resourceElements.List.children[target].focus();
+		});
+		resourceElements.List.append(button);
+	}
+	selectManagedResource(selected);
+}
+
+function selectManagedResource(item) {
+	releaseResourcePreview();
+	resourceManager.selected = item || null;
+	const items = resourceManager.items.filter(entry => entry.kind === resourceElements.Kind.value);
+	Array.from(resourceElements.List.children).forEach((node, i) => {
+		node.setAttribute("aria-selected", String(items[i] === item));
+		node.tabIndex = items[i] === item ? 0 : -1;
+	});
+	const references = item?.references || [];
+	const roles = {Font: "字体", ResourceID: "资源", Substitution: "替换", ImageMask: "蒙版", Thumbnail: "缩略", AttachID: "附件"};
+	resourceElements.Reference.replaceChildren(...references.map((ref, index) => new Option(`${ref.page >= 0 ? `第${ref.page + 1}页` : ref.file}${ref.object ? ` · ${ref.object}` : ""} · ${roles[ref.role] || ref.role}`, String(index))));
+	if (!references.length) resourceElements.Reference.add(new Option(!item || item.complete ? "暂无引用" : "引用未知", ""));
+	updateResourceControls();
+}
+
+function updateResourceControls() {
+	const item = resourceManager.selected, editing = state.editing;
+	const disabled = resourceManager.busy || !state.doc || document.body.hasAttribute("aria-busy");
+	const media = item && ["Audio", "Video"].includes(item.kind);
+	resourceElements.Add.hidden = resourceElements.Replace.hidden = resourceElements.Delete.hidden = !editing;
+	resourceElements.Add.disabled = disabled;
+	resourceElements.Reference.disabled = disabled || !item?.references?.length;
+	resourceElements.Preview.disabled = disabled || !item?.file || item.kind === "Attachment";
+	resourceElements.Export.disabled = disabled || !item?.file;
+	resourceElements.Replace.disabled = disabled || !item || !item.complete;
+	resourceElements.Replace.textContent = item?.kind === "Font" ? item.file ? "外置" : "嵌入" : "替换";
+	resourceElements.Delete.disabled = disabled || !item?.complete || Boolean(item?.references?.length);
+	resourceElements.Delete.title = item?.references?.length ? "资源仍被引用" : "删除资源";
+	resourceElements.Locate.disabled = disabled || !(item?.references?.[Number(resourceElements.Reference.value)]?.page >= 0);
+	resourceElements.Binding.hidden = !editing || !media;
+	resourceElements.Bind.disabled = resourceElements.Unbind.disabled = disabled || !media || !resourceElements.Object.value;
+}
+
+async function loadResourceTargets() {
+	resourceElements.Object.replaceChildren(new Option("选择图元", ""));
+	const page = Number(resourceElements.Page.value), sequence = state.openSeq;
+	const items = await callWASM("ofdgoResourceTargets", page);
+	if (!resourceElements.Panel.open || sequence !== state.openSeq) return;
+	for (const item of items || []) resourceElements.Object.add(new Option(`${item.id} · ${(item.text || "图元").slice(0, 50)}`, item.id));
+	const selected = canvasEditor.selected;
+	if (selected?.index === page && !selected.scoped) resourceElements.Object.value = selected.id;
+}
+
+function chooseResourceFile(action) {
+	const item = action === "add" ? {kind: resourceElements.Kind.value, id: ""} : resourceManager.selected;
+	if (!item) return;
+	resourceManager.fileAction = {action, item, sequence: state.openSeq};
+	resourceElements.File.value = "";
+	resourceElements.File.accept = {Audio: "audio/*", Video: "video/*", Image: ".png,.jpg,.jpeg,.bmp,.tif,.tiff,.jb2,.jbig2"}[item.kind] || "";
+	resourceElements.File.click();
+}
+
+async function changeManagedResource(action, item, file) {
+	if (!item || !state.editing) return;
+	releaseResourcePreview();
+	const format = file?.name.includes(".") ? file.name.split(".").at(-1).toUpperCase() : "";
+	if (await changeDocument("ofdgoChangeResource", null, action, item.kind, item.id, format, file || null, Number(resourceElements.Page.value), resourceElements.Object.value)) {
+		await loadManagedResources();
+		await loadResourceTargets();
+	}
+}
+
+function releaseResourcePreview() {
+	resourceManager.sequence++;
+	for (const player of resourceElements.Viewer.querySelectorAll("audio, video")) { player.pause(); player.removeAttribute("src"); player.load(); }
+	resourceElements.Viewer.replaceChildren();
+	resourceElements.Viewer.hidden = true;
+	if (resourceManager.url) URL.revokeObjectURL(resourceManager.url);
+	if (resourceManager.font) document.fonts.delete(resourceManager.font);
+	resourceManager.url = resourceManager.font = null;
+}
+
+async function previewManagedResource() {
+	const item = resourceManager.selected;
+	if (!item?.file) return;
+	if (state.doc.encryption?.encrypted && !window.confirm("资源将按明文读取，是否继续？")) return;
+	releaseResourcePreview();
+	const sequence = resourceManager.sequence, openSeq = state.openSeq;
+	let result;
+	try {
+		result = await callWASM("ofdgoExportResource", JSON.stringify([item.kind, item.id]), null);
+	} finally {
+		state.exportRequestID = 0;
+		el.cancelExportButton.hidden = true;
+	}
+	if (sequence !== resourceManager.sequence || openSeq !== state.openSeq || !resourceElements.Panel.open) return;
+	const format = item.format.toLowerCase();
+	const mime = {mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", m4a: "audio/mp4", mp4: "video/mp4", webm: "video/webm", png: "image/png", jpeg: "image/jpeg", jpg: "image/jpeg", bmp: "image/bmp"}[format] || "application/octet-stream";
+	resourceManager.url = URL.createObjectURL(new Blob([result.blob], {type: mime}));
+	let element;
+	if (item.kind === "Font") {
+		const font = new FontFace("OFDResourcePreview", `url("${resourceManager.url}")`);
+		await font.load();
+		if (sequence !== resourceManager.sequence) return;
+		document.fonts.add(font);
+		resourceManager.font = font;
+		element = document.createElement("span");
+		element.style.fontFamily = '"OFDResourcePreview"';
+		element.style.fontSize = "24px";
+		element.textContent = "Aa 0123 字体预览";
+	} else {
+		element = document.createElement(item.kind === "Image" ? "img" : item.kind === "Audio" ? "audio" : "video");
+		element.src = resourceManager.url;
+		if (item.kind === "Image") element.alt = item.name;
+		else { element.controls = true; element.preload = "metadata"; }
+		element.addEventListener("error", () => { resourceElements.Status.textContent = "浏览器无法预览此格式"; });
+	}
+	resourceElements.Viewer.append(element);
+	resourceElements.Viewer.hidden = false;
+}
+
+function resourceFileName(item) {
+	let name = item.kind === "Font" ? item.file.split("/").at(-1) : item.name;
+	if (!name.includes(".") && item.format) name += "." + item.format.toLowerCase();
+	return name;
 }
 
 function downloadAttachment(attachment) {
@@ -9265,6 +9510,8 @@ function updateDocumentControls() {
 	const disabled = !state.doc || !state.ready || state.exporting || busy;
 	el.documentManageButton.hidden = !state.editing;
 	el.documentManageButton.disabled = disabled;
+	resourceElements.ManageButton.disabled = disabled;
+	updateResourceControls();
 	el.documentRow.hidden = !count || !state.editing && count < 2;
 	el.documentSelect.disabled = disabled;
 	const actionsDisabled = disabled || !state.editing || Boolean(manager?.loading || manager?.failed);
@@ -9454,7 +9701,7 @@ async function callWASM(name, ...args) {
 			request.fontData = new Map();
 			args.push([...request.localFonts.keys()]);
 		}
-		if (name === "ofdgoImportImages" || name === "ofdgoExportImages" || name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoSaveDocument" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
+		if (name === "ofdgoImportImages" || name === "ofdgoExportImages" || name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoExportResource" || name === "ofdgoSaveDocument" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
 			state.exportRequestID = id;
 			el.cancelExportButton.hidden = false;
 			el.cancelExportButton.disabled = false;

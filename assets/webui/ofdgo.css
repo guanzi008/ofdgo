@@ -1548,6 +1548,137 @@ body[data-hide-meta] .meta-panel {
 	width: 440px;
 }
 
+.resource-dialog {
+	width: 600px;
+}
+
+.resource-heading,
+.resource-option {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) 90px 50px;
+	align-items: center;
+	gap: 10px;
+	padding: 8px 10px;
+	text-align: left;
+}
+
+.resource-heading {
+	background: #eef1f4;
+	border: 1px solid var(--line);
+}
+
+.resource-list-container {
+	position: relative;
+	margin-bottom: 12px;
+}
+
+.resource-empty {
+	position: absolute;
+	inset: 0;
+	display: grid;
+	place-items: center;
+	color: var(--text-muted);
+	pointer-events: none;
+}
+
+.resource-empty[hidden] {
+	display: none;
+}
+
+.resource-list {
+	max-height: 220px;
+	min-height: 80px;
+	overflow: auto;
+	border: 1px solid var(--line);
+	border-top: 0;
+}
+
+.resource-option {
+	width: 100%;
+	border: 0;
+	border-bottom: 1px solid var(--line);
+	background: #fff;
+	color: inherit;
+	font: inherit;
+	cursor: pointer;
+}
+
+.resource-option span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.resource-heading > :not(:first-child),
+.resource-option > :not(:first-child) {
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+}
+
+.resource-option[aria-selected="true"] {
+	background: #e4f3f0;
+	color: #087f70;
+}
+
+.resource-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 12px;
+}
+
+.resource-actions > button {
+	min-height: 28px;
+}
+
+.resource-actions > [hidden] {
+	display: none;
+}
+
+.resource-actions > :last-child {
+	margin-left: auto;
+}
+
+.resource-binding {
+	border-top: 1px solid var(--line);
+	margin-top: 12px;
+	padding-top: 12px;
+}
+
+.resource-binding .form-actions {
+	display: flex;
+	justify-content: flex-end;
+}
+
+.resource-binding .form-actions > button {
+	flex: 0 0 auto;
+}
+
+.resource-viewer {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 180px;
+	margin-top: 12px;
+	overflow: auto;
+	background: white;
+}
+
+.resource-viewer[hidden] {
+	display: none;
+}
+
+.resource-viewer img,
+.resource-viewer video {
+	max-width: 100%;
+	max-height: 100%;
+	object-fit: contain;
+}
+
+.resource-viewer audio {
+	width: 100%;
+}
+
 .document-dialog .form-status:not(:empty) {
 	margin-top: 8px;
 }
