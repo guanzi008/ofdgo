@@ -30,7 +30,7 @@ import (
 // pdfRenderer PDF渲染器
 type pdfRenderer struct {
 	*pdf.PDF
-	glyphPaths  map[*canvas.Path]*canvas.Path
+	glyphPaths  renderCache[*canvas.Path, *canvas.Path]
 	fonts       map[*canvas.Font]*canvas.Font
 	images      [][]image.Image
 	exactImages bool
@@ -136,18 +136,22 @@ func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 	r.PDF.RenderImage(img, matrix)
 }
 
-// glyphPath 复用相似变换下的PDF字形圆弧转换
+// glyphPath 在缓存预算内复用相似变换下的PDF字形圆弧转换
 // 入参: path 缓存字形路径, matrix 字形变换
 // 返回: *canvas.Path PDF字形路径
 func (r *pdfRenderer) glyphPath(path *canvas.Path, matrix canvas.Matrix) *canvas.Path {
 	if !matrix.IsSimilarity() {
 		return path
 	}
-	if cached, ok := r.glyphPaths[path]; ok {
+	if cached, ok := r.glyphPaths.get(path); ok {
 		return cached
 	}
 	converted := path.ReplaceArcs()
-	r.glyphPaths[path] = converted
+	cost := 256 + cap(path.Data())*8
+	if converted != path {
+		cost += cap(converted.Data()) * 8
+	}
+	r.glyphPaths.put(path, converted, cost)
 	return converted
 }
 
