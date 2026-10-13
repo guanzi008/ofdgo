@@ -23,7 +23,7 @@ const batch = { items: [], formats: [], running: false, canceled: false, worker:
 const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Compression", "FontRow", "FontMode", "Destination", "DPIRow", "DPI", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
 const fontBinding = { font: null, choices: [], sequence: 0 };
 const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name", "SourceRow", "Source", "File", "Hint", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#fontBinding${name}`)]));
-const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Kind", "List", "Empty", "Reference", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
+const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Kind", "List", "Empty", "Reference", "Actions", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "BindingActions", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
 const resourceManager = { items: [], selected: null, targets: [], pick: null, busy: false, sequence: 0, url: null, font: null, fileAction: null };
 
 let wasmPromise = null;
@@ -5189,6 +5189,8 @@ function updateResourceControls() {
 	resourceElements.Delete.title = item?.kind === "Attachment" ? "删除附件" : item?.references?.length ? "资源仍被引用" : "删除资源";
 	resourceElements.Locate.disabled = disabled || !item?.references?.length;
 	resourceElements.Binding.hidden = !editing || !actionable;
+	const actions = resourceElements.Binding.hidden ? resourceElements.Actions : resourceElements.BindingActions;
+	if (resourceElements.Close.parentElement !== actions) actions.append(resourceElements.Close);
 	const target = resourceManager.targets.find(target => target.id === resourceElements.Object.value);
 	resourceElements.Pick.disabled = disabled || !editing || !actionable || Boolean(state.composite);
 	resourceElements.Bind.disabled = disabled || !actionable || !target || target.bound;

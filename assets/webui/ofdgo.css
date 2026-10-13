@@ -1552,8 +1552,7 @@ body[data-hide-meta] .meta-panel {
 	width: 600px;
 }
 
-.resource-dialog form > .form-actions {
-	grid-template-columns: minmax(0, 1fr) auto;
+.resource-dialog .form-status:not(:empty) {
 	margin-top: 12px;
 }
 
@@ -1640,6 +1639,10 @@ body[data-hide-meta] .meta-panel {
 
 .resource-actions > button {
 	min-height: 28px;
+}
+
+.resource-actions > #resourceClose {
+	margin-left: auto;
 }
 
 .resource-actions > [hidden] {
