@@ -61,12 +61,13 @@ type fontSourceKey struct {
 	name  string
 }
 
-// fontSourceCache 保存字体文件候选与原始数据，不包含绘图库对象
+// fontSourceCache 保存字体候选及独立字体数据，原始集合按字节预算淘汰，不包含绘图库对象
 type fontSourceCache struct {
 	candidates   map[string][]fontSource
 	directories  map[string][]fontFileCandidate
 	filesystems  map[int][]fontFileCandidate
 	data         map[fontSourceKey]fontSourceData
+	collections  *renderCache[fontSourceKey, []byte]
 	fallback     ResolvedFont
 	fallbackRead bool
 }
@@ -80,7 +81,7 @@ type fontSourceData struct {
 // newFontSourceCache 创建独立字体来源缓存
 // 返回: *fontSourceCache 字体来源缓存
 func newFontSourceCache() *fontSourceCache {
-	return &fontSourceCache{candidates: make(map[string][]fontSource), directories: make(map[string][]fontFileCandidate), filesystems: make(map[int][]fontFileCandidate), data: make(map[fontSourceKey]fontSourceData)}
+	return &fontSourceCache{candidates: make(map[string][]fontSource), directories: make(map[string][]fontFileCandidate), filesystems: make(map[int][]fontFileCandidate), data: make(map[fontSourceKey]fontSourceData), collections: &renderCache[fontSourceKey, []byte]{limit: 32 << 20}}
 }
 
 // child 复用相同来源的文件索引与数据，匹配和回退状态保持独立
@@ -88,6 +89,7 @@ func newFontSourceCache() *fontSourceCache {
 func (c *fontSourceCache) child() *fontSourceCache {
 	cache := newFontSourceCache()
 	cache.directories, cache.filesystems, cache.data = c.directories, c.filesystems, c.data
+	cache.collections = c.collections
 	return cache
 }
 
@@ -106,14 +108,21 @@ func (r *Renderer) readFontSource(source fontSource, definition *Font) ([]byte, 
 	if cached, ok := r.fontSourcesCache.data[key]; ok {
 		return cached.data, cached.err
 	}
-	var data []byte
+	fileKey := key
+	fileKey.face = 0
+	data, cached := r.fontSourcesCache.collections.get(fileKey)
 	var err error
-	if key.kind == fontSourceFS {
-		data, err = fs.ReadFile(r.fontFS[key.index], key.name)
-	} else {
-		data, err = os.ReadFile(key.name)
+	if !cached {
+		if key.kind == fontSourceFS {
+			data, err = fs.ReadFile(r.fontFS[key.index], key.name)
+		} else {
+			data, err = os.ReadFile(key.name)
+		}
 	}
 	if err == nil && bytes.HasPrefix(data, []byte("ttcf")) {
+		if !cached {
+			r.fontSourcesCache.collections.put(fileKey, data, min(cap(data), r.fontSourcesCache.collections.limit)+256)
+		}
 		data, err = basefont.ExtractCollectionFont(data, key.face)
 	}
 	if err == nil {
