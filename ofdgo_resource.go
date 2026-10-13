@@ -41,7 +41,7 @@ type ResourceInfo struct {
 	References []ResourceReference `json:"references"`
 }
 
-// ResourceReference 记录资源引用所在的XML及字段，Page为零基页码，非页面文件为-1
+// ResourceReference 记录资源引用所在的XML及字段，Page为零基页码，非页面或多实例文件为-1
 // Object为最近的图元标识，模板、注解、图案和复合资源通过File区分，不推断其页面实例数
 type ResourceReference struct {
 	File   string `json:"file"`
@@ -136,7 +136,15 @@ func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) 
 		return nil, err
 	}
 	for i, page := range doc.Pages.Page {
-		pages[cleanPackagePath(r.ResPath(page.BaseLoc))] = i
+		name := cleanPackagePath(r.ResPath(page.BaseLoc))
+		if _, exists := pages[name]; exists {
+			pages[name] = -1
+		} else {
+			pages[name] = i
+		}
+	}
+	for _, page := range doc.CommonData.TemplatePage {
+		pages[cleanPackagePath(r.ResPath(page.BaseLoc))] = -1
 	}
 	refs := make(map[string][]ResourceReference)
 	for _, name := range slices.Sorted(maps.Keys(scan.files)) {
