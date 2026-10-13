@@ -55,9 +55,9 @@ func (v *structureVisitor) BeginAnnotation(id string) bool { return false }
 // 入参: count 跳过的图元数
 func (v *structureVisitor) SkipObjects(count int) {}
 
-// IncludeHidden 保留隐藏图元的结构语义，但不为其生成可见范围
-// 返回: bool 始终为true
-func (v *structureVisitor) IncludeHidden() bool { return true }
+// IncludeHidden 读取原文时保留隐藏语义，仅定位时跳过隐藏复合图元及注解
+// 返回: bool 是否需要隐藏内容
+func (v *structureVisitor) IncludeHidden() bool { return !v.boundsOnly }
 
 // SkipClips 保留裁剪语义，以可见范围定位图元
 // 返回: bool 始终为false
