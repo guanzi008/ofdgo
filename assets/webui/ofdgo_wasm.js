@@ -29,7 +29,7 @@ self.onmessage = ({ data }) => {
 		operations.get(data.id)?.abort();
 		return;
 	}
-	if (data.name === "ofdgoImportImages" || data.name === "ofdgoExportImages" || data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" || data.name === "ofdgoConvertPDF" || data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoExportResource" || data.name === "ofdgoExportMedia" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoSaveSigned" || data.name === "ofdgoImportPages") {
+	if (data.name === "ofdgoImportImages" || data.name === "ofdgoExportImages" || data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" || data.name === "ofdgoConvertPDF" || data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoExportResource" || data.name === "ofdgoExportMedia" || data.name === "ofdgoExportVersion" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoSaveSigned" || data.name === "ofdgoImportPages") {
 		operations.set(data.id, new AbortController());
 	}
 	pending = pending.then(() => data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" ? handleBatchMessage(data) : handleMessage(data));
@@ -240,6 +240,11 @@ async function handleMessage({ id, name, args }) {
 						self.postMessage({ id, type: "export", stage: "pages", completed, total });
 						finish(done);
 					});
+				} else if (name === "ofdgoExportVersion") {
+					args.push((phase, completed, total, done) => {
+						self.postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
+						finish(done);
+					}, done => finish(done));
 				} else if (saving) {
 					args.push((phase, completed, total, done) => {
 						self.postMessage({ id, type: "export", stage: "prepare", phase, completed, total });

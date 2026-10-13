@@ -194,6 +194,18 @@ func RunWASM() {
 	registerCallback("ofdgoOpen", openDocument)
 	registerCallback("ofdgoSelectDocument", selectDocument)
 	registerCallback("ofdgoDocumentVersions", documentVersions)
+	registerAsyncCallback("ofdgoExportVersion", exportVersion)
+	registerCallback("ofdgoAnnotationInfos", annotationInfos)
+	registerCallback("ofdgoDocumentNavigation", documentNavigation)
+	registerCallback("ofdgoChangeBookmark", changeBookmark)
+	registerCallback("ofdgoActionList", actionList)
+	registerCallback("ofdgoChangeActions", changeActions)
+	registerCallback("ofdgoStyleResource", styleResource)
+	registerCallback("ofdgoChangeStyleResource", changeStyleResource)
+	registerCallback("ofdgoApplyStyleResource", applyStyleResource)
+	registerCallback("ofdgoPageSettings", pageSettings)
+	registerCallback("ofdgoChangeLayer", changeLayer)
+	registerCallback("ofdgoChangeTemplate", changeTemplate)
 	registerCallback("ofdgoSelectVersion", selectDocumentVersion)
 	registerCallback("ofdgoChangeVersion", changeDocumentVersion)
 	registerCallback("ofdgoChangeDocument", changePackageDocument)
@@ -3678,6 +3690,370 @@ func documentVersions(args []js.Value) (any, error) {
 		}
 	}
 	return entries, nil
+}
+
+// styleResource 读取当前文档中的颜色空间或共享绘制参数
+// 入参: args 类型和资源标识
+// 返回: any 资源定义, error 读取错误
+func styleResource(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) != 2 {
+		return nil, fmt.Errorf("invalid style resource")
+	}
+	ctx := context.Background()
+	switch args[0].String() {
+	case "ColorSpace":
+		return currentSession.Reader.ColorSpace(ctx, args[1].String())
+	case "DrawParam":
+		return currentSession.Reader.DrawParam(ctx, args[1].String(), false)
+	default:
+		return nil, fmt.Errorf("invalid style resource kind")
+	}
+}
+
+// changeStyleResource 注册或替换共享样式资源，未重新选择ICC时保留既有配置
+// 入参: args 类型、标识、定义JSON、可选ICC字节和RGB颜色增量JSON
+// 返回: any 编辑状态, error 校验或提交错误
+func changeStyleResource(args []js.Value) (any, error) {
+	if len(args) != 5 {
+		return nil, fmt.Errorf("invalid style resource arguments")
+	}
+	return changeAtomicObjects(func() error {
+		ctx := context.Background()
+		kind, id := args[0].String(), args[1].String()
+		if kind == "ColorSpace" {
+			var space ofdgo.ColorSpace
+			if err := json.Unmarshal([]byte(args[2].String()), &space); err != nil {
+				return err
+			}
+			var profile []byte
+			var err error
+			if !args[3].IsNull() && !args[3].IsUndefined() {
+				profile, err = bytesFromJS(args[3])
+			} else if id != "" {
+				var original *ofdgo.ColorSpace
+				original, err = currentEditor.ColorSpace(id)
+				if err == nil && original.Profile != "" {
+					var stream io.ReadCloser
+					stream, err = currentSession.Reader.OpenResource(ctx, kind, id)
+					if err == nil {
+						defer stream.Close()
+						profile, err = io.ReadAll(stream)
+					}
+				}
+			}
+			if err != nil {
+				return err
+			}
+			if id == "" {
+				_, err = currentEditor.ImportColorSpace(ctx, space, profile)
+				return err
+			}
+			return currentEditor.ReplaceColorSpace(ctx, id, space, profile)
+		}
+		if kind != "DrawParam" {
+			return fmt.Errorf("invalid style resource kind")
+		}
+		var draw ofdgo.DrawParam
+		var colors map[string]string
+		if err := json.Unmarshal([]byte(args[2].String()), &draw); err != nil {
+			return err
+		}
+		if err := json.Unmarshal([]byte(args[4].String()), &colors); err != nil {
+			return err
+		}
+		for key, value := range colors {
+			paint := &ofdgo.FillColor{}
+			if key == "FillColor" && draw.FillColor != nil {
+				paint.Alpha = draw.FillColor.Alpha
+			} else if key == "StrokeColor" && draw.StrokeColor != nil {
+				paint.Alpha = draw.StrokeColor.Alpha
+			}
+			if err := setEditorColor(paint, value); err != nil {
+				return err
+			}
+			if key == "FillColor" {
+				draw.FillColor = paint
+			} else if key == "StrokeColor" {
+				draw.StrokeColor = (*ofdgo.StrokeColor)(paint)
+			} else {
+				return fmt.Errorf("invalid paint target")
+			}
+		}
+		if id == "" {
+			_, err := currentEditor.ImportDrawParam(ctx, draw)
+			return err
+		}
+		return currentEditor.ReplaceDrawParam(ctx, id, draw)
+	})
+}
+
+// applyStyleResource 为指定图元设置共享绘制参数或颜色，库层负责颜色及对象校验
+// 入参: args 类型、资源标识、页码、图元标识及颜色JSON
+// 返回: any 编辑状态, error 校验或提交错误
+func applyStyleResource(args []js.Value) (any, error) {
+	if len(args) != 5 {
+		return nil, fmt.Errorf("invalid style application")
+	}
+	return changeAtomicObjects(func() error {
+		page, ids := args[2].Int(), []string{args[3].String()}
+		if args[0].String() == "DrawParam" {
+			return currentEditor.SetObjectDrawParam(page, ids, args[1].String())
+		}
+		if args[0].String() != "ColorSpace" || args[1].String() == "" {
+			return fmt.Errorf("invalid color space")
+		}
+		var paint struct{ Target, Mode, Value string }
+		if err := json.Unmarshal([]byte(args[4].String()), &paint); err != nil {
+			return err
+		}
+		fill := &ofdgo.FillColor{ColorSpace: args[1].String()}
+		if paint.Mode == "index" {
+			index, err := strconv.Atoi(paint.Value)
+			if err != nil {
+				return err
+			}
+			fill.Index = &index
+		} else if paint.Mode == "value" {
+			fill.Value = paint.Value
+		} else {
+			return fmt.Errorf("invalid color mode")
+		}
+		style := ofdgo.ObjectStyle{}
+		if paint.Target == "fill" {
+			style.FillColor = fill
+		} else if paint.Target == "stroke" {
+			style.StrokeColor = (*ofdgo.StrokeColor)(fill)
+		} else {
+			return fmt.Errorf("invalid paint target")
+		}
+		return currentEditor.StyleObjects(page, ids, style)
+	})
+}
+
+// pageSettings 获取当前页的图层、模板定义和绑定信息，不修改文档
+// 入参: args 页面索引
+// 返回: any 页面设置, error 读取错误
+func pageSettings(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) != 1 {
+		return nil, fmt.Errorf("invalid page settings")
+	}
+	reader := currentSession.Reader
+	layers, err := reader.Layers(args[0].Int())
+	if err != nil {
+		return nil, err
+	}
+	templates, err := reader.Templates()
+	if err != nil {
+		return nil, err
+	}
+	page, err := reader.PageContentByIndex(args[0].Int())
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"layers": layers, "templates": templates, "bindings": page.Template}, nil
+}
+
+// changeLayer 调用图层管理接口，组合修改使用同一次事务
+// 入参: args 操作、页码、图层标识、类型、绘制参数、顺序及图元标识
+// 返回: any 编辑状态, error 校验或提交错误
+func changeLayer(args []js.Value) (any, error) {
+	if len(args) != 7 {
+		return nil, fmt.Errorf("invalid layer arguments")
+	}
+	return changeAtomicObjects(func() error {
+		page, id := args[1].Int(), args[2].String()
+		switch args[0].String() {
+		case "add":
+			_, err := currentEditor.AddLayer(page, args[3].String(), args[4].String())
+			return err
+		case "update":
+			return currentEditor.Transaction(func(editor *ofdgo.Editor) error {
+				if err := editor.SetLayerType(page, id, args[3].String()); err != nil {
+					return err
+				}
+				return editor.SetLayerDrawParam(page, id, args[4].String())
+			})
+		case "delete":
+			return currentEditor.DeleteLayer(page, id)
+		case "move":
+			return currentEditor.MoveLayer(page, id, args[5].Int())
+		case "objects":
+			return currentEditor.MoveObjectsToLayer(page, stringsFromJS(args[6]), id)
+		default:
+			return fmt.Errorf("invalid layer operation")
+		}
+	})
+}
+
+// changeTemplate 调用模板及页面绑定接口，组合修改使用同一次事务
+// 入参: args 操作、页码、模板标识、名称、层次及顺序
+// 返回: any 编辑状态, error 校验或提交错误
+func changeTemplate(args []js.Value) (any, error) {
+	if len(args) != 6 {
+		return nil, fmt.Errorf("invalid template arguments")
+	}
+	return changeAtomicObjects(func() error {
+		page, id, order := args[1].Int(), args[2].String(), args[4].String()
+		switch args[0].String() {
+		case "add":
+			_, err := currentEditor.CreateTemplateFromPage(page, args[3].String(), order)
+			return err
+		case "update":
+			return currentEditor.Transaction(func(editor *ofdgo.Editor) error {
+				if err := editor.RenameTemplate(id, args[3].String()); err != nil {
+					return err
+				}
+				return editor.SetTemplateZOrder(id, order)
+			})
+		case "replace":
+			return currentEditor.ReplaceTemplateFromPage(id, page)
+		case "delete":
+			return currentEditor.DeleteTemplate(id)
+		case "bind":
+			return currentEditor.BindTemplate(page, id, order)
+		case "unbind":
+			return currentEditor.UnbindTemplate(page, id)
+		case "order":
+			return currentEditor.SetPageTemplateZOrder(page, id, order)
+		case "move":
+			return currentEditor.MovePageTemplate(page, id, args[5].Int())
+		default:
+			return fmt.Errorf("invalid template operation")
+		}
+	})
+}
+
+// documentNavigation 按需读取命名书签或通用扩展，不解释业务数据
+// 入参: args 设置类型
+// 返回: any 文档导航和扩展信息, error 读取错误
+func documentNavigation(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) != 1 {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	switch args[0].String() {
+	case "bookmarks", "actions":
+		bookmarks, err := currentSession.Reader.Bookmarks()
+		return map[string]any{"bookmarks": bookmarks}, err
+	case "extensions":
+		extensions, err := currentSession.Reader.Extensions()
+		return map[string]any{"extensions": extensions}, err
+	default:
+		return nil, fmt.Errorf("invalid navigation kind")
+	}
+}
+
+// changeBookmark 调用库层书签操作，引用更新和版本隔离由编辑器完成
+// 入参: args 操作、原名称及书签JSON
+// 返回: any 编辑状态, error 校验或提交错误
+func changeBookmark(args []js.Value) (any, error) {
+	if len(args) != 3 {
+		return nil, fmt.Errorf("invalid bookmark arguments")
+	}
+	var bookmark ofdgo.Bookmark
+	if err := json.Unmarshal([]byte(args[2].String()), &bookmark); err != nil {
+		return nil, err
+	}
+	return changeAtomicObjects(func() error {
+		switch args[0].String() {
+		case "add":
+			return currentEditor.AddBookmark(bookmark.Name, bookmark.Dest)
+		case "update":
+			return currentEditor.UpdateBookmark(args[1].String(), bookmark)
+		case "delete":
+			return currentEditor.DeleteBookmark(args[1].String())
+		default:
+			return fmt.Errorf("invalid bookmark operation")
+		}
+	})
+}
+
+// actionList 获取编辑对象的动作序列，返回独立数据，不触发动作
+// 入参: args 归属、页码、图元标识和目录路径
+// 返回: any 动作列表, error 归属或读取错误
+func actionList(args []js.Value) (any, error) {
+	if currentEditor == nil || len(args) != 4 {
+		return nil, fmt.Errorf("invalid action selection")
+	}
+	switch args[0].String() {
+	case "document":
+		return currentEditor.DocumentActions(), nil
+	case "page":
+		return currentEditor.PageActions(args[1].Int())
+	case "object":
+		return currentEditor.ObjectActions(args[1].Int(), args[2].String())
+	case "outline":
+		return currentEditor.OutlineActions(indexesFromJS(args[3]))
+	default:
+		return nil, fmt.Errorf("invalid action scope")
+	}
+}
+
+// changeActions 将动作列表交给库层校验和原子提交
+// 入参: args 归属、页码、图元标识、目录路径及动作JSON
+// 返回: any 编辑状态, error 校验或提交错误
+func changeActions(args []js.Value) (any, error) {
+	if len(args) != 5 {
+		return nil, fmt.Errorf("invalid action arguments")
+	}
+	var actions []ofdgo.Action
+	if err := json.Unmarshal([]byte(args[4].String()), &actions); err != nil {
+		return nil, err
+	}
+	return changeAtomicObjects(func() error {
+		if err := currentEditor.ValidateActionTargets(context.Background(), actions); err != nil {
+			return err
+		}
+		switch args[0].String() {
+		case "document":
+			return currentEditor.SetDocumentActions(actions)
+		case "page":
+			return currentEditor.SetPageActions(args[1].Int(), actions)
+		case "object":
+			return currentEditor.SetObjectActions(args[1].Int(), []string{args[2].String()}, actions)
+		case "outline":
+			return currentEditor.SetOutlineActions(indexesFromJS(args[3]), actions)
+		default:
+			return fmt.Errorf("invalid action scope")
+		}
+	})
+}
+
+// annotationInfos 读取当前文档及版本的注释摘要，不解析页面图元
+// 入参: args 保留参数
+// 返回: any 注释摘要, error 读取错误
+func annotationInfos(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	return currentSession.Reader.AnnotationInfos()
+}
+
+// exportVersion 提取指定历史版本并另存，不切换当前视图或修改编辑历史
+// 入参: args 版本标识、写出回调、进度回调及取消检查
+// 返回: any 保存结果, error 提取或写入错误
+func exportVersion(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) != 4 || args[0].Type() != js.TypeString || args[0].String() == "" {
+		return nil, fmt.Errorf("invalid version export")
+	}
+	ctx := newOutputContext(args[3])
+	reader := currentSession.Reader
+	if currentEditor != nil {
+		var err error
+		reader, err = currentEditor.ReaderContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	version, err := reader.ExtractVersionContext(ctx, args[0].String())
+	if err != nil {
+		return nil, err
+	}
+	defer version.Close()
+	editor, err := version.Editor()
+	if err != nil {
+		return nil, err
+	}
+	return saveEditor(editor, []js.Value{args[1], args[2], js.Null(), js.ValueOf(map[string]any{"mode": 0}), args[3]})
 }
 
 // selectDocumentVersion 切换阅读版本，已有编辑器时保留修改及历史，否则直接创建阅读视图

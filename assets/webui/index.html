@@ -356,7 +356,7 @@
 		<dialog id="resourcePanel" class="form-dialog resource-dialog" aria-labelledby="resourceTitle">
 			<form id="resourceForm">
 				<h2 id="resourceTitle" class="form-title">资源管理</h2>
-				<div class="form-row"><label for="resourceKind">类型</label><select id="resourceKind"><option value="Font">字体</option><option value="Image">图片</option><option value="Audio">音频</option><option value="Video">视频</option><option value="Attachment">附件</option></select></div>
+				<div class="form-row"><label for="resourceKind">类型</label><select id="resourceKind"><option value="Font">字体</option><option value="Image">图片</option><option value="Audio">音频</option><option value="Video">视频</option><option value="Attachment">附件</option><option value="ColorSpace">色彩</option><option value="DrawParam">样式</option></select></div>
 				<div class="resource-list-container">
 					<div class="resource-heading" aria-hidden="true"><span>名称</span><span>大小</span><span>引用</span></div>
 					<div class="resource-list-body">
@@ -399,6 +399,16 @@
 				<div id="documentStatus" class="form-status" role="status"></div>
 			</form>
 		</dialog>
+		<dialog id="settingsPanel" class="form-dialog settings-dialog" aria-labelledby="settingsTitle">
+			<form id="settingsForm">
+				<h2 id="settingsTitle" class="form-title">文档设置</h2>
+				<label class="form-row"><span>类型</span><select id="settingsKind"><option value="bookmarks">书签</option><option value="actions">动作</option><option value="templates">模板</option><option value="layers">图层</option><option value="extensions">扩展</option><option value="ColorSpace" hidden>色彩</option><option value="DrawParam" hidden>样式</option></select></label>
+				<div id="settingsContext"></div>
+				<div id="settingsContent"></div>
+				<div id="settingsActions" class="form-actions"></div>
+				<div id="settingsStatus" class="form-status" role="status"></div>
+			</form>
+		</dialog>
 		<dialog id="versionPanel" class="form-dialog document-dialog" aria-labelledby="versionTitle">
 			<form id="versionForm">
 				<h2 id="versionTitle" class="form-title">版本管理</h2>
@@ -411,6 +421,7 @@
 					<button id="versionDefault" class="button" type="button" title="设为默认" aria-label="设为默认">默认</button>
 					<button id="versionDelete" class="button" type="button" title="删除版本" aria-label="删除版本">删除</button>
 					<button id="versionSelect" class="button" type="button" title="切换版本" aria-label="切换版本">切换</button>
+					<button id="versionExport" class="button" type="button" title="另存版本" aria-label="另存版本">另存</button>
 					<button id="versionClose" class="button" type="button">关闭</button>
 				</div>
 				<div id="versionStatus" class="form-status" role="status"></div>
@@ -635,6 +646,7 @@
 				<div id="navigationTabs" class="navigation-tabs" role="tablist" aria-label="文档导航" hidden>
 					<button id="pagesTab" type="button" role="tab" aria-selected="true" aria-controls="pageList">页面</button>
 					<button id="outlinesTab" type="button" role="tab" aria-selected="false" aria-controls="outlineList" tabindex="-1">目录</button>
+					<button id="annotationsTab" type="button" role="tab" aria-selected="false" aria-controls="annotationsPanel" tabindex="-1">注解</button>
 					<button id="searchTab" type="button" role="tab" aria-keyshortcuts="Control+F Meta+F" aria-selected="false" aria-controls="searchPanel" tabindex="-1">搜索</button>
 				</div>
 				<div id="pageSelectionTools" class="page-selection-tools" hidden>
@@ -645,6 +657,11 @@
 				<div id="navigationContent" class="navigation-content">
 					<div id="pageList" class="page-list" role="tabpanel" aria-label="页面"></div>
 					<div id="outlineList" role="tabpanel" aria-label="目录" hidden></div>
+					<div id="annotationsPanel" role="tabpanel" aria-label="注解" hidden>
+						<div class="search-form"><input id="annotationsFilter" type="search" aria-label="筛选注解" placeholder="内容、作者" autocomplete="off"><select id="annotationsKind" aria-label="注解类型"><option value="">全部</option></select></div>
+						<div id="annotationsStatus" class="form-status" role="status"></div>
+						<div id="annotationsList" class="annotation-summary-list"></div>
+					</div>
 					<div id="searchPanel" role="tabpanel" aria-label="搜索" hidden>
 						<form id="searchForm" class="search-form" role="search">
 							<input id="searchInput" type="search" aria-label="搜索文字" placeholder="搜索文字" autocomplete="off">
@@ -690,6 +707,7 @@
 					<div class="panel-title compact">文档</div>
 					<div class="panel-actions">
 						<button id="resourceManageButton" class="small-button" type="button" title="资源管理" aria-label="资源管理" aria-haspopup="dialog" aria-controls="resourcePanel" disabled>资源</button>
+						<button id="settingsButton" class="small-button" type="button" title="文档设置" aria-label="文档设置" aria-haspopup="dialog" aria-controls="settingsPanel" disabled>设置</button>
 						<button id="versionManageButton" class="small-button" type="button" title="版本管理" aria-label="版本管理" aria-haspopup="dialog" aria-controls="versionPanel" hidden>版本</button>
 						<button id="documentManageButton" class="small-button" type="button" title="文档管理" aria-label="文档管理" aria-haspopup="dialog" aria-controls="documentPanel" hidden>管理</button>
 					</div>

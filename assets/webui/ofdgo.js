@@ -25,6 +25,8 @@ const fontBinding = { font: null, choices: [], sequence: 0 };
 const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name", "SourceRow", "Source", "File", "Hint", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#fontBinding${name}`)]));
 const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Kind", "List", "Empty", "Reference", "Actions", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "BindingActions", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
 const resourceManager = { items: [], selected: null, targets: [], pick: null, busy: false, sequence: 0, url: null, font: null, fileAction: null };
+const settingsElements = Object.fromEntries(["Button", "Panel", "Form", "Title", "Kind", "Context", "Content", "Actions", "Status"].map(name => [name, document.querySelector(`#settings${name}`)]));
+const settings = { sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [] };
 
 let wasmPromise = null;
 let remoteDownload = null;
@@ -275,6 +277,7 @@ const el = {
 	versionDefault: document.querySelector("#versionDefault"),
 	versionDelete: document.querySelector("#versionDelete"),
 	versionSelect: document.querySelector("#versionSelect"),
+	versionExport: document.querySelector("#versionExport"),
 	versionClose: document.querySelector("#versionClose"),
 	infoPanel: document.querySelector("#infoPanel"),
 	infoForm: document.querySelector("#infoForm"),
@@ -494,6 +497,12 @@ const el = {
 	finishPageSelection: document.querySelector("#finishPageSelection"),
 	navigationContent: document.querySelector("#navigationContent"),
 	pagesTab: document.querySelector("#pagesTab"),
+	annotationsTab: document.querySelector("#annotationsTab"),
+	annotationsPanel: document.querySelector("#annotationsPanel"),
+	annotationsFilter: document.querySelector("#annotationsFilter"),
+	annotationsKind: document.querySelector("#annotationsKind"),
+	annotationsStatus: document.querySelector("#annotationsStatus"),
+	annotationsList: document.querySelector("#annotationsList"),
 	outlinesTab: document.querySelector("#outlinesTab"),
 	pageList: document.querySelector("#pageList"),
 	outlineList: document.querySelector("#outlineList"),
@@ -753,12 +762,15 @@ resourceElements.Add.addEventListener("click", () => {
 	if (kind === "Font") openFontFile(el.fontInput);
 	else if (kind === "Image") openInsertPanel();
 	else if (kind === "Attachment") openAttachmentDialog("add");
+	else if (kind === "ColorSpace" || kind === "DrawParam") openResourceSettings(kind, "");
 	else chooseResourceFile("add");
 });
 resourceElements.Replace.addEventListener("click", async () => {
 	const item = resourceManager.selected;
 	if (!state.editing || !item) return;
-	if (item.kind === "Font") {
+	if (item.kind === "ColorSpace" || item.kind === "DrawParam") {
+		await openResourceSettings(item.kind, item.id);
+	} else if (item.kind === "Font") {
 		const font = state.doc.fonts?.find(font => font.id === item.id) || {id: item.id, fontName: item.name, embedded: Boolean(item.file)};
 		await openFontBinding(font);
 		if (!fontBindingElements.Panel.open) await resourceTask(loadManagedResources);
@@ -979,8 +991,10 @@ annotationFields.CreateForm.addEventListener("submit", async event => {
 el.annotationForm.addEventListener("submit", async event => {
 	if (!state.annotationEdit) return;
 	event.preventDefault();
+	const fromSummary = state.annotationEdit.fromSummary;
 	if (await changeAnnotations(state.annotationEdit, "update", el.annotationRemark.value, el.annotationCreator.value)) {
 		el.annotationNote.close();
+		if (fromSummary) showNavigation(el.annotationsTab);
 		canvasEditor.focus();
 	}
 });
@@ -1480,6 +1494,15 @@ el.credentialsForm.addEventListener("submit", async event => {
 el.togglePagesButton.addEventListener("click", () => toggleSidebar("pages"));
 el.toggleMetaButton.addEventListener("click", () => toggleSidebar("meta"));
 el.pagesTab.addEventListener("click", () => showNavigation(el.pagesTab));
+el.annotationsTab.addEventListener("click", () => showNavigation(el.annotationsTab));
+el.annotationsFilter.addEventListener("input", renderAnnotationSummary);
+el.annotationsKind.addEventListener("change", renderAnnotationSummary);
+el.versionExport.addEventListener("click", exportManagedVersion);
+editorClick(settingsElements.Button, openDocumentSettings);
+settingsElements.Kind.addEventListener("change", () => { settings.selected = -1; loadDocumentSettings(); });
+settingsElements.Form.addEventListener("submit", event => event.preventDefault());
+settingsElements.Panel.addEventListener("cancel", event => { if (settings.busy) event.preventDefault(); });
+settingsElements.Panel.addEventListener("close", () => { settings.sequence++; });
 el.outlinesTab.addEventListener("click", () => showNavigation(el.outlinesTab));
 el.searchTab.addEventListener("click", focusSearch);
 el.navigationTabs.addEventListener("keydown", (event) => {
@@ -1488,7 +1511,7 @@ el.navigationTabs.addEventListener("keydown", (event) => {
 	}
 	if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
 		event.preventDefault();
-		const tabs = [el.pagesTab, el.outlinesTab, el.searchTab].filter((tab) => !tab.hidden);
+		const tabs = [el.pagesTab, el.outlinesTab, el.annotationsTab, el.searchTab].filter((tab) => !tab.hidden);
 		const current = tabs.indexOf(event.target);
 		const index = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
 			: (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
@@ -2337,6 +2360,34 @@ function updateVersionControls() {
 	el.versionDelete.disabled = unavailable || !state.editing || !entry?.id || manager.entries.length < 2;
 	el.versionDefault.disabled = unavailable || !state.editing || Boolean(entry?.default);
 	el.versionSelect.disabled = unavailable || entry?.id === (state.doc?.documentVersion || "");
+	el.versionExport.disabled = unavailable || !entry?.id;
+}
+
+async function exportManagedVersion() {
+	const manager = state.versionManagement;
+	const entry = manager?.entries?.find(item => item.id === manager.id);
+	if (!entry?.id || !state.ready || state.exporting || manager.loading || manager.failed || document.body.hasAttribute("aria-busy")) return;
+	if (state.doc.signatureCount && !window.confirm("版本副本可能使原签名失效，是否继续？")) return;
+	const openSeq = state.openSeq;
+	const name = `${baseFileName()}_${entry.name || `版本${entry.index}`}`.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_") + ".ofd";
+	state.exporting = true;
+	setBusy(true, "正在另存版本");
+	el.versionStatus.textContent = "正在另存版本";
+	try {
+		const file = window.showSaveFilePicker ? await window.showSaveFilePicker({suggestedName: name, types: [{description: "OFD", accept: {"application/ofd": [".ofd"]}}]}) : null;
+		if (openSeq !== state.openSeq) return;
+		const result = await callWASM("ofdgoExportVersion", entry.id, file);
+		if (openSeq !== state.openSeq) return;
+		if (result.blob) downloadBytes(result.blob, result.mime, name);
+		el.versionStatus.textContent = `已另存（${formatBytes(result.size)}）`;
+	} catch (error) {
+		if (openSeq === state.openSeq) el.versionStatus.textContent = error.name === "AbortError" ? "另存已取消" : error.message;
+	} finally {
+		state.exporting = false;
+		state.exportRequestID = 0;
+		el.cancelExportButton.hidden = true;
+		if (openSeq === state.openSeq) { setBusy(false); updateControls(); }
+	}
 }
 
 function managedDocumentIndex() {
@@ -3498,6 +3549,7 @@ async function changeDocument(name, item, ...args) {
 		}
 		if (openSeq === state.openSeq) {
 			if (!restoring) rememberEditorView(before, revision, reindex);
+			if (el.annotationsTab.getAttribute("aria-selected") === "true") await loadAnnotationSummary();
 			if (!toolbarFocus && !changingFont) canvasEditor.focus();
 			return true;
 		}
@@ -3505,7 +3557,9 @@ async function changeDocument(name, item, ...args) {
 		refreshManagement = false;
 		if (name === "ofdgoChangeFontBinding") err.message = fontBindingError(err.message);
 		if (openSeq === state.openSeq) {
-			if (fontBindingElements.Panel.open) {
+			if (settingsElements.Panel.open) {
+				settingsElements.Status.textContent = err.message;
+			} else if (fontBindingElements.Panel.open) {
 				fontBindingElements.Status.textContent = fontBindingError(err.message);
 			} else if (el.annotationCreate.open) {
 				el.annotationCreateStatus.textContent = err.message;
@@ -5075,6 +5129,527 @@ async function renderPage(index, options = {}) {
 	}
 }
 
+function settingsField(container, label, id, value = "", type = "text", unit = "") {
+	const row = document.createElement("label"), title = document.createElement("span");
+	row.className = "form-row";
+	title.textContent = label;
+	const field = document.createElement(type === "textarea" ? "textarea" : "input");
+	field.id = `settings${id}`;
+	field.setAttribute("aria-label", label);
+	if (type === "textarea") field.rows = 3;
+	else field.type = type;
+	if (type === "number") field.step = "any";
+	if (type === "checkbox") field.checked = Boolean(value);
+	else field.value = value ?? "";
+	row.append(title, field);
+	if (unit) {
+		const wrapper = document.createElement("span"), suffix = document.createElement("span");
+		wrapper.className = "form-unit";
+		suffix.textContent = unit;
+		wrapper.append(field, suffix);
+		row.append(wrapper);
+	}
+	container.append(row);
+	return field;
+}
+
+function settingsSelect(container, label, id, choices, value, change) {
+	const row = document.createElement("label"), title = document.createElement("span"), field = document.createElement("select");
+	row.className = "form-row";
+	title.textContent = label;
+	field.id = `settings${id}`;
+	field.setAttribute("aria-label", label);
+	field.replaceChildren(...choices.map(([value, text]) => new Option(text, String(value))));
+	if (value != null && choices.some(([key]) => String(key) === String(value))) field.value = String(value);
+	if (change) field.addEventListener("change", () => change(field.value));
+	row.append(title, field);
+	container.append(row);
+	return field;
+}
+
+function settingsButton(label, action, disabled = false, id = "") {
+	const button = document.createElement("button");
+	button.type = "button";
+	button.className = "button";
+	button.textContent = label;
+	button.disabled = disabled;
+	if (id) button.id = `settings${id}`;
+	button.addEventListener("click", action);
+	settingsElements.Actions.append(button);
+	return button;
+}
+
+function settingsValue(id) {
+	const field = document.querySelector(`#settings${id}`);
+	return field?.type === "checkbox" ? field.checked : field?.value ?? "";
+}
+
+async function openDocumentSettings() {
+	if (!state.doc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy")) return;
+	settings.page = state.pageIndex;
+	settings.object = canvasEditor.selected?.index === settings.page && !canvasEditor.selected.scoped ? canvasEditor.selected.id : "";
+	settings.path = state.outlineSelection || [];
+	settings.selected = -1;
+	settings.resource = null;
+	settingsElements.Kind.disabled = false;
+	for (const option of settingsElements.Kind.options) option.hidden = option.value === "actions" && !state.editing || ["ColorSpace", "DrawParam"].includes(option.value);
+	if (settingsElements.Kind.selectedOptions[0]?.hidden) settingsElements.Kind.value = "bookmarks";
+	settingsElements.Panel.showModal();
+	await loadDocumentSettings();
+}
+
+async function openResourceSettings(kind, id) {
+	if (!state.doc || !state.ready || document.body.hasAttribute("aria-busy")) return;
+	settings.resource = {kind, id};
+	const page = Number(resourceElements.Page.value);
+	settings.page = resourceElements.Page.value !== "" && Number.isInteger(page) && page >= 0 && page < state.doc.pages.length ? page : state.pageIndex;
+	settings.object = resourceElements.Object.value || "";
+	settingsElements.Kind.querySelector(`option[value="${kind}"]`).hidden = false;
+	settingsElements.Kind.value = kind;
+	settingsElements.Kind.disabled = true;
+	settingsElements.Panel.showModal();
+	await loadDocumentSettings();
+}
+
+async function loadDocumentSettings() {
+	const sequence = ++settings.sequence, openSeq = state.openSeq;
+	const kind = settingsElements.Kind.value;
+	settings.busy = true;
+	settingsElements.Form.inert = true;
+	settingsElements.Status.textContent = "正在读取信息";
+	try {
+		const data = ["bookmarks", "actions", "extensions"].includes(kind) ? await callWASM("ofdgoDocumentNavigation", kind) : {};
+		if (sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
+		data.resources = ["bookmarks", "extensions"].includes(kind) ? [] : await callWASM("ofdgoResources") || [];
+		if (sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
+		if (kind === "actions" && state.editing) {
+			if (settings.scope === "object") {
+				const page = await loadPageData(settings.page);
+				if (sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
+				data.objects = (page.objects || []).filter(item => item.type !== "Annotation" && !item.scoped);
+				if (!data.objects.some(item => item.id === settings.object)) settings.object = data.objects[0]?.id || "";
+			}
+			if (settings.scope === "outline" && !settings.path.length) settings.path = outlineSettingsChoices()[0]?.[0] ? JSON.parse(outlineSettingsChoices()[0][0]) : [];
+			data.actions = (settings.scope === "object" && !settings.object || settings.scope === "outline" && !settings.path.length) ? [] : await callWASM("ofdgoActionList", settings.scope, settings.page, settings.object, settings.path) || [];
+		}
+		if (kind === "templates" || kind === "layers") {
+			data.page = await callWASM("ofdgoPageSettings", settings.page);
+			if (kind === "layers" && state.editing) {
+				const page = await loadPageData(settings.page);
+				data.objects = (page.objects || []).filter(item => item.type !== "Annotation" && !item.scoped);
+			}
+		}
+		if (kind === "ColorSpace" || kind === "DrawParam") {
+			data.resource = settings.resource.id ? await callWASM("ofdgoStyleResource", kind, settings.resource.id) : {};
+			if (state.editing) {
+				const page = await loadPageData(settings.page);
+				data.objects = (page.objects || []).filter(item => ["TextObject", "PathObject", "CompositeObject", "CompositeGraphicUnit"].includes(item.type) && !item.scoped);
+			}
+		}
+		if (sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
+		settings.data = data;
+		settings.actions = data.actions || [];
+		settingsElements.Status.textContent = "";
+		renderDocumentSettings();
+	} catch (error) {
+		if (sequence === settings.sequence && openSeq === state.openSeq) {
+			settingsElements.Content.replaceChildren();
+			settingsElements.Actions.replaceChildren();
+			settingsButton("关闭", () => settingsElements.Panel.close());
+			settingsElements.Status.textContent = error.message;
+		}
+	} finally {
+		if (sequence === settings.sequence) { settings.busy = false; settingsElements.Form.inert = false; }
+	}
+}
+
+function renderDocumentSettings() {
+	settingsElements.Context.replaceChildren();
+	settingsElements.Content.replaceChildren();
+	settingsElements.Actions.replaceChildren();
+	const kind = settingsElements.Kind.value;
+	settingsElements.Title.textContent = {ColorSpace: "色彩设置", DrawParam: "样式设置"}[kind] || "文档设置";
+	if (kind === "actions") renderActionSettings();
+	else if (kind === "bookmarks") renderBookmarkSettings();
+	else if (kind === "extensions") renderExtensionSettings();
+	else if (kind === "templates") renderTemplateSettings();
+	else if (kind === "layers") renderLayerSettings();
+	else if (kind === "ColorSpace" || kind === "DrawParam") renderStyleResourceSettings(kind);
+	settingsButton("关闭", () => settingsElements.Panel.close(), false, "Close").classList.add("settings-close");
+}
+
+function settingsPages(container, id, value, change) {
+	return settingsSelect(container, "页码", id, state.doc.pages.map((page, index) => [index, `第${index + 1}页`]), value, change);
+}
+
+function outlineSettingsChoices() {
+	const result = [];
+	const visit = (nodes, path = [], prefix = "") => {
+		for (const [index, node] of (nodes || []).entries()) {
+			const next = [...path, index], title = prefix + node.title;
+			result.push([JSON.stringify(next), title]);
+			visit(node.children, next, title + " / ");
+		}
+	};
+	visit(state.doc?.outlines);
+	return result;
+}
+
+function actionSettingsLabel(action) {
+	if (action.Goto) return action.Goto.Bookmark ? `书签 · ${action.Goto.Bookmark.Name}` : `页面 · ${pageIndexByID(state.doc.pages, action.Goto.Dest?.PageID) + 1}`;
+	if (action.URI) return `网址 · ${action.URI.URI}`;
+	const [key, label, id] = action.Sound ? ["Audio", "音频", action.Sound.ResourceID] : action.Movie ? ["Video", "视频", action.Movie.ResourceID] : ["Attachment", "附件", action.GotoA?.AttachID];
+	return `${label} · ${settings.data.resources.find(item => item.kind === key && item.id === referenceIDKey(id))?.name || id || ""}`;
+}
+
+function renderActionSettings() {
+	const context = settingsElements.Context, content = settingsElements.Content;
+	settingsSelect(context, "归属", "Scope", [["document", "文档"], ["page", "页面"], ["object", "图元"], ["outline", "目录"]], settings.scope, value => { settings.scope = value; settings.selected = -1; loadDocumentSettings(); });
+	if (settings.scope === "page" || settings.scope === "object") settingsPages(context, "Page", settings.page, value => { settings.page = Number(value); settings.selected = -1; loadDocumentSettings(); });
+	if (settings.scope === "object") settingsSelect(context, "图元", "Object", (settings.data.objects || []).map(item => [item.id, `${item.id} · ${item.text || ({TextObject: "文字", PathObject: "图形", ImageObject: "图片"}[item.type] || "组合")}`]), settings.object, value => { settings.object = value; settings.selected = -1; loadDocumentSettings(); });
+	if (settings.scope === "outline") settingsSelect(context, "目录", "Outline", outlineSettingsChoices(), JSON.stringify(settings.path), value => { settings.path = JSON.parse(value); settings.selected = -1; loadDocumentSettings(); });
+	if (settings.selected >= settings.actions.length) settings.selected = -1;
+	settingsSelect(context, "动作", "Entry", [[-1, "新增动作"], ...settings.actions.map((item, index) => [index, `${index + 1} · ${actionSettingsLabel(item)}`])], settings.selected, value => { settings.selected = Number(value); renderDocumentSettings(); });
+	const action = settings.actions[settings.selected] || {};
+	const type = action.Goto ? action.Goto.Bookmark ? "Bookmark" : "Goto" : ["URI", "GotoA", "Sound", "Movie"].find(key => action[key]) || "Goto";
+	settingsSelect(content, "类型", "ActionType", [["Goto", "页面"], ["Bookmark", "书签"], ["URI", "网址"], ["GotoA", "附件"], ["Sound", "音频"], ["Movie", "视频"]], type, value => renderActionFields(value, action));
+	const fields = document.createElement("div");
+	fields.id = "settingsActionFields";
+	content.append(fields);
+	renderActionFields(type, action);
+	const missing = settings.scope === "object" && !settings.object || settings.scope === "outline" && !settings.path.length;
+	settingsButton(settings.selected < 0 ? "添加" : "修改", () => writeActionSettings("save"), missing, "Save");
+	settingsButton("删除", () => writeActionSettings("delete"), settings.selected < 0, "Delete");
+	settingsButton("上移", () => writeActionSettings("up"), settings.selected <= 0, "Up");
+	settingsButton("下移", () => writeActionSettings("down"), settings.selected < 0 || settings.selected >= settings.actions.length - 1, "Down");
+}
+
+function renderActionFields(type, action) {
+	const fields = document.querySelector("#settingsActionFields");
+	fields.replaceChildren();
+	if (type === "Goto") renderDestinationFields(fields, action.Goto?.Dest);
+	else if (type === "Bookmark") settingsSelect(fields, "书签", "Bookmark", (settings.data.bookmarks || []).map(item => [item.Name, item.Name]), action.Goto?.Bookmark?.Name);
+	else if (type === "URI") {
+		settingsField(fields, "网址", "URI", action.URI?.URI);
+		settingsField(fields, "基址", "Base", action.URI?.Base);
+		settingsField(fields, "目标", "Target", action.URI?.Target);
+	} else {
+		const kind = {GotoA: "Attachment", Sound: "Audio", Movie: "Video"}[type];
+		settingsSelect(fields, "资源", "Resource", settings.data.resources.filter(item => item.kind === kind).map(item => [item.id, item.name]), referenceIDKey(action[type]?.ResourceID || action[type]?.AttachID));
+		if (type === "GotoA") settingsSelect(fields, "窗口", "NewWindow", [["", "默认"], ["true", "新建"], ["false", "当前"]], action.GotoA?.NewWindow == null ? "" : String(action.GotoA.NewWindow));
+		if (type === "Sound") {
+			const volume = settingsField(fields, "音量", "Volume", action.Sound?.Volume ?? "", "number");
+			volume.min = "0"; volume.max = "100"; volume.step = "1"; volume.placeholder = "默认";
+			settingsField(fields, "循环", "Repeat", action.Sound?.Repeat, "checkbox");
+			settingsField(fields, "同步", "Synchronous", action.Sound?.Synchronous, "checkbox");
+		}
+		if (type === "Movie") settingsSelect(fields, "操作", "Operator", [["", "默认"], ["Play", "播放"], ["Stop", "停止"], ["Pause", "暂停"], ["Resume", "继续"]], action.Movie?.Operator || "");
+	}
+}
+
+function renderDestinationFields(container, dest = {}) {
+	const type = dest?.Type || "XYZ";
+	settingsSelect(container, "定位", "DestType", [["XYZ", "坐标"], ["Fit", "适页"], ["FitH", "适宽"], ["FitV", "适高"], ["FitR", "区域"]], type, () => updateDestinationFields());
+	const index = pageIndexByID(state.doc.pages, dest?.PageID);
+	const pages = state.doc.pages.map((page, index) => [page.id, `第${index + 1}页`]);
+	if (dest?.PageID && index < 0) pages.push([dest.PageID, "页面缺失"]);
+	settingsSelect(container, "页码", "DestPage", pages, index >= 0 ? state.doc.pages[index].id : dest?.PageID || state.doc.pages[settings.page]?.id);
+	for (const [id, label] of [["Left", "左侧"], ["Top", "顶部"], ["Right", "右侧"], ["Bottom", "底部"], ["Zoom", "缩放"]]) {
+		const field = settingsField(container, label, id, dest?.[`Omit${id}`] ? "" : dest?.[id] ?? "", "number");
+		field.placeholder = id === "Zoom" ? "保持" : "默认";
+	}
+	updateDestinationFields();
+}
+
+function updateDestinationFields() {
+	const type = settingsValue("DestType"), required = {XYZ: ["Left", "Top", "Zoom"], Fit: [], FitH: ["Top"], FitV: ["Left"], FitR: ["Left", "Top", "Right", "Bottom"]}[type] || [];
+	for (const id of ["Left", "Top", "Right", "Bottom", "Zoom"]) {
+		const field = document.querySelector(`#settings${id}`);
+		field.closest("label").hidden = !required.includes(id);
+		field.disabled = !state.editing || !required.includes(id);
+	}
+}
+
+function destinationFromSettings() {
+	const dest = {Type: settingsValue("DestType"), PageID: settingsValue("DestPage")};
+	for (const id of ["Left", "Top", "Right", "Bottom", "Zoom"]) dest[id] = Number(settingsValue(id));
+	for (const id of ["Left", "Top", "Zoom"]) dest[`Omit${id}`] = settingsValue(id) === "";
+	return dest;
+}
+
+async function commitSettings(name, ...args) {
+	if (!state.editing || settings.busy || document.body.hasAttribute("aria-busy")) return false;
+	settings.busy = true;
+	settingsElements.Form.inert = true;
+	settingsElements.Status.textContent = "正在保存修改";
+	try {
+		if (!await changeDocument(name, null, ...args)) {
+			if (settingsElements.Status.textContent === "正在保存修改") settingsElements.Status.textContent = el.statusText.textContent;
+			return false;
+		}
+		await loadDocumentSettings();
+		return true;
+	} finally { settings.busy = false; settingsElements.Form.inert = false; }
+}
+
+async function writeActionSettings(operation) {
+	if (!settingsElements.Form.reportValidity()) return;
+	const actions = structuredClone(settings.actions), index = settings.selected;
+	if (operation === "save") {
+		const original = actions[index] || {};
+		const action = {Event: {document: "DO", page: "PO", object: "CLICK", outline: original.Event || "CLICK"}[settings.scope], Region: original.Region || null};
+		const type = settingsValue("ActionType");
+		if (type === "Goto") action.Goto = {Dest: destinationFromSettings()};
+		else if (type === "Bookmark") action.Goto = {Bookmark: {Name: settingsValue("Bookmark")}};
+		else if (type === "URI") action.URI = {URI: settingsValue("URI"), Base: settingsValue("Base"), Target: settingsValue("Target")};
+		else if (type === "GotoA") action.GotoA = {AttachID: settingsValue("Resource"), NewWindow: settingsValue("NewWindow") === "" ? null : settingsValue("NewWindow") === "true"};
+		else if (type === "Sound") action.Sound = {ResourceID: settingsValue("Resource"), Volume: settingsValue("Volume") === "" ? null : Number(settingsValue("Volume")), Repeat: settingsValue("Repeat"), Synchronous: settingsValue("Synchronous")};
+		else action.Movie = {ResourceID: settingsValue("Resource"), Operator: settingsValue("Operator")};
+		if (index < 0) { settings.selected = actions.length; actions.push(action); }
+		else actions[index] = action;
+	} else if (operation === "delete") { actions.splice(index, 1); settings.selected = Math.min(index, actions.length - 1); }
+	else {
+		const next = index + (operation === "up" ? -1 : 1);
+		[actions[index], actions[next]] = [actions[next], actions[index]];
+		settings.selected = next;
+	}
+	if (!await commitSettings("ofdgoChangeActions", settings.scope, settings.page, settings.object, settings.path, JSON.stringify(actions))) settings.selected = index;
+}
+
+function renderStyleResourceSettings(kind) {
+	const content = settingsElements.Content, value = settings.data.resource || {};
+	const existing = Boolean(settings.resource.id);
+	if (kind === "ColorSpace") {
+		settingsSelect(content, "模型", "ColorType", [["RGB", "RGB"], ["GRAY", "GRAY"], ["CMYK", "CMYK"]], value.Type || "RGB");
+		settingsSelect(content, "位深", "Bits", [1, 2, 4, 8, 16].map(bits => [bits, String(bits)]), value.BitsPerComponent || 8);
+		settingsField(content, "调色板", "Palette", (value.Palette || []).join("\n"), "textarea");
+		if (value.Profile) appendInfoLine(content, "配置", value.Profile);
+		const file = settingsField(content, "配置文件", "Profile", "", "file");
+		file.accept = ".icc,.icm";
+		if (value.Profile) settingsField(content, "移除配置", "ClearProfile", false, "checkbox");
+	} else {
+		settingsSelect(content, "继承", "Relative", [["", "无"], ...settings.data.resources.filter(item => item.kind === "DrawParam" && item.id !== settings.resource.id).map(item => [item.id, item.name])], referenceIDKey(value.Relative));
+		settingsSelect(content, "字体", "Font", [["", "继承"], ...settings.data.resources.filter(item => item.kind === "Font").map(item => [item.id, item.name])], referenceIDKey(value.Font));
+		const grid = document.createElement("div");
+		grid.className = "settings-grid";
+		content.append(grid);
+		for (const [id, label, unit] of [["Size", "字号", "mm"], ["Weight", "字重", ""], ["LineWidth", "线宽", "mm"], ["MiterLimit", "截断值", ""]]) {
+			const field = settingsField(grid, label, id, value[id] || (value[`${id}Set`] ? 0 : ""), "number", unit);
+			field.min = "0";
+			field.placeholder = "继承";
+			if (id === "Weight") { field.step = "100"; field.max = "900"; }
+		}
+		settingsField(content, "斜体", "Italic", value.Italic, "checkbox");
+		settingsSelect(content, "端点", "Cap", [["", "继承"], ["Butt", "平头"], ["Round", "圆头"], ["Square", "方头"]], value.Cap || "");
+		settingsSelect(content, "连接", "Join", [["", "继承"], ["Miter", "尖角"], ["Round", "圆角"], ["Bevel", "斜角"]], value.Join || "");
+		settingsField(content, "虚线", "DashPattern", value.DashPattern || "");
+		settingsField(content, "偏移", "DashOffset", value.DashOffset ?? "", "number", "mm");
+		for (const [key, label] of [["FillColor", "填充"], ["StrokeColor", "描边"]]) {
+			settingsSelect(content, label, key + "Mode", [["keep", "原有"], ["inherit", "继承"], ["solid", "颜色"]], "keep");
+			const field = settingsField(content, label + "颜色", key, "#000000", "color");
+			field.closest("label").hidden = true;
+			document.querySelector(`#settings${key}Mode`).addEventListener("change", event => { field.closest("label").hidden = event.target.value !== "solid"; });
+		}
+	}
+	content.querySelectorAll("input,select,textarea").forEach(field => { field.disabled = !state.editing; });
+	if (!state.editing) return;
+	settingsButton(existing ? "修改" : "添加", () => writeStyleResource(kind), false, "Save");
+	if (!existing) return;
+	const binding = document.createElement("div");
+	binding.className = "settings-binding";
+	content.append(binding);
+	settingsPages(binding, "TargetPage", settings.page, value => { settings.page = Number(value); loadSettingsObjects(); });
+	settingsSelect(binding, "图元", "TargetObject", [["", "选择图元"], ...(settings.data.objects || []).map(item => [item.id, `${item.id} · ${item.text || "图元"}`])], settings.object);
+	if (kind === "ColorSpace") {
+		settingsSelect(binding, "应用", "PaintTarget", [["fill", "填充"], ["stroke", "描边"]], "fill");
+		settingsSelect(binding, "方式", "PaintMode", [["value", "分量"], ["index", "索引"]], "value");
+		settingsField(binding, "颜色值", "PaintValue", value.Type === "CMYK" ? "0 0 0 255" : value.Type === "GRAY" ? "0" : "0 0 0");
+	}
+	settingsButton("应用", () => applyStyleResource(kind), false, "Apply");
+	if (kind === "DrawParam") settingsButton("解绑", () => applyStyleResource(kind, true), false, "Unbind");
+}
+
+async function loadSettingsObjects() {
+	const sequence = settings.sequence, page = settings.page, openSeq = state.openSeq;
+	const field = document.querySelector("#settingsTargetObject");
+	field.disabled = true;
+	try {
+		const data = await loadPageData(page);
+		if (sequence !== settings.sequence || page !== settings.page || openSeq !== state.openSeq) return;
+		field.replaceChildren(new Option("选择图元", ""), ...(data.objects || []).filter(item => ["TextObject", "PathObject", "CompositeObject", "CompositeGraphicUnit"].includes(item.type) && !item.scoped).map(item => new Option(`${item.id} · ${item.text || "图元"}`, item.id)));
+	} catch (error) { if (sequence === settings.sequence) settingsElements.Status.textContent = error.message; }
+	finally { if (sequence === settings.sequence) field.disabled = false; }
+}
+
+async function writeStyleResource(kind) {
+	if (!settingsElements.Form.reportValidity()) return;
+	const sequence = settings.sequence, openSeq = state.openSeq, resource = settings.resource, open = settingsElements.Panel.open;
+	const value = structuredClone(settings.data.resource || {});
+	let profile = null;
+	const colors = {};
+	if (kind === "ColorSpace") {
+		value.Type = settingsValue("ColorType");
+		value.BitsPerComponent = Number(settingsValue("Bits"));
+		value.Palette = settingsValue("Palette").split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+		const file = document.querySelector("#settingsProfile").files[0];
+		if (file) {
+			try { profile = new Uint8Array(await file.arrayBuffer()); }
+			catch (error) { if (sequence === settings.sequence && openSeq === state.openSeq) settingsElements.Status.textContent = error.message; return; }
+			if (sequence !== settings.sequence || openSeq !== state.openSeq || resource !== settings.resource || open !== settingsElements.Panel.open) return;
+		}
+		else if (settingsValue("ClearProfile")) profile = new Uint8Array();
+	} else {
+		for (const id of ["Relative", "Font", "Cap", "Join", "DashPattern"]) value[id] = settingsValue(id);
+		for (const id of ["Size", "Weight", "LineWidth", "MiterLimit"]) value[id] = Number(settingsValue(id));
+		value.LineWidthSet = settingsValue("LineWidth") !== "";
+		value.MiterLimitSet = settingsValue("MiterLimit") !== "";
+		value.DashOffset = settingsValue("DashOffset") === "" ? null : Number(settingsValue("DashOffset"));
+		value.Italic = settingsValue("Italic");
+		for (const key of ["FillColor", "StrokeColor"]) {
+			const mode = settingsValue(key + "Mode");
+			if (mode === "inherit") value[key] = null;
+			if (mode === "solid") colors[key] = settingsValue(key);
+		}
+	}
+	const before = new Set(settings.data.resources.filter(item => item.kind === kind).map(item => item.id));
+	if (await commitSettings("ofdgoChangeStyleResource", kind, settings.resource.id, JSON.stringify(value), profile, JSON.stringify(colors))) {
+		await resourceTask(loadManagedResources);
+		if (!settings.resource.id) {
+			settings.resource.id = resourceManager.items.find(item => item.kind === kind && !before.has(item.id))?.id || "";
+			await loadDocumentSettings();
+		}
+	}
+}
+
+async function applyStyleResource(kind, clear = false) {
+	const object = settingsValue("TargetObject");
+	if (!object) { settingsElements.Status.textContent = "请选择图元"; return; }
+	settings.object = object;
+	const paint = kind === "ColorSpace" ? {target: settingsValue("PaintTarget"), mode: settingsValue("PaintMode"), value: settingsValue("PaintValue")} : {};
+	if (await commitSettings("ofdgoApplyStyleResource", kind, clear ? "" : settings.resource.id, settings.page, object, JSON.stringify(paint))) await resourceTask(loadManagedResources);
+}
+
+function renderLayerSettings() {
+	const entries = settings.data.page.layers || [], content = settingsElements.Content;
+	settingsPages(settingsElements.Context, "Page", settings.page, value => { settings.page = Number(value); settings.selected = -1; loadDocumentSettings(); });
+	if (settings.selected >= entries.length) settings.selected = -1;
+	if (!state.editing && settings.selected < 0 && entries.length) settings.selected = 0;
+	const types = {Background: "背景", Body: "正文", Foreground: "前景"};
+	const options = entries.map((entry, index) => [index, `${entry.ID} · ${types[entry.Type] || entry.Type} · ${entry.ObjectCount}个图元`]);
+	if (state.editing) options.unshift([-1, "新增图层"]);
+	settingsSelect(settingsElements.Context, "图层", "Entry", options, settings.selected, value => { settings.selected = Number(value); renderDocumentSettings(); });
+	const entry = entries[settings.selected];
+	if (!entry && !state.editing) { settingsElements.Status.textContent = "暂无图层"; return; }
+	settingsSelect(content, "类型", "LayerType", Object.entries(types), entry?.Type || "Body");
+	settingsSelect(content, "样式", "DrawParam", [["", "无"], ...settings.data.resources.filter(item => item.kind === "DrawParam").map(item => [item.id, item.name])], referenceIDKey(entry?.DrawParam));
+	content.querySelectorAll("select").forEach(field => { field.disabled = !state.editing; });
+	if (!state.editing) return;
+	const write = async (operation, order = 0, objects = []) => {
+		const selected = settings.selected;
+		if (!entry && operation === "add") settings.selected = entries.length;
+		if (!await commitSettings("ofdgoChangeLayer", operation, settings.page, entry?.ID || "", settingsValue("LayerType"), settingsValue("DrawParam"), order, objects)) settings.selected = selected;
+	};
+	settingsButton(entry ? "修改" : "添加", () => write(entry ? "update" : "add"), false, "Save");
+	settingsButton("删除", () => write("delete"), !entry || entry.ObjectCount > 0, "Delete");
+	settingsButton("上移", () => write("move", entry.Order - 1), !entry || entry.Order === 0, "Up");
+	settingsButton("下移", () => write("move", entry.Order + 1), !entry || entry.Order >= entries.filter(item => item.Type === entry.Type).length - 1, "Down");
+	if (entry) {
+		const objects = settingsSelect(content, "图元", "LayerObjects", (settings.data.objects || []).map(item => [item.id, `${item.id} · ${item.text || "图元"}`]), null);
+		objects.multiple = true;
+		objects.size = Math.min(4, Math.max(2, objects.options.length));
+		for (const option of objects.options) option.selected = canvasEditor.items().some(item => item.index === settings.page && item.id === option.value && !item.scoped);
+		settingsButton("移入", () => write("objects", 0, [...objects.selectedOptions].map(option => option.value)), !objects.options.length, "MoveObjects");
+	}
+}
+
+function renderTemplateSettings() {
+	const entries = settings.data.page.templates || [], bindings = settings.data.page.bindings || [], content = settingsElements.Content;
+	settingsPages(settingsElements.Context, "Page", settings.page, value => { settings.page = Number(value); loadDocumentSettings(); });
+	if (settings.selected >= entries.length) settings.selected = -1;
+	if (!state.editing && settings.selected < 0 && entries.length) settings.selected = 0;
+	const options = entries.map((entry, index) => [index, `${entry.Name || entry.ID}${bindings.some(binding => referenceIDKey(binding.TemplateID) === referenceIDKey(entry.ID)) ? " · 已绑定" : ""}`]);
+	if (state.editing) options.unshift([-1, "新增模板"]);
+	settingsSelect(settingsElements.Context, "模板", "Entry", options, settings.selected, value => { settings.selected = Number(value); renderDocumentSettings(); });
+	const entry = entries[settings.selected];
+	if (!entry && !state.editing) { settingsElements.Status.textContent = "暂无模板"; return; }
+	settingsField(content, "名称", "Name", entry?.Name);
+	settingsSelect(content, "层次", "TemplateOrder", [["Background", "背景"], ["Foreground", "前景"]], entry?.ZOrder || "Background");
+	if (entry) appendInfoLine(content, "文件", entry.BaseLoc);
+	content.querySelectorAll("input,select").forEach(field => { field.disabled = !state.editing; });
+	const bound = entry ? bindings.findIndex(binding => referenceIDKey(binding.TemplateID) === referenceIDKey(entry.ID)) : -1;
+	if (entry && bound >= 0) {
+		const order = bindings[bound].ZOrder;
+		if (!state.editing) appendInfoLine(content, "绑定层次", {Background: "背景", Foreground: "前景"}[order] || "默认");
+	}
+	if (!state.editing) return;
+	settingsPages(content, "SourcePage", settings.page);
+	document.querySelector("#settingsSourcePage").closest("label").firstElementChild.textContent = "来源页";
+	const write = async (operation, order = 0) => {
+		if (operation === "replace" && !window.confirm("替换模板内容？当前文档中引用此模板的页面将同步更新。")) return;
+		const selected = settings.selected;
+		if (operation === "add") settings.selected = entries.length;
+		if (!await commitSettings("ofdgoChangeTemplate", operation, ["add", "replace"].includes(operation) ? Number(settingsValue("SourcePage")) : settings.page, entry?.ID || "", settingsValue("Name"), ["bind", "order"].includes(operation) ? settingsValue("BindingOrder") : settingsValue("TemplateOrder"), order)) settings.selected = selected;
+	};
+	settingsButton(entry ? "修改" : "添加", () => write(entry ? "update" : "add"), false, "Save");
+	settingsButton("替换", () => write("replace"), !entry, "Replace");
+	settingsButton("删除", () => write("delete"), !entry || bound >= 0, "Delete");
+	if (entry) {
+		settingsSelect(content, "绑定层次", "BindingOrder", [["", "默认"], ["Background", "背景"], ["Foreground", "前景"]], bound < 0 ? "" : bindings[bound].ZOrder || "");
+		settingsButton(bound < 0 ? "绑定" : "应用", () => write(bound < 0 ? "bind" : "order"), false, "Bind");
+		settingsButton("解绑", () => write("unbind"), bound < 0, "Unbind");
+		settingsButton("上移", () => write("move", bound - 1), bound <= 0, "Up");
+		settingsButton("下移", () => write("move", bound + 1), bound < 0 || bound >= bindings.length - 1, "Down");
+	}
+}
+
+function renderBookmarkSettings() {
+	const entries = settings.data.bookmarks || [];
+	if (settings.selected >= entries.length) settings.selected = -1;
+	if (!state.editing && settings.selected < 0 && entries.length) settings.selected = 0;
+	const options = entries.map((entry, index) => [index, entry.Name]);
+	if (state.editing) options.unshift([-1, "新增书签"]);
+	settingsSelect(settingsElements.Context, "书签", "Entry", options, settings.selected, value => { settings.selected = Number(value); renderDocumentSettings(); });
+	const entry = entries[settings.selected];
+	if (!entry && !state.editing) { settingsElements.Status.textContent = "暂无书签"; return; }
+	settingsField(settingsElements.Content, "名称", "Name", entry?.Name).required = true;
+	renderDestinationFields(settingsElements.Content, entry?.Dest);
+	settingsElements.Content.querySelectorAll("input,select").forEach(field => { field.disabled = !state.editing; });
+	updateDestinationFields();
+	settingsButton("定位", () => {
+		settingsElements.Panel.close();
+		const d = entry.Dest;
+		navigateDestination({type: d.Type, pageID: d.PageID, left: d.Left, top: d.Top, right: d.Right, bottom: d.Bottom, zoom: d.Zoom, omitLeft: d.OmitLeft, omitTop: d.OmitTop, omitZoom: d.OmitZoom}, false);
+	}, !entry, "Locate");
+	if (!state.editing) return;
+	settingsButton(entry ? "修改" : "添加", async () => {
+		if (!settingsElements.Form.reportValidity()) return;
+		const bookmark = {Name: settingsValue("Name"), Dest: destinationFromSettings()};
+		const selected = settings.selected;
+		if (!entry) settings.selected = entries.length;
+		if (!await commitSettings("ofdgoChangeBookmark", entry ? "update" : "add", entry?.Name || "", JSON.stringify(bookmark))) settings.selected = selected;
+	}, false, "Save");
+	settingsButton("删除", () => commitSettings("ofdgoChangeBookmark", "delete", entry.Name, "{}"), !entry, "Delete");
+}
+
+function renderExtensionSettings() {
+	const entries = settings.data.extensions || [];
+	if (!entries.length) settingsElements.Status.textContent = "暂无扩展";
+	for (const entry of entries) {
+		const section = document.createElement("div");
+		section.className = "settings-detail";
+		for (const [key, label] of [["AppName", "应用"], ["Company", "单位"], ["AppVersion", "版本"], ["Date", "日期"], ["RefID", "引用"]]) appendInfoLine(section, label, entry[key]);
+		for (const property of entry.Property || []) appendInfoLine(section, property.Name, property.Value);
+		for (const value of entry.ExtendData || []) appendInfoLine(section, "文件", value);
+		for (const value of entry.Data || []) {
+			for (const attr of value.Attr || []) appendInfoLine(section, attr.Name.Local, attr.Value);
+			const text = document.createElement("pre");
+			text.textContent = value.Content;
+			section.append(text);
+		}
+		settingsElements.Content.append(section);
+	}
+}
+
 async function openResourceManagement() {
 	if (!state.doc || !state.ready || document.body.hasAttribute("aria-busy")) return;
 	if (resourceManager.pick) { finishResourcePick(); return; }
@@ -5132,7 +5707,7 @@ async function renderResourceList() {
 		button.setAttribute("role", "option");
 		button.setAttribute("aria-selected", String(item === selected));
 		button.title = item.file || item.name;
-		for (const value of [item.name, item.missing ? "缺失" : item.file ? formatBytes(item.size) : "外部", item.complete ? String(item.references?.length || 0) : "未知"]) {
+		for (const value of [item.name, item.missing ? "缺失" : item.file ? formatBytes(item.size) : item.kind === "Font" ? "外部" : "-", item.complete ? String(item.references?.length || 0) : "未知"]) {
 			const span = document.createElement("span");
 			span.textContent = value;
 			button.append(span);
@@ -5181,10 +5756,12 @@ function updateResourceControls() {
 	resourceElements.Rename.disabled = disabled || item?.kind !== "Attachment";
 	resourceElements.Add.disabled = disabled;
 	resourceElements.Reference.disabled = disabled || !item?.references?.length;
-	resourceElements.Preview.disabled = disabled || !item?.file || item.missing || item.kind === "Attachment";
+	const style = item && ["ColorSpace", "DrawParam"].includes(item.kind);
+	resourceElements.Preview.disabled = disabled || (!style && (!item?.file || item.missing || item.kind === "Attachment"));
+	resourceElements.Preview.textContent = style ? "查看" : "预览";
 	resourceElements.Export.disabled = disabled || !item?.file || item.missing;
 	resourceElements.Replace.disabled = disabled || !item || item.kind !== "Attachment" && !item.complete;
-	resourceElements.Replace.textContent = item?.kind === "Font" ? item.file ? "外置" : "嵌入" : "替换";
+	resourceElements.Replace.textContent = style ? "修改" : item?.kind === "Font" ? item.file ? "外置" : "嵌入" : "替换";
 	resourceElements.Delete.disabled = disabled || !item || item.kind !== "Attachment" && (!item.complete || Boolean(item.references?.length));
 	resourceElements.Delete.title = item?.kind === "Attachment" ? "删除附件" : item?.references?.length ? "资源仍被引用" : "删除资源";
 	resourceElements.Locate.disabled = disabled || !item?.references?.length;
@@ -5345,6 +5922,10 @@ function releaseResourcePreview() {
 }
 
 async function previewManagedResource() {
+	if (["ColorSpace", "DrawParam"].includes(resourceManager.selected?.kind)) {
+		await openResourceSettings(resourceManager.selected.kind, resourceManager.selected.id);
+		return;
+	}
 	const item = resourceManager.selected;
 	if (!item?.file) return;
 	if (state.doc.encryption?.encrypted && !window.confirm("资源将按明文读取，是否继续？")) return;
@@ -7657,7 +8238,7 @@ function focusSearch() {
 
 function showNavigation(selected) {
 	const scrollTop = el.navigationContent.scrollTop;
-	for (const [tab, panel] of [[el.pagesTab, el.pageList], [el.outlinesTab, el.outlineList], [el.searchTab, el.searchPanel]]) {
+	for (const [tab, panel] of [[el.pagesTab, el.pageList], [el.outlinesTab, el.outlineList], [el.annotationsTab, el.annotationsPanel], [el.searchTab, el.searchPanel]]) {
 		if (tab.getAttribute("aria-selected") === "true") {
 			state.navigationScroll.set(tab, scrollTop);
 		}
@@ -7669,10 +8250,75 @@ function showNavigation(selected) {
 	el.pageSelectionTools.hidden = !state.editing || !state.pageMultiSelect || selected !== el.pagesTab;
 	el.navigationContent.scrollTop = state.navigationScroll.get(selected) || 0;
 	if (selected === el.pagesTab) syncThumbnailWindow();
+	if (selected === el.annotationsTab) loadAnnotationSummary();
+}
+
+async function loadAnnotationSummary() {
+	if (!state.doc || !state.ready) return;
+	const seq = state.openSeq;
+	if (state.annotationSummary?.seq === seq) { renderAnnotationSummary(); return; }
+	const summary = {seq, items: [], loading: true};
+	state.annotationSummary = summary;
+	el.annotationsList.replaceChildren();
+	el.annotationsStatus.textContent = "正在读取注解";
+	try {
+		const items = await callWASM("ofdgoAnnotationInfos");
+		if (seq !== state.openSeq || state.annotationSummary !== summary) return;
+		summary.items = items || [];
+		const labels = {Path: "批注", Highlight: "高亮", Stamp: "印章", Watermark: "水印", Link: "链接"};
+		const kind = el.annotationsKind.value;
+		el.annotationsKind.replaceChildren(new Option("全部", ""), ...[...new Set(summary.items.map(item => item.type))].map(type => new Option(labels[type] || type, type)));
+		el.annotationsKind.value = [...el.annotationsKind.options].some(option => option.value === kind) ? kind : "";
+		summary.loading = false;
+		renderAnnotationSummary();
+	} catch (error) {
+		if (seq === state.openSeq && state.annotationSummary === summary) {
+			state.annotationSummary = null;
+			el.annotationsStatus.textContent = error.message;
+		}
+	}
+}
+
+function renderAnnotationSummary() {
+	const summary = state.annotationSummary;
+	if (!summary || summary.loading || summary.seq !== state.openSeq) return;
+	const query = el.annotationsFilter.value.trim().toLocaleLowerCase();
+	const kind = el.annotationsKind.value;
+	const labels = {Path: "批注", Highlight: "高亮", Stamp: "印章", Watermark: "水印", Link: "链接"};
+	const items = summary.items.filter(item => (!kind || item.type === kind) && `${item.remark || ""}\n${item.creator || ""}\n${item.id}`.toLocaleLowerCase().includes(query));
+	el.annotationsStatus.textContent = summary.items.length ? `${items.length} / ${summary.items.length}` : "暂无注解";
+	el.annotationsList.replaceChildren(...items.map(item => {
+		const row = document.createElement("div");
+		row.className = "annotation-summary";
+		const target = document.createElement("button");
+		target.type = "button";
+		target.className = "annotation-summary-target";
+		target.title = "定位注解";
+		const heading = document.createElement("span"), content = document.createElement("span");
+		heading.textContent = `第${item.page}页 · ${labels[item.type] || item.type}${item.visible ? "" : " · 隐藏"}`;
+		content.textContent = item.remark || item.id;
+		target.append(heading, content);
+		target.addEventListener("click", () => focusPageRegion(item, "注解", "center"));
+		row.append(target);
+		appendInfoLine(row, "作者", item.creator);
+		appendInfoLine(row, "时间", formatDocumentTime(item.lastModDate));
+		if (state.editing) {
+			const edit = document.createElement("button");
+			edit.type = "button";
+			edit.className = "small-button";
+			edit.textContent = "修改";
+			edit.addEventListener("click", () => {
+				if (!state.editing || document.body.hasAttribute("aria-busy") || summary.seq !== state.openSeq) return;
+				editAnnotationDetails({...item, id: `annotation:${item.id}`, index: item.page - 1, type: "Annotation", fromSummary: true});
+			});
+			row.append(edit);
+		}
+		return row;
+	}));
 }
 
 function renderOutlines(reset = true) {
-	const selected = !reset && [el.pagesTab, el.outlinesTab, el.searchTab].find(tab => tab.getAttribute("aria-selected") === "true");
+	const selected = !reset && [el.pagesTab, el.outlinesTab, el.annotationsTab, el.searchTab].find(tab => tab.getAttribute("aria-selected") === "true");
 	const scrollTop = reset ? 0 : el.navigationContent.scrollTop;
 	if (reset) {
 		state.navigationScroll.clear();
@@ -8031,11 +8677,16 @@ const pageIndexes = new WeakMap();
 function pageIndexByID(pages, id) {
 	let indexes = pageIndexes.get(pages);
 	if (!indexes) {
-		indexes = new Map(pages.map((page, position) => [page.id, {page, position}]));
+		indexes = new Map(pages.map((page, position) => [referenceIDKey(page.id), {page, position}]));
 		pageIndexes.set(pages, indexes);
 	}
-	const entry = indexes.get(id);
+	const entry = indexes.get(referenceIDKey(id));
 	return entry ? entry.page.index ?? entry.position : -1;
+}
+
+function referenceIDKey(id) {
+	const value = String(id ?? ""), trimmed = value.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+	return /^\d+$/.test(trimmed) && Number(trimmed) > 0 && Number(trimmed) <= 4294967295 ? trimmed.replace(/^0+(?=\d)/, "") : value;
 }
 
 function selectedPageIndexes() {
@@ -9580,6 +10231,7 @@ function updateDocumentControls() {
 	el.documentManageButton.hidden = !state.editing;
 	el.documentManageButton.disabled = disabled;
 	resourceElements.ManageButton.disabled = disabled;
+	settingsElements.Button.disabled = disabled;
 	updateResourceControls();
 	el.documentRow.hidden = !count || !state.editing && count < 2;
 	el.documentSelect.disabled = disabled;
@@ -9768,7 +10420,7 @@ async function callWASM(name, ...args) {
 			request.fontData = new Map();
 			args.push([...request.localFonts.keys()]);
 		}
-		if (name === "ofdgoImportImages" || name === "ofdgoExportImages" || name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoExportResource" || name === "ofdgoSaveDocument" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
+		if (name === "ofdgoImportImages" || name === "ofdgoExportImages" || name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoExportResource" || name === "ofdgoExportVersion" || name === "ofdgoSaveDocument" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
 			state.exportRequestID = id;
 			el.cancelExportButton.hidden = false;
 			el.cancelExportButton.disabled = false;

@@ -24,9 +24,10 @@ import (
 	"strings"
 )
 
-// ResourceInfo 描述当前文档及所选版本的字体、图片、音视频或附件，Size为文件字节数
-// Kind为Font、Image、Audio、Video或Attachment，标识仅在当前文档及同类资源内有效
-// Complete表示已完整识别引用；不包含其他文档和历史版本的引用，空File表示外部字体
+// ResourceInfo 描述当前文档及所选版本的资源，Size为文件字节数
+// Kind为Font、Image、Audio、Video、Attachment、ColorSpace或DrawParam
+// Complete表示已完整识别引用；不包含其他文档和历史版本的引用
+// ColorSpace的File为ICC文件，未声明ICC及内联DrawParam的File为空且Missing为false
 // Missing表示声明的文件不在包内，与外部字体及零字节文件区分，不表示文件解码结果
 type ResourceInfo struct {
 	Kind       string              `json:"kind"`
@@ -79,7 +80,8 @@ func (r *Reader) Resources(ctx context.Context) ([]ResourceInfo, error) {
 	return result, nil
 }
 
-// OpenResource 打开当前资源的原始文件，外部字体无可导出的内嵌文件
+// OpenResource 打开当前资源的原始文件，ColorSpace导出ICC，无ICC或内联DrawParam不提供文件流
+// 外部字体同样无可导出的内嵌文件，定义读取使用ColorSpace或DrawParam
 // 入参: ctx 取消上下文, kind 资源类型, id 资源标识
 // 返回: io.ReadCloser 文件流，由调用方关闭, error 资源或文件错误
 func (r *Reader) OpenResource(ctx context.Context, kind, id string) (io.ReadCloser, error) {
@@ -152,6 +154,14 @@ func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) 
 						item.Kind, item.Name, field = "Font", node.attr("FontName"), "FontFile"
 					} else if group.matchesOFD("MultiMedias") && node.matchesOFD("MultiMedia") && slices.Contains([]string{"Image", "Audio", "Video"}, node.attr("Type")) {
 						item.Kind, item.Format, field = node.attr("Type"), node.attr("Format"), "MediaFile"
+					} else if group.matchesOFD("ColorSpaces") && node.matchesOFD("ColorSpace") {
+						item.Kind, item.Name = "ColorSpace", node.attr("Type")
+						if profile := strings.TrimSpace(node.attr("Profile")); profile != "" {
+							item.File = resolveResourcePath(name, root.attr("BaseLoc"), profile)
+							item.Format = "ICC"
+						}
+					} else if group.matchesOFD("DrawParams") && node.matchesOFD("DrawParam") {
+						item.Kind, item.Name = "DrawParam", "DrawParam "+item.ID
 					} else {
 						continue
 					}
@@ -205,7 +215,7 @@ func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) 
 					add(attr.Name.Local, attr.Value)
 				}
 			}
-			if slices.Contains([]string{"Thumbnail", "Substitution"}, node.name.Local) {
+			if slices.Contains([]string{"Thumbnail", "Substitution", "DefaultCS"}, node.name.Local) {
 				add(node.name.Local, strings.TrimSpace(editorImportText(file.data, node)))
 			}
 			for _, child := range node.children {
@@ -245,7 +255,7 @@ func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) 
 				item.Missing = true
 			}
 		} else {
-			item.Missing = item.Kind != "Font"
+			item.Missing = item.Kind != "Font" && item.Kind != "ColorSpace" && item.Kind != "DrawParam"
 		}
 	}
 	return catalog, ctx.Err()
@@ -260,7 +270,7 @@ func (c *resourceCatalog) add(item ResourceInfo, node editorFontText) error {
 		return fmt.Errorf("duplicate resource %s", key)
 	}
 	if item.Kind != "Attachment" {
-		for _, kind := range []string{"Font", "Image", "Audio", "Video"} {
+		for _, kind := range []string{"Font", "Image", "Audio", "Video", "ColorSpace", "DrawParam"} {
 			if _, exists := c.nodes[kind+"/"+item.ID]; exists {
 				return fmt.Errorf("conflicting resource ID %s", item.ID)
 			}

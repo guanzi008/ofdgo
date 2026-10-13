@@ -1726,7 +1726,69 @@ body[data-hide-meta] .meta-panel {
 }
 
 .document-actions.version-readonly {
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+#versionActions:not(.version-readonly) {
+	grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.settings-dialog {
+	width: 560px;
+}
+
+.settings-dialog .form-row {
+	grid-template-columns: 4em minmax(0, 1fr);
+}
+
+.settings-dialog .form-row > label,
+.settings-dialog .form-row > span:not(.form-unit) {
+	white-space: nowrap;
+	text-align-last: justify;
+}
+
+.settings-grid {
+	display: grid;
 	grid-template-columns: repeat(2, minmax(0, 1fr));
+	column-gap: 16px;
+}
+
+@media (max-width: 480px) {
+	.settings-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+.settings-dialog .form-status:not(:empty) {
+	margin-top: 12px;
+}
+
+.settings-detail {
+	padding-block: 10px;
+	border-bottom: 1px solid var(--line);
+	overflow-wrap: anywhere;
+}
+
+.settings-detail pre {
+	white-space: pre-wrap;
+	font: inherit;
+}
+
+.settings-binding {
+	margin-block: 12px;
+	padding-top: 12px;
+	border-top: 1px solid var(--line);
+}
+
+#settingsActions {
+	display: flex;
+	flex-wrap: wrap;
+}
+
+#settingsActions > .button {
+	flex: 0 0 auto;
+}
+
+#settingsActions .settings-close {
+	margin-left: auto;
 }
 
 .document-list {
@@ -1815,6 +1877,58 @@ body[data-hide-meta] .meta-panel {
 	gap: 16px;
 	margin-bottom: 12px;
 	border-bottom: 1px solid var(--line);
+}
+
+.annotation-summary-list {
+	display: grid;
+	gap: 10px;
+}
+
+.annotation-summary {
+	min-width: 0;
+	padding: 10px 0;
+	border-bottom: 1px solid var(--line);
+}
+
+.annotation-summary-target {
+	display: grid;
+	gap: 6px;
+	width: 100%;
+	padding: 0 0 8px;
+	border: 0;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.annotation-summary-target span {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.annotation-summary-target span:first-child {
+	color: var(--muted);
+}
+
+.annotation-summary .small-button {
+	margin-top: 8px;
+}
+
+#annotationsPanel .search-form {
+	grid-template-columns: minmax(0, 1fr) 72px;
+}
+
+#annotationsPanel select {
+	min-width: 0;
+	border: 1px solid var(--line);
+	background: #fff;
+	font: inherit;
+}
+
+#annotationsStatus {
+	margin: 8px 0;
 }
 
 .navigation-tabs button {

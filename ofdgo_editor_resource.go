@@ -158,8 +158,8 @@ func (e *Editor) ImportMedia(ctx context.Context, kind, format string, data []by
 // 入参: ctx 取消上下文, kind 资源类型, id 资源标识, format 媒体格式，图片按实际数据确定, data 完整文件
 // 返回: error 校验或提交错误，失败时文档不变
 func (e *Editor) ReplaceResource(ctx context.Context, kind, id, format string, data []byte) error {
-	if kind == "Font" {
-		return fmt.Errorf("use font binding operations for fonts")
+	if !slices.Contains([]string{"Image", "Audio", "Video", "Attachment"}, kind) {
+		return fmt.Errorf("use typed definition or font binding operations for %s", kind)
 	}
 	return e.changeResource(ctx, kind, id, func(catalog *resourceCatalog, item ResourceInfo, changes map[string][]byte) error {
 		reader := catalog.scan.reader
@@ -347,10 +347,15 @@ func validateResourceImageMask(ctx context.Context, catalog *resourceCatalog, id
 	return ctx.Err()
 }
 
-// invalidateResourcePreviews 沿绘制参数和复合引用移除图片变化后失效的替换图及底纹预览
-// 入参: ctx 取消上下文, scan 当前文档结构, id 图片标识, changes 待提交文件
+// invalidateResourcePreviews 沿颜色、绘制参数和复合引用移除资源变化后失效的替换图及底纹预览
+// 入参: ctx 取消上下文, scan 当前文档结构, id 资源标识, changes 待提交文件
 // 返回: error 解析或取消错误
 func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, id string, changes map[string][]byte) error {
+	doc, err := scan.reader.DocContext(ctx)
+	if err != nil {
+		return err
+	}
+	defaultCS := strconv.Itoa(doc.CommonData.DefaultCS)
 	affected := map[string]bool{id: true}
 	for {
 		count := len(affected)
@@ -373,7 +378,10 @@ func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, i
 					return false, nil
 				}
 				primary := affected[editorResourceID(node.attr("ResourceID"))] || affected[editorResourceID(node.attr("ImageMask"))]
-				changed := primary || affected[editorResourceID(node.attr("Substitution"))] || affected[editorResourceID(node.attr("DrawParam"))]
+				changed := primary || affected[editorResourceID(node.attr("Substitution"))] || affected[editorResourceID(node.attr("DrawParam"))] || affected[editorResourceID(node.attr("ColorSpace"))]
+				if resourceColorNode(node) && node.attr("ColorSpace") == "" {
+					changed = changed || affected[defaultCS]
+				}
 				if node.matchesOFD("DrawParam") {
 					changed = changed || affected[editorResourceID(node.attr("Relative"))]
 				}

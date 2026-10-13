@@ -47,6 +47,10 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 		return nil, fmt.Errorf("resource reference not found")
 	}
 	ref := item.References[reference]
+	doc, err := r.Reader.DocContext(ctx)
+	if err != nil {
+		return nil, err
+	}
 	wanted := make(map[string]bool)
 	users := make(map[string][]string)
 	for _, file := range catalog.scan.files {
@@ -66,6 +70,13 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 				object = node.attr("ID")
 			}
 			owner := resourceReferenceOwner(node)
+			if owner != "" && resourceColorNode(node) && node.attr("ColorSpace") == "" && doc.CommonData.DefaultCS != 0 {
+				dependency := fmt.Sprint(doc.CommonData.DefaultCS)
+				users[dependency] = append(users[dependency], owner)
+				if ref.Role == "DefaultCS" && sameResourceID(dependency, item.ID) {
+					wanted[owner] = true
+				}
+			}
 			add := func(role, value string) {
 				if owner == "" {
 					return
@@ -119,10 +130,6 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 				queue = append(queue, user)
 			}
 		}
-	}
-	doc, err := r.Reader.DocContext(ctx)
-	if err != nil {
-		return nil, err
 	}
 	view := *r
 	view.RenderAnnotations, view.pageContext = true, ctx

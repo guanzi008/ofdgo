@@ -626,6 +626,7 @@ func (e *Editor) replaceLayers(page int, layers []Layer) {
 }
 
 // replacePreparedLayers 提交已隔离的图层容器，历史启用时仍保留独立快照
+// 图层回放同步补回文档或版本快照中尚未加载的页面原文、属性和对象来源
 // 入参: page 页面索引, after 已准备且不再由调用方修改的图层列表
 func (e *Editor) replacePreparedLayers(page int, after []Layer) {
 	if e.historyLimit == 0 {
@@ -633,13 +634,34 @@ func (e *Editor) replacePreparedLayers(page int, after []Layer) {
 		e.recordChange()
 		return
 	}
-	before := copyEditorPage(e.pages[page]).Content.Layer
+	before := copyEditorPage(e.pages[page])
+	var reader *Reader
+	var source *editorSourcePage
+	var origins map[string]*editorObjectOrigin
+	if e.source != nil {
+		reader, source = e.source.reader, e.source.pages[before.ID]
+		if source != nil && source.original != nil {
+			origins = make(map[string]*editorObjectOrigin, len(source.nodes))
+			for id := range source.nodes {
+				origins[id] = e.source.origins[id]
+			}
+		}
+	}
 	apply := func(e *Editor, layers []Layer) {
+		if source != nil && source.original != nil && e.source != nil && e.source.reader == reader && e.pages[page].ID == before.ID {
+			if current := e.source.pages[before.ID]; current != nil && current.original == nil {
+				e.source.pages[before.ID] = source
+				for id, origin := range origins {
+					e.source.origins[id] = origin
+				}
+				e.pages[page] = copyEditorPage(before)
+			}
+		}
 		e.pages[page].Content.Layer = copyEditorPage(PageContent{Content: Content{Layer: layers}}).Content.Layer
 	}
 	apply(e, after)
 	if change := e.recordChange(); change != nil {
-		change.undo = func(e *Editor) { apply(e, before) }
+		change.undo = func(e *Editor) { apply(e, before.Content.Layer) }
 		change.redo = func(e *Editor) { apply(e, after) }
 	}
 }
