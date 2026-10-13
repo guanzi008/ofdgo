@@ -27,6 +27,7 @@ import (
 // ResourceInfo 描述当前文档及所选版本的字体、图片、音视频或附件，Size为文件字节数
 // Kind为Font、Image、Audio、Video或Attachment，标识仅在当前文档及同类资源内有效
 // Complete表示已完整识别引用；不包含其他文档和历史版本的引用，空File表示外部字体
+// Missing表示声明的文件不在包内，与外部字体及零字节文件区分，不表示文件解码结果
 type ResourceInfo struct {
 	Kind       string              `json:"kind"`
 	ID         string              `json:"id"`
@@ -34,6 +35,7 @@ type ResourceInfo struct {
 	Format     string              `json:"format"`
 	File       string              `json:"file"`
 	Size       uint64              `json:"size"`
+	Missing    bool                `json:"missing"`
 	Complete   bool                `json:"complete"`
 	References []ResourceReference `json:"references"`
 }
@@ -54,7 +56,7 @@ type resourceCatalog struct {
 	nodes map[string]editorFontText
 }
 
-// Resources 列出当前文档及所选版本的资源，不读取二进制内容或执行媒体动作
+// Resources 列出当前文档及所选版本的资源，标记缺失文件，不读取二进制内容或执行媒体动作
 // 入参: ctx 取消上下文
 // 返回: []ResourceInfo 资源及引用位置, error 结构或读取错误
 func (r *Reader) Resources(ctx context.Context) ([]ResourceInfo, error) {
@@ -202,10 +204,15 @@ func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) 
 		}
 		item.References = refs[key]
 		if item.File != "" {
-			item.Size, err = outputResourceSize(r, nil, item.File)
-			if err != nil {
-				return nil, err
+			if data, ok := r.files[cleanPackagePath(item.File)]; ok {
+				item.Size = uint64(len(data))
+			} else if file, ok := r.packageFile(item.File); ok {
+				item.Size = file.UncompressedSize64
+			} else {
+				item.Missing = true
 			}
+		} else {
+			item.Missing = item.Kind != "Font"
 		}
 	}
 	return catalog, ctx.Err()

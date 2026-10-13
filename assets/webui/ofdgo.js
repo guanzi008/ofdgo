@@ -5118,7 +5118,7 @@ function renderResourceList() {
 		button.setAttribute("role", "option");
 		button.setAttribute("aria-selected", String(item === selected));
 		button.title = item.file || item.name;
-		for (const value of [item.name, item.file ? formatBytes(item.size) : "外部", item.complete ? String(item.references?.length || 0) : "未知"]) {
+		for (const value of [item.name, item.missing ? "缺失" : item.file ? formatBytes(item.size) : "外部", item.complete ? String(item.references?.length || 0) : "未知"]) {
 			const span = document.createElement("span");
 			span.textContent = value;
 			button.append(span);
@@ -5159,8 +5159,8 @@ function updateResourceControls() {
 	resourceElements.Add.hidden = resourceElements.Replace.hidden = resourceElements.Delete.hidden = !editing;
 	resourceElements.Add.disabled = disabled;
 	resourceElements.Reference.disabled = disabled || !item?.references?.length;
-	resourceElements.Preview.disabled = disabled || !item?.file || item.kind === "Attachment";
-	resourceElements.Export.disabled = disabled || !item?.file;
+	resourceElements.Preview.disabled = disabled || !item?.file || item.missing || item.kind === "Attachment";
+	resourceElements.Export.disabled = disabled || !item?.file || item.missing;
 	resourceElements.Replace.disabled = disabled || !item || !item.complete;
 	resourceElements.Replace.textContent = item?.kind === "Font" ? item.file ? "外置" : "嵌入" : "替换";
 	resourceElements.Delete.disabled = disabled || !item?.complete || Boolean(item?.references?.length);
