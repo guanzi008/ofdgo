@@ -144,6 +144,10 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			return false
 		}
 		if len(s.stack) == 0 {
+			if s.seen {
+				s.safe = false
+				return false
+			}
 			s.seen = true
 			if token.Name.Local == "Document" {
 				if s.refs.documents == nil {
@@ -216,6 +220,10 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			s.capture = true
 		}
 	case xml.CharData:
+		if len(s.stack) == 0 && len(bytes.Trim(token, " \t\r\n")) != 0 {
+			s.safe = false
+			return false
+		}
 		if s.capture {
 			s.text.Write(token)
 		}

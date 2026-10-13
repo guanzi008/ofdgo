@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/xml"
@@ -49,7 +50,11 @@ func editorResourceDefinitions(ctx context.Context, data []byte, name string, so
 	result.definitions = make(map[string]*editorResourceRefs)
 	outer := &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
 	scan := editorReferenceScan{refs: outer, name: name, safe: true}
-	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	input := bufio.NewReader(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	if found, err := editorXMLPrefix(input); err != nil || !found {
+		return nil, err
+	}
+	decoder := xml.NewDecoder(input)
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -66,7 +71,7 @@ func editorResourceDefinitions(ctx context.Context, data []byte, name string, so
 		}
 		depth := len(scan.stack)
 		if node, ok := token.(xml.StartElement); ok {
-			if depth == 0 && (scan.seen || node.Name.Local != "Res") || depth == 1 && editorResourceElement(node.Name.Local) == "" {
+			if depth == 0 && node.Name.Local != "Res" || depth == 1 && editorResourceElement(node.Name.Local) == "" {
 				return nil, nil
 			}
 			if depth == 2 {

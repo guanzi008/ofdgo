@@ -328,7 +328,7 @@ func (r *editorResourceRefs) scan(input io.Reader, name string) (bool, bool) {
 	for {
 		token, err := decoder.Token()
 		if err == io.EOF {
-			return scan.resource, len(scan.stack) == 0
+			return scan.resource, scan.seen && len(scan.stack) == 0
 		}
 		if err != nil {
 			return false, false
