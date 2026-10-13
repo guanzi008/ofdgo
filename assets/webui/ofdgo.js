@@ -8286,7 +8286,7 @@ function renderAnnotationSummary() {
 	const kind = el.annotationsKind.value;
 	const labels = {Path: "批注", Highlight: "高亮", Stamp: "印章", Watermark: "水印", Link: "链接"};
 	const items = summary.items.filter(item => (!kind || item.type === kind) && `${item.remark || ""}\n${item.creator || ""}\n${item.id}`.toLocaleLowerCase().includes(query));
-	el.annotationsStatus.textContent = summary.items.length ? `${items.length} / ${summary.items.length}` : "暂无注解";
+	el.annotationsStatus.textContent = summary.items.length ? `${items.length} / ${summary.items.length}` : "";
 	el.annotationsList.replaceChildren(...items.map(item => {
 		const row = document.createElement("div");
 		row.className = "annotation-summary";
