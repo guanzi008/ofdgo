@@ -156,7 +156,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		textRun = r.pageText.addRun(obj)
 	}
 	if ff == nil {
-		if textRun != nil {
+		if textRun != nil && !r.textContentOnly {
 			box, _ := ParseBox(obj.Boundary)
 			boundaryCTM := TranslationMatrix(box.X, box.Y)
 			if parentCTM != nil {
@@ -193,6 +193,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			textRun.Text = text
 			textRun.Boxes = make([]Box, len([]rune(text)))
 		}
+	}
+	if r.textOnly && r.textContentOnly {
+		ctx.Pop()
+		return
 	}
 	glyphTransforms := r.textObjectGlyphTransforms(fontID, obj)
 	hasUnderline := strings.Contains(obj.Decoration, "Underline")
@@ -239,6 +243,13 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		positioned := textCodePositioned(tc, positioner.xs, positioner.ys)
 		drawAsPath := embeddedFont || face.FauxBold > 0 || positioned || fillClip != nil || shadedFill || fillPattern != nil || shouldStroke
 		for i, glyph := range glyphs {
+			if i%64 == 0 && r.pageContext != nil {
+				if err := r.pageContext.Err(); err != nil {
+					r.renderError = err
+					ctx.Pop()
+					return
+				}
+			}
 			str := glyph.Text
 			drawAsGlyphPath := drawAsPath || glyph.GlyphID >= 0
 			if !drawAsGlyphPath {

@@ -47,8 +47,17 @@ type glyphOutlineKey struct {
 // 入参: object 文字对象, state 继承状态
 // 返回: *PositionedText 定位结果, error 字体或几何错误
 func (r *Renderer) PositionText(object TextObject, state RenderState) (*PositionedText, error) {
+	return r.positionText(object, state, false)
+}
+
+// positionText 提取原文，按需计算字形与搜索范围
+// 入参: object 文字对象, state 继承状态, contentOnly 仅提取原文
+// 返回: *PositionedText 定位结果, error 字体或几何错误
+func (r *Renderer) positionText(object TextObject, state RenderState, contentOnly bool) (*PositionedText, error) {
 	result := &PositionedText{Run: TextRun{ID: object.ID, Text: object.Text()}}
-	result.Run.Boxes = make([]Box, len([]rune(result.Run.Text)))
+	if !contentOnly {
+		result.Run.Boxes = make([]Box, len([]rune(result.Run.Text)))
+	}
 	if state.Hidden || object.Visible != nil && !*object.Visible {
 		return result, nil
 	}
@@ -87,6 +96,9 @@ func (r *Renderer) PositionText(object TextObject, state RenderState) (*Position
 		return nil, err
 	}
 	if len(prepared.Data) == 0 {
+		if contentOnly {
+			return result, nil
+		}
 		box, _ := ParseBox(object.Boundary)
 		boundary, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
 		path, err := geometry.Transform(geometryRectangle(Box{W: box.W, H: box.H}), boundary)
@@ -132,8 +144,13 @@ func (r *Renderer) PositionText(object TextObject, state RenderState) (*Position
 	if recoverBaseline {
 		if text := object.Text(); text != result.Run.Text {
 			result.Run.Text = text
-			result.Run.Boxes = make([]Box, len([]rune(text)))
+			if !contentOnly {
+				result.Run.Boxes = make([]Box, len([]rune(text)))
+			}
 		}
+	}
+	if contentOnly {
+		return result, nil
 	}
 	transforms := r.textObjectGlyphTransforms(id, object)
 	codeOffset, textOffset := 0, 0
@@ -174,6 +191,11 @@ func (r *Renderer) PositionText(object TextObject, state RenderState) (*Position
 		}
 		positioner := NewTextPositioner(code)
 		for i, gid := range ids {
+			if i%64 == 0 && r.pageContext != nil {
+				if err := r.pageContext.Err(); err != nil {
+					return nil, err
+				}
+			}
 			path := paths[i]
 			width := float64(metrics.GlyphAdvance(gid)) * unit
 			origin := positioner.Next()
@@ -275,6 +297,11 @@ func (r *Renderer) preparedOutlines(prepared *PreparedFont, metrics FontMetrics,
 	missing := make([]uint16, 0)
 	unique := make(map[uint16]int)
 	for i, glyph := range glyphs {
+		if i%64 == 0 && r.pageContext != nil {
+			if err := r.pageContext.Err(); err != nil {
+				return nil, err
+			}
+		}
 		if path, ok := r.glyphOutlines.get(glyphOutlineKey{prepared, glyph, size}); ok {
 			result[i] = path
 			continue
@@ -313,11 +340,21 @@ func (r *Renderer) preparedOutlines(prepared *PreparedFont, metrics FontMetrics,
 		}
 		paths = make([]GeometryPath, len(missing))
 		for i, glyph := range missing {
+			if r.pageContext != nil {
+				if err := r.pageContext.Err(); err != nil {
+					return nil, err
+				}
+			}
 			var err error
 			paths[i], err = provider.GlyphOutline(glyph, size)
 			if err != nil {
 				return nil, err
 			}
+		}
+	}
+	if r.pageContext != nil {
+		if err := r.pageContext.Err(); err != nil {
+			return nil, err
 		}
 	}
 	for i, path := range paths {

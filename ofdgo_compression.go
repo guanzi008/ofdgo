@@ -573,9 +573,12 @@ func (r *Renderer) writeCompressedImage(writer io.Writer, data []byte) error {
 	return err
 }
 
-// outputContext 获取仅用于输出的取消上下文
+// outputContext 优先使用当前页面上下文，否则使用输出上下文
 // 返回: context.Context 取消上下文
 func (r *Renderer) outputContext() context.Context {
+	if r.pageContext != nil {
+		return r.pageContext
+	}
 	if r.OutputContext != nil {
 		return r.OutputContext
 	}

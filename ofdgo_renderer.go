@@ -26,7 +26,7 @@ import (
 // OnPageText可选，接收页面绘制时同步提取的文字，不包含图案和签名外观
 // OnExportProgress可选，同步回报文档导出的已处理页数及总页数，返回错误则停止，页数完成不代表写入成功
 // TransparentBackground关闭页面白底，供嵌套图案和印章保持透明背景
-// Compression仅控制导出编码，OutputContext可取消输出压缩，nil使用后台上下文
+// Compression仅控制导出编码，OutputContext用于导出和文字提取的取消，nil使用后台上下文
 type Renderer struct {
 	Reader                *Reader
 	DPI                   float64
@@ -38,13 +38,14 @@ type Renderer struct {
 	DrawParams            map[string]*DrawParam
 	CompositeGraphicUnits map[string]*CompositeGraphicUnit
 	templatePageCache     map[string]*PageContent
-	imageCache            renderCache[string, image.Image]
+	imageCache            *renderCache[string, image.Image]
 	fontDirs              []string
 	fontFS                []fs.FS
 	decodeImages          bool
 	pageText              *PageText
 	pageContext           context.Context
 	textOnly              bool
+	textContentOnly       bool
 	backends              RenderBackends
 	backendStates         map[any]any
 	sharedBackendStates   map[any]any
@@ -54,7 +55,7 @@ type Renderer struct {
 	fontPreparations      *renderCache[[32]byte, PreparedFont]
 	fontSourcesCache      *fontSourceCache
 	fontMetrics           *renderCache[[32]byte, FontMetrics]
-	glyphOutlines         renderCache[glyphOutlineKey, GeometryPath]
+	glyphOutlines         *renderCache[glyphOutlineKey, GeometryPath]
 	renderError           error
 	patternReferences     map[*Pattern]bool
 	patternPage           *Matrix
@@ -81,7 +82,7 @@ func (r *Renderer) deviceLineWidth(width float64) float64 {
 // ClearCache 释放派生字体、图片、模板与后端缓存，不改变文档和渲染配置
 func (r *Renderer) ClearCache() {
 	r.backendStates = make(map[any]any)
-	r.imageCache = renderCache[string, image.Image]{limit: imageCacheLimit}
+	r.imageCache = &renderCache[string, image.Image]{limit: imageCacheLimit}
 	r.templatePageCache = make(map[string]*PageContent)
 	r.resetFontCache()
 }

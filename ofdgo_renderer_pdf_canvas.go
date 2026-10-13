@@ -52,6 +52,8 @@ type pdfNavigation struct {
 	Outline     []pdfOutline
 	Open        []pdfNavigationAction
 	PageOpen    map[int][]pdfNavigationAction
+	pageIndex   map[string]int
+	bookmarks   map[string]Dest
 	attachments map[string]Attachment
 	audio       map[string]*pdfgo.FileSpecification
 	video       map[string]*pdfVideoResource
@@ -149,14 +151,20 @@ func (r *pdfRenderer) glyphPath(path *canvas.Path, matrix canvas.Matrix) *canvas
 	return converted
 }
 
-// newPDFNavigation 创建PDF导航信息
-// 入参: renderer 渲染器, doc 文档结构, pages 页面数据
-// 返回: *pdfNavigation PDF导航信息, error 区域或目标错误
+// newPDFNavigation 建立文档导航与输出页索引，不读取页面图元
+// 入参: renderer 渲染器, doc 文档结构, pages 输出页面描述
+// 返回: *pdfNavigation 导航信息, error 资源或目标错误
 func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentPage) (*pdfNavigation, error) {
+	ctx := renderer.outputContext()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	navigation := &pdfNavigation{
-		Link:     make(map[int][]pdfLink),
-		PageOpen: make(map[int][]pdfNavigationAction),
-		source:   renderer.Reader,
+		Link:      make(map[int][]pdfLink),
+		PageOpen:  make(map[int][]pdfNavigationAction),
+		pageIndex: make(map[string]int, len(pages)),
+		bookmarks: make(map[string]Dest),
+		source:    renderer.Reader,
 	}
 	if doc != nil && (doc.Attachments.Path != "" || len(doc.Attachments.Attachment) != 0) {
 		attachments, err := renderer.Reader.Attachments()
@@ -188,11 +196,18 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentP
 		}
 		navigation.nativeWrite = len(attachments) != 0
 	}
-	pageIndex := make(map[string]int, len(pages))
+	pageIndex := navigation.pageIndex
 	for i, page := range pages {
-		pageIndex[page.Content.ID] = i
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		id := page.Source.ID
+		if page.Content != nil {
+			id = page.Content.ID
+		}
+		pageIndex[id] = i
 	}
-	bookmarks := make(map[string]Dest)
+	bookmarks := navigation.bookmarks
 	if doc != nil {
 		for _, bookmark := range doc.Bookmarks.Bookmark {
 			bookmarks[bookmark.Name] = bookmark.Dest
@@ -201,28 +216,32 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentP
 			return nil, err
 		}
 	}
-	for i, page := range pages {
-		for _, source := range renderer.pageOpenActionSources(page.Content) {
-			if err := navigation.addLifecycleActions(renderer.outputContext(), source, i, bookmarks, pageIndex, pages); err != nil {
-				return nil, err
-			}
-		}
-		sources := renderer.pageActionSources(page.Content)
-		if renderer.RenderAnnotations {
-			sources = append(sources, renderer.annotationActionSources(renderer.Reader.Annots[page.Content.ID])...)
-		}
-		for _, source := range sources {
-			if err := navigation.addActions(renderer, i, source, bookmarks, pageIndex, pages); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if doc != nil {
-		if err := navigation.addOutlines(doc.Outlines.OutlineElem, 0, bookmarks, pageIndex, pages); err != nil {
-			return nil, err
-		}
-	}
 	return navigation, nil
+}
+
+// addPage 收集当前页面及模板、注释中的导航，不保留页面图元
+// 入参: renderer 渲染器, index 输出页索引, page 页面内容, pages 输出页面描述
+// 返回: error 区域、目标或取消错误
+func (n *pdfNavigation) addPage(renderer *Renderer, index int, page *PageContent, pages []RenderDocumentPage) error {
+	ctx := renderer.outputContext()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, source := range renderer.pageOpenActionSources(page) {
+		if err := n.addLifecycleActions(ctx, source, index, n.bookmarks, n.pageIndex, pages); err != nil {
+			return err
+		}
+	}
+	sources := renderer.pageActionSources(page)
+	if renderer.RenderAnnotations {
+		sources = append(sources, renderer.annotationActionSources(renderer.Reader.Annots[page.ID])...)
+	}
+	for _, source := range sources {
+		if err := n.addActions(renderer, index, source, n.bookmarks, n.pageIndex, pages); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
 }
 
 // actionTarget 转换动作及资源引用，选页未包含的目标不写入
@@ -298,16 +317,11 @@ func (n *pdfNavigation) addOutlines(outlines []OutlineElem, level int, bookmarks
 	return nil
 }
 
-// apply 生成链接及大纲结构，内部目标在原生写入时关联
+// apply 生成当前页链接，内部目标在原生写入时关联
 // 入参: renderer PDF渲染器, page 页面索引
 func (n *pdfNavigation) apply(renderer *pdf.PDF, page int) {
 	for _, link := range n.Link[page] {
 		renderer.AddLink("", link.Rect)
-	}
-	if page == 0 {
-		for index, outline := range n.Outline {
-			renderer.AddOutline(strconv.Itoa(index), outline.Level, 0)
-		}
 	}
 }
 

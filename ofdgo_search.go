@@ -96,10 +96,33 @@ func (d *textPageTokens) Token() (xml.Token, error) {
 // 入参: page 页面内容
 // 返回: *PageText 页面文字, error 错误信息
 func (r *Renderer) PageText(page *PageContent) (*PageText, error) {
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	return r.PageTextContext(ctx, page)
+}
+
+// PageTextContext 提取页面原文及字形位置，取消时不返回部分结果
+// 入参: ctx 取消上下文，nil使用后台上下文, page 页面内容
+// 返回: *PageText 页面文字, error 提取或取消错误
+func (r *Renderer) PageTextContext(ctx context.Context, page *PageContent) (*PageText, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if r.backends.Compiler == nil {
 		return nil, fmt.Errorf("%w: page text", ErrBackendUnavailable)
 	}
-	return r.backends.Compiler.PageText(r, page)
+	renderer := *r
+	renderer.pageContext = ctx
+	text, err := renderer.backends.Compiler.PageText(&renderer, page)
+	if canceled := ctx.Err(); canceled != nil {
+		return nil, canceled
+	}
+	return text, err
 }
 
 // PageTextByIndex 按页面索引提取文字，避免解析独立路径和图片图元
@@ -109,6 +132,16 @@ func (r *Renderer) PageTextByIndex(index int) (*PageText, error) {
 	ctx := r.pageContext
 	if ctx == nil {
 		ctx = r.outputContext()
+	}
+	return r.PageTextByIndexContext(ctx, index)
+}
+
+// PageTextByIndexContext 按索引读取页面并提取文字，读取和页内计算均响应取消
+// 入参: ctx 取消上下文，nil使用后台上下文, index 页面索引，从0开始
+// 返回: *PageText 页面文字, error 读取、提取或取消错误
+func (r *Renderer) PageTextByIndexContext(ctx context.Context, index int) (*PageText, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	doc, err := r.Reader.DocContext(ctx)
 	if err != nil {
@@ -121,7 +154,7 @@ func (r *Renderer) PageTextByIndex(index int) (*PageText, error) {
 	if err != nil {
 		return nil, err
 	}
-	return r.PageText(page)
+	return r.PageTextContext(ctx, page)
 }
 
 // String 按文本对象顺序合并原文，以换行分隔非空对象
@@ -162,7 +195,7 @@ func (p *PageText) SearchEach(ctx context.Context, query string, visit func(Text
 }
 
 // SearchText 逐页搜索原文并立即返回匹配，不保留整本文字或识别图像
-// 入参: ctx 取消上下文，页面提取之间及匹配时检查, query 搜索文字, visit 零基页码和匹配访问函数, indices 页码，省略则全部，按原页序去重
+// 入参: ctx 取消上下文，页面读取、文字提取及匹配时检查, query 搜索文字, visit 零基页码和匹配访问函数, indices 页码，省略则全部，按原页序去重
 // 返回: error 页面提取、取消或访问错误
 func (r *Renderer) SearchText(ctx context.Context, query string, visit func(int, TextMatch) error, indices ...int) error {
 	if err := ctx.Err(); err != nil {
@@ -171,11 +204,11 @@ func (r *Renderer) SearchText(ctx context.Context, query string, visit func(int,
 	if query == "" {
 		return nil
 	}
-	count, err := r.Reader.PageCount()
+	doc, err := r.Reader.DocContext(ctx)
 	if err != nil {
 		return err
 	}
-	indices, err = exportPageIndices(count, indices)
+	indices, err = exportPageIndices(len(doc.Pages.Page), indices)
 	if err != nil {
 		return err
 	}
@@ -184,7 +217,7 @@ func (r *Renderer) SearchText(ctx context.Context, query string, visit func(int,
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		text, err := r.PageTextByIndex(index)
+		text, err := r.PageTextByIndexContext(ctx, index)
 		if err != nil {
 			return fmt.Errorf("failed to search page %d: %w", index+1, err)
 		}

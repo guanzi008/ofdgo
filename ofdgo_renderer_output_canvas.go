@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"strconv"
 
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/canvas/renderers/pdf"
@@ -111,10 +112,18 @@ func (w canvasEPSWriter) Write(data []byte) (int, error) {
 // 入参: r 渲染器, pages 页面列表, writer 输出流, progress 页面处理进度
 // 返回: error 错误信息
 func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer io.Writer, progress func(int, int) error) error {
+	ctx := r.outputContext()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	view := *r
+	view.pageContext = ctx
+	r = &view
 	if len(pages) == 0 {
 		return fmt.Errorf("no pages found")
 	}
-	navigation, err := newPDFNavigation(r, r.Reader.doc, pages)
+	doc := r.Reader.doc
+	navigation, err := newPDFNavigation(r, doc, pages)
 	if err != nil {
 		return err
 	}
@@ -139,13 +148,22 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	}
 	p.SetInfo(info.Title, info.Subject, "", info.Author, ofdCreator)
 	for i, page := range pages {
+		content, err := page.ReadContent(ctx, r.Reader)
+		if err != nil {
+			buf.Truncate(start)
+			return fmt.Errorf("failed to read page %d: %w", i+1, err)
+		}
+		if err := navigation.addPage(r, i, content, pages); err != nil {
+			buf.Truncate(start)
+			return fmt.Errorf("failed to read page %d navigation: %w", i+1, err)
+		}
 		if i > 0 {
 			p.NewPage(page.Box.W, page.Box.H)
 			renderer.images = append(renderer.images, nil)
 			renderer.text = append(renderer.text, pdfPageText{})
 		}
 		navigation.apply(p, i)
-		if err := r.renderCanvasPageToContext(canvas.NewContext(renderer), page.Content, !r.TransparentBackground); err != nil {
+		if err := r.renderCanvasPageToContext(canvas.NewContext(renderer), content, !r.TransparentBackground); err != nil {
 			buf.Truncate(start)
 			return fmt.Errorf("failed to render page %d: %w", i+1, err)
 		}
@@ -154,12 +172,29 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 			return fmt.Errorf("failed to render page %d: %w", i+1, renderer.imageError)
 		}
 		pages[i].Content = nil
+		if err := ctx.Err(); err != nil {
+			buf.Truncate(start)
+			return err
+		}
 		if progress != nil {
 			if err := progress(i+1, len(pages)); err != nil {
 				buf.Truncate(start)
 				return err
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			buf.Truncate(start)
+			return err
+		}
+	}
+	if doc != nil {
+		if err := navigation.addOutlines(doc.Outlines.OutlineElem, 0, navigation.bookmarks, navigation.pageIndex, pages); err != nil {
+			buf.Truncate(start)
+			return err
+		}
+	}
+	for index, outline := range navigation.Outline {
+		p.AddOutline(strconv.Itoa(index), outline.Level, 0)
 	}
 	if err := p.Close(); err != nil {
 		buf.Truncate(start)

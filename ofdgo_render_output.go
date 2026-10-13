@@ -90,22 +90,34 @@ func (r *Renderer) RenderTo(page *PageContent, writer io.Writer, format string) 
 }
 
 // RenderToZIP 逐页渲染并写入ZIP，文件编号按总页数补零，出错时调用方应丢弃输出
+// 读取和渲染使用OutputContext响应取消，TXT只解析文字提取所需的图元
 // 入参: writer 输出流, format svg、pdf、eps、png、jpg、jpeg或txt, indices 零基页面索引，省略则全部，按原页序去重
 // 返回: error 错误信息
 func (r *Renderer) RenderToZIP(writer io.Writer, format string, indices ...int) error {
+	renderer := *r
+	if renderer.pageContext == nil {
+		renderer.pageContext = r.outputContext()
+	}
+	r = &renderer
+	ctx := r.pageContext
 	extension, render, err := r.outputRenderer(format)
 	if err != nil {
 		return err
 	}
-	count, err := r.Reader.PageCount()
+	if err := r.Compression.Validate(); err != nil {
+		return err
+	}
+	doc, err := r.Reader.DocContext(ctx)
 	if err != nil {
 		return err
 	}
+	count := len(doc.Pages.Page)
 	indices, err = exportPageIndices(count, indices)
 	if err != nil {
 		return err
 	}
-	archive := zip.NewWriter(writer)
+	var countWritten int64
+	archive := zip.NewWriter(convertWriter{context: ctx, writer: writer, count: &countWritten})
 	configureArchive(archive, r.Compression)
 	method := zip.Deflate
 	if extension == "png" || extension == "jpg" {
@@ -116,7 +128,7 @@ func (r *Renderer) RenderToZIP(writer io.Writer, format string, indices ...int) 
 		return err
 	}
 	for i, index := range indices {
-		page, err := r.Reader.PageContentByIndex(index)
+		page, err := r.Reader.readPageContent(ctx, doc.Pages.Page[index], extension == "txt", false)
 		if err != nil {
 			return fmt.Errorf("failed to read page %d: %w", index+1, err)
 		}
@@ -130,34 +142,59 @@ func (r *Renderer) RenderToZIP(writer io.Writer, format string, indices ...int) 
 		if err := render(page, entry); err != nil {
 			return fmt.Errorf("failed to export page %d: %w", index+1, err)
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := r.exportProgress(i+1, len(indices)); err != nil {
 			return err
 		}
 	}
-	return archive.Close()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := archive.Close(); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 // RenderToText 导出页面原文为UTF-8文本，以换行分隔非空文本对象
 // 入参: page 页面内容, writer 输出流
 // 返回: error 错误信息
 func (r *Renderer) RenderToText(page *PageContent, writer io.Writer) error {
-	text, err := r.PageText(page)
+	renderer := *r
+	renderer.textContentOnly = true
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	text, err := renderer.PageTextContext(ctx, page)
 	if err != nil {
 		return err
 	}
 	_, err = text.WriteTo(writer)
-	return err
+	if err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 // RenderToMultiPageText 逐页导出UTF-8原文，以换行分隔非空页面，出错时调用方应丢弃输出
 // 入参: writer 输出流, indices 零基页面索引，省略则全部，按原页序去重
 // 返回: error 错误信息
 func (r *Renderer) RenderToMultiPageText(writer io.Writer, indices ...int) error {
-	count, err := r.Reader.PageCount()
+	renderer := *r
+	renderer.textContentOnly = true
+	r = &renderer
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	doc, err := r.Reader.DocContext(ctx)
 	if err != nil {
 		return err
 	}
-	indices, err = exportPageIndices(count, indices)
+	indices, err = exportPageIndices(len(doc.Pages.Page), indices)
 	if err != nil {
 		return err
 	}
@@ -166,7 +203,7 @@ func (r *Renderer) RenderToMultiPageText(writer io.Writer, indices ...int) error
 	}
 	written := false
 	for i, index := range indices {
-		text, err := r.PageTextByIndex(index)
+		text, err := r.PageTextByIndexContext(ctx, index)
 		if err != nil {
 			return fmt.Errorf("failed to extract page %d text: %w", index+1, err)
 		}
@@ -175,11 +212,14 @@ func (r *Renderer) RenderToMultiPageText(writer io.Writer, indices ...int) error
 			return err
 		}
 		written = written || n > 0
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := r.exportProgress(i+1, len(indices)); err != nil {
 			return err
 		}
 	}
-	return nil
+	return ctx.Err()
 }
 
 // RenderToImage 渲染为光栅图
@@ -291,11 +331,12 @@ func (r *Renderer) RenderToEPS(page *PageContent, writer io.Writer) error {
 	return r.backends.EPS.RenderEPS(r, page, writer)
 }
 
-// RenderToMultiPagePDF 将文档页面导出为多页PDF
+// RenderToMultiPagePDF 将文档页面导出为多页PDF，仅预读页面区域和资源索引
 // 入参: writer 输出流, indices 零基页面索引，省略则全部，按原页序去重
 // 返回: error 错误信息
 func (r *Renderer) RenderToMultiPagePDF(writer io.Writer, indices ...int) error {
-	doc, err := r.Reader.Doc()
+	ctx := r.outputContext()
+	doc, err := r.Reader.DocContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -308,15 +349,21 @@ func (r *Renderer) RenderToMultiPagePDF(writer io.Writer, indices ...int) error 
 	}
 	pages := make([]RenderDocumentPage, len(indices))
 	for i, index := range indices {
-		page, err := r.Reader.PageContent(doc.Pages.Page[index])
+		ref := doc.Pages.Page[index]
+		page, err := r.Reader.readPageHeaderContext(ctx, ref)
 		if err != nil {
 			return fmt.Errorf("failed to read page %d: %w", index+1, err)
 		}
-		box, err := r.GetPageBox(page)
+		for _, res := range page.PageRes {
+			if err := r.Reader.loadResContext(ctx, "/"+resolveResourcePath(r.Reader.ResPath(ref.BaseLoc), "", res)); err != nil {
+				return fmt.Errorf("failed to read page %d resources: %w", index+1, err)
+			}
+		}
+		box, err := r.GetPageBox(&page)
 		if err != nil {
 			return fmt.Errorf("failed to read page %d area: %w", index+1, err)
 		}
-		pages[i] = RenderDocumentPage{Content: page, Box: box}
+		pages[i] = RenderDocumentPage{Source: ref, Box: box}
 	}
 	return r.renderPDFPages(pages, writer, r.OnExportProgress)
 }
@@ -325,6 +372,10 @@ func (r *Renderer) RenderToMultiPagePDF(writer io.Writer, indices ...int) error 
 // 入参: contents 页面内容列表, writer 输出流
 // 返回: error 错误信息
 func (r *Renderer) RenderPagesToPDF(contents []*PageContent, writer io.Writer) error {
+	ctx := r.outputContext()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(contents) == 0 {
 		return fmt.Errorf("no pages found")
 	}
@@ -333,6 +384,9 @@ func (r *Renderer) RenderPagesToPDF(contents []*PageContent, writer io.Writer) e
 	}
 	pages := make([]RenderDocumentPage, len(contents))
 	for i, page := range contents {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		box, err := r.GetPageBox(page)
 		if err != nil {
 			return fmt.Errorf("failed to read page %d area: %w", i+1, err)
@@ -405,11 +459,21 @@ func fillWhiteBackground(img image.Image) image.Image {
 // 入参: pages 页面列表, writer 输出流, progress 页面处理进度
 // 返回: error 错误信息
 func (r *Renderer) renderPDFPages(pages []RenderDocumentPage, writer io.Writer, progress func(int, int) error) error {
+	ctx := r.outputContext()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := r.Compression.Validate(); err != nil {
 		return err
 	}
 	if r.backends.PDF == nil {
 		return fmt.Errorf("pdf: %w", ErrBackendUnavailable)
 	}
-	return r.backends.PDF.RenderPDF(r, pages, writer, progress)
+	renderer := *r
+	renderer.pageContext = ctx
+	renderer.OutputContext = ctx
+	if err := renderer.backends.PDF.RenderPDF(&renderer, pages, writer, progress); err != nil {
+		return err
+	}
+	return ctx.Err()
 }

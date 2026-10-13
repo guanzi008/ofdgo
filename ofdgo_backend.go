@@ -92,14 +92,17 @@ type SVGBackend interface {
 	RenderSVG(renderer *Renderer, page *PageContent, writer io.Writer, mode SVGMode) (SVGResources, error)
 }
 
-// RenderDocumentPage 保存已解析页面和物理区域，不得修改源页面内容
+// RenderDocumentPage 保存输出页面及物理区域，Content非空时优先使用已解析内容
+// Content为空时通过Source从当前阅读器按需读取，后端统一调用ReadContent且不得修改源页面
 type RenderDocumentPage struct {
 	Content *PageContent
+	Source  Page
 	Box     Box
 }
 
 // PDFBackend 输出完整PDF，保留文字、链接、目录和文档信息
-// pages交由后端消费，可逐页清空Content以释放引用，不得改变页面顺序
+// pages交由后端消费，通过ReadContent逐页读取，可清空Content释放引用，不得改变页面顺序
+// 通过Renderer调用时，OutputContext为当前导出的取消上下文
 // progress返回错误时应停止输出，调用方在失败后丢弃输出
 type PDFBackend interface {
 	Backend
@@ -141,6 +144,25 @@ type BackendInfo struct {
 // 返回: BackendInfo 后端能力
 func (b RenderBackends) Info() BackendInfo {
 	return BackendInfo{FontResources: backendName(b.FontResources), Fonts: backendName(b.Fonts), Geometry: backendName(b.Geometry), Compiler: backendName(b.Compiler), Raster: backendName(b.Raster), SVG: backendName(b.SVG), PDF: backendName(b.PDF), EPS: backendName(b.EPS)}
+}
+
+// ReadContent 返回已有页面或按文档引用读取，不在描述对象中保留新解析的内容
+// 入参: ctx 取消上下文，nil使用后台上下文, reader 页面所属阅读器
+// 返回: *PageContent 只读页面内容, error 读取或取消错误
+func (p RenderDocumentPage) ReadContent(ctx context.Context, reader *Reader) (*PageContent, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p.Content != nil {
+		return p.Content, nil
+	}
+	if reader == nil || p.Source.BaseLoc == "" {
+		return nil, fmt.Errorf("missing document page source")
+	}
+	return reader.PageContentContext(ctx, p.Source)
 }
 
 // WithRenderBackends 替换完整后端组合，未配置的能力不会沿用默认实现

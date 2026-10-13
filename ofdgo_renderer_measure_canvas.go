@@ -53,6 +53,7 @@ func (CanvasBackend) MeasureObject(r *Renderer, object GraphicObject, options Me
 	renderer.renderError = nil
 	renderer.pageText = nil
 	renderer.textOnly = false
+	renderer.textContentOnly = false
 	defaults := options.Defaults
 	ctx := canvas.NewContext(bounds)
 	switch object.Type {

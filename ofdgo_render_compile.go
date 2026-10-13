@@ -396,7 +396,7 @@ func (c *semanticCompiler) textObject(object TextObject, state RenderState) erro
 	if object.Visible != nil && !*object.Visible || object.Fill != nil && !*object.Fill && (object.Stroke == nil || !*object.Stroke) {
 		return nil
 	}
-	positioned, err := c.renderer.PositionText(object, state)
+	positioned, err := c.renderer.positionText(object, state, c.textOnly && c.renderer.textContentOnly)
 	if err != nil {
 		return err
 	}

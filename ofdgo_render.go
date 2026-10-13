@@ -27,7 +27,7 @@ func (r *Renderer) RenderPage(page *PageContent) (*RasterPage, error) {
 // 入参: page 页面内容
 // 返回: Box 区域, error 错误信息
 func (r *Renderer) GetPageBox(page *PageContent) (Box, error) {
-	area, err := r.Reader.resolvePageArea(page.Area, page.Template)
+	area, err := r.Reader.resolvePageAreaContext(r.outputContext(), page.Area, page.Template)
 	if err != nil {
 		return Box{}, err
 	}

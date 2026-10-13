@@ -64,6 +64,9 @@ func WriteArchive(ctx context.Context, writer io.Writer, files []ArchiveFile, op
 				return count, err
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			return count, err
+		}
 		method := uint16(zip.Deflate)
 		switch strings.ToLower(path.Ext(file.Name)) {
 		case ".ofd", ".pdf", ".png", ".jpg", ".jpeg":
@@ -85,8 +88,13 @@ func WriteArchive(ctx context.Context, writer io.Writer, files []ArchiveFile, op
 	if err := archive.Close(); err != nil {
 		return count, err
 	}
+	if err := ctx.Err(); err != nil {
+		return count, err
+	}
 	if options.OnProgress != nil {
-		return count, options.OnProgress(len(files), len(files))
+		if err := options.OnProgress(len(files), len(files)); err != nil {
+			return count, err
+		}
 	}
 	return count, ctx.Err()
 }
