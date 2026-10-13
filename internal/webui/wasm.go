@@ -223,6 +223,7 @@ func RunWASM() {
 	registerAsyncCallback("ofdgoExportMedia", exportMedia)
 	registerCallback("ofdgoResources", documentResources)
 	registerCallback("ofdgoResourceTargets", resourceTargets)
+	registerCallback("ofdgoResourceLocations", resourceLocations)
 	registerCallback("ofdgoChangeResource", changeResource)
 	registerAsyncCallback("ofdgoExportResource", exportResource)
 	registerCallback("ofdgoImages", documentImages)
@@ -808,24 +809,24 @@ func documentResources(args []js.Value) (any, error) {
 	return currentSession.Reader.Resources(context.Background())
 }
 
-// resourceTargets 列出当前页可由普通对象接口编辑动作的图元
-// 入参: args 零基页码
+// resourceTargets 列出当前页可绑定指定资源的图元及已有绑定状态
+// 入参: args 零基页码、资源类型和标识
 // 返回: any 图元列表, error 页面读取错误
 func resourceTargets(args []js.Value) (any, error) {
-	if currentEditor == nil || len(args) != 1 {
+	if currentEditor == nil || len(args) != 3 {
 		return nil, fmt.Errorf("no document is being edited")
 	}
-	items, err := currentSession.Renderer.StructureObjects(args[0].Int())
-	if err != nil {
-		return nil, err
+	return currentEditor.ResourceTargets(context.Background(), args[1].String(), args[2].String(), args[0].Int())
+}
+
+// resourceLocations 定位当前文档与版本中的资源引用实例
+// 入参: args 资源类型、标识和引用索引
+// 返回: any 页面图元范围, error 引用或度量错误
+func resourceLocations(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) != 3 {
+		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	result := items[:0]
-	for _, item := range items {
-		if _, err := currentEditor.Object(args[0].Int(), item.ID); err == nil {
-			result = append(result, item)
-		}
-	}
-	return result, nil
+	return currentSession.Renderer.ResourceLocations(context.Background(), args[0].String(), args[1].String(), args[2].Int())
 }
 
 // changeResource 调用库层资源编辑，浏览器不改写资源声明和包路径

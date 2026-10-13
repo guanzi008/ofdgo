@@ -364,7 +364,7 @@
 						<div id="resourceEmpty" class="resource-empty" hidden>暂无资源</div>
 					</div>
 				</div>
-				<div class="form-row"><label for="resourceReference">引用</label><select id="resourceReference" aria-label="引用位置"></select></div>
+				<div class="form-row"><label for="resourceReference">引用</label><div class="resource-target"><select id="resourceReference" aria-label="引用位置"></select><button id="resourceLocate" class="button" type="button">定位</button></div></div>
 				<div class="resource-actions">
 					<button id="resourceAdd" class="button" type="button" title="添加资源" aria-label="添加资源">添加</button>
 					<button id="resourcePreview" class="button" type="button">预览</button>
@@ -372,16 +372,14 @@
 					<button id="resourceRename" class="button" type="button" hidden>改名</button>
 					<button id="resourceReplace" class="button" type="button">替换</button>
 					<button id="resourceDelete" class="button" type="button">删除</button>
-					<button id="resourceLocate" class="button" type="button">定位</button>
-					<button id="resourceClose" class="button" type="button">关闭</button>
 				</div>
 				<div id="resourceBinding" class="resource-binding" hidden>
 					<div class="form-row"><label for="resourcePage">页码</label><select id="resourcePage"></select></div>
-					<div class="form-row"><label for="resourceObject">图元</label><select id="resourceObject"></select></div>
+					<div class="form-row"><label for="resourceObject">图元</label><div class="resource-target"><select id="resourceObject"></select><button id="resourcePick" class="button" type="button">选取</button></div></div>
 					<div class="form-actions"><button id="resourceUnbind" class="button" type="button">解绑</button><button id="resourceBind" class="button" type="button">绑定</button></div>
 				</div>
 				<div id="resourceViewer" class="resource-viewer" hidden></div>
-				<div id="resourceStatus" class="form-status" role="status"></div>
+				<div class="form-actions"><div id="resourceStatus" class="form-status" role="status"></div><button id="resourceClose" class="button" type="button">关闭</button></div>
 				<input id="resourceFile" type="file" hidden>
 			</form>
 		</dialog>

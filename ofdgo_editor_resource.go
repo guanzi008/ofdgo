@@ -26,6 +26,14 @@ import (
 	"strings"
 )
 
+// ResourceTarget 描述当前页可绑定资源动作的图元，Bound表示已有该资源的点击动作
+type ResourceTarget struct {
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	Text  string `json:"text,omitempty"`
+	Bound bool   `json:"bound"`
+}
+
 // Resources 获取当前编辑快照的资源，覆盖正文、模板、注解、图案和复合图元
 // 入参: ctx 取消上下文
 // 返回: []ResourceInfo 资源及引用位置, error 快照或结构错误
@@ -35,6 +43,46 @@ func (e *Editor) Resources(ctx context.Context) ([]ResourceInfo, error) {
 		return nil, err
 	}
 	return reader.Resources(ctx)
+}
+
+// ResourceTargets 列出当前页可独立绑定音视频或附件动作的图元及绑定状态
+// 模板和共享复合资源的内部成员不作为普通页面图元返回
+// 入参: ctx 取消上下文, kind 为Audio、Video或Attachment, id 资源标识, page 零基页码
+// 返回: []ResourceTarget 按绘制顺序排列的候选, error 资源、页面或取消错误
+func (e *Editor) ResourceTargets(ctx context.Context, kind, id string, page int) ([]ResourceTarget, error) {
+	if kind != "Audio" && kind != "Video" && kind != "Attachment" {
+		return nil, fmt.Errorf("resource does not support actions")
+	}
+	items, err := e.Resources(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := findResource(items, kind, id); err != nil {
+		return nil, err
+	}
+	content, err := e.page(page)
+	if err != nil {
+		return nil, err
+	}
+	var result []ResourceTarget
+	for _, layer := range content.Content.Layer {
+		for _, object := range layer.Objects {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			actions, err := resourceObjectActions(object)
+			if err != nil {
+				continue
+			}
+			target := ResourceTarget{ID: editorObjectID(object), Type: object.Type}
+			if object.Type == "TextObject" {
+				target.Text = object.TextObject.Text()
+			}
+			target.Bound = slices.ContainsFunc(actions, func(action Action) bool { return resourceActionMatches(action, kind, id) })
+			result = append(result, target)
+		}
+	}
+	return result, ctx.Err()
 }
 
 // ImportMedia 导入可独立管理的音视频资源，即使尚未绑定动作也保留在当前文档中
@@ -459,33 +507,13 @@ func (e *Editor) bindResourceAction(ctx context.Context, kind, id string, page i
 	if err != nil {
 		return err
 	}
-	var actions []Action
-	switch target.Type {
-	case "TextObject":
-		actions = target.TextObject.Actions
-	case "ImageObject":
-		actions = target.ImageObject.Actions
-	case "Path", "PathObject":
-		actions = target.PathObject.Actions
-	case "CompositeObject", "CompositeGraphicUnit":
-		actions = target.CompositeGraphicUnit.Actions
-	default:
-		return fmt.Errorf("object does not support actions")
+	actions, err := resourceObjectActions(target)
+	if err != nil {
+		return err
 	}
 	found := false
 	actions = slices.DeleteFunc(slices.Clone(actions), func(action Action) bool {
-		if action.Event != "CLICK" {
-			return false
-		}
-		match := false
-		switch kind {
-		case "Attachment":
-			match = action.GotoA != nil && action.GotoA.AttachID == id
-		case "Audio":
-			match = action.Sound != nil && sameResourceID(action.Sound.ResourceID, id)
-		case "Video":
-			match = action.Movie != nil && sameResourceID(action.Movie.ResourceID, id) && (action.Movie.Operator == "" || action.Movie.Operator == "Play")
-		}
+		match := resourceActionMatches(action, kind, id)
 		found = found || match
 		return match && !bind
 	})
@@ -508,4 +536,41 @@ func (e *Editor) bindResourceAction(ctx context.Context, kind, id string, page i
 		return nil
 	}
 	return e.SetObjectActions(page, []string{object}, actions)
+}
+
+// resourceObjectActions 读取支持动作的图元，不复制或修改动作
+// 入参: object 页面图元
+// 返回: []Action 原动作, error 不支持动作的图元类型
+func resourceObjectActions(object GraphicObject) ([]Action, error) {
+	switch object.Type {
+	case "TextObject":
+		return object.TextObject.Actions, nil
+	case "ImageObject":
+		return object.ImageObject.Actions, nil
+	case "Path", "PathObject":
+		return object.PathObject.Actions, nil
+	case "CompositeObject", "CompositeGraphicUnit":
+		return object.CompositeGraphicUnit.Actions, nil
+	default:
+		return nil, fmt.Errorf("object does not support actions")
+	}
+}
+
+// resourceActionMatches 检查资源的点击动作，视频停止或暂停不视为播放绑定
+// 入参: action 动作, kind 资源类型, id 资源标识
+// 返回: bool 是否匹配
+func resourceActionMatches(action Action, kind, id string) bool {
+	if action.Event != "CLICK" {
+		return false
+	}
+	switch kind {
+	case "Attachment":
+		return action.GotoA != nil && action.GotoA.AttachID == id
+	case "Audio":
+		return action.Sound != nil && sameResourceID(action.Sound.ResourceID, id)
+	case "Video":
+		return action.Movie != nil && sameResourceID(action.Movie.ResourceID, id) && (action.Movie.Operator == "" || action.Movie.Operator == "Play")
+	default:
+		return false
+	}
 }

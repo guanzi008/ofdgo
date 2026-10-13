@@ -23,8 +23,8 @@ const batch = { items: [], formats: [], running: false, canceled: false, worker:
 const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Compression", "FontRow", "FontMode", "Destination", "DPIRow", "DPI", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
 const fontBinding = { font: null, choices: [], sequence: 0 };
 const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name", "SourceRow", "Source", "File", "Hint", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#fontBinding${name}`)]));
-const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Kind", "List", "Empty", "Reference", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "Page", "Object", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
-const resourceManager = { items: [], selected: null, busy: false, sequence: 0, url: null, font: null, fileAction: null };
+const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Kind", "List", "Empty", "Reference", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
+const resourceManager = { items: [], selected: null, targets: [], pick: null, busy: false, sequence: 0, url: null, font: null, fileAction: null };
 
 let wasmPromise = null;
 let remoteDownload = null;
@@ -736,19 +736,17 @@ resourceElements.Close.addEventListener("click", () => resourceElements.Panel.cl
 resourceElements.Form.addEventListener("submit", event => event.preventDefault());
 resourceElements.Panel.addEventListener("cancel", event => { if (resourceManager.busy) event.preventDefault(); });
 resourceElements.Panel.addEventListener("close", () => { resourceManager.sequence++; releaseResourcePreview(); });
-resourceElements.Kind.addEventListener("change", renderResourceList);
-resourceElements.Reference.addEventListener("change", updateResourceControls);
-resourceElements.Page.addEventListener("change", () => resourceTask(loadResourceTargets));
+resourceElements.Kind.addEventListener("change", () => resourceTask(renderResourceList));
+resourceElements.Reference.addEventListener("change", () => resourceTask(syncResourceReference));
+resourceElements.Page.addEventListener("change", () => resourceTask(() => loadResourceTargets("")));
 resourceElements.Object.addEventListener("change", updateResourceControls);
+resourceElements.Pick.addEventListener("click", () => resourceTask(beginResourcePick));
 resourceElements.Preview.addEventListener("click", () => resourceTask(previewManagedResource));
 resourceElements.Export.addEventListener("click", () => {
 	const item = resourceManager.selected;
 	if (item) downloadResource({ id: JSON.stringify([item.kind, item.id]), fileName: resourceFileName(item) }, "ofdgoExportResource", "资源");
 });
-resourceElements.Locate.addEventListener("click", () => {
-	const reference = resourceManager.selected?.references?.[Number(resourceElements.Reference.value)];
-	if (reference?.page >= 0) { resourceElements.Panel.close(); renderPage(reference.page); }
-});
+resourceElements.Locate.addEventListener("click", () => resourceTask(locateManagedResource));
 resourceElements.Add.addEventListener("click", () => {
 	if (!state.editing) return;
 	const kind = resourceElements.Kind.value;
@@ -1432,6 +1430,13 @@ const sealPosition = Object.fromEntries(["Layer", "Stamp", "Image"].map(name => 
 let sealPreview = null;
 document.querySelector("#signPick").addEventListener("click", openSealPosition);
 el.viewerPanel.addEventListener("pointerdown", beginSealDrag, true);
+el.viewerPanel.addEventListener("pointerdown", pickResourceObject, true);
+document.addEventListener("keydown", event => {
+	if (!resourceManager.pick || el.objectPicker.open) return;
+	if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); finishResourcePick(); return; }
+	if (event.target.closest?.("input, textarea, select")) return;
+	if (event.key !== "Tab") { event.preventDefault(); event.stopImmediatePropagation(); }
+}, true);
 el.viewerPanel.addEventListener("pointermove", moveSealDrag, true);
 el.viewerPanel.addEventListener("pointerup", confirmSealPosition, true);
 el.viewerPanel.addEventListener("pointercancel", () => { if (sealPreview) finishSealPosition(); }, true);
@@ -1757,7 +1762,7 @@ function handleKeyDown(event) {
 }
 
 function formDialogOpen() {
-	return Boolean(sealPreview) || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
+	return Boolean(sealPreview || resourceManager.pick) || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
 		|| resourceElements.Panel.open || el.structureDialog.open || el.versionPanel.open || el.batchPagesPanel.open || el.objectStylePanel.open || el.sourceTextPanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
 
@@ -4710,6 +4715,7 @@ function updateFontPermissionHint() {
 }
 
 function clearSecurityForms() {
+	finishResourcePick(false);
 	if (sealPreview) finishSealPosition(false);
 	finishCredentials(null);
 	clearEncryptionForm();
@@ -5071,10 +5077,11 @@ async function renderPage(index, options = {}) {
 
 async function openResourceManagement() {
 	if (!state.doc || !state.ready || document.body.hasAttribute("aria-busy")) return;
+	if (resourceManager.pick) { finishResourcePick(); return; }
 	resourceElements.Panel.showModal();
 	resourceElements.Page.replaceChildren(...state.doc.pages.map((page, index) => new Option(`第${index + 1}页`, String(index))));
 	resourceElements.Page.value = String(state.pageIndex);
-	await resourceTask(async () => { await loadManagedResources(); if (state.editing) await loadResourceTargets(); });
+	await resourceTask(loadManagedResources);
 }
 
 async function resourceTask(action) {
@@ -5110,10 +5117,10 @@ async function loadManagedResources() {
 	const items = await callWASM("ofdgoResources");
 	if (sequence !== state.openSeq || !resourceElements.Panel.open) return;
 	resourceManager.items = items || [];
-	renderResourceList();
+	await renderResourceList();
 }
 
-function renderResourceList() {
+async function renderResourceList() {
 	const items = resourceManager.items.filter(item => item.kind === resourceElements.Kind.value);
 	const selected = items.find(item => item.id === resourceManager.selected?.id && item.kind === resourceManager.selected?.kind) || items[0];
 	resourceElements.List.replaceChildren();
@@ -5130,21 +5137,24 @@ function renderResourceList() {
 			span.textContent = value;
 			button.append(span);
 		}
-		button.addEventListener("click", () => selectManagedResource(item));
+		button.addEventListener("click", () => resourceTask(() => selectManagedResource(item)));
 		button.addEventListener("keydown", event => {
 			const index = items.indexOf(item);
 			const target = { ArrowDown: Math.min(items.length - 1, index + 1), ArrowUp: Math.max(0, index - 1), Home: 0, End: items.length - 1 }[event.key];
 			if (target == null) return;
 			event.preventDefault();
-			selectManagedResource(items[target]);
-			resourceElements.List.children[target].focus();
+			resourceTask(() => selectManagedResource(items[target])).then(() => {
+				if (resourceElements.Panel.open && resourceManager.selected === items[target]) resourceElements.List.children[target]?.focus();
+			});
 		});
 		resourceElements.List.append(button);
 	}
-	selectManagedResource(selected);
+	await selectManagedResource(selected);
 }
 
-function selectManagedResource(item) {
+async function selectManagedResource(item) {
+	const same = item?.id === resourceManager.selected?.id && item?.kind === resourceManager.selected?.kind;
+	const reference = same ? resourceElements.Reference.value : "0";
 	releaseResourcePreview();
 	resourceManager.selected = item || null;
 	const items = resourceManager.items.filter(entry => entry.kind === resourceElements.Kind.value);
@@ -5156,7 +5166,10 @@ function selectManagedResource(item) {
 	const roles = {Font: "字体", ResourceID: "资源", Substitution: "替换", ImageMask: "蒙版", Thumbnail: "缩略", AttachID: "附件"};
 	resourceElements.Reference.replaceChildren(...references.map((ref, index) => new Option(`${ref.page >= 0 ? `第${ref.page + 1}页` : ref.file}${ref.object ? ` · ${ref.object}` : ""} · ${roles[ref.role] || ref.role}`, String(index))));
 	if (!references.length) resourceElements.Reference.add(new Option(!item || item.complete ? "暂无引用" : "引用未知", ""));
+	else resourceElements.Reference.value = references[Number(reference)] ? String(Number(reference)) : "0";
 	updateResourceControls();
+	if (same) await loadResourceTargets();
+	else await syncResourceReference();
 }
 
 function updateResourceControls() {
@@ -5174,19 +5187,127 @@ function updateResourceControls() {
 	resourceElements.Replace.textContent = item?.kind === "Font" ? item.file ? "外置" : "嵌入" : "替换";
 	resourceElements.Delete.disabled = disabled || !item || item.kind !== "Attachment" && (!item.complete || Boolean(item.references?.length));
 	resourceElements.Delete.title = item?.kind === "Attachment" ? "删除附件" : item?.references?.length ? "资源仍被引用" : "删除资源";
-	resourceElements.Locate.disabled = disabled || !(item?.references?.[Number(resourceElements.Reference.value)]?.page >= 0);
+	resourceElements.Locate.disabled = disabled || !item?.references?.length;
 	resourceElements.Binding.hidden = !editing || !actionable;
-	resourceElements.Bind.disabled = resourceElements.Unbind.disabled = disabled || !actionable || !resourceElements.Object.value;
+	const target = resourceManager.targets.find(target => target.id === resourceElements.Object.value);
+	resourceElements.Pick.disabled = disabled || !editing || !actionable || Boolean(state.composite);
+	resourceElements.Bind.disabled = disabled || !actionable || !target || target.bound;
+	resourceElements.Unbind.disabled = disabled || !actionable || !target?.bound;
 }
 
-async function loadResourceTargets() {
+async function syncResourceReference() {
+	const reference = resourceManager.selected?.references?.[Number(resourceElements.Reference.value)];
+	if (reference?.page >= 0) resourceElements.Page.value = String(reference.page);
+	await loadResourceTargets(reference?.page >= 0 ? reference.object : "");
+	updateResourceControls();
+}
+
+async function loadResourceTargets(preferred) {
+	const resource = resourceManager.selected;
+	if (preferred === undefined) {
+		const reference = resource?.references?.[Number(resourceElements.Reference.value)];
+		preferred = resourceElements.Object.value || (reference?.page === Number(resourceElements.Page.value) ? reference.object : "");
+	}
+	resourceManager.targets = [];
 	resourceElements.Object.replaceChildren(new Option("选择图元", ""));
+	if (!state.editing || !resource || !["Audio", "Video", "Attachment"].includes(resource.kind)) return;
 	const page = Number(resourceElements.Page.value), sequence = state.openSeq;
-	const items = await callWASM("ofdgoResourceTargets", page);
-	if (!resourceElements.Panel.open || sequence !== state.openSeq) return;
-	for (const item of items || []) resourceElements.Object.add(new Option(`${item.id} · ${(item.text || "图元").slice(0, 50)}`, item.id));
+	const items = await callWASM("ofdgoResourceTargets", page, resource.kind, resource.id);
+	if (!resourceElements.Panel.open || sequence !== state.openSeq || resource !== resourceManager.selected || page !== Number(resourceElements.Page.value)) return;
+	resourceManager.targets = items || [];
+	const types = {TextObject: "文字", PathObject: "图形", ImageObject: "图片", CompositeObject: "组合", CompositeGraphicUnit: "组合"};
+	for (const item of resourceManager.targets) resourceElements.Object.add(new Option(`${item.id} · ${(item.text || types[item.type] || "图元").slice(0, 50)}${item.bound ? " · 已绑定" : ""}`, item.id));
 	const selected = canvasEditor.selected;
-	if (selected?.index === page && !selected.scoped) resourceElements.Object.value = selected.id;
+	if (!preferred && selected?.index === page && !selected.scoped) preferred = selected.id;
+	resourceElements.Object.value = resourceManager.targets.some(item => item.id === preferred) ? preferred : "";
+}
+
+async function locateManagedResource() {
+	const item = resourceManager.selected, sequence = state.openSeq;
+	if (!item?.references?.length) return;
+	const locations = await callWASM("ofdgoResourceLocations", item.kind, item.id, Number(resourceElements.Reference.value));
+	if (sequence !== state.openSeq || !resourceElements.Panel.open || item !== resourceManager.selected) return;
+	if (!locations?.length) { resourceElements.Status.textContent = "暂无可见位置"; return; }
+	const focus = async location => {
+		if (sequence !== state.openSeq) return;
+		resourceElements.Panel.close();
+		const box = location.bounds;
+		await focusPageRegion({page: location.page, x: box.X, y: box.Y, width: box.W, height: box.H}, "资源", "center");
+		if (sequence !== state.openSeq || !state.editing) return;
+		const target = canvasEditor.pageItems(location.page - 1).find(item => item.id === location.object && !item.scoped);
+		if (target) canvasEditor.select(target);
+	};
+	if (locations.length === 1) await focus(locations[0]);
+	else resourceChoices(locations, location => `第${location.page}页 · ${location.object}`, location => resourceTask(() => focus(location)));
+}
+
+function resourceChoices(items, label, choose) {
+	el.objectPickerList.replaceChildren();
+	for (const item of items) {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.className = "button";
+		button.textContent = label(item);
+		button.addEventListener("click", () => { el.objectPicker.close(); choose(item); });
+		el.objectPickerList.append(button);
+	}
+	el.objectPicker.showModal();
+}
+
+async function beginResourcePick() {
+	if (!state.editing || state.composite || !["Audio", "Video", "Attachment"].includes(resourceManager.selected?.kind)) return;
+	const sequence = state.openSeq;
+	if (!await renderPage(Number(resourceElements.Page.value), {fit: false})) return;
+	if (sequence !== state.openSeq || !resourceElements.Panel.open) return;
+	resourceManager.pick = {sequence, status: el.statusText.textContent};
+	resourceElements.Panel.close();
+	canvasEditor.enabled = false;
+	el.viewerPanel.classList.add("resource-picking");
+	setBusy(false);
+	setStatus("选取图元");
+	el.viewerPanel.focus({preventScroll: true});
+}
+
+function finishResourcePick(reopen = true) {
+	const picking = resourceManager.pick;
+	if (!picking) return;
+	resourceManager.pick = null;
+	el.viewerPanel.classList.remove("resource-picking");
+	if (picking.sequence === state.openSeq) {
+		updateEditorTools();
+		setBusy(document.body.hasAttribute("aria-busy"));
+		setStatus(picking.status);
+		if (reopen && !resourceElements.Panel.open) {
+			resourceElements.Panel.showModal();
+			resourceElements.Pick.focus();
+		}
+	}
+}
+
+function pickResourceObject(event) {
+	const picking = resourceManager.pick;
+	if (!picking || event.button !== 0) return;
+	event.preventDefault();
+	event.stopImmediatePropagation();
+	if (resourceManager.busy || document.body.hasAttribute("aria-busy")) return;
+	const items = canvasEditor.itemsAt(event).filter(item => !item.scoped && !item.draft);
+	if (!items.length) { setStatus("未选中图元"); return; }
+	resourceTask(async () => {
+		const resource = resourceManager.selected, page = items[0].index;
+		const targets = await callWASM("ofdgoResourceTargets", page, resource.kind, resource.id);
+		if (resourceManager.pick !== picking || picking.sequence !== state.openSeq) return;
+		const available = items.filter(item => targets?.some(target => target.id === item.id));
+		if (!available.length) { setStatus("图元不可绑定"); return; }
+		const choose = async item => {
+			if (resourceManager.pick !== picking || picking.sequence !== state.openSeq) return;
+			finishResourcePick();
+			resourceElements.Page.value = String(item.index);
+			await loadResourceTargets(item.id);
+			resourceElements.Status.textContent = "已选取";
+		};
+		if (available.length === 1) await choose(available[0]);
+		else resourceChoices(available, item => `${item.id} · ${(item.text || "图元").slice(0, 50)}`, item => resourceTask(() => choose(item)));
+	});
 }
 
 function chooseResourceFile(action) {
@@ -5207,7 +5328,7 @@ async function changeManagedResource(action, item, file) {
 		: await changeDocument("ofdgoChangeResource", null, action, item.kind, item.id, format, file || null, Number(resourceElements.Page.value), resourceElements.Object.value);
 	if (changed) {
 		await loadManagedResources();
-		await loadResourceTargets();
+		if (action === "bind" || action === "unbind") resourceElements.Status.textContent = action === "bind" ? "已绑定" : "已解绑";
 	}
 }
 
@@ -8922,7 +9043,7 @@ function appendSignaturePolicy(row, label, checked, ok) {
 	appendSignatureCheck(row, label, checked, ok);
 }
 
-async function focusPageRegion(region, label) {
+async function focusPageRegion(region, label, alignment = "nearest") {
 	const pageIndex = region.page - 1;
 	if (!state.doc || pageIndex < 0 || document.body.hasAttribute("aria-busy")) {
 		return;
@@ -8935,11 +9056,11 @@ async function focusPageRegion(region, label) {
 	if (openSeq !== state.openSeq || pageIndex !== state.pageIndex) {
 		return;
 	}
-	highlightPageRegion(region);
+	highlightPageRegion(region, alignment);
 	setStatus(`已定位${label}（第${region.page}页）`);
 }
 
-function highlightPageRegion(region) {
+function highlightPageRegion(region, alignment = "nearest") {
 	clearRegionHighlights();
 	const pageIndex = region.page - 1;
 	const shell = pageShell(pageIndex);
@@ -8955,11 +9076,12 @@ function highlightPageRegion(region) {
 	shell.querySelector(".page-surface").append(mark);
 	if (state.pageWindow) {
 		const box = mark.getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
-		if (box.top < viewer.top) scrollViewerBy(box.top - viewer.top);
+		if (alignment === "center") scrollViewerBy(box.top - viewer.top + (box.height - el.viewerPanel.clientHeight) / 2);
+		else if (box.top < viewer.top) scrollViewerBy(box.top - viewer.top);
 		else if (box.bottom > viewer.top + el.viewerPanel.clientHeight) scrollViewerBy(Math.min(box.top - viewer.top, box.bottom - viewer.top - el.viewerPanel.clientHeight));
 		if (box.left < viewer.left) el.viewerPanel.scrollLeft += box.left - viewer.left;
 		else if (box.right > viewer.left + el.viewerPanel.clientWidth) el.viewerPanel.scrollLeft += box.right - viewer.left - el.viewerPanel.clientWidth;
-	} else mark.scrollIntoView({ block: "nearest", inline: "nearest" });
+	} else mark.scrollIntoView({ block: alignment, inline: "nearest" });
 	window.setTimeout(() => mark.remove(), 1800);
 }
 
@@ -9522,7 +9644,7 @@ function updateEditorTools() {
 	const moveDisabled = selectionDisabled || selectedPages.some(index => !pageCan("move", index));
 	el.movePagePrevButton.disabled = moveDisabled || selectedPages[0] === 0;
 	el.movePageNextButton.disabled = moveDisabled || selectedPages.at(-1) === state.doc?.pageCount - 1;
-	const enabled = state.editing && state.selectObjects && !state.panMode && !sealPreview;
+	const enabled = state.editing && state.selectObjects && !state.panMode && !sealPreview && !resourceManager.pick;
 	canvasEditor.setEnabled(enabled);
 	updateObjectControls(canvasEditor.selected);
 	el.undoButton.disabled = !state.editorInfo?.canUndo || !state.ready || state.exporting;
@@ -9680,7 +9802,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	updateDocumentControls();
 	renderSecurity();
 	updateDisplayControls();
-	el.editButton.disabled = busy || Boolean(sealPreview) || !state.doc || !state.ready || state.exporting;
+	el.editButton.disabled = busy || Boolean(sealPreview || resourceManager.pick) || !state.doc || !state.ready || state.exporting;
 	el.createForm.inert = busy && !state.imageImporting;
 	updateCreateOptions();
 	el.insertForm.inert = busy;
@@ -9703,7 +9825,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	el.outlineList.inert = busy;
 	el.navigationTabs.inert = busy;
 	el.pageList.inert = busy;
-	el.editorTools.inert = busy || Boolean(sealPreview);
+	el.editorTools.inert = busy || Boolean(sealPreview || resourceManager.pick);
 	el.fontList.inert = busy;
 	el.docFontList.inert = busy;
 	if (!busy) {

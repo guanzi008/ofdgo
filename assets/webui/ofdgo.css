@@ -1552,6 +1552,11 @@ body[data-hide-meta] .meta-panel {
 	width: 600px;
 }
 
+.resource-dialog form > .form-actions {
+	grid-template-columns: minmax(0, 1fr) auto;
+	margin-top: 12px;
+}
+
 .resource-heading,
 .resource-option {
 	display: grid;
@@ -1641,8 +1646,25 @@ body[data-hide-meta] .meta-panel {
 	display: none;
 }
 
-.resource-actions > :last-child {
-	margin-left: auto;
+.resource-target {
+	display: flex;
+	align-items: stretch;
+	gap: 6px;
+	min-width: 0;
+}
+
+.resource-target select {
+	flex: 1;
+	min-width: 0;
+}
+
+.resource-target button {
+	flex: 0 0 auto;
+}
+
+.resource-picking,
+.resource-picking .edit-object {
+	cursor: crosshair;
 }
 
 .resource-binding {
