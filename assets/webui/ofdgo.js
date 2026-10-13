@@ -5268,7 +5268,7 @@ function renderDocumentSettings() {
 	settingsElements.Content.replaceChildren();
 	settingsElements.Actions.replaceChildren();
 	const kind = settingsElements.Kind.value;
-	settingsElements.Title.textContent = {ColorSpace: "色彩设置", DrawParam: "样式设置"}[kind] || "文档设置";
+	settingsElements.Title.textContent = {ColorSpace: "色彩设置", DrawParam: "样式设置"}[kind] || "文档配置";
 	if (kind === "actions") renderActionSettings();
 	else if (kind === "bookmarks") renderBookmarkSettings();
 	else if (kind === "extensions") renderExtensionSettings();
@@ -5309,7 +5309,7 @@ function renderActionSettings() {
 	if (settings.scope === "object") settingsSelect(context, "图元", "Object", (settings.data.objects || []).map(item => [item.id, `${item.id} · ${item.text || ({TextObject: "文字", PathObject: "图形", ImageObject: "图片"}[item.type] || "组合")}`]), settings.object, value => { settings.object = value; settings.selected = -1; loadDocumentSettings(); });
 	if (settings.scope === "outline") settingsSelect(context, "目录", "Outline", outlineSettingsChoices(), JSON.stringify(settings.path), value => { settings.path = JSON.parse(value); settings.selected = -1; loadDocumentSettings(); });
 	if (settings.selected >= settings.actions.length) settings.selected = -1;
-	settingsSelect(context, "动作", "Entry", [[-1, "新增动作"], ...settings.actions.map((item, index) => [index, `${index + 1} · ${actionSettingsLabel(item)}`])], settings.selected, value => { settings.selected = Number(value); renderDocumentSettings(); });
+	settingsSelect(context, "动作", "Entry", [[-1, "新增"], ...settings.actions.map((item, index) => [index, `${index + 1} · ${actionSettingsLabel(item)}`])], settings.selected, value => { settings.selected = Number(value); renderDocumentSettings(); });
 	const action = settings.actions[settings.selected] || {};
 	const type = action.Goto ? action.Goto.Bookmark ? "Bookmark" : "Goto" : ["URI", "GotoA", "Sound", "Movie"].find(key => action[key]) || "Goto";
 	settingsSelect(content, "类型", "ActionType", [["Goto", "页面"], ["Bookmark", "书签"], ["URI", "网址"], ["GotoA", "附件"], ["Sound", "音频"], ["Movie", "视频"]], type, value => renderActionFields(value, action));
@@ -5536,7 +5536,7 @@ function renderLayerSettings() {
 	if (!state.editing && settings.selected < 0 && entries.length) settings.selected = 0;
 	const types = {Background: "背景", Body: "正文", Foreground: "前景"};
 	const options = entries.map((entry, index) => [index, `${entry.ID} · ${types[entry.Type] || entry.Type} · ${entry.ObjectCount}个图元`]);
-	if (state.editing) options.unshift([-1, "新增图层"]);
+	if (state.editing) options.unshift([-1, "新增"]);
 	settingsSelect(settingsElements.Context, "图层", "Entry", options, settings.selected, value => { settings.selected = Number(value); renderDocumentSettings(); });
 	const entry = entries[settings.selected];
 	if (!entry && !state.editing) { settingsElements.Status.textContent = "暂无图层"; return; }
@@ -5568,7 +5568,7 @@ function renderTemplateSettings() {
 	if (settings.selected >= entries.length) settings.selected = -1;
 	if (!state.editing && settings.selected < 0 && entries.length) settings.selected = 0;
 	const options = entries.map((entry, index) => [index, `${entry.Name || entry.ID}${bindings.some(binding => referenceIDKey(binding.TemplateID) === referenceIDKey(entry.ID)) ? " · 已绑定" : ""}`]);
-	if (state.editing) options.unshift([-1, "新增模板"]);
+	if (state.editing) options.unshift([-1, "新增"]);
 	settingsSelect(settingsElements.Context, "模板", "Entry", options, settings.selected, value => { settings.selected = Number(value); renderDocumentSettings(); });
 	const entry = entries[settings.selected];
 	if (!entry && !state.editing) { settingsElements.Status.textContent = "暂无模板"; return; }
@@ -5607,7 +5607,7 @@ function renderBookmarkSettings() {
 	if (settings.selected >= entries.length) settings.selected = -1;
 	if (!state.editing && settings.selected < 0 && entries.length) settings.selected = 0;
 	const options = entries.map((entry, index) => [index, entry.Name]);
-	if (state.editing) options.unshift([-1, "新增书签"]);
+	if (state.editing) options.unshift([-1, "新增"]);
 	settingsSelect(settingsElements.Context, "书签", "Entry", options, settings.selected, value => { settings.selected = Number(value); renderDocumentSettings(); });
 	const entry = entries[settings.selected];
 	if (!entry && !state.editing) { settingsElements.Status.textContent = "暂无书签"; return; }

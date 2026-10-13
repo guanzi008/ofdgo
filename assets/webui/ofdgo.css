@@ -1880,25 +1880,28 @@ body[data-hide-meta] .meta-panel {
 }
 
 .annotation-summary-list {
-	display: grid;
-	gap: 10px;
+	min-height: 0;
+	overflow: auto;
 }
 
 .annotation-summary {
 	min-width: 0;
-	padding: 10px 0;
+	padding: 8px 4px;
 	border-bottom: 1px solid var(--line);
 }
 
 .annotation-summary-target {
 	display: grid;
-	gap: 6px;
+	gap: 3px;
 	width: 100%;
-	padding: 0 0 8px;
+	height: auto;
+	padding: 0;
 	border: 0;
 	background: transparent;
 	color: inherit;
 	font: inherit;
+	font-size: 13px;
+	line-height: 1.5;
 	text-align: left;
 	cursor: pointer;
 }
@@ -1909,15 +1912,16 @@ body[data-hide-meta] .meta-panel {
 }
 
 .annotation-summary-target span:first-child {
-	color: var(--muted);
+	color: var(--text-muted);
+	font-size: 12px;
+}
+
+.annotation-summary-target + .info-line {
+	margin-top: 3px;
 }
 
 .annotation-summary .small-button {
 	margin-top: 8px;
-}
-
-#annotationsPanel .search-form {
-	grid-template-columns: minmax(0, 1fr) 72px;
 }
 
 #annotationsPanel select {
@@ -1928,7 +1932,12 @@ body[data-hide-meta] .meta-panel {
 }
 
 #annotationsStatus {
-	margin: 8px 0;
+	flex-shrink: 0;
+	margin: 8px 0 0;
+}
+
+#annotationsStatus:empty {
+	display: none;
 }
 
 .navigation-tabs button {
@@ -1954,18 +1963,22 @@ body[data-hide-meta] .meta-panel {
 }
 
 .navigation-content:has(#searchPanel:not([hidden])),
-#searchPanel:not([hidden]) {
+.navigation-content:has(#annotationsPanel:not([hidden])),
+#searchPanel:not([hidden]),
+#annotationsPanel:not([hidden]) {
 	display: flex;
 	flex-direction: column;
 	min-height: 0;
 	overflow: hidden;
 }
 
-#searchPanel {
+#searchPanel,
+#annotationsPanel {
 	flex: 1;
 }
 
-#searchPanel :focus-visible {
+#searchPanel :focus-visible,
+#annotationsPanel :focus-visible {
 	outline-offset: -2px;
 }
 
