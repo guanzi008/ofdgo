@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"math"
 	"strconv"
 	"strings"
@@ -157,12 +158,12 @@ func (p PathObject) Shape() (ShapeKind, Box) {
 	boundary, err := ParseBox(p.Boundary)
 	m := NewMatrix(p.CTM)
 	_, invertible := m.Invert()
-	if err != nil || !axisAlignedMatrix(m) && (!line || !invertible) {
+	if err != nil || !basegeom.AxisAligned(basegeom.MatrixFromValues(m.Values())) && (!line || !invertible) {
 		return "", Box{}
 	}
 	if line {
 		x, y := m.Transform(box.X, box.Y)
-		w, h := matrixVector(m, box.W, box.H)
+		w, h := basegeom.Vector(basegeom.MatrixFromValues(m.Values()), box.W, box.H)
 		box = Box{X: boundary.X + x, Y: boundary.Y + y, W: w, H: h}
 	} else {
 		box = TranslationMatrix(boundary.X, boundary.Y).Multiply(m).TransformBox(box)
@@ -293,7 +294,7 @@ func (p PathObject) reshape(kind ShapeKind, box Box) (PathObject, error) {
 		w, h = box.H/m.b, box.W/m.c
 	} else {
 		inverse, _ := m.Invert()
-		w, h = matrixVector(inverse, box.W, box.H)
+		w, h = basegeom.Vector(basegeom.MatrixFromValues(inverse.Values()), box.W, box.H)
 	}
 	if !line {
 		w, h = math.Abs(w), math.Abs(h)

@@ -16,7 +16,8 @@ package ofdgo
 
 import (
 	"fmt"
-	"math"
+
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
 // 路径填充区域的交集、并集、差集和异或运算
@@ -35,15 +36,7 @@ type GeometryOperation uint8
 // MiterLimit为尖角长度与半线宽的比值上限，MiterLimitSet区分显式零值与默认值
 // DashOffset为虚线起始偏移，允许负值；Dashes交替指定实线段和间隔长度，奇数项按重复一遍处理
 // Tolerance为曲线展开的误差目标，0采用后端默认精度
-type StrokeOptions struct {
-	Width         float64
-	Cap, Join     string
-	MiterLimit    float64
-	MiterLimitSet bool
-	DashOffset    float64
-	Tolerance     float64
-	Dashes        []float64
-}
+type StrokeOptions = basegeom.StrokeOptions
 
 // GeometryBackend 操作库自有路径，坐标以页面左上角为原点，不修改任何输入
 // Clip返回nil表示不裁剪，空路径指针表示完全裁去，矩阵将裁剪坐标映射到页面坐标
@@ -97,72 +90,6 @@ func (r *Renderer) PathOutline(object PathObject) (string, error) {
 	return path.SVG()
 }
 
-// validateStroke 校验各后端共用的描边参数
-// 入参: options 描边样式
-// 返回: error 无效样式
-func validateStroke(options StrokeOptions) error {
-	if !finite(options.Width) || options.Width <= 0 || !finite(options.Tolerance) || options.Tolerance < 0 || !finite(options.DashOffset) || !finite(options.MiterLimit) || options.MiterLimit < 0 {
-		return fmt.Errorf("invalid stroke width or tolerance")
-	}
-	if options.Cap != "" && options.Cap != "Butt" && options.Cap != "Round" && options.Cap != "Square" {
-		return fmt.Errorf("invalid stroke cap %q", options.Cap)
-	}
-	if options.Join != "" && options.Join != "Miter" && options.Join != "Round" && options.Join != "Bevel" {
-		return fmt.Errorf("invalid stroke join %q", options.Join)
-	}
-	for _, dash := range options.Dashes {
-		if !finite(dash) || dash < 0 {
-			return fmt.Errorf("invalid stroke dash")
-		}
-	}
-	return nil
-}
-
-// geometryRectangle 构建页面坐标矩形，保留输入精度
-// 入参: box 矩形范围
-// 返回: GeometryPath 闭合路径
-func geometryRectangle(box Box) GeometryPath {
-	return GeometryPath{
-		{Verb: GeometryMove, End: Point{X: box.X, Y: box.Y}},
-		{Verb: GeometryLine, End: Point{X: box.X + box.W, Y: box.Y}},
-		{Verb: GeometryLine, End: Point{X: box.X + box.W, Y: box.Y + box.H}},
-		{Verb: GeometryLine, End: Point{X: box.X, Y: box.Y + box.H}},
-		{Verb: GeometryClose, End: Point{X: box.X, Y: box.Y}},
-	}
-}
-
-// geometryRectangleBounds 识别单个轴对齐矩形，不用包围盒代替实际路径
-// 入参: path 填充路径
-// 返回: Box 矩形范围, bool 是否为非退化矩形
-func geometryRectangleBounds(path GeometryPath) (Box, bool) {
-	if len(path) > 0 && path[len(path)-1].Verb == GeometryClose {
-		path = path[:len(path)-1]
-	}
-	if len(path) == 5 && path[4].Verb == GeometryLine && path[4].End == path[0].End {
-		path = path[:4]
-	}
-	if len(path) != 4 || path[0].Verb != GeometryMove || path[1].Verb != GeometryLine || path[2].Verb != GeometryLine || path[3].Verb != GeometryLine {
-		return Box{}, false
-	}
-	a, b, c, d := path[0].End, path[1].End, path[2].End, path[3].End
-	for _, point := range [...]Point{a, b, c, d} {
-		if !finite(point.X) || !finite(point.Y) {
-			return Box{}, false
-		}
-	}
-	if a.X == c.X || a.Y == c.Y {
-		return Box{}, false
-	}
-	if !(a.X == b.X && b.Y == c.Y && c.X == d.X && d.Y == a.Y || a.Y == b.Y && b.X == c.X && c.Y == d.Y && d.X == a.X) {
-		return Box{}, false
-	}
-	width, height := math.Abs(c.X-a.X), math.Abs(c.Y-a.Y)
-	if !finite(width) || !finite(height) {
-		return Box{}, false
-	}
-	return Box{X: min(a.X, c.X), Y: min(a.Y, c.Y), W: width, H: height}, true
-}
-
 // clipGeometry 将非零填充路径与页面裁剪相交
 // 入参: geometry 几何后端, path 页面路径, clip 页面裁剪
 // 返回: GeometryPath 裁剪路径, error 几何错误
@@ -173,14 +100,14 @@ func clipGeometry(geometry GeometryBackend, path GeometryPath, clip *GeometryPat
 	if len(*clip) == 0 {
 		return nil, nil
 	}
-	if rect, ok := geometryRectangleBounds(*clip); ok {
-		if bounds, ok := geometryRectangleBounds(path); ok {
+	if rect, ok := basegeom.RectangleBounds(basegeom.Path(*clip)); ok {
+		if bounds, ok := basegeom.RectangleBounds(basegeom.Path(path)); ok {
 			left, top := max(rect.X, bounds.X), max(rect.Y, bounds.Y)
 			right, bottom := min(rect.X+rect.W, bounds.X+bounds.W), min(rect.Y+rect.H, bounds.Y+bounds.H)
 			if right <= left || bottom <= top {
 				return nil, nil
 			}
-			return geometryRectangle(Box{X: left, Y: top, W: right - left, H: bottom - top}), nil
+			return GeometryPath(basegeom.Rectangle(Box{X: left, Y: top, W: right - left, H: bottom - top})), nil
 		}
 		if err := path.validate(); err != nil {
 			return nil, err
@@ -214,7 +141,7 @@ func clipGeometry(geometry GeometryBackend, path GeometryPath, clip *GeometryPat
 			return path, nil
 		}
 	}
-	if rect, ok := geometryRectangleBounds(path); ok {
+	if rect, ok := basegeom.RectangleBounds(basegeom.Path(path)); ok {
 		bounds, err := geometry.Bounds(*clip)
 		if err != nil {
 			return nil, err

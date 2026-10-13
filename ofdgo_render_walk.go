@@ -14,7 +14,10 @@
 
 package ofdgo
 
-import "fmt"
+import (
+	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
+)
 
 // RenderState 保存对象继承的样式、父变换和页面坐标裁剪，所有引用只读
 // Clip为nil表示未提供裁剪，空路径表示完全裁去，单位为毫米
@@ -344,7 +347,7 @@ func (r *Renderer) geometryExtentClip(width, height float64, matrix Matrix, pare
 	if err != nil {
 		return nil, err
 	}
-	clip, err := geometry.Transform(geometryRectangle(Box{W: width, H: height}), matrix)
+	clip, err := geometry.Transform(GeometryPath(basegeom.Rectangle(Box{W: width, H: height})), matrix)
 	if err != nil {
 		return nil, err
 	}

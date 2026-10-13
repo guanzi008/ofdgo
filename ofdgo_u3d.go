@@ -15,108 +15,185 @@
 package ofdgo
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
-	"fmt"
-	"io"
-	"math"
+	"image"
+
+	basethreed "github.com/xiaoqidun/ofdgo/internal/base/threed"
 )
 
-// u3dDefaultBytes 限制默认解码数据规模，不包括调用方已有输入及运行时开销
-const u3dDefaultBytes = 256 << 20
+const (
+	U3DRenderSolid              = basethreed.U3DRenderSolid              // 实体
+	U3DRenderSolidWireframe     = basethreed.U3DRenderSolidWireframe     // 实体线框
+	U3DRenderWireframe          = basethreed.U3DRenderWireframe          // 线框
+	U3DRenderShadedWireframe    = basethreed.U3DRenderShadedWireframe    // 着色线框
+	U3DRenderHiddenWireframe    = basethreed.U3DRenderHiddenWireframe    // 隐藏线框
+	U3DRenderVertices           = basethreed.U3DRenderVertices           // 顶点
+	U3DRenderShadedVertices     = basethreed.U3DRenderShadedVertices     // 着色顶点
+	U3DRenderBoundingBox        = basethreed.U3DRenderBoundingBox        // 包围盒线框
+	U3DRenderBoundingBoxFaces   = basethreed.U3DRenderBoundingBoxFaces   // 包围盒面
+	U3DRenderBoundingBoxOutline = basethreed.U3DRenderBoundingBoxOutline // 包围盒面及线框
+	U3DRenderIllustration       = basethreed.U3DRenderIllustration       // 插图
+	U3DRenderSolidOutline       = basethreed.U3DRenderSolidOutline       // 实体轮廓
+	U3DRenderShadedIllustration = basethreed.U3DRenderShadedIllustration // 着色插图
+)
 
 // U3DOptions 控制U3D解码规模，MaxDecodedBytes为0时采用256MiB上限
-type U3DOptions struct {
-	MaxDecodedBytes int64
-}
+type U3DOptions = basethreed.U3DOptions
 
 // U3DModel 保存独立于PDF的U3D场景及动作数据，不执行动作或读取外部文件
-type U3DModel struct {
-	Major, Minor int16
-	DefinedUnits bool
-	Units        float64
-	Meshes       []U3DMesh
-	Nodes        []U3DNode
-	Materials    []U3DMaterial
-	Shaders      []U3DShader
-	Lights       []U3DLight
-	Views        []U3DViewResource
-	Textures     []U3DTexture
-	Motions      []U3DMotion
-	Metadata     []U3DMetadata
-}
+type U3DModel = basethreed.U3DModel
 
 // U3DMetadata 保留块所属名称与原始元数据，数据不与输入共享存储
-type U3DMetadata struct {
-	Block uint32
-	Name  string
-	Data  []byte
-}
+type U3DMetadata = basethreed.U3DMetadata
 
 // U3DNode 保存组、模型、光源或视图节点，父节点矩阵按列存储
-type U3DNode struct {
-	Name, Kind, Resource string
-	Parents              []U3DParent
-	Visibility           uint32
-	Shaders              [][]string
-	LineShaders          [][]string
-	PointShaders         [][]string
-	View                 *U3DView
-	BoneWeights          []U3DBoneWeights
-	Animations           []U3DAnimation
-}
+type U3DNode = basethreed.U3DNode
 
 // U3DParent 保存父节点名称及局部到父节点的变换，空名称引用默认节点
-type U3DParent struct {
-	Name      string
-	Transform [16]float32
-}
+type U3DParent = basethreed.U3DParent
 
 // U3DMaterial 保存材质参数，Attributes各位决定相应参数是否生效
-type U3DMaterial struct {
-	Name                                 string
-	Attributes                           uint32
-	Ambient, Diffuse, Specular, Emissive [3]float32
-	Reflectivity, Opacity                float32
-}
+type U3DMaterial = basethreed.U3DMaterial
 
 // U3DShader 保存材质与八个纹理通道，Textures中的空项表示未启用
-type U3DShader struct {
-	Name, Material                   string
-	Attributes, AlphaFunction, Blend uint32
-	RenderPass                       uint32
-	AlphaReference                   float32
-	Textures                         [8]*U3DTextureLayer
-}
+type U3DShader = basethreed.U3DShader
 
 // U3DLight 保存环境、方向、点或聚光资源，Kind依次为0至3
-type U3DLight struct {
-	Name                 string
-	Attributes           uint32
-	Kind                 byte
-	Color, Attenuation   [3]float32
-	SpotAngle, Intensity float32
-}
+type U3DLight = basethreed.U3DLight
 
-// u3dBlock 保存校验后的块边界，数据切片仅在解码期间引用输入
-type u3dBlock struct {
-	kind       uint32
-	data, meta []byte
-}
+// U3DAnimation 保存ECMA-363第9.7.3节的动画修饰器，Index为链内位置
+// Attributes的1、2、4、8分别表示启动、锁定根骨骼、单轨播放和动作间平滑过渡
+// TimeScale为整体时间倍率，BlendTime以毫秒计；Motions为空时使用无轨道的默认动作
+type U3DAnimation = basethreed.U3DAnimation
 
-// u3dDecoder 保存单次解码预算及场景索引，不跨调用缓存输入
-type u3dDecoder struct {
-	ctx       context.Context
-	model     U3DModel
-	remaining uint64
-	plain     bool
-	meshes    map[string]*u3dMeshDeclaration
-	meshOrder []string
-	nodes     map[string]int
-	palettes  map[uint32]map[string]bool
-	textures  map[string]int
-}
+// U3DAnimationMotion 保存动画中的动作引用，空名称引用默认动作
+// Attributes的1、2分别表示循环和同步结束，TimeOffset以毫秒计，TimeScale为动作时间倍率
+type U3DAnimationMotion = basethreed.U3DAnimationMotion
+
+// U3DDirectionalLight 定义无限远光源，Direction为发射方向，CameraRelative使用相机坐标
+type U3DDirectionalLight = basethreed.U3DDirectionalLight
+
+// U3DLighting 替换场景灯光，空灯光列表表示无光源，DiffuseOffset加到受光材质的漫反射颜色
+// 颜色及漫反射增量的各分量取值为0到1；不修改材质自发光或不受光着色器
+type U3DLighting = basethreed.U3DLighting
+
+// U3DMesh 保存静态三角面、线段和点的共享属性数组，索引对应原始作者几何
+type U3DMesh = basethreed.U3DMesh
+
+// U3DShading 描述图元使用的颜色及纹理坐标，纹理维数依层排列
+type U3DShading = basethreed.U3DShading
+
+// U3DFace 保存着色描述索引和依原始绕序排列的三个角点
+type U3DFace = basethreed.U3DFace
+
+// U3DLine 保存着色描述及线段两端的独立属性索引
+type U3DLine = basethreed.U3DLine
+
+// U3DPoint 保存点集着色描述及独立属性索引
+type U3DPoint = basethreed.U3DPoint
+
+// U3DCorner 保存各属性索引，未启用的属性不可用于访问数组
+type U3DCorner = basethreed.U3DCorner
+
+// U3DRenderMode 定义静态几何的呈现方式，边线和顶点使用单像素覆盖
+type U3DRenderMode = basethreed.U3DRenderMode
+
+// U3DMotion 保存骨骼或节点动作轨道，解码不执行动画
+type U3DMotion = basethreed.U3DMotion
+
+// U3DMotionTrack 保存命名轨道及其关键帧，保持文件中的时间与帧次序
+type U3DMotionTrack = basethreed.U3DMotionTrack
+
+// U3DKeyFrame 保存关键帧时间及相对父项的变换，Rotation按W、X、Y、Z排列
+type U3DKeyFrame = basethreed.U3DKeyFrame
+
+// U3DCamera 定义沿正Z方向观察的相机，ScaleX和ScaleY为投影到像素的倍率
+// ToWorld按列存储，全零表示单位矩阵；Far为0且ClipFar为假时不设置远裁剪面
+// ShiftX和ShiftY为投影原点相对视口中心的像素偏移，向右及向下为正
+type U3DCamera = basethreed.U3DCamera
+
+// U3DRenderOptions 控制静态绘制，指定Camera时使用整个输出视口
+// Camera为空时使用View指定的节点或首个视图节点，Instance指定其父路径实例
+// Lighting为空时沿用模型灯光，非空时替换全部模型灯光
+// Opacity为空时沿用着色器混合，非空时叠加面片、着色边点及包围盒轮廓的透明度
+// 纹理合成后先应用节点透明度，再应用Opacity
+// Mode控制绘制方式，AuxiliaryColor用于固定颜色的边点，FaceColor用于包围盒面及插图面，空值分别使用黑色和背景色
+// CreaseAngle为轮廓夹角，单位为度，空值使用45；着色插图以漫反射色的1/4补充自发光
+// Nodes按名称覆盖节点，重复名称使用最后一项，每次绘制均从原场景开始
+// Time以秒指定动画采样时刻，零值为初始时刻，不随实际时钟推进
+// ResolveTexture提供外部纹理，空值不访问外部资源；回调自身的内存与超时由调用方控制
+// Background为空时使用白色；缓存与实例上限为0时分别使用256MiB和65536，不含输入及运行时开销
+type U3DRenderOptions = basethreed.U3DRenderOptions
+
+// U3DTrackState 指定动作资源、轨道和采样时间，Time与关键帧使用相同单位
+// Loop将时间循环到首末帧之间，未启用时停留在端点，不自动解释动画修饰器的时间参数
+type U3DTrackState = basethreed.U3DTrackState
+
+// U3DCrossSection 定义世界坐标中的剖切面，AxisU与AxisV须为非零正交方向
+// 两轴叉积指向被裁去的一侧；平面方形边长取静态场景包围盒对角线
+// Opacity为0时不显示平面，Intersection为空时不显示交线，颜色分量范围为0到1
+type U3DCrossSection = basethreed.U3DCrossSection
+
+// U3DTextureLayer 保存单个着色器纹理通道，矩阵按列排列
+// Blend依次以0至3表示相乘、相加、替换及线性混合，BlendSource为1时使用BlendConstant
+// Mode依次以0至4表示模型坐标、平面、圆柱、球面及反射映射
+// Alpha控制是否使用纹理透明度，Repeat低两位分别启用横向及纵向平铺
+// 平面映射直接取参考位置的XY；圆柱以Z为纵坐标，圆柱与球面的经线从正X轴朝正Y轴递增
+// 球面纬度从正Z极到负Z极映射为0至1；反射映射使用相机空间球面环境图，图像纵坐标向下
+type U3DTextureLayer = basethreed.U3DTextureLayer
+
+// U3DBone 保存相对父骨骼的初始位姿，Orientation按W、X、Y、Z排列
+// Attributes标志决定链接、关节字段是否存在，以及各轴旋转约束是否启用和限幅
+// RotationConstraints按X、Y、Z轴排列，每项依次为上限、下限；未指定骨骼姿态时不变形
+type U3DBone = basethreed.U3DBone
+
+// U3DBoneJoint 保存骨骼局部坐标系内关节椭圆的中心偏移和两轴尺寸
+type U3DBoneJoint = basethreed.U3DBoneJoint
+
+// U3DBoneState 按骨骼名称指定相对父骨骼末端的姿态，根骨骼相对模型原点
+// Frame可由动作轨道采样得到，Time不参与变形；单位缩放需显式设为[3]float32{1, 1, 1}
+// 未覆盖项沿用文件或动画求值后的局部姿态，重复名称使用最后一项，不施加逆运动学约束
+type U3DBoneState = basethreed.U3DBoneState
+
+// U3DNodeState 按名称覆盖节点，未指定透明度或可见性时沿父路径继承
+// Opacity范围为0到1，采用标准透明混合；Matrix为相对父节点的列式仿射矩阵
+// 显式Opacity覆盖材质和纹理合成的透明度，之后仍应用视图附加透明度
+// 未匹配的名称不影响场景，Matrix和Motion均为空时保留每条父路径的原始变换
+// Motion以指定轨道替换节点变换，与Matrix互斥，不驱动骨架；显式变换优先于动画修饰器
+// Bones覆盖动画求值后的指定骨骼姿态，未指定项沿用当前局部变换，不修改共享几何
+type U3DNodeState = basethreed.U3DNodeState
+
+// U3DTexture 保存纹理尺寸、图像类型及各通道的图像数据
+type U3DTexture = basethreed.U3DTexture
+
+// U3DTextureImage 保存压缩格式、通道位图及完整压缩数据，外部图像仅保留候选URL
+// Compression依次以1至4表示JPEG-24、PNG、JPEG-8和TIFF，ByteCount仅用于内置图像
+type U3DTextureImage = basethreed.U3DTextureImage
+
+// U3DTextureResolver 由调用方按原始URL读取外部纹理，地址解析、访问策略和读取限额由调用方控制
+// 返回的数据在本次绘制结束前不得修改；失败时尝试下一候选地址，取消及超时错误立即返回
+// 入参: ctx 取消上下文, url 绝对或相对地址
+// 返回: []byte 压缩图像数据, error 读取错误
+type U3DTextureResolver = basethreed.U3DTextureResolver
+
+// U3DView 保存视图节点的投影、裁剪、视口及叠加层参数
+type U3DView = basethreed.U3DView
+
+// U3DViewLayer 保存背景或覆盖纹理，注册点使用纹理像素，旋转使用弧度
+type U3DViewLayer = basethreed.U3DViewLayer
+
+// U3DViewResource 保存视图的绘制轮次，各轮独立指定根节点及雾效
+type U3DViewResource = basethreed.U3DViewResource
+
+// U3DViewPass 保存单轮根节点与雾效，Attributes最低位启用雾效
+type U3DViewPass = basethreed.U3DViewPass
+
+// U3DBoneWeight 保存某骨骼对一个位置的影响系数
+type U3DBoneWeight = basethreed.U3DBoneWeight
+
+// U3DBoneWeights 保存修饰链中的权重，Index为链内位置，Attributes的1、2、4分别表示网格、线集、点集
+// 第i个位置的权重为Weights[Offsets[i]:Offsets[i+1]]，空区间表示没有骨骼影响
+type U3DBoneWeights = basethreed.U3DBoneWeights
 
 // DecodeU3D 按ECMA-363解码静态几何、骨架、场景节点及材质、纹理图像等资源
 // 保留动作轨道和动画修饰器，不在解码时求值；绘制能力由RenderU3D另行校验
@@ -125,556 +202,21 @@ type u3dDecoder struct {
 // 入参: ctx 取消上下文, data U3D数据, options 解码限制
 // 返回: *U3DModel 独立场景数据, error 格式、能力、预算或取消错误
 func DecodeU3D(ctx context.Context, data []byte, options U3DOptions) (*U3DModel, error) {
-	if ctx == nil || options.MaxDecodedBytes < 0 {
-		return nil, fmt.Errorf("invalid U3D decode options")
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	limit := options.MaxDecodedBytes
-	if limit == 0 {
-		limit = u3dDefaultBytes
-	}
-	d := u3dDecoder{ctx: ctx, remaining: uint64(limit), meshes: make(map[string]*u3dMeshDeclaration), nodes: make(map[string]int), palettes: make(map[uint32]map[string]bool)}
-	header, next, err := u3dReadBlock(data, 0)
-	if err != nil {
-		return nil, err
-	}
-	if header.kind != 0x00443355 {
-		return nil, fmt.Errorf("invalid U3D file header")
-	}
-	r := u3dValues{data: header.data}
-	version, profile := r.u32(), r.u32()
-	d.model.Major, d.model.Minor = int16(version), int16(version>>16)
-	if d.model.Major > 0 || profile & ^uint32(14) != 0 {
-		return nil, fmt.Errorf("unsupported U3D version or profile")
-	}
-	declarationEnd := uint64(r.u32())
-	fileSize := uint64(r.u32())
-	fileSize |= uint64(r.u32()) << 32
-	if r.u32() != 106 {
-		return nil, fmt.Errorf("unsupported U3D character encoding")
-	}
-	d.plain = profile&4 != 0
-	d.model.DefinedUnits, d.model.Units = profile&8 != 0, 1
-	if d.model.DefinedUnits {
-		unitBytes := r.take(8)
-		if r.err == nil {
-			d.model.Units = math.Float64frombits(binary.LittleEndian.Uint64(unitBytes))
-			if !finite(d.model.Units) || d.model.Units <= 0 {
-				return nil, fmt.Errorf("invalid U3D units")
-			}
-		}
-	}
-	if err := r.done(); err != nil {
-		return nil, err
-	}
-	if fileSize != uint64(len(data)) || declarationEnd < uint64(next) || declarationEnd > fileSize || declarationEnd%4 != 0 {
-		return nil, fmt.Errorf("invalid U3D file size")
-	}
-	if err := d.metadata(header, ""); err != nil {
-		return nil, err
-	}
-	priority := uint32(0)
-	for offset := next; offset < len(data); {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		block, end, err := u3dReadBlock(data, offset)
-		if err != nil {
-			return nil, fmt.Errorf("U3D block at %d: %w", offset, err)
-		}
-		continuation := block.kind == 0xffffff15 || block.kind == 0xffffff3b || block.kind == 0xffffff3c || block.kind == 0xffffff3e || block.kind == 0xffffff3f || block.kind == 0xffffff5c
-		if uint64(offset) < declarationEnd && (uint64(end) > declarationEnd || continuation) || uint64(offset) >= declarationEnd && !continuation {
-			return nil, fmt.Errorf("invalid U3D declaration boundary at %d", offset)
-		}
-		if block.kind == 0xffffff15 {
-			r := u3dValues{data: block.data}
-			value := r.u32()
-			if err := r.done(); err != nil {
-				return nil, err
-			}
-			if value == 0 || value < priority || value > 0x7fffffff {
-				return nil, fmt.Errorf("invalid U3D block priority")
-			}
-			priority = value
-			err = d.metadata(block, "")
-		} else if block.kind == 0xffffff14 {
-			err = d.chain(block)
-		} else {
-			_, err = d.block(block, "", -1, 0)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("U3D block %#x at %d: %w", block.kind, offset, err)
-		}
-		offset = end
-	}
-	for _, name := range d.meshOrder {
-		mesh := d.meshes[name]
-		if !mesh.decoded && mesh.counts[1] != 0 {
-			return nil, fmt.Errorf("missing U3D base mesh %q", name)
-		}
-		d.model.Meshes = append(d.model.Meshes, mesh.mesh)
-	}
-	if err := d.checkTextures(); err != nil {
-		return nil, err
-	}
-	if err := d.checkParents(); err != nil {
-		return nil, err
-	}
-	if err := d.checkBoneWeights(); err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return &d.model, nil
+	return basethreed.DecodeU3D(ctx, data, options)
 }
 
-// u3dReadBlock 按64位长度计算校验块数据与零填充，避免长度溢出
-// 入参: data 块序列, offset 块起点
-// 返回: u3dBlock 块, int 下一块起点, error 边界或填充错误
-func u3dReadBlock(data []byte, offset int) (u3dBlock, int, error) {
-	if offset < 0 || offset > len(data) || len(data)-offset < 12 {
-		return u3dBlock{}, 0, io.ErrUnexpectedEOF
-	}
-	header := data[offset : offset+12]
-	size, meta := uint64(binary.LittleEndian.Uint32(header[4:])), uint64(binary.LittleEndian.Uint32(header[8:]))
-	start := uint64(offset) + 12
-	metaStart := start + ((size + 3) &^ 3)
-	end := metaStart + ((meta + 3) &^ 3)
-	if end > uint64(len(data)) {
-		return u3dBlock{}, 0, io.ErrUnexpectedEOF
-	}
-	for _, padding := range [][]byte{data[start+size : metaStart], data[metaStart+meta : end]} {
-		for _, value := range padding {
-			if value != 0 {
-				return u3dBlock{}, 0, fmt.Errorf("invalid U3D padding")
-			}
-		}
-	}
-	return u3dBlock{binary.LittleEndian.Uint32(header), data[start : start+size], data[metaStart : metaStart+meta]}, int(end), nil
-}
-
-// reserve 在分配解码数组前检查总预算及取消状态
-// 入参: count 元素数量, size 元素规模上界
-// 返回: error 预算或取消错误
-func (d *u3dDecoder) reserve(count, size uint64) error {
-	if err := d.ctx.Err(); err != nil {
-		return err
-	}
-	if size == 0 || count > d.remaining/size || count > uint64(^uint(0)>>1)/size {
-		return fmt.Errorf("U3D decoded data exceeds limit")
-	}
-	d.remaining -= count * size
-	return nil
-}
-
-// metadata 校验元数据结构并保留原始数据，不解释或执行其中的动作
-// 入参: block 数据块, name 所属资源名
-// 返回: error 结构、预算或取消错误
-func (d *u3dDecoder) metadata(block u3dBlock, name string) error {
-	if len(block.meta) == 0 {
-		return nil
-	}
-	if err := d.reserve(uint64(len(block.meta))+128, 1); err != nil {
-		return err
-	}
-	r := u3dValues{data: block.meta}
-	count := r.u32()
-	if uint64(count) > uint64(len(block.meta))/8 {
-		return fmt.Errorf("invalid U3D metadata count")
-	}
-	for range count {
-		if err := d.ctx.Err(); err != nil {
-			return err
-		}
-		flags := r.u32()
-		r.text()
-		if flags&1 != 0 {
-			size := r.u32()
-			if uint64(size) > uint64(len(r.data)-r.pos) {
-				return io.ErrUnexpectedEOF
-			}
-			r.take(int(size))
-		} else {
-			r.text()
-		}
-		if r.err != nil {
-			return r.err
-		}
-	}
-	if err := r.done(); err != nil {
-		return err
-	}
-	d.model.Metadata = append(d.model.Metadata, U3DMetadata{block.kind, name, bytes.Clone(block.meta)})
-	return nil
-}
-
-// chain 解析单层修饰链并校验名称、链类型与修饰顺序
-// 入参: block 修饰链块
-// 返回: error 结构、能力或资源错误
-func (d *u3dDecoder) chain(block u3dBlock) error {
-	if err := d.reserve(256, 1); err != nil {
-		return err
-	}
-	r := u3dValues{data: block.data}
-	name, kind, flags := r.text(), r.u32(), r.u32()
-	if r.err != nil {
-		return r.err
-	}
-	if name == "" {
-		return fmt.Errorf("cannot redefine U3D default resource")
-	}
-	if kind > 2 || flags & ^uint32(3) != 0 {
-		return fmt.Errorf("invalid U3D modifier chain")
-	}
-	if flags&1 != 0 {
-		for range 4 {
-			r.f32()
-		}
-	}
-	if flags&2 != 0 {
-		for range 6 {
-			r.f32()
-		}
-	}
-	for r.pos%4 != 0 && r.err == nil {
-		if r.u8() != 0 {
-			return fmt.Errorf("invalid U3D chain padding")
-		}
-	}
-	count := r.u32()
-	if r.err != nil {
-		return r.err
-	}
-	if uint64(count) > uint64(len(r.data)-r.pos)/12 {
-		return fmt.Errorf("invalid U3D modifier count")
-	}
-	for index := uint32(0); index < count; index++ {
-		if err := d.ctx.Err(); err != nil {
-			return err
-		}
-		nested, next, err := u3dReadBlock(r.data, r.pos)
-		if err != nil {
-			return err
-		}
-		actual, err := d.block(nested, name, int(kind), index)
-		if err != nil {
-			return err
-		}
-		if actual != name {
-			return fmt.Errorf("U3D modifier name mismatch")
-		}
-		r.pos = next
-	}
-	if err := r.done(); err != nil {
-		return err
-	}
-	return d.metadata(block, name)
-}
-
-// block 解析支持的静态场景块，不丢弃未实现的修饰器或几何
-// 入参: block 数据块, owner 所属链名, chain 链类别，负值表示独立块, index 修饰位置
-// 返回: string 资源名, error 格式、能力或资源错误
-func (d *u3dDecoder) block(block u3dBlock, owner string, chain int, index uint32) (string, error) {
-	if err := d.ctx.Err(); err != nil {
-		return "", err
-	}
-	if err := d.reserve(uint64(len(block.data))+256, 1); err != nil {
-		return "", err
-	}
-	r := u3dValues{data: block.data}
-	name := r.text()
-	if r.err != nil {
-		return "", r.err
-	}
-	if name == "" {
-		return "", fmt.Errorf("cannot redefine U3D default resource")
-	}
-	var err error
-	switch block.kind {
-	case 0xffffff21, 0xffffff22, 0xffffff23, 0xffffff24:
-		if chain >= 0 && (chain != 0 || index != 0) {
-			return name, fmt.Errorf("invalid U3D node chain")
-		}
-		err = d.node(&r, block.kind, name)
-	case 0xffffff31:
-		if chain >= 0 && (chain != 1 || index != 0) {
-			return name, fmt.Errorf("invalid U3D mesh chain")
-		}
-		err = d.meshDeclaration(&r, name)
-	case 0xffffff3b:
-		if chain >= 0 {
-			return name, fmt.Errorf("invalid U3D mesh continuation location")
-		}
-		err = d.baseMesh(&r, name)
-	case 0xffffff36, 0xffffff37:
-		if chain >= 0 && (chain != 1 || index != 0) {
-			return name, fmt.Errorf("invalid U3D primitive chain")
-		}
-		err = d.primitiveDeclaration(&r, name, block.kind == 0xffffff36)
-	case 0xffffff3e, 0xffffff3f:
-		if chain >= 0 {
-			return name, fmt.Errorf("invalid U3D primitive continuation location")
-		}
-		err = d.primitiveContinuation(&r, name, block.kind == 0xffffff3e)
-	case 0xffffff43, 0xffffff44:
-		if (chain != 0 && chain != 1) || index == 0 || owner != name || r.u32() != index {
-			return name, fmt.Errorf("invalid U3D animation or bone weight modifier chain")
-		}
-		if _, exists := d.nodes[name]; chain == 0 && !exists || chain == 1 && d.meshes[name] == nil {
-			return name, fmt.Errorf("missing U3D animation or bone weight modifier target")
-		}
-		if block.kind == 0xffffff43 {
-			err = d.animation(&r, name, chain, index)
-		} else {
-			err = d.boneWeights(&r, name, chain, index)
-		}
-	case 0xffffff45:
-		if chain != 0 || index == 0 || owner != name || r.u32() != index {
-			return name, fmt.Errorf("invalid U3D shading modifier chain")
-		}
-		err = d.shading(&r, name)
-	case 0xffffff51, 0xffffff52, 0xffffff53, 0xffffff54, 0xffffff56:
-		if chain >= 0 {
-			return name, fmt.Errorf("invalid U3D palette resource location")
-		}
-		err = d.resource(&r, block.kind, name)
-	case 0xffffff55:
-		if chain >= 0 && (chain != 2 || index != 0) {
-			return name, fmt.Errorf("invalid U3D texture chain")
-		}
-		err = d.textureDeclaration(&r, name)
-	case 0xffffff5c:
-		if chain >= 0 {
-			return name, fmt.Errorf("invalid U3D texture continuation location")
-		}
-		err = d.textureContinuation(&r, name)
-	default:
-		return name, fmt.Errorf("unsupported U3D block %#x", block.kind)
-	}
-	if err != nil {
-		return name, err
-	}
-	if err := r.done(); err != nil {
-		return name, err
-	}
-	return name, d.metadata(block, name)
-}
-
-// node 读取节点与父变换，允许引用后续声明的父节点
-// 入参: r 字段读取器, kind 节点类型, name 节点名
-// 返回: error 结构或预算错误
-func (d *u3dDecoder) node(r *u3dValues, kind uint32, name string) error {
-	if _, exists := d.nodes[name]; exists {
-		return fmt.Errorf("duplicate U3D node %q", name)
-	}
-	node := U3DNode{Name: name, Kind: "Group"}
-	count := r.u32()
-	if uint64(count) > uint64(len(r.data)-r.pos)/66 {
-		return io.ErrUnexpectedEOF
-	}
-	if err := d.reserve(uint64(count), 96); err != nil {
-		return err
-	}
-	node.Parents = make([]U3DParent, int(count))
-	for index := range node.Parents {
-		if index%256 == 0 {
-			if err := d.ctx.Err(); err != nil {
-				return err
-			}
-		}
-		node.Parents[index].Name = r.text()
-		for element := range node.Parents[index].Transform {
-			node.Parents[index].Transform[element] = r.f32()
-		}
-	}
-	if kind == 0xffffff22 {
-		node.Kind, node.Resource, node.Visibility = "Model", r.text(), r.u32()
-		if node.Visibility > 3 {
-			return fmt.Errorf("invalid U3D model visibility")
-		}
-	} else if kind == 0xffffff23 {
-		node.Kind, node.Resource = "Light", r.text()
-	} else if kind == 0xffffff24 {
-		node.Kind, node.Resource = "View", r.text()
-		var err error
-		node.View, err = d.view(r)
-		if err != nil {
-			return err
-		}
-	}
-	d.nodes[name] = len(d.model.Nodes)
-	d.model.Nodes = append(d.model.Nodes, node)
-	return r.err
-}
-
-// shading 分别读取网格、线集和点集着色列表，保留列表内各着色器的先后次序
-// 入参: r 字段读取器, name 目标节点名
-// 返回: error 结构、能力或预算错误
-func (d *u3dDecoder) shading(r *u3dValues, name string) error {
-	index, exists := d.nodes[name]
-	if !exists || d.model.Nodes[index].Kind != "Model" {
-		return fmt.Errorf("missing U3D shading target")
-	}
-	flags := r.u32()
-	if flags & ^uint32(7) != 0 {
-		return fmt.Errorf("unsupported U3D shading modifier target")
-	}
-	count := r.u32()
-	if uint64(count) > uint64(len(r.data)-r.pos)/4 {
-		return io.ErrUnexpectedEOF
-	}
-	if err := d.reserve(uint64(count), 24); err != nil {
-		return err
-	}
-	lists := make([][]string, int(count))
-	for index := range lists {
-		n := r.u32()
-		if uint64(n) > uint64(len(r.data)-r.pos)/2 {
-			return io.ErrUnexpectedEOF
-		}
-		if err := d.reserve(uint64(n), 16); err != nil {
-			return err
-		}
-		lists[index] = make([]string, int(n))
-		for j := range lists[index] {
-			if j%256 == 0 {
-				if err := d.ctx.Err(); err != nil {
-					return err
-				}
-			}
-			lists[index][j] = r.text()
-		}
-	}
-	if flags&1 != 0 {
-		d.model.Nodes[index].Shaders = lists
-	}
-	if flags&2 != 0 {
-		d.model.Nodes[index].LineShaders = lists
-	}
-	if flags&4 != 0 {
-		d.model.Nodes[index].PointShaders = lists
-	}
-	return r.err
-}
-
-// resource 读取独立材质、着色器、光源、视图和动作资源
-// 入参: r 字段读取器, kind 资源类型, name 资源名
-// 返回: error 结构或能力错误
-func (d *u3dDecoder) resource(r *u3dValues, kind uint32, name string) error {
-	palette := d.palettes[kind]
-	if palette == nil {
-		palette = make(map[string]bool)
-		d.palettes[kind] = palette
-	}
-	if palette[name] {
-		return fmt.Errorf("duplicate U3D resource %q", name)
-	}
-	palette[name] = true
-	switch kind {
-	case 0xffffff56:
-		return d.motion(r, name)
-	case 0xffffff52:
-		return d.viewResource(r, name)
-	case 0xffffff54:
-		material := U3DMaterial{Name: name, Attributes: r.u32()}
-		if material.Attributes & ^uint32(63) != 0 {
-			return fmt.Errorf("invalid U3D material attributes")
-		}
-		for _, color := range []*[3]float32{&material.Ambient, &material.Diffuse, &material.Specular, &material.Emissive} {
-			for index := range color {
-				color[index] = r.f32()
-			}
-		}
-		material.Reflectivity, material.Opacity = r.f32(), r.f32()
-		d.model.Materials = append(d.model.Materials, material)
-	case 0xffffff53:
-		shader := U3DShader{Name: name, Attributes: r.u32(), AlphaReference: r.f32(), AlphaFunction: r.u32(), Blend: r.u32(), RenderPass: r.u32()}
-		channels, alpha := r.u32(), r.u32()
-		shader.Material = r.text()
-		if shader.Attributes & ^uint32(7) != 0 || shader.AlphaFunction < 0x610 || shader.AlphaFunction > 0x617 || shader.Blend < 0x604 || shader.Blend > 0x607 || channels & ^uint32(255) != 0 || alpha & ^channels != 0 {
-			return fmt.Errorf("invalid U3D shader parameters")
-		}
-		for channel := range shader.Textures {
-			if channels&(1<<channel) == 0 {
-				continue
-			}
-			if err := d.reserve(1, 192); err != nil {
-				return err
-			}
-			layer := &U3DTextureLayer{Texture: r.text(), Intensity: r.f32(), Blend: r.u8(), BlendSource: r.u8(), BlendConstant: r.f32(), Mode: r.u8(), Alpha: alpha&(1<<channel) != 0}
-			for i := range layer.Transform {
-				layer.Transform[i] = r.f32()
-			}
-			for i := range layer.WrapTransform {
-				layer.WrapTransform[i] = r.f32()
-			}
-			layer.Repeat = r.u8()
-			if r.err != nil {
-				return r.err
-			}
-			if layer.Blend > 3 || layer.BlendSource > 1 || layer.Mode > 4 || layer.Repeat > 3 {
-				return fmt.Errorf("invalid U3D texture layer")
-			}
-			shader.Textures[channel] = layer
-		}
-		d.model.Shaders = append(d.model.Shaders, shader)
-	case 0xffffff51:
-		light := U3DLight{Name: name, Attributes: r.u32(), Kind: r.u8()}
-		if light.Attributes & ^uint32(7) != 0 || light.Kind > 3 {
-			return fmt.Errorf("invalid U3D light parameters")
-		}
-		for index := range light.Color {
-			light.Color[index] = r.f32()
-		}
-		if r.f32() != 1 {
-			return fmt.Errorf("invalid U3D light reserved parameter")
-		}
-		for index := range light.Attenuation {
-			light.Attenuation[index] = r.f32()
-		}
-		light.SpotAngle, light.Intensity = r.f32(), r.f32()
-		d.model.Lights = append(d.model.Lights, light)
-	}
-	return r.err
-}
-
-// checkParents 迭代检查场景父子环路，不递归展开多父节点的实例组合
-// 返回: error 环路或取消错误
-func (d *u3dDecoder) checkParents() error {
-	state := make([]byte, len(d.model.Nodes))
-	type frame struct{ node, parent int }
-	var stack []frame
-	for index := range d.model.Nodes {
-		if state[index] != 0 {
-			continue
-		}
-		stack = append(stack[:0], frame{node: index})
-		state[index] = 1
-		for len(stack) != 0 {
-			if err := d.ctx.Err(); err != nil {
-				return err
-			}
-			current := &stack[len(stack)-1]
-			parents := d.model.Nodes[current.node].Parents
-			if current.parent == len(parents) {
-				state[current.node] = 2
-				stack = stack[:len(stack)-1]
-				continue
-			}
-			parent, exists := d.nodes[parents[current.parent].Name]
-			current.parent++
-			if !exists || state[parent] == 2 {
-				continue
-			}
-			if state[parent] == 1 {
-				return fmt.Errorf("cyclic U3D node parents")
-			}
-			state[parent] = 1
-			stack = append(stack, frame{node: parent})
-		}
-	}
-	return nil
+// RenderU3D 绘制几何及视图纹理层，返回指定时刻的不透明图像，不执行脚本
+// 可通过节点覆盖指定动作轨道与采样时间，逐次生成独立姿态，不修改原模型
+// 显式骨骼姿态按权重变换位置和法线，暂不生成骨骼链接或推导缺失权重
+// 动画修饰器支持单动作的节点和骨骼求值，尚未实现的动作衔接返回明确错误
+// 几何纹理支持模型坐标与程序化映射，参考形状约定见U3DTextureLayer
+// 纹理按需解码并复用，不自动访问外部图像
+// 采用逐顶点光照及逐像素深度混合，空名称引用标准默认资源
+// 缺失几何、材质和着色器采用默认资源，缺失的非空光源引用不产生光照
+// 缺失纹理返回错误，空纹理名称使用标准默认图像
+// 仅绘制默认根的后代，非空父节点引用缺失时不展开该父路径
+// 入参: ctx 取消上下文, model 场景, options 视图、输出与资源限制
+// 返回: *image.RGBA 图像, error 参数、能力、预算或取消错误
+func RenderU3D(ctx context.Context, model *U3DModel, options U3DRenderOptions) (*image.RGBA, error) {
+	return basethreed.RenderU3D(ctx, model, options)
 }

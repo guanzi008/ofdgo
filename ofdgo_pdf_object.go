@@ -545,7 +545,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		}
 		lineWidth := mark.Style.LineWidth * math.Hypot(p.matrix[0], p.matrix[1]) * sx
 		margin := lineWidth / 2 * math.Max(1, mark.Style.MiterLimit)
-		box = Box{box.X - margin, box.Y - margin, box.W + 2*margin, box.H + 2*margin}
+		box = Box{X: box.X - margin, Y: box.Y - margin, W: box.W + 2*margin, H: box.H + 2*margin}
 		object.LineWidth = lineWidth / scale
 		object.LineWidthSet = object.LineWidth == 0
 		object.Cap = []string{"Butt", "Round", "Square"}[mark.Style.Cap]

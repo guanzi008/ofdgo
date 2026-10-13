@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"image"
 	"math"
 	"slices"
@@ -50,7 +51,7 @@ func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) er
 		return err
 	}
 	if c.measure {
-		path, err := c.geometry.Transform(geometryRectangle(Box{W: 1, H: 1}), matrix)
+		path, err := c.geometry.Transform(GeometryPath(basegeom.Rectangle(Box{W: 1, H: 1})), matrix)
 		if err != nil {
 			return err
 		}
@@ -117,7 +118,7 @@ func imageBorderObject(object ImageObject, box Box) PathObject {
 func (c *semanticCompiler) addImage(img image.Image, matrix Matrix, clip *GeometryPath) error {
 	command := RasterCommand{Image: img, Transform: RasterMatrix(matrix.Values())}
 	if clip != nil {
-		if box, ok := geometryRectangleBounds(*clip); ok {
+		if box, ok := basegeom.RectangleBounds(basegeom.Path(*clip)); ok {
 			bounds := img.Bounds()
 			visible := matrix.TransformBox(Box{X: float64(bounds.Min.X), Y: float64(bounds.Min.Y), W: float64(bounds.Dx()), H: float64(bounds.Dy())})
 			if box.X <= visible.X && box.Y <= visible.Y && visible.X+visible.W <= box.X+box.W && visible.Y+visible.H <= box.Y+box.H {
@@ -125,11 +126,11 @@ func (c *semanticCompiler) addImage(img image.Image, matrix Matrix, clip *Geomet
 			}
 		} else {
 			bounds := img.Bounds()
-			outline, err := geometryRectangle(Box{X: float64(bounds.Min.X), Y: float64(bounds.Min.Y), W: float64(bounds.Dx()), H: float64(bounds.Dy())}).Transform(matrix)
+			outline, err := GeometryPath(basegeom.Rectangle(Box{X: float64(bounds.Min.X), Y: float64(bounds.Min.Y), W: float64(bounds.Dx()), H: float64(bounds.Dy())})).Transform(matrix)
 			if err != nil {
 				return err
 			}
-			if geometryConvexContains(*clip, outline) {
+			if basegeom.ConvexContains(basegeom.Path(*clip), basegeom.Path(outline)) {
 				clip = nil
 			}
 		}
@@ -184,7 +185,7 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 			var clip GeometryPath
 			var segments []RasterSegment
 			if stamp.Clip != nil {
-				clip = geometryRectangle(Box{X: stamp.Box.X + stamp.Clip.X, Y: stamp.Box.Y + stamp.Clip.Y, W: stamp.Clip.W, H: stamp.Clip.H})
+				clip = GeometryPath(basegeom.Rectangle(Box{X: stamp.Box.X + stamp.Clip.X, Y: stamp.Box.Y + stamp.Clip.Y, W: stamp.Clip.W, H: stamp.Clip.H}))
 				segments, err = c.segments(clip)
 				if err != nil {
 					return err
@@ -248,7 +249,7 @@ func (c *semanticCompiler) stampImage(img image.Image, stamp Stamp) error {
 	box := stamp.Box
 	var clip *GeometryPath
 	if stamp.Clip != nil {
-		path := geometryRectangle(Box{X: box.X + stamp.Clip.X, Y: box.Y + stamp.Clip.Y, W: stamp.Clip.W, H: stamp.Clip.H})
+		path := GeometryPath(basegeom.Rectangle(Box{X: box.X + stamp.Clip.X, Y: box.Y + stamp.Clip.Y, W: stamp.Clip.W, H: stamp.Clip.H}))
 		clip = &path
 	}
 	bounds := img.Bounds()

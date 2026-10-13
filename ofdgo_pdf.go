@@ -431,7 +431,7 @@ func (b *pdfPointBounds) box() Box {
 	if !b.found {
 		return Box{}
 	}
-	return Box{b.minX, b.minY, math.Max(b.maxX-b.minX, 1e-6), math.Max(b.maxY-b.minY, 1e-6)}
+	return Box{X: b.minX, Y: b.minY, W: math.Max(b.maxX-b.minX, 1e-6), H: math.Max(b.maxY-b.minY, 1e-6)}
 }
 
 // pathBoundsContext 逐段计算变换后的控制点边界，不创建临时点集合
@@ -465,7 +465,7 @@ func (p *pdfImporter) pathBoundsContext(ctx context.Context, path pdfgo.Path) (B
 	if !found {
 		return Box{}, nil
 	}
-	return Box{minX, minY, math.Max(maxX-minX, 1e-6), math.Max(maxY-minY, 1e-6)}, nil
+	return Box{X: minX, Y: minY, W: math.Max(maxX-minX, 1e-6), H: math.Max(maxY-minY, 1e-6)}, nil
 }
 
 // color 保留设备色彩分量并复用文档颜色空间
@@ -662,7 +662,7 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 	}
 	if mark.Stroke {
 		margin := mark.Style.LineWidth * marginScale / 2 * math.Max(1, mark.Style.MiterLimit)
-		box = Box{box.X - margin, box.Y - margin, box.W + 2*margin, box.H + 2*margin}
+		box = Box{X: box.X - margin, Y: box.Y - margin, W: box.W + 2*margin, H: box.H + 2*margin}
 	}
 	if mark.StrokeMatrix == (pdfgo.Matrix{}) {
 		origin = box

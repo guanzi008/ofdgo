@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"math"
 	"reflect"
 	"slices"
@@ -58,7 +59,7 @@ func (e *Editor) EraseCompositeObjects(page int, path ObjectPath, indexes []int,
 	if err := validateCreationBox(box); err != nil {
 		return err
 	}
-	return e.eraseCompositeObjects(page, path, indexes, geometryRectangle(box))
+	return e.eraseCompositeObjects(page, path, indexes, GeometryPath(basegeom.Rectangle(box)))
 }
 
 // EraseCompositeObjectsPath 按闭合折线擦除内部成员，末点自动连接起点
@@ -113,7 +114,7 @@ func (e *Editor) eraseCompositeObjects(page int, path ObjectPath, indexes []int,
 			if box.W <= 0 || box.H <= 0 {
 				continue
 			}
-			bounds := geometryRectangle(box)
+			bounds := GeometryPath(basegeom.Rectangle(box))
 			intersection, err := geometry.Combine(bounds, region, GeometryIntersect)
 			if err != nil {
 				return err
@@ -137,7 +138,7 @@ func (e *Editor) eraseCompositeObjects(page int, path ObjectPath, indexes []int,
 			if !ok {
 				return fmt.Errorf("composite clip transform is not invertible")
 			}
-			outer := geometryRectangle(Box{X: box.X - 1, Y: box.Y - 1, W: box.W + 2, H: box.H + 2})
+			outer := GeometryPath(basegeom.Rectangle(Box{X: box.X - 1, Y: box.Y - 1, W: box.W + 2, H: box.H + 2}))
 			remainder, err = geometry.Combine(outer, region, GeometrySubtract)
 			if err != nil {
 				return err
@@ -178,7 +179,7 @@ func (e *Editor) eraseObjects(page int, ids []string, box Box, points []Point, r
 		}
 		covered := x == bounds.X && y == bounds.Y && right == bounds.X+bounds.W && bottom == bounds.Y+bounds.H
 		if region != nil {
-			path := geometryRectangle(bounds)
+			path := GeometryPath(basegeom.Rectangle(bounds))
 			intersection, err := e.backends.Geometry.Combine(path, region, GeometryIntersect)
 			if err != nil {
 				return err

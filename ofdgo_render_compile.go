@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"math"
 	"strconv"
 )
@@ -127,7 +128,7 @@ func (c *semanticCompiler) addBounds(path GeometryPath, evenOdd bool) error {
 	}
 	c.measurement.Bounds = unionTextBox(c.measurement.Bounds, box)
 	if c.contours {
-		svg, err := closedGeometry(path).SVG()
+		svg, err := GeometryPath(basegeom.Close(basegeom.Path(path))).SVG()
 		if err != nil {
 			return err
 		}
@@ -143,7 +144,7 @@ func (c *semanticCompiler) fill(path GeometryPath, paint Paint, evenOdd bool, cl
 	if len(path) == 0 || paint.Kind == PaintNone || paint.Kind == PaintSolid && paint.Color.A == 0 {
 		return nil
 	}
-	path = closedGeometry(path)
+	path = GeometryPath(basegeom.Close(basegeom.Path(path)))
 	if !c.measure && paint.Kind != PaintPattern {
 		return c.command(path, paint, evenOdd, clip, shadingMatrix, nil)
 	}

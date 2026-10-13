@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"context"
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
 // Bounds 度量已编译指令的页面坐标范围，不重新定位文字或读取图片像素
@@ -74,7 +75,7 @@ func rasterCommandGeometry(geometry GeometryBackend, command RasterCommand) (Geo
 		if bounds.Empty() {
 			return nil, nil
 		}
-		path = geometryRectangle(Box{X: float64(bounds.Min.X), Y: float64(bounds.Min.Y), W: float64(bounds.Dx()), H: float64(bounds.Dy())})
+		path = GeometryPath(basegeom.Rectangle(Box{X: float64(bounds.Min.X), Y: float64(bounds.Min.Y), W: float64(bounds.Dx()), H: float64(bounds.Dy())}))
 	} else {
 		if len(command.Path) == 0 || command.Paint.Gradient == nil && command.Paint.Color.A == 0 {
 			return nil, nil
@@ -92,7 +93,7 @@ func rasterCommandGeometry(geometry GeometryBackend, command RasterCommand) (Geo
 		return nil, err
 	}
 	if command.Image == nil && command.Stroke != nil {
-		if err := validateStroke(*command.Stroke); err != nil {
+		if err := basegeom.ValidateStroke(*command.Stroke); err != nil {
 			return nil, err
 		}
 		path, err = geometry.Stroke(path, *command.Stroke)

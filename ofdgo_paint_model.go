@@ -14,7 +14,10 @@
 
 package ofdgo
 
-import "image/color"
+import (
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
+	"image/color"
+)
 
 // 画刷类型，区分纯色、渐变和图案填充
 const (
@@ -94,7 +97,7 @@ func (r *Renderer) ResolvePaint(fill *FillColor) (Paint, error) {
 		if err != nil {
 			return Paint{}, err
 		}
-		if len(start) >= 2 && len(end) >= 2 && len(stops) != 0 && (!geometryEqual(start[0], end[0]) || !geometryEqual(start[1], end[1])) {
+		if len(start) >= 2 && len(end) >= 2 && len(stops) != 0 && (!basegeom.Equal(start[0], end[0]) || !basegeom.Equal(start[1], end[1])) {
 			paint.Kind = PaintLinear
 			paint.Gradient = &Shading{Start: Point{X: start[0], Y: start[1]}, End: Point{X: end[0], Y: end[1]}, Stops: stops, Extend: node.Extend, MapType: node.MapType, MapUnit: node.MapUnit}
 			paint.Gradient.Sample = sample

@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"image"
 	"image/color"
 	"image/draw"
@@ -165,7 +166,7 @@ func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Ima
 		m := cmd.Transform
 		if cmd.Stroke != nil {
 			options := *cmd.Stroke
-			if err := validateStroke(options); err != nil {
+			if err := basegeom.ValidateStroke(options); err != nil {
 				return nil, err
 			}
 			p = p.Transform(canvas.Matrix{{m[0], m[2], m[4]}, {m[1], m[3], m[5]}})

@@ -239,7 +239,7 @@ func (r *Renderer) resolveMesh(fill *FillColor) (*MeshShading, error) {
 		if value := mergeAlpha(point.Color.Alpha, fill.Alpha); value != nil {
 			alpha = float64(*value) / 255
 		}
-		vertices[i] = MeshVertex{Point: Point{point.X, point.Y}, Space: kind, Values: values, Alpha: alpha, profile: profile}
+		vertices[i] = MeshVertex{Point: Point{X: point.X, Y: point.Y}, Space: kind, Values: values, Alpha: alpha, profile: profile}
 	}
 	mesh := &MeshShading{}
 	if extend == 1 && back != nil {

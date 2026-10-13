@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"math"
 	"slices"
 	"strconv"
@@ -88,7 +89,7 @@ func (CanvasBackend) Transform(path GeometryPath, matrix Matrix) (GeometryPath, 
 			return nil, fmt.Errorf("invalid geometry transform")
 		}
 	}
-	if geometryEqual(m[0]*m[3]-m[1]*m[2], 0) {
+	if basegeom.Equal(m[0]*m[3]-m[1]*m[2], 0) {
 		p = p.ReplaceArcs()
 	}
 	p = p.Transform(canvas.Matrix{{m[0], -m[2], m[4]}, {-m[1], m[3], -m[5]}})
@@ -149,7 +150,7 @@ func (CanvasBackend) Combine(left, right GeometryPath, operation GeometryOperati
 // 入参: path 页面路径, options 描边样式
 // 返回: GeometryPath 描边区域, error 样式或路径错误
 func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (result GeometryPath, err error) {
-	if err := validateStroke(options); err != nil {
+	if err := basegeom.ValidateStroke(options); err != nil {
 		return nil, err
 	}
 	if slices.Contains(options.Dashes, 0) {
@@ -248,7 +249,7 @@ func canvasStrokeFillPath(geometry GeometryBackend, path *canvas.Path, options S
 		if options.Tolerance == 0 {
 			options.Tolerance = canvas.Tolerance
 		}
-		if err := validateStroke(options); err != nil {
+		if err := basegeom.ValidateStroke(options); err != nil {
 			return nil, err
 		}
 		if len(path.Dash(options.DashOffset, options.Dashes...).Data()) > 256 {

@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"encoding/xml"
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"net/url"
 	"strconv"
 )
@@ -482,8 +483,8 @@ func (r *Renderer) appendGraphicActionSources(sources []actionSource, object Gra
 		if placement.a == 1 && placement.b == 0 && placement.c == 0 && placement.d == 1 {
 			source.Box.W, source.Box.H = box.W, box.H
 		}
-		if box.W > 0 && box.H > 0 && !axisAlignedMatrix(placement) {
-			path := geometryRectangle(Box{W: box.W, H: box.H})
+		if box.W > 0 && box.H > 0 && !basegeom.AxisAligned(basegeom.MatrixFromValues(placement.Values())) {
+			path := GeometryPath(basegeom.Rectangle(Box{W: box.W, H: box.H}))
 			for i := range path {
 				path[i].End.X, path[i].End.Y = placement.Transform(path[i].End.X, path[i].End.Y)
 			}

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"maps"
 	"slices"
 
@@ -165,7 +166,7 @@ func (m CompositeMember) Shape() (ShapeKind, Box) {
 	if lineShapeKind(kind) {
 		return kind, transformLineBox(box, parent)
 	}
-	if !axisAlignedMatrix(parent) {
+	if !basegeom.AxisAligned(basegeom.MatrixFromValues(parent.Values())) {
 		return "", Box{}
 	}
 	return kind, parent.TransformBox(box)
@@ -303,7 +304,7 @@ func (m CompositeMember) shapeParent() (Matrix, bool) {
 // 返回: Box 变换后的端点
 func transformLineBox(box Box, matrix Matrix) Box {
 	x, y := matrix.Transform(box.X, box.Y)
-	w, h := matrixVector(matrix, box.W, box.H)
+	w, h := basegeom.Vector(basegeom.MatrixFromValues(matrix.Values()), box.W, box.H)
 	return Box{X: x, Y: y, W: w, H: h}
 }
 

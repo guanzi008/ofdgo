@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"context"
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"math"
 	"slices"
 
@@ -60,7 +61,7 @@ func pdfActionRegion(ctx context.Context, outline string, pageH float64) (*pdfgo
 	if path.Len() > pdfLinkEdgeLimit {
 		return nil, fmt.Errorf("PDF link region exceeds edge limit")
 	}
-	if _, ok := geometryRectangleBounds(*geometryFromCanvasPath(path)); ok {
+	if _, ok := basegeom.RectangleBounds(basegeom.Path(*geometryFromCanvasPath(path))); ok {
 		return nil, nil
 	}
 	path, err = flattenPDFLink(ctx, path)
@@ -279,7 +280,7 @@ func flattenPDFLink(ctx context.Context, path *canvas.Path) (*canvas.Path, error
 		for n := len(points); n > 0; n-- {
 			left[len(points)-n], right[n-1] = work[0], work[n-1]
 			for i := 0; i < n-1; i++ {
-				work[i] = geometryLerp(work[i], work[i+1], .5)
+				work[i] = basegeom.Lerp(work[i], work[i+1], .5)
 			}
 		}
 		if err := flatten(left[:len(points)], depth+1); err != nil {
@@ -299,10 +300,10 @@ func flattenPDFLink(ctx context.Context, path *canvas.Path) (*canvas.Path, error
 			result.Close()
 			current = start
 		default:
-			curves := GeometryPath{segment}
+			curves := basegeom.Path{segment}
 			if segment.Verb == GeometryArc {
 				var err error
-				curves, err = arcCurves(current, segment, pdfLinkTolerance/2)
+				curves, err = basegeom.ArcCurves(current, segment, pdfLinkTolerance/2)
 				if err != nil {
 					return nil, err
 				}

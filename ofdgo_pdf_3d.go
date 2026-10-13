@@ -22,6 +22,7 @@ import (
 	"math"
 	"strings"
 
+	basethreed "github.com/xiaoqidun/ofdgo/internal/base/threed"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -222,22 +223,22 @@ func RenderPDFThreeD(ctx context.Context, model *U3DModel, source pdfgo.ThreeD, 
 	if err := pdfThreeDSections(ctx, presentation.CrossSections, &render); err != nil {
 		return nil, err
 	}
-	r, err := newU3DRender(ctx, model, render, options.Nodes)
+	r, err := basethreed.NewRenderer(ctx, model, render, options.Nodes)
 	if err != nil {
 		return nil, err
 	}
-	camera, view, err := r.pdfCamera(source.Camera)
+	camera, view, err := pdfThreeDCamera(ctx, model, r, source.Camera)
 	if err != nil {
 		return nil, err
 	}
 	render.View = view
 	camera.ScaleX, camera.ScaleY, camera.Near = 1, 1, 1
 	render.Camera = &camera
-	passes, err := r.selectView(render)
+	passes, err := r.SelectView(render)
 	if err != nil {
 		return nil, err
 	}
-	if err := r.prepareSections(render.Sections); err != nil {
+	if err := r.PrepareSections(render.Sections); err != nil {
 		return nil, err
 	}
 	scale, err := projection.ScaleFactor(source.ViewBox, source.AnnotationBox)
@@ -268,7 +269,7 @@ func RenderPDFThreeD(ctx context.Context, model *U3DModel, source pdfgo.ThreeD, 
 			}
 		}
 	case "ANF":
-		minimum, maximum, found, err := r.depthRange()
+		minimum, maximum, found, err := r.DepthRange()
 		if err != nil {
 			return nil, err
 		}
@@ -292,11 +293,11 @@ func RenderPDFThreeD(ctx context.Context, model *U3DModel, source pdfgo.ThreeD, 
 	default:
 		return nil, fmt.Errorf("invalid PDF 3D clipping style")
 	}
-	if _, err := r.selectView(render); err != nil {
+	if _, err := r.SelectView(render); err != nil {
 		return nil, err
 	}
 	if source.Lighting.Subtype != "Artwork" && source.Lighting.Subtype != "" {
-		if err := r.reserve(uint64(len(source.Lighting.Lights)), 56); err != nil {
+		if err := r.Reserve(uint64(len(source.Lighting.Lights)), 56); err != nil {
 			return nil, err
 		}
 		render.Lighting = &U3DLighting{DiffuseOffset: source.Lighting.Ambient, Lights: make([]U3DDirectionalLight, len(source.Lighting.Lights))}
@@ -313,18 +314,18 @@ func RenderPDFThreeD(ctx context.Context, model *U3DModel, source pdfgo.ThreeD, 
 			render.Lighting.Lights[i] = U3DDirectionalLight{Color: light.Color, Direction: direction, CameraRelative: light.CameraAttached}
 		}
 	}
-	return r.render(render, passes)
+	return r.Render(render, passes)
 }
 
-// pdfCamera 解析PDF相机来源并保留模型视图的绘制轮次
-// 入参: source 相机来源
+// pdfThreeDCamera 解析PDF相机来源并保留模型视图的绘制轮次
+// 入参: ctx 取消上下文, model 三维模型, renderer 场景实例, source 相机来源
 // 返回: U3DCamera 相机变换, string 视图节点, error 路径或变换错误
-func (r *u3dRender) pdfCamera(source pdfgo.ThreeDCamera) (U3DCamera, string, error) {
+func pdfThreeDCamera(ctx context.Context, model *U3DModel, renderer *basethreed.Renderer, source pdfgo.ThreeDCamera) (U3DCamera, string, error) {
 	var camera U3DCamera
 	selected := -1
-	for i, node := range r.model.Nodes {
+	for i, node := range model.Nodes {
 		if i%256 == 0 {
-			if err := r.ctx.Err(); err != nil {
+			if err := ctx.Err(); err != nil {
 				return camera, "", err
 			}
 		}
@@ -342,9 +343,9 @@ func (r *u3dRender) pdfCamera(source pdfgo.ThreeDCamera) (U3DCamera, string, err
 		}
 		if source.Source == "U3D" {
 			selected = -1
-			for i, node := range r.model.Nodes {
+			for i, node := range model.Nodes {
 				if i%256 == 0 {
-					if err := r.ctx.Err(); err != nil {
+					if err := ctx.Err(); err != nil {
 						return camera, "", err
 					}
 				}
@@ -354,102 +355,26 @@ func (r *u3dRender) pdfCamera(source pdfgo.ThreeDCamera) (U3DCamera, string, err
 				}
 			}
 		}
-		if selected < 0 || r.model.Nodes[selected].Kind != "View" {
+		if selected < 0 || model.Nodes[selected].Kind != "View" {
 			return camera, "", fmt.Errorf("missing PDF 3D camera node")
 		}
-		found := false
-		for _, index := range r.byNode[selected] {
-			if err := r.ctx.Err(); err != nil {
-				return camera, "", err
-			}
-			current, match := index, true
-			for j := len(source.Path) - 1; j >= 0; j-- {
-				if j%256 == 0 {
-					if err := r.ctx.Err(); err != nil {
-						return camera, "", err
-					}
-				}
-				if current < 0 || r.model.Nodes[r.scene[current].node].Name != source.Path[j] || r.model.Nodes[r.scene[current].node].Kind != "View" {
-					match = false
-					break
-				}
-				current = r.scene[current].parent
-			}
-			if source.Source == "U3D" && current >= 0 {
-				match = false
-			}
-			if !match {
-				continue
-			}
-			if found {
-				return camera, "", &pdfgo.UnsupportedError{Feature: "ambiguous 3D camera instance"}
-			}
-			camera.ToWorld, found = r.scene[index].world, true
+		var err error
+		camera.ToWorld, err = renderer.ViewCamera(selected, source.Path, source.Source == "U3D")
+		if errors.Is(err, basethreed.ErrAmbiguousCamera) {
+			return camera, "", &pdfgo.UnsupportedError{Feature: "ambiguous 3D camera instance"}
 		}
-		if !found {
+		if errors.Is(err, basethreed.ErrCameraNotFound) {
 			return camera, "", fmt.Errorf("missing PDF 3D camera path")
+		}
+		if err != nil {
+			return camera, "", err
 		}
 	}
 	view := ""
 	if selected >= 0 {
-		view = r.model.Nodes[selected].Name
+		view = model.Nodes[selected].Name
 	}
 	return camera, view, nil
-}
-
-// depthRange 计算可见模型几何的相机深度范围，不为自动裁剪复制顶点
-// 返回: float64 最近深度, float64 最远深度, bool 是否含几何, error 几何或取消错误
-func (r *u3dRender) depthRange() (float64, float64, bool, error) {
-	minimum, maximum := math.Inf(1), math.Inf(-1)
-	for i, instance := range r.scene {
-		if i%256 == 0 {
-			if err := r.ctx.Err(); err != nil {
-				return 0, 0, false, err
-			}
-		}
-		node := r.model.Nodes[instance.node]
-		index, ok := r.meshes[node.Resource]
-		if node.Kind != "Model" || instance.modelVisibility(&node) == 0 || instance.opacity == 0 || !ok {
-			continue
-		}
-		mesh := &r.model.Meshes[index]
-		matrix := r.toCamera.multiply(instance.world)
-		for j := range len(mesh.Faces) + len(mesh.Lines) + len(mesh.Points) {
-			_, corners := mesh.primitive(j)
-			if j%256 == 0 {
-				if err := r.ctx.Err(); err != nil {
-					return 0, 0, false, err
-				}
-			}
-			for _, corner := range corners {
-				if uint64(corner.Position) >= uint64(len(mesh.Positions)) {
-					return 0, 0, false, fmt.Errorf("invalid U3D position index")
-				}
-				p := mesh.Positions[corner.Position]
-				z := matrix[2]*float64(p[0]) + matrix[6]*float64(p[1]) + matrix[10]*float64(p[2]) + matrix[14]
-				if !finite(z) {
-					return 0, 0, false, fmt.Errorf("invalid U3D camera depth")
-				}
-				minimum, maximum = min(minimum, z), max(maximum, z)
-			}
-		}
-	}
-	for i, section := range r.sections {
-		if i%256 == 0 {
-			if err := r.ctx.Err(); err != nil {
-				return 0, 0, false, err
-			}
-		}
-		if section.opacity > 0 {
-			for _, corner := range section.corners {
-				minimum, maximum = min(minimum, corner.point[2]), max(maximum, corner.point[2])
-			}
-		}
-	}
-	if math.IsInf(minimum, 1) {
-		return 0, 0, false, nil
-	}
-	return minimum, maximum, true, nil
 }
 
 // pdfThreeDNodeStates 将PDF节点参数转为场景覆盖，转换缓存计入绘制预算
@@ -461,7 +386,7 @@ func pdfThreeDNodeStates(ctx context.Context, nodes []pdfgo.ThreeDNode, options 
 	}
 	limit := options.MaxMemoryBytes
 	if limit == 0 {
-		limit = u3dDefaultBytes
+		limit = basethreed.DefaultBytes
 	}
 	if limit <= 0 || uint64(len(nodes)) >= uint64(limit)/168 {
 		return fmt.Errorf("PDF 3D node memory exceeds limit")

@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"image/color"
 	"math"
 
@@ -110,7 +111,7 @@ func (p *pdfImporter) compileCoverage(node pdfCompositeNode, stroke bool) (*Rast
 		path, err = pdfGeometryPath(p.ctx, node.path.Path, p.matrix)
 		evenOdd = node.path.Path.EvenOdd
 	} else {
-		path, err = geometry.Transform(geometryRectangle(Box{W: 1, H: 1}), MatrixFromValues([6]float64(p.matrix.Mul(node.image.Matrix))))
+		path, err = geometry.Transform(GeometryPath(basegeom.Rectangle(Box{W: 1, H: 1})), MatrixFromValues([6]float64(p.matrix.Mul(node.image.Matrix))))
 	}
 	if err != nil {
 		return nil, Box{}, err
@@ -118,7 +119,7 @@ func (p *pdfImporter) compileCoverage(node pdfCompositeNode, stroke bool) (*Rast
 	if len(path) == 0 {
 		return nil, Box{}, fmt.Errorf("empty PDF painted path")
 	}
-	path = closedGeometry(path)
+	path = GeometryPath(basegeom.Close(basegeom.Path(path)))
 	clip, err := p.coverageClip(style.Clips, geometry)
 	if err != nil || len(clip) == 0 {
 		return nil, Box{}, err
@@ -134,7 +135,7 @@ func (p *pdfImporter) compileCoverage(node pdfCompositeNode, stroke bool) (*Rast
 			bounds.add(pdfgo.Point{X: segment.Control2.X, Y: segment.Control2.Y})
 		}
 	}
-	boundary := geometryRectangle(bounds.box())
+	boundary := GeometryPath(basegeom.Rectangle(bounds.box()))
 	clip, err = clipGeometry(geometry, clip, &boundary)
 	if err != nil {
 		return nil, Box{}, err
@@ -149,7 +150,7 @@ func (p *pdfImporter) compileCoverage(node pdfCompositeNode, stroke bool) (*Rast
 	if err != nil {
 		return nil, Box{}, err
 	}
-	rect, rectangle := geometryRectangleBounds(clip)
+	rect, rectangle := basegeom.RectangleBounds(basegeom.Path(clip))
 	if !rectangle || box.X < rect.X || box.Y < rect.Y || box.X+box.W > rect.X+rect.W || box.Y+box.H > rect.Y+rect.H {
 		if evenOdd {
 			path, err = geometry.Normalize(path, true)
@@ -189,7 +190,7 @@ func (p *pdfImporter) coverageClip(paths []pdfgo.Path, geometry GeometryBackend)
 	if err := p.ctx.Err(); err != nil {
 		return nil, err
 	}
-	clip := geometryRectangle(Box{W: p.pageWidth, H: p.pageHeight})
+	clip := GeometryPath(basegeom.Rectangle(Box{W: p.pageWidth, H: p.pageHeight}))
 	if len(paths) == 0 {
 		return clip, nil
 	}
@@ -216,8 +217,8 @@ func (p *pdfImporter) coverageClip(paths []pdfgo.Path, geometry GeometryBackend)
 		if err != nil {
 			return nil, err
 		}
-		part = closedGeometry(part)
-		if _, rectangle := geometryRectangleBounds(part); source.EvenOdd && !rectangle {
+		part = GeometryPath(basegeom.Close(basegeom.Path(part)))
+		if _, rectangle := basegeom.RectangleBounds(basegeom.Path(part)); source.EvenOdd && !rectangle {
 			part, err = geometry.Normalize(part, true)
 			if err != nil {
 				return nil, err

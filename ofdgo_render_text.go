@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"math"
 	"strings"
 )
@@ -101,7 +102,7 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 		}
 		box, _ := ParseBox(object.Boundary)
 		boundary, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
-		path, err := geometry.Transform(geometryRectangle(Box{W: box.W, H: box.H}), boundary)
+		path, err := geometry.Transform(GeometryPath(basegeom.Rectangle(Box{W: box.W, H: box.H})), boundary)
 		if err != nil {
 			return nil, err
 		}
@@ -430,7 +431,7 @@ func (run *TextRun) addGeometrySpan(geometry GeometryBackend, start, end int, bo
 		return nil
 	}
 	if clip != nil {
-		path, err := geometry.Transform(geometryRectangle(bounds), matrix)
+		path, err := geometry.Transform(GeometryPath(basegeom.Rectangle(bounds)), matrix)
 		if err != nil {
 			return err
 		}

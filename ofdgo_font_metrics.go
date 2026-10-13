@@ -50,25 +50,25 @@ type glyphGeometry struct{ path GeometryPath }
 // MoveTo 开始子路径
 // 入参: x 横坐标, y 纵坐标
 func (p *glyphGeometry) MoveTo(x, y float64) {
-	p.path = append(p.path, GeometrySegment{Verb: GeometryMove, End: Point{x, -y}})
+	p.path = append(p.path, GeometrySegment{Verb: GeometryMove, End: Point{X: x, Y: -y}})
 }
 
 // LineTo 添加直线
 // 入参: x 横坐标, y 纵坐标
 func (p *glyphGeometry) LineTo(x, y float64) {
-	p.path = append(p.path, GeometrySegment{Verb: GeometryLine, End: Point{x, -y}})
+	p.path = append(p.path, GeometrySegment{Verb: GeometryLine, End: Point{X: x, Y: -y}})
 }
 
 // QuadTo 添加二次贝塞尔曲线
 // 入参: cx 控制点横坐标, cy 控制点纵坐标, x 终点横坐标, y 终点纵坐标
 func (p *glyphGeometry) QuadTo(cx, cy, x, y float64) {
-	p.path = append(p.path, GeometrySegment{Verb: GeometryQuad, Control1: Point{cx, -cy}, End: Point{x, -y}})
+	p.path = append(p.path, GeometrySegment{Verb: GeometryQuad, Control1: Point{X: cx, Y: -cy}, End: Point{X: x, Y: -y}})
 }
 
 // CubeTo 添加三次贝塞尔曲线
 // 入参: ax 第一控制点横坐标, ay 第一控制点纵坐标, bx 第二控制点横坐标, by 第二控制点纵坐标, x 终点横坐标, y 终点纵坐标
 func (p *glyphGeometry) CubeTo(ax, ay, bx, by, x, y float64) {
-	p.path = append(p.path, GeometrySegment{Verb: GeometryCubic, Control1: Point{ax, -ay}, Control2: Point{bx, -by}, End: Point{x, -y}})
+	p.path = append(p.path, GeometrySegment{Verb: GeometryCubic, Control1: Point{X: ax, Y: -ay}, Control2: Point{X: bx, Y: -by}, End: Point{X: x, Y: -y}})
 }
 
 // Close 闭合当前子路径

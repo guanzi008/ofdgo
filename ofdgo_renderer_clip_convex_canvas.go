@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"math"
 
 	"github.com/tdewolff/canvas"
@@ -133,7 +134,7 @@ func intersectCanvasPolygons(a, b []canvas.Point) (*canvas.Path, bool) {
 			if (d >= 0) != (previousDistance >= 0) {
 				scale := math.Max(math.Abs(d), math.Abs(previousDistance))
 				fraction := (previousDistance / scale) / (previousDistance/scale - d/scale)
-				intersection := geometryLerp(Point{previous.X, previous.Y}, Point{p.X, p.Y}, fraction)
+				intersection := basegeom.Lerp(Point{X: previous.X, Y: previous.Y}, Point{X: p.X, Y: p.Y}, fraction)
 				if dx == 0 {
 					intersection.X = start.X
 				}

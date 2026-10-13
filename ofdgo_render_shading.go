@@ -14,7 +14,10 @@
 
 package ofdgo
 
-import "math"
+import (
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
+	"math"
+)
 
 // reflectShdPosition 获取镜像周期内的位置
 // 入参: position 渐变位置
@@ -68,7 +71,7 @@ func (c *semanticCompiler) shadingClip(path GeometryPath, paint Paint, matrix Ma
 		if box.W <= 0 {
 			return nil, nil
 		}
-		clip, err := c.geometry.Transform(geometryRectangle(box), axis)
+		clip, err := c.geometry.Transform(GeometryPath(basegeom.Rectangle(box)), axis)
 		if err != nil {
 			return nil, err
 		}

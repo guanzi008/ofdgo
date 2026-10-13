@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"context"
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"slices"
 
 	"github.com/tdewolff/canvas"
@@ -56,7 +57,7 @@ func (n *pdfNavigation) addActions(renderer *Renderer, page int, source actionSo
 		if value == nil {
 			continue
 		}
-		path := geometryRectangle(box)
+		path := GeometryPath(basegeom.Rectangle(box))
 		if outline != "" {
 			parsed, err := canvas.ParseSVGPath(outline)
 			if err != nil {

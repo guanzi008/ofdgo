@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"maps"
 	"slices"
 )
@@ -345,7 +346,7 @@ func (n *editorCompositeNode) preserveActionRegions(matrix Matrix) (bool, error)
 	if n.object.Type == "ImageObject" && ctm == "" && (matrix.a != 1 || matrix.b != 0 || matrix.c != 0 || matrix.d != 1) {
 		return false, nil
 	}
-	if axisAlignedMatrix(matrix) {
+	if basegeom.AxisAligned(basegeom.MatrixFromValues(matrix.Values())) {
 		return true, nil
 	}
 	var targets []*editorXML

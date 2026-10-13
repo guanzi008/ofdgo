@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"image"
 	"math"
 
@@ -177,7 +178,7 @@ func imageClipContains(img image.Image, clipPath *canvas.Path, m canvas.Matrix) 
 	if rect, ok := rectangularPath(clipPath); ok {
 		return rect.Contains(outline.FastBounds())
 	}
-	if geometryConvexContains(*geometryFromCanvasPath(clipPath), *geometryFromCanvasPath(outline)) {
+	if basegeom.ConvexContains(basegeom.Path(*geometryFromCanvasPath(clipPath)), basegeom.Path(*geometryFromCanvasPath(outline))) {
 		return true
 	}
 	return clipPath.Contains(outline)

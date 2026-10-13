@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"image"
 	"math"
 
@@ -373,7 +374,7 @@ func pdfRadialBackground(gradient *pdfgo.RadialGradient, matrix pdfgo.Matrix, bo
 	}
 	var circles, path GeometryPath
 	if !extend[1] {
-		path = geometryRectangle(Box{W: box.W, H: box.H})
+		path = GeometryPath(basegeom.Rectangle(Box{W: box.W, H: box.H}))
 		circles = geometryCircle(RasterPoint{X: outer.X, Y: outer.Y}, r1)
 	}
 	if !extend[0] && r0 > 0 {

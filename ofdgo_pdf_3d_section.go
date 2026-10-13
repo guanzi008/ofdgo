@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 
+	basethreed "github.com/xiaoqidun/ofdgo/internal/base/threed"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -31,7 +32,7 @@ func pdfThreeDSections(ctx context.Context, sections []pdfgo.ThreeDCrossSection,
 	}
 	limit := options.MaxMemoryBytes
 	if limit == 0 {
-		limit = u3dDefaultBytes
+		limit = basethreed.DefaultBytes
 	}
 	if limit <= 0 || uint64(len(sections)) >= uint64(limit)/136 {
 		return fmt.Errorf("PDF 3D section memory exceeds limit")

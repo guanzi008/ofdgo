@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"math"
 	"slices"
 )
@@ -206,7 +207,7 @@ func (obj TextObject) ResizeTextFrame(offset, width float64) (TextObject, error)
 	if err != nil {
 		return TextObject{}, err
 	}
-	if !axisAlignedMatrix(NewMatrix(obj.CTM)) {
+	if !basegeom.AxisAligned(basegeom.MatrixFromValues(NewMatrix(obj.CTM).Values())) {
 		return TextObject{}, fmt.Errorf("text frame resizing requires an axis-aligned transform")
 	}
 	if !finite(offset) || !finite(width) || width <= 0 {
@@ -474,7 +475,7 @@ func transformEditorMatrix(object GraphicObject, matrix Matrix) GraphicObject {
 	if clips := editorObjectClips(&object); *clips != nil && !(*clips).usesObjectMatrix() {
 		*clips = transformObjectClips(*clips, local)
 	}
-	if !axisAlignedMatrix(matrix) && before.W > 0 && before.H > 0 {
+	if !basegeom.AxisAligned(basegeom.MatrixFromValues(matrix.Values())) && before.W > 0 && before.H > 0 {
 		clips := editorObjectClips(&object)
 		if *clips == nil {
 			*clips = &Clips{}

@@ -18,16 +18,18 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
 // 几何路径指令，包括直线、曲线、椭圆弧和闭合
 const (
-	GeometryMove GeometryVerb = iota
-	GeometryLine
-	GeometryQuad
-	GeometryCubic
-	GeometryArc
-	GeometryClose
+	GeometryMove  = basegeom.Move
+	GeometryLine  = basegeom.Line
+	GeometryQuad  = basegeom.Quad
+	GeometryCubic = basegeom.Cubic
+	GeometryArc   = basegeom.Arc
+	GeometryClose = basegeom.ClosePath
 )
 
 // GeometryPath 保存独立于绘图库的几何路径，不扁平化曲线或舍入坐标
@@ -35,18 +37,11 @@ const (
 type GeometryPath []GeometrySegment
 
 // GeometryVerb 表示几何路径指令
-type GeometryVerb uint8
+type GeometryVerb = basegeom.Verb
 
 // GeometrySegment 保存路径端点、贝塞尔控制点或端点式椭圆弧参数
 // 弧线Rotation单位为度，Sweep为true表示顺时针，Large表示大弧
-type GeometrySegment struct {
-	Verb               GeometryVerb
-	End                Point
-	Control1, Control2 Point
-	RadiusX, RadiusY   float64
-	Rotation           float64
-	Large, Sweep       bool
-}
+type GeometrySegment = basegeom.Segment
 
 // ParseGeometryPath 解析标准OFD紧缩路径，保留弧线和原始数值精度
 // 入参: data 紧缩路径
@@ -137,18 +132,18 @@ func geometryPathSegment(command string, args []string) (GeometrySegment, error)
 	segment := GeometrySegment{}
 	switch command {
 	case "M", "S":
-		segment.Verb, segment.End = GeometryMove, Point{values[0], values[1]}
+		segment.Verb, segment.End = GeometryMove, Point{X: values[0], Y: values[1]}
 	case "L":
-		segment.Verb, segment.End = GeometryLine, Point{values[0], values[1]}
+		segment.Verb, segment.End = GeometryLine, Point{X: values[0], Y: values[1]}
 	case "Q":
-		segment.Verb, segment.Control1, segment.End = GeometryQuad, Point{values[0], values[1]}, Point{values[2], values[3]}
+		segment.Verb, segment.Control1, segment.End = GeometryQuad, Point{X: values[0], Y: values[1]}, Point{X: values[2], Y: values[3]}
 	case "B":
-		segment.Verb, segment.Control1, segment.Control2, segment.End = GeometryCubic, Point{values[0], values[1]}, Point{values[2], values[3]}, Point{values[4], values[5]}
+		segment.Verb, segment.Control1, segment.Control2, segment.End = GeometryCubic, Point{X: values[0], Y: values[1]}, Point{X: values[2], Y: values[3]}, Point{X: values[4], Y: values[5]}
 	case "A":
 		if values[0] < 0 || values[1] < 0 || values[3] != 0 && values[3] != 1 || values[4] != 0 && values[4] != 1 {
 			return GeometrySegment{}, fmt.Errorf("invalid arc radii or flags")
 		}
-		segment = GeometrySegment{Verb: GeometryArc, RadiusX: values[0], RadiusY: values[1], Rotation: values[2], Large: values[3] != 0, Sweep: values[4] != 0, End: Point{values[5], values[6]}}
+		segment = GeometrySegment{Verb: GeometryArc, RadiusX: values[0], RadiusY: values[1], Rotation: values[2], Large: values[3] != 0, Sweep: values[4] != 0, End: Point{X: values[5], Y: values[6]}}
 	case "C":
 		segment.Verb = GeometryClose
 	}
@@ -185,36 +180,6 @@ func objectGeometryPath(geometry GeometryBackend, object PathObject) (GeometryPa
 		}
 	}
 	return geometry.Transform(path, TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(object.CTM)))
-}
-
-// closedGeometry 为填充轮廓补齐隐式闭合边，不改变源路径
-// 入参: path 填充路径
-// 返回: GeometryPath 显式闭合路径
-func closedGeometry(path GeometryPath) GeometryPath {
-	open, missing := false, false
-	for _, segment := range path {
-		if segment.Verb == GeometryMove && open {
-			missing = true
-			break
-		}
-		open = segment.Verb != GeometryClose
-	}
-	if !missing && !open {
-		return path
-	}
-	result := make(GeometryPath, 0, len(path)+1)
-	open = false
-	for _, segment := range path {
-		if segment.Verb == GeometryMove && open {
-			result = append(result, GeometrySegment{Verb: GeometryClose})
-		}
-		result = append(result, segment)
-		open = segment.Verb != GeometryClose
-	}
-	if open {
-		result = append(result, GeometrySegment{Verb: GeometryClose})
-	}
-	return result
 }
 
 // encode 按目标格式写入路径，圆弧标志采用两种格式均支持的0和1
@@ -274,4 +239,49 @@ func geometryClipPath(path GeometryPath) (PathObject, error) {
 	fill, stroke := true, false
 	box.W, box.H = max(box.W, 1e-6), max(box.H, 1e-6)
 	return PathObject{Boundary: editorBoxString(box), CTM: TranslationMatrix(-box.X, -box.Y).String(), Fill: &fill, Stroke: &stroke, AbbreviatedData: data}, nil
+}
+
+// Bounds 通过解析极值计算直线、贝塞尔和椭圆弧的轴对齐边界
+// 不进行曲线展开且不使用Tolerance，结果受float64舍入误差影响，不保证向外舍入
+// 返回: Box 浮点路径范围, error 无效路径、弧线或数值溢出
+func (p GeometryPath) Bounds() (Box, error) {
+	return basegeom.Path(p).Bounds()
+}
+
+// Curves 按毫米误差上限将端点式椭圆弧转换为三次贝塞尔曲线，其他指令保持原样
+// 入参: tolerance 正有限误差上限
+// 返回: GeometryPath 独立路径, error 参数错误
+func (p GeometryPath) Curves(tolerance float64) (GeometryPath, error) {
+	result, err := basegeom.Path(p).Curves(tolerance)
+	return GeometryPath(result), err
+}
+
+// Stroke 按端点和转角样式将曲线、虚线转换为非零填充轮廓
+// 曲线按Tolerance展开，默认误差为0.001毫米，重叠轮廓保持同向绕数
+// 结果未做布尔整理，按非零规则填充，区域运算需能处理重叠子路径的后端
+// 入参: options 描边样式
+// 返回: GeometryPath 描边轮廓, error 无效参数或精度限制
+func (p GeometryPath) Stroke(options StrokeOptions) (GeometryPath, error) {
+	if options.MiterLimit == 0 && !options.MiterLimitSet {
+		options.MiterLimit = defaultMiterLimit
+	}
+	result, err := basegeom.Path(p).Stroke(options)
+	if unsupported, ok := err.(basegeom.UnsupportedError); ok {
+		err = fmt.Errorf("%s: %w", unsupported, ErrBackendUnavailable)
+	}
+	return GeometryPath(result), err
+}
+
+// Transform 精确变换控制点和椭圆轴，退化弧沿投影极值分段保留折返
+// 入参: matrix 仿射变换
+// 返回: GeometryPath 独立路径, error 无效路径或数值溢出
+func (p GeometryPath) Transform(matrix Matrix) (GeometryPath, error) {
+	result, err := basegeom.Path(p).Transform(basegeom.MatrixFromValues(matrix.Values()))
+	return GeometryPath(result), err
+}
+
+// validate 校验公共路径指令、子路径起点和有限坐标
+// 返回: error 无效路径
+func (p GeometryPath) validate() error {
+	return basegeom.Path(p).Validate()
 }

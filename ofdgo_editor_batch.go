@@ -18,6 +18,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"reflect"
 	"slices"
 	"strconv"
@@ -591,7 +592,7 @@ func editorDistribution(boxes []Box, indexes []editorObjectPosition, axis string
 	gap := (positions[last] + sizes[last] - positions[first] - total) / float64(len(order)-1)
 	for i, index := range order[:len(order)-1] {
 		step := sizes[index] + gap
-		if geometryEqual(step, 0) {
+		if basegeom.Equal(step, 0) {
 			step = 0
 		}
 		if step < 0 || step == 0 && compareEditorPosition(indexes[index], indexes[order[i+1]]) > 0 {
@@ -602,7 +603,7 @@ func editorDistribution(boxes []Box, indexes []editorObjectPosition, axis string
 	for _, index := range order[1 : len(order)-1] {
 		position := next
 		next += sizes[index] + gap
-		if geometryEqual(position, positions[index]) {
+		if basegeom.Equal(position, positions[index]) {
 			continue
 		}
 		dx, dy := position-positions[index], 0.0
@@ -791,10 +792,10 @@ func editorAlignment(box, target Box, alignment string) Matrix {
 	case "bottom":
 		matrix.f = target.Y + target.H - box.H - box.Y
 	}
-	if geometryEqual(matrix.e, 0) {
+	if basegeom.Equal(matrix.e, 0) {
 		matrix.e = 0
 	}
-	if geometryEqual(matrix.f, 0) {
+	if basegeom.Equal(matrix.f, 0) {
 		matrix.f = 0
 	}
 	return matrix

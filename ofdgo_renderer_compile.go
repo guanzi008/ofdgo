@@ -14,7 +14,10 @@
 
 package ofdgo
 
-import "image/color"
+import (
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
+	"image/color"
+)
 
 // OFDCompiler 使用库自有页面语义，字体和几何操作交给当前后端配置
 type OFDCompiler struct{}
@@ -40,7 +43,7 @@ func (OFDCompiler) CompilePage(r *Renderer, page *PageContent) (*RasterPage, err
 		return nil, err
 	}
 	if !r.TransparentBackground {
-		if err := c.fill(geometryRectangle(Box{W: box.W, H: box.H}), Paint{Kind: PaintSolid, Color: color.RGBA{255, 255, 255, 255}}, false, nil, IdentityMatrix, IdentityMatrix); err != nil {
+		if err := c.fill(GeometryPath(basegeom.Rectangle(Box{W: box.W, H: box.H})), Paint{Kind: PaintSolid, Color: color.RGBA{255, 255, 255, 255}}, false, nil, IdentityMatrix, IdentityMatrix); err != nil {
 			return nil, err
 		}
 	}

@@ -35,8 +35,8 @@ func pdfGlyphPath(outline GeometryPath, matrix pdfgo.Matrix) (pdfgo.Path, error)
 		case GeometryLine:
 			path.Segments = append(path.Segments, pdfgo.Segment{Operator: "L", Points: []pdfgo.Point{point(segment.End)}})
 		case GeometryQuad:
-			c1 := Point{current.X + (segment.Control1.X-current.X)*2/3, current.Y + (segment.Control1.Y-current.Y)*2/3}
-			c2 := Point{segment.End.X + (segment.Control1.X-segment.End.X)*2/3, segment.End.Y + (segment.Control1.Y-segment.End.Y)*2/3}
+			c1 := Point{X: current.X + (segment.Control1.X-current.X)*2/3, Y: current.Y + (segment.Control1.Y-current.Y)*2/3}
+			c2 := Point{X: segment.End.X + (segment.Control1.X-segment.End.X)*2/3, Y: segment.End.Y + (segment.Control1.Y-segment.End.Y)*2/3}
 			path.Segments = append(path.Segments, pdfgo.Segment{Operator: "B", Points: []pdfgo.Point{point(c1), point(c2), point(segment.End)}})
 		case GeometryCubic:
 			path.Segments = append(path.Segments, pdfgo.Segment{Operator: "B", Points: []pdfgo.Point{point(segment.Control1), point(segment.Control2), point(segment.End)}})

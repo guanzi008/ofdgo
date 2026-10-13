@@ -242,7 +242,7 @@ func geometryFromRaster(path []RasterSegment) GeometryPath {
 		if s.Verb == RasterClose {
 			verb = GeometryClose
 		}
-		result = append(result, GeometrySegment{Verb: verb, End: Point{s.End.X, s.End.Y}, Control1: Point{s.Control1.X, s.Control1.Y}, Control2: Point{s.Control2.X, s.Control2.Y}})
+		result = append(result, GeometrySegment{Verb: verb, End: Point{X: s.End.X, Y: s.End.Y}, Control1: Point{X: s.Control1.X, Y: s.Control1.Y}, Control2: Point{X: s.Control2.X, Y: s.Control2.Y}})
 	}
 	return result
 }

@@ -178,7 +178,7 @@ func validateActionRegion(region *Region) error {
 		if err != nil {
 			return err
 		}
-		current := Point{values[0], values[1]}
+		current := Point{X: values[0], Y: values[1]}
 		start := current
 		if len(area.Command) == 0 {
 			return fmt.Errorf("action area requires a path command")
@@ -222,7 +222,7 @@ func validateActionRegion(region *Region) error {
 				if err != nil {
 					return err
 				}
-				end = Point{values[0], values[1]}
+				end = Point{X: values[0], Y: values[1]}
 			}
 			if command.Type == "Arc" && end == current {
 				return fmt.Errorf("arc endpoint equals current point")
