@@ -2194,6 +2194,12 @@ button.outline-link:hover {
 	display: block;
 }
 
+.editing .svg-host,
+.editing .page-shell,
+.editing .page-surface > .ofd-svg {
+	overflow: visible;
+}
+
 .editing-select .text-run > span {
 	pointer-events: none;
 }
