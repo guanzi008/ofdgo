@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // DeleteCompositeObjects 删除内部成员，保留容器、未选对象及其他实例，一次撤销恢复全部
@@ -121,7 +123,7 @@ func (e *Editor) ReplaceCompositeImage(page int, path ObjectPath, index int, dat
 			return fmt.Errorf("composite member is not an image")
 		}
 		object := node.object
-		decoded, _, err := decodeImagePixelsContext(context.Background(), data)
+		decoded, _, err := baseimage.DecodePixelsContext(context.Background(), data)
 		if err != nil {
 			return err
 		}

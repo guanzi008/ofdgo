@@ -17,6 +17,8 @@ package ofdgo
 import (
 	"fmt"
 	"sync"
+
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
 // sfntGlyphBoundsLimit 限制单个字体保留的字形与字号边界数量
@@ -24,9 +26,9 @@ const sfntGlyphBoundsLimit = 4096
 
 // sfntFontMetrics 保留默认字体度量，写出时不更新原始时间
 type sfntFontMetrics struct {
-	*sfntFont
+	*basefont.SFNT
 	*fontShaper
-	outlines *sfntOutliner
+	outlines *basefont.Outliner
 	bounds   *sfntFontBounds
 }
 
@@ -40,15 +42,6 @@ type sfntFontBounds struct {
 type sfntGlyphSize struct {
 	glyph uint16
 	size  float64
-}
-
-// glyphPather 接收字体设计坐标中的轮廓指令
-type glyphPather interface {
-	MoveTo(float64, float64)
-	LineTo(float64, float64)
-	QuadTo(float64, float64, float64, float64)
-	CubeTo(float64, float64, float64, float64, float64, float64)
-	Close()
 }
 
 // glyphGeometry 将字体轮廓转换为纵轴向下的几何路径
@@ -92,15 +85,15 @@ func (b SFNTBackend) ResolveFont(r *Renderer, id string, exact bool) (ResolvedFo
 // 入参: data 字体数据
 // 返回: FontMetrics 字体度量, error 解析错误
 func (SFNTBackend) OpenFont(data []byte) (FontMetrics, error) {
-	data, err := defaultCFF2Font(data)
+	data, err := basefont.DefaultCFF2Font(data)
 	if err != nil {
 		return nil, err
 	}
-	sfnt, err := parseSFNTFont(data)
+	sfnt, err := basefont.ParseSFNT(data)
 	if err != nil {
 		return nil, err
 	}
-	metrics := &sfntFontMetrics{sfntFont: sfnt, outlines: &sfntOutliner{font: sfnt}, bounds: &sfntFontBounds{}}
+	metrics := &sfntFontMetrics{SFNT: sfnt, outlines: &basefont.Outliner{Font: sfnt}, bounds: &sfntFontBounds{}}
 	metrics.fontShaper = &fontShaper{metrics: metrics}
 	return metrics, nil
 }
@@ -108,7 +101,7 @@ func (SFNTBackend) OpenFont(data []byte) (FontMetrics, error) {
 // Write 返回字体数据，不修改字体元信息
 // 返回: []byte 独立SFNT数据
 func (f sfntFontMetrics) Write() []byte {
-	return f.sfntFont.Write()
+	return f.SFNT.Write()
 }
 
 // GlyphOutline 返回基线原点、纵轴向下的字形轮廓
@@ -119,7 +112,7 @@ func (f sfntFontMetrics) GlyphOutline(glyph uint16, size float64) (GeometryPath,
 		return nil, fmt.Errorf("invalid glyph or size")
 	}
 	path := &glyphGeometry{}
-	if err := f.outlines.path(path, glyph, size/float64(f.UnitsPerEm())); err != nil {
+	if err := f.outlines.Path(path, glyph, size/float64(f.UnitsPerEm())); err != nil {
 		return nil, err
 	}
 	return path.path, nil
@@ -161,7 +154,7 @@ func (f sfntFontMetrics) GlyphBounds(glyph uint16, size float64) (Box, error) {
 // 入参: glyph 字形编号
 // 返回: error 恢复原因，无恢复时为空
 func (f sfntFontMetrics) GlyphWarning(glyph uint16) error {
-	return f.outlines.glyphWarning(glyph)
+	return f.outlines.GlyphWarning(glyph)
 }
 
 // GlyphOutlines 批量提取字形轮廓，重复编号只解析一次

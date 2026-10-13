@@ -22,6 +22,8 @@ import (
 	"path"
 	"slices"
 	"sort"
+
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
 const (
@@ -128,7 +130,7 @@ func (r *Reader) fontData(id string, readonly bool) ([]byte, error) {
 	}
 	if bytes.HasPrefix(data, []byte("ttcf")) {
 		index := fontCollectionIndex(data, []string{f.FontName, f.FamilyName}, f.Bold, f.Italic)
-		return extractCollectionFont(data, index)
+		return basefont.ExtractCollectionFont(data, index)
 	}
 	return data, nil
 }
@@ -245,11 +247,11 @@ func (r *Reader) embeddedFontFace(of Font) (*FontFace, error) {
 			return nil, err
 		}
 		if data, err = decodeFontContainer(data); err == nil {
-			if count, err := fontFileCount(data); err == nil {
+			if count, err := basefont.FileCount(data); err == nil {
 				faces = make([]*FontFace, count)
 				for index := range faces {
-					if tables, err := fontFileTables(data, index); err == nil {
-						info := fontFaceInfo(tables["name"], index)
+					if tables, err := basefont.FileTables(data, index); err == nil {
+						info := basefont.FaceInfo(tables["name"], index)
 						faces[index] = &info
 					}
 				}

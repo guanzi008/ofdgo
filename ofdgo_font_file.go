@@ -15,22 +15,14 @@
 package ofdgo
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
-	"strings"
 	"unicode/utf8"
+
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
 // FontFace 字体文件中的字体名称与零起始索引，不依赖文件名
-type FontFace struct {
-	Index          int      `json:"index"`
-	FullName       string   `json:"fullName"`
-	Family         string   `json:"family"`
-	Style          string   `json:"style"`
-	PostScriptName string   `json:"postscriptName"`
-	Names          []string `json:"names"`
-}
+type FontFace = basefont.Face
 
 // Faces 读取字体名称表，集合文件按原顺序列出各项，不解析字形轮廓
 // 返回: []FontFace 字体列表, error 格式或名称表错误
@@ -39,23 +31,7 @@ func (f FontFile) Faces() ([]FontFace, error) {
 	if err != nil {
 		return nil, err
 	}
-	count, err := fontFileCount(data)
-	if err != nil {
-		return nil, err
-	}
-	faces := make([]FontFace, 0, count)
-	for index := 0; index < count; index++ {
-		tables, err := fontFileTables(data, index)
-		if err != nil {
-			return nil, err
-		}
-		face := fontFaceInfo(tables["name"], index)
-		if face.FullName == "" {
-			return nil, fmt.Errorf("font %d has no usable name", index)
-		}
-		faces = append(faces, face)
-	}
-	return faces, nil
+	return basefont.ReadFaces(data)
 }
 
 // Face 提取指定字体，返回独立的OpenType数据，可用于预览或AddFont，且不修改原文件
@@ -66,26 +42,7 @@ func (f FontFile) Face(index int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if bytes.HasPrefix(data, []byte("ttcf")) {
-		data, err = extractCollectionFont(data, index)
-		if err != nil {
-			return nil, err
-		}
-		index = 0
-	}
-	tables, err := fontFileTables(data, index)
-	if err != nil {
-		return nil, err
-	}
-	cmap, err := normalizeCmap(tables["cmap"])
-	if err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(cmap, tables["cmap"]) {
-		tables["cmap"] = cmap
-		return serializeOTF(tables)
-	}
-	return bytes.Clone(data), nil
+	return basefont.ExtractFace(data, index)
 }
 
 // MissingGlyphs 检查指定字体的字符覆盖，不注册资源或修改文档，忽略段落换行
@@ -99,66 +56,5 @@ func (f FontFile) MissingGlyphs(index int, text string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	data, err = defaultCFF2Font(data)
-	if err != nil {
-		return "", err
-	}
-	sfnt, err := parseSFNTFont(data)
-	if err != nil {
-		return "", err
-	}
-	seen := make(map[rune]bool)
-	var missing strings.Builder
-	for _, char := range text {
-		if char == '\r' || char == '\n' || seen[char] {
-			continue
-		}
-		seen[char] = true
-		if sfnt.GlyphIndex(char) == 0 {
-			missing.WriteRune(char)
-		}
-	}
-	return missing.String(), nil
-}
-
-// fontFaceInfo 从名称表读取字体信息
-// 入参: data 名称表数据, index 零起始字体索引
-// 返回: FontFace 字体信息
-func fontFaceInfo(data []byte, index int) FontFace {
-	records, values := fontNameValues(data)
-	name := func(ids ...uint16) string {
-		for _, id := range ids {
-			for _, record := range records {
-				if record.Name == id {
-					if value := strings.TrimSpace(values[[4]uint16{record.Platform, record.Encoding, record.Language, id}]); value != "" {
-						return value
-					}
-				}
-			}
-		}
-		return ""
-	}
-	return FontFace{Index: index, FullName: name(4, 6, 16, 1), Family: name(16, 1), Style: name(17, 2), PostScriptName: name(6), Names: fontNamesFromTable(data)}
-}
-
-// fontFileCount 校验字体或集合头并读取字体数量
-// 入参: data OpenType数据
-// 返回: int 字体数量, error 格式错误
-func fontFileCount(data []byte) (int, error) {
-	if len(data) < 12 {
-		return 0, fmt.Errorf("invalid font header")
-	}
-	switch string(data[:4]) {
-	case "\x00\x01\x00\x00", "OTTO", "true":
-		return 1, nil
-	case "ttcf":
-		version := binary.BigEndian.Uint32(data[4:])
-		count := uint64(binary.BigEndian.Uint32(data[8:]))
-		if (version != 0x00010000 && version != 0x00020000) || count == 0 || count > uint64(len(data)-12)/4 {
-			return 0, fmt.Errorf("invalid font collection header")
-		}
-		return int(count), nil
-	default:
-		return 0, fmt.Errorf("invalid OpenType header")
-	}
+	return basefont.MissingGlyphs(data, text)
 }

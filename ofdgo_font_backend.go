@@ -19,6 +19,8 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
 // FontMetrics 提供不依赖绘图库的字体度量，所有整数尺寸使用字体设计单位
@@ -219,13 +221,13 @@ func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
 			r.preparedFonts[id] = prepared
 			return prepared, nil
 		}
-		prepared.CIDs = getCFFCIDRuneMap(resolved.Data)
+		prepared.CIDs = basefont.GetCFFCIDRuneMap(resolved.Data)
 		if _, data, mapping, _, err := FixFontDataAggressive(resolved.Data, true, true); err == nil {
 			prepared.Data = data
 			if mapping != nil {
 				prepared.Glyphs = make(map[uint16]rune)
 				for character, glyph := range mapping {
-					if character == packedGlyphRune(glyph) {
+					if character == basefont.PackedGlyphRune(glyph) {
 						prepared.Glyphs[glyph] = character
 					}
 				}

@@ -25,6 +25,7 @@ import (
 	"image/png"
 	"io"
 
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"golang.org/x/image/tiff"
 )
 
@@ -257,7 +258,7 @@ func (r *u3dRender) textureChannels(pixels *image.NRGBA64, source U3DTextureImag
 					return err
 				}
 			}
-			value := imageNRGBA64At(img, x, y)
+			value := baseimage.NRGBA64At(img, x, y)
 			current := pixels.NRGBA64At(x, y)
 			if channels&8 != 0 {
 				current.R = value.R

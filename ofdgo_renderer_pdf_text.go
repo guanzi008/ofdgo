@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"github.com/tdewolff/canvas"
 	canvastext "github.com/tdewolff/canvas/text"
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -51,7 +52,7 @@ func (r *pdfRenderer) preserveText(first int, text string) {
 func (r *pdfRenderer) glyphText(face *canvas.FontFace, glyph textGlyph) (*canvas.Text, error) {
 	font := r.fonts[face.Font]
 	if font == nil {
-		loaded, err := loadCanvasFont(fontSFNTData(face.Font.Tables), 0, face.Font.Style())
+		loaded, err := loadCanvasFont(basefont.SFNTData(face.Font.Tables), 0, face.Font.Style())
 		if err != nil {
 			return nil, err
 		}

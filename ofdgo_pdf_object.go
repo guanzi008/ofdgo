@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"unicode/utf8"
 
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -77,7 +78,7 @@ func (s *pdfStencilImage) NRGBA64At(x, y int) color.NRGBA64 {
 	if !image.Pt(x, y).In(s.Bounds()) {
 		return color.NRGBA64{}
 	}
-	gray := imageNRGBA64At(s.source, x, y)
+	gray := baseimage.NRGBA64At(s.source, x, y)
 	pixel := s.fill
 	pixel.A = uint16(65535 - gray.R)
 	return pixel

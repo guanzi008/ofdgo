@@ -32,6 +32,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // editorPathValidationLimit 限制同次对象校验保留的路径数量
@@ -483,7 +485,7 @@ func (e *Editor) ImageSize(id string) (image.Point, error) {
 // 入参: data 图片数据, decoded 已解码像素，为nil时按需解码
 // 返回: string 资源标识, error 注册错误
 func (e *Editor) addDecodedImage(data []byte, decoded image.Image) (string, error) {
-	config, format, err := decodeImageConfigData(data)
+	config, format, err := baseimage.DecodeConfigData(data)
 	if err != nil {
 		return "", err
 	}
@@ -676,7 +678,7 @@ func (e *Editor) ReplaceImage(page int, id string, data []byte, fit string) erro
 	if object.Type != "ImageObject" {
 		return fmt.Errorf("object %q is not an image", id)
 	}
-	decoded, _, err := decodeImagePixelsContext(context.Background(), data)
+	decoded, _, err := baseimage.DecodePixelsContext(context.Background(), data)
 	if err != nil {
 		return err
 	}

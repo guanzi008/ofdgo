@@ -20,6 +20,7 @@ import (
 	"image"
 	"math"
 
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -66,7 +67,7 @@ func (p *pdfImporter) applySoftMask(source image.Image, box Box, mask *pdfgo.Sof
 					}
 				}
 				px, py := out.Rect.Min.X+x+i%width, out.Rect.Min.Y+y+i/width
-				pixel := imageNRGBAAt(source, px, py)
+				pixel := baseimage.NRGBAAt(source, px, py)
 				pixel.A = uint8(math.Round(float64(pixel.A) * opacity))
 				out.SetNRGBA(px, py, pixel)
 			}

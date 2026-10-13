@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"image"
 	"math"
+
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // ImagePageSource 图片页面来源，按列表顺序逐张读取，每张图片处理完成后不再引用返回数据
@@ -115,7 +117,7 @@ func (e *Editor) addImagePage(ctx context.Context, data []byte, options ImagePag
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	config, format, err := decodeImageConfigDataContext(ctx, data)
+	config, format, err := baseimage.DecodeConfigDataContext(ctx, data)
 	if err != nil {
 		return 0, err
 	}
@@ -125,18 +127,18 @@ func (e *Editor) addImagePage(ctx context.Context, data []byte, options ImagePag
 	var decoded image.Image
 	checksum := sha256.Sum256(data)
 	if !verified[checksum] {
-		decoded, _, err = decodeImagePixelsContext(ctx, data)
+		decoded, _, err = baseimage.DecodePixelsContext(ctx, data)
 		if err != nil {
 			return 0, err
 		}
 		verified[checksum] = true
 	}
-	metadata, err := imagePageMetadataContext(ctx, data, format, options.DPI)
+	metadata, err := baseimage.PageMetadataContext(ctx, data, format, options.DPI)
 	if err != nil {
 		return 0, err
 	}
-	w, h := float64(config.Width)*25.4/metadata.xdpi, float64(config.Height)*25.4/metadata.ydpi
-	if metadata.orientation >= 5 {
+	w, h := float64(config.Width)*25.4/metadata.XDPI, float64(config.Height)*25.4/metadata.YDPI
+	if metadata.Orientation >= 5 {
 		w, h = h, w
 	}
 	pw, ph := options.Width, options.Height
@@ -160,7 +162,7 @@ func (e *Editor) addImagePage(ctx context.Context, data []byte, options ImagePag
 	if err != nil {
 		return 0, err
 	}
-	matrix := imagePageOrientation(metadata.orientation, w, h)
+	matrix := imagePageOrientation(metadata.Orientation, w, h)
 	_, err = e.AddObject(page, GraphicObject{Type: "ImageObject", ImageObject: ImageObject{
 		ResourceID: resource,
 		Boundary:   fmt.Sprintf("%s %s %s %s", ofdNumber((pw-w)/2), ofdNumber((ph-h)/2), ofdNumber(w), ofdNumber(h)),

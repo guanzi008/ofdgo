@@ -19,6 +19,7 @@ import (
 	"sync"
 
 	"github.com/tdewolff/canvas"
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
 // canvasFontLoadMu 保护绘图后端加载无名称字体时使用的共享状态
@@ -44,9 +45,9 @@ func decodeFontContainer(data []byte) ([]byte, error) {
 	case "\x00\x01\x00\x00", "OTTO", "true", "ttcf":
 		return data, nil
 	case "wOFF":
-		return decodeWOFF(data)
+		return basefont.DecodeWOFF(data)
 	case "wOF2":
-		decoded, handled, err := decodeWOFF2(data)
+		decoded, handled, err := basefont.DecodeWOFF2(data)
 		if handled {
 			return decoded, err
 		}
@@ -55,5 +56,5 @@ func decodeFontContainer(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return serializeOTF(loaded.Tables)
+	return basefont.SerializeOTF(loaded.Tables)
 }

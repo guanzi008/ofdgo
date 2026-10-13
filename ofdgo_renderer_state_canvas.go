@@ -18,6 +18,7 @@ import (
 	"image"
 
 	"github.com/tdewolff/canvas"
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
 // canvasFontKey 按字体内容、名称及样式区分可复用的字体族，不依赖文档资源编号
@@ -57,7 +58,7 @@ type canvasBackendState struct {
 	fontMap            map[string]*canvas.FontFamily
 	svgFontCache       map[*canvas.Font]SVGFont
 	textGlyphPathCache renderCache[textGlyphPathCacheKey, textGlyphPathCacheValue]
-	fontOutlines       map[*canvas.Font]*sfntOutliner
+	fontOutlines       map[*canvas.Font]*basefont.Outliner
 }
 
 // canvasClipIntersections 获取子渲染器共享的几何交集缓存，限制结果保留量
@@ -118,13 +119,13 @@ func (r *Renderer) canvasFontFamilies() *renderCache[canvasFontKey, *canvas.Font
 }
 
 // canvasFontOutlines 获取子渲染器共享的字体轮廓解析缓存，限制字体及解析数据保留量
-// 返回: *renderCache[*canvas.Font, *sfntOutliner] 字体轮廓缓存
-func (r *Renderer) canvasFontOutlines() *renderCache[*canvas.Font, *sfntOutliner] {
+// 返回: *renderCache[*canvas.Font, *basefont.Outliner] 字体轮廓缓存
+func (r *Renderer) canvasFontOutlines() *renderCache[*canvas.Font, *basefont.Outliner] {
 	key := canvasOutlineCacheKey{}
 	if state, ok := r.sharedBackendStates[key]; ok {
-		return state.(*renderCache[*canvas.Font, *sfntOutliner])
+		return state.(*renderCache[*canvas.Font, *basefont.Outliner])
 	}
-	cache := &renderCache[*canvas.Font, *sfntOutliner]{limit: 32 << 20}
+	cache := &renderCache[*canvas.Font, *basefont.Outliner]{limit: 32 << 20}
 	r.sharedBackendStates[key] = cache
 	return cache
 }
@@ -149,5 +150,5 @@ func (s *canvasBackendState) resetFonts() {
 	s.fontMap = make(map[string]*canvas.FontFamily)
 	s.svgFontCache = make(map[*canvas.Font]SVGFont)
 	s.textGlyphPathCache = renderCache[textGlyphPathCacheKey, textGlyphPathCacheValue]{limit: 16 << 20}
-	s.fontOutlines = make(map[*canvas.Font]*sfntOutliner)
+	s.fontOutlines = make(map[*canvas.Font]*basefont.Outliner)
 }

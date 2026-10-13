@@ -20,6 +20,7 @@ import (
 	"image"
 	"math"
 
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -248,7 +249,7 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 			return err
 		}
 		for x := region.Min.X; x < region.Max.X; x++ {
-			a := imageAlphaAt(coverage, x, y)
+			a := baseimage.AlphaAt(coverage, x, y)
 			if a == 0 {
 				continue
 			}

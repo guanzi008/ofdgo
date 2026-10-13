@@ -29,6 +29,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // editorSource 保留输入包及按需加载的原始页面
@@ -945,13 +947,13 @@ func (e *Editor) editorImage(id string) (image.Point, error) {
 		return image.Point{}, err
 	}
 	defer input.Close()
-	config, _, err := decodeImageConfig(input)
-	if errors.Is(err, errTIFFRandomAccess) {
+	config, _, err := baseimage.DecodeConfig(input)
+	if errors.Is(err, baseimage.ErrTIFFRandomAccess) {
 		data, readErr := reader.readFileView(reader.ResPath(name))
 		if readErr != nil {
 			return image.Point{}, readErr
 		}
-		config, _, err = decodeImageConfigData(data)
+		config, _, err = baseimage.DecodeConfigData(data)
 	}
 	if err != nil {
 		return image.Point{}, err
@@ -984,7 +986,7 @@ func (e *Editor) validateImageMask(id string, size image.Point) error {
 			return err
 		}
 	}
-	mask, _, err := decodeImageData(data)
+	mask, _, err := baseimage.Decode(data)
 	if err != nil {
 		return err
 	}

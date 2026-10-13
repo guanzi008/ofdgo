@@ -22,6 +22,8 @@ import (
 	"io"
 	"runtime"
 	"sync"
+
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // outputImageBatchLimit 限制并行批次持有的原始编码，超限图片单独处理
@@ -135,14 +137,14 @@ func outputImageWorkingSet(ctx context.Context, data []byte) int {
 	}
 	input := bytes.NewReader(data)
 	available := outputImageWorkingSetLimit - len(data)
-	if isTIFFData(data) {
-		layout, err := readTIFFLayoutContext(ctx, input)
+	if baseimage.IsTIFF(data) {
+		layout, err := baseimage.ReadTIFFLayoutContext(ctx, input)
 		if err != nil {
 			return outputImageWorkingSetLimit
 		}
 		return len(data) + tiffImageWorkingSet(layout, available)
 	}
-	config, _, err := decodeImageConfig(imageInput{ReadCloser: io.NopCloser(input), context: ctx})
+	config, _, err := baseimage.DecodeConfig(imageInput{ReadCloser: io.NopCloser(input), context: ctx})
 	if err != nil || config.Width <= 0 || config.Height <= 0 {
 		return outputImageWorkingSetLimit
 	}
@@ -155,21 +157,21 @@ func outputImageWorkingSet(ctx context.Context, data []byte) int {
 // tiffImageWorkingSet 分别估算显示缓冲及主图、蒙版的完整瓦片存储，超预算时返回上限
 // 入参: layout 已校验的主图布局, limit 可用字节数
 // 返回: int 不超过limit的估算值
-func tiffImageWorkingSet(layout tiffImageLayout, limit int) int {
-	size := layout.displaySize()
+func tiffImageWorkingSet(layout baseimage.TIFFLayout, limit int) int {
+	size := layout.DisplaySize()
 	if size.X <= 0 || size.Y <= 0 || size.X > limit/16/size.Y {
 		return limit
 	}
 	cost := size.X * size.Y * 16
-	for source := &layout; source != nil; source = source.transparency {
-		width, height := uint64(source.width), uint64(source.height)
-		if source.tileWidth != 0 {
-			x, y := uint64(source.tileWidth), uint64(source.tileHeight)
+	for source := &layout; source != nil; source = source.Transparency {
+		width, height := uint64(source.Width), uint64(source.Height)
+		if source.TileWidth != 0 {
+			x, y := uint64(source.TileWidth), uint64(source.TileHeight)
 			width, height = ((width-1)/x+1)*x, ((height-1)/y+1)*y
 		}
-		pixelSize := max(uint64(16), source.decodedPixelBytes())
-		if !source.planar {
-			pixelSize = max(pixelSize, uint64(source.samples)*4)
+		pixelSize := max(uint64(16), source.DecodedPixelBytes())
+		if !source.Planar {
+			pixelSize = max(pixelSize, uint64(source.Samples)*4)
 		}
 		if width > uint64(limit-cost)/pixelSize/height {
 			return limit

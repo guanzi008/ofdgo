@@ -35,6 +35,7 @@ import (
 	"github.com/emmansun/gmsm/sm2"
 	"github.com/emmansun/gmsm/sm3"
 	"github.com/emmansun/gmsm/smx509"
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // signatureWriteKey 已验证签署身份
@@ -157,7 +158,7 @@ func signatureWriteIdentity(options SignatureWriteOptions) (*signatureWriteKey, 
 			return nil, fmt.Errorf("invalid seal maker signature")
 		}
 		mediaType, media := probeSealMedia(seal.PicData)
-		if len(media) == 0 || mediaType != normalizeSealType(seal.PicType) {
+		if len(media) == 0 || mediaType != baseimage.NormalizeFormat(seal.PicType) {
 			return nil, fmt.Errorf("invalid seal picture")
 		}
 	}

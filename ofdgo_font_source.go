@@ -26,6 +26,8 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
 // 字体来源：文件、文件系统和系统字体
@@ -112,10 +114,10 @@ func (r *Renderer) readFontSource(source fontSource, definition *Font) ([]byte, 
 		data, err = os.ReadFile(key.name)
 	}
 	if err == nil && bytes.HasPrefix(data, []byte("ttcf")) {
-		data, err = extractCollectionFont(data, key.face)
+		data, err = basefont.ExtractCollectionFont(data, key.face)
 	}
 	if err == nil {
-		data, _, err = symbolFontProgram(context.Background(), data, "")
+		data, _, err = basefont.SymbolProgram(context.Background(), data, "")
 	}
 	r.fontSourcesCache.data[key] = fontSourceData{data, err}
 	return data, err
@@ -229,7 +231,7 @@ func (r *Renderer) fontSources(fontID string, font *Font) []fontSource {
 		for _, name := range fontSystemNames(names...) {
 			source := fontSource{kind: fontSourceSystem, name: name, exact: true}
 			for i, requested := range names {
-				if fontNormalizeName(name) == fontNormalizeName(requested) {
+				if basefont.NormalizeName(name) == basefont.NormalizeName(requested) {
 					source.priority = (i - len(names)) * 2
 					break
 				}
@@ -294,7 +296,7 @@ func (r *Renderer) matchFontFiles(dir string, names []string, bold, italic bool)
 			if err != nil {
 				continue
 			}
-			candidates = appendFontFileNames(candidates, i, fontFileNames(file))
+			candidates = appendFontFileNames(candidates, i, basefont.FileNames(file))
 			file.Close()
 		}
 		r.fontSourcesCache.directories[dir] = candidates
@@ -324,7 +326,7 @@ func (r *Renderer) matchFontFS(index int, names []string, bold, italic bool) []f
 				data, _ := io.ReadAll(file)
 				reader = bytes.NewReader(data)
 			}
-			candidates = appendFontFileNames(candidates, i, fontFileNames(reader))
+			candidates = appendFontFileNames(candidates, i, basefont.FileNames(reader))
 			file.Close()
 		}
 		r.fontSourcesCache.filesystems[index] = candidates
@@ -373,7 +375,7 @@ func indexSystemFonts() []fontFileCandidate {
 	seen := make(map[string]bool)
 	for _, dir := range systemFontDirs() {
 		_ = filepath.WalkDir(dir, func(name string, entry fs.DirEntry, err error) error {
-			if err == nil && !entry.IsDir() && isFontFileName(name) && !seen[name] {
+			if err == nil && !entry.IsDir() && basefont.IsFontFileName(name) && !seen[name] {
 				seen[name] = true
 				files = append(files, name)
 			}
@@ -386,7 +388,7 @@ func indexSystemFonts() []fontFileCandidate {
 		if err != nil {
 			continue
 		}
-		candidates = appendFontFileNames(candidates, i, fontFileNames(file))
+		candidates = appendFontFileNames(candidates, i, basefont.FileNames(file))
 		file.Close()
 	}
 	return candidates

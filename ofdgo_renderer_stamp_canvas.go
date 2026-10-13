@@ -20,6 +20,7 @@ import (
 	"image"
 
 	"github.com/tdewolff/canvas"
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // renderStamp 渲染印章
@@ -87,7 +88,7 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 		return
 	}
 	if len(s.Data) > 0 {
-		img, _, err := decodeImageDataContext(pageContext, s.Data)
+		img, _, err := baseimage.DecodeContext(pageContext, s.Data)
 		if err != nil {
 			r.renderError = err
 			return
@@ -149,7 +150,7 @@ func (r *Renderer) renderOFDStampImage(data []byte) image.Image {
 // renderStampImage 渲染印章图像
 // 入参: ctx 画布上下文, img 印章图像, s 印章对象, pageH 页面高度
 func (r *Renderer) renderStampImage(ctx *canvas.Context, img image.Image, s Stamp, pageH float64) {
-	pixels, err := imagePixelDataContext(r.pageContext, img)
+	pixels, err := baseimage.PixelDataContext(r.pageContext, img)
 	if err != nil {
 		r.renderError = err
 		return

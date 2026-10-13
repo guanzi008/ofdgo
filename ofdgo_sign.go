@@ -22,6 +22,8 @@ import (
 	"encoding/xml"
 	"fmt"
 	"strings"
+
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 const (
@@ -333,7 +335,7 @@ func sealMediaFromElements(elements []asn1.RawValue) (string, []byte, bool) {
 	if len(elements) < 2 || elements[1].Tag != asn1.TagOctetString {
 		return "", nil, false
 	}
-	mediaType := normalizeSealType(sealString(elements[0]))
+	mediaType := baseimage.NormalizeFormat(sealString(elements[0]))
 	if isSealMediaType(mediaType) {
 		if mediaType == "ofd" {
 			if data := trimOFDPackage(elements[1].Bytes); len(data) > 0 {
@@ -361,22 +363,6 @@ func sealString(raw asn1.RawValue) string {
 		s = "jpeg"
 	}
 	return s
-}
-
-// normalizeSealType 标准化印章媒体类型
-// 入参: s 原始媒体类型
-// 返回: string 标准媒体类型
-func normalizeSealType(s string) string {
-	switch s {
-	case "jpg":
-		return "jpeg"
-	case "bmp":
-		return "bmp"
-	case "jb2", "gbig2":
-		return "jbig2"
-	default:
-		return s
-	}
 }
 
 // isSealMediaType 判断是否为可渲染印章媒体类型
@@ -438,11 +424,11 @@ func zipDataEnd(data []byte) int {
 // 入参: data 原始数据
 // 返回: string 媒体类型, []byte 图片数据
 func probeImageMedia(data []byte) (string, []byte) {
-	_, format, err := decodeImageConfigData(data)
+	_, format, err := baseimage.DecodeConfigData(data)
 	if err != nil {
 		return "", nil
 	}
-	return normalizeSealType(format), data
+	return baseimage.NormalizeFormat(format), data
 }
 
 // addStamp 添加印章到页面

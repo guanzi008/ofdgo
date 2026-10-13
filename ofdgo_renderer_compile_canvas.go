@@ -20,6 +20,7 @@ import (
 	"image/color"
 
 	"github.com/tdewolff/canvas"
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // canvasPageCompiler 将已解释的页面绘制转换为自有数据，不保存第三方绘图对象
@@ -105,7 +106,7 @@ func (c *canvasPageCompiler) RenderImage(img image.Image, m canvas.Matrix) {
 		return
 	}
 	var err error
-	img, err = imagePixelData(img)
+	img, err = baseimage.PixelData(img)
 	if err != nil {
 		c.err = err
 		return
@@ -127,10 +128,14 @@ func (c *canvasPageCompiler) RenderImage(img image.Image, m canvas.Matrix) {
 // 返回: image.Rectangle 图像边界
 func (s *rasterPaddedImage) Bounds() image.Rectangle { return s.rect }
 
+// BackingImage 返回共享的原图，用于计算底层像素存储
+// 返回: image.Image 原图
+func (s *rasterPaddedImage) BackingImage() image.Image { return s.source }
+
 // ColorModel 按原图采样精度返回支持透明补边的预乘颜色模型
 // 返回: color.Model 颜色模型
 func (s *rasterPaddedImage) ColorModel() color.Model {
-	if imageHighPrecision(s.source) {
+	if baseimage.HighPrecision(s.source) {
 		return color.RGBA64Model
 	}
 	return color.RGBAModel

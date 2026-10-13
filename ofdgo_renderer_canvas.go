@@ -23,6 +23,7 @@ import (
 
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/canvas/renderers/rasterizer"
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // CanvasBackend canvas页面编译与绘制适配器，ColorSpace仅影响光栅输出
@@ -99,7 +100,7 @@ func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Ima
 	masks := renderCache[[32]byte, *image.Alpha]{limit: 16 << 20}
 	for i, cmd := range page.Commands {
 		if cmd.Image != nil {
-			source, err := imagePixelData(cmd.Image)
+			source, err := baseimage.PixelData(cmd.Image)
 			if err != nil {
 				return nil, fmt.Errorf("canvas image %d: %w", i, err)
 			}

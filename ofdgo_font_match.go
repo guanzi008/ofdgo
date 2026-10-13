@@ -18,6 +18,8 @@ import (
 	"path"
 	"slices"
 	"strings"
+
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
 // 字体匹配按精确、部分和模糊匹配排列，零值表示未匹配
@@ -105,9 +107,6 @@ var fontMatchRules = normalizeFontMatchRules([]fontMatchRule{
 	},
 })
 
-// fontNameReplacer 移除字体名称匹配时忽略的分隔符
-var fontNameReplacer = strings.NewReplacer(" ", "", "-", "", "_", "", "(", "", ")", "", "（", "", "）", "")
-
 // fontMatchRule 字体匹配规则
 type fontMatchRule struct {
 	Keys            []string
@@ -121,7 +120,7 @@ type fontMatchRule struct {
 // 入参: name 字体名称
 // 返回: string 规范化后的字体名称
 func FontNormalizeName(name string) string {
-	return fontNormalizeName(name)
+	return basefont.NormalizeName(name)
 }
 
 // FontCandidateNames 获取字体候选名称
@@ -154,26 +153,13 @@ func normalizeFontMatchRules(rules []fontMatchRule) []fontMatchRule {
 		keys := append(append(rule.Keys, rule.Names...), rule.System)
 		rule.Keys = nil
 		for _, key := range keys {
-			key = fontNormalizeName(key)
+			key = basefont.NormalizeName(key)
 			if key != "" && !slices.Contains(rule.Keys, key) {
 				rule.Keys = append(rule.Keys, key)
 			}
 		}
 	}
 	return rules
-}
-
-// fontNormalizeName 规范化字体名称
-// 入参: name 字体名称
-// 返回: string 规范化后的字体名称
-func fontNormalizeName(name string) string {
-	name = strings.ReplaceAll(name, "\\", "/")
-	name = path.Base(strings.TrimSpace(name))
-	if isFontFileName(name) {
-		name = strings.TrimSuffix(name, path.Ext(name))
-	}
-	name = strings.ToLower(strings.TrimSpace(name))
-	return fontNameReplacer.Replace(name)
 }
 
 // fontCandidateNames 获取字体候选名称
@@ -194,8 +180,8 @@ func fontExactCandidateNames(names ...string) []string {
 // 入参: name 字体名称
 // 返回: []string 保留后缀的候选名称
 func fontQualifiedNames(name string) []string {
-	name = fontNormalizeName(name)
-	key := fontNormalizeName(name)
+	name = basefont.NormalizeName(name)
+	key := basefont.NormalizeName(name)
 	var names []string
 	seen := make(map[string]bool)
 	for _, rule := range fontMatchRules {
@@ -210,7 +196,7 @@ func fontQualifiedNames(name string) []string {
 		}
 		suffix := strings.TrimPrefix(name, prefix)
 		for _, alias := range append([]string{rule.System}, rule.Names...) {
-			names = appendFontName(names, seen, fontNormalizeName(alias)+suffix)
+			names = basefont.AppendFontName(names, seen, basefont.NormalizeName(alias)+suffix)
 		}
 	}
 	return names
@@ -228,7 +214,7 @@ func fontCandidateNamesByLevel(maxLevel int, names ...string) []string {
 		if name == "" {
 			continue
 		}
-		result = appendFontName(result, seen, name)
+		result = basefont.AppendFontName(result, seen, name)
 		bases = append(bases, name)
 	}
 	levels := fontMatchLevels(bases)
@@ -236,9 +222,9 @@ func fontCandidateNamesByLevel(maxLevel int, names ...string) []string {
 		for i := range bases {
 			for j, rule := range fontMatchRules {
 				if levels[i*len(fontMatchRules)+j] == level {
-					result = appendFontName(result, seen, rule.System)
+					result = basefont.AppendFontName(result, seen, rule.System)
 					for _, item := range rule.Names {
-						result = appendFontName(result, seen, item)
+						result = basefont.AppendFontName(result, seen, item)
 					}
 				}
 			}
@@ -252,13 +238,13 @@ func fontCandidateNamesByLevel(maxLevel int, names ...string) []string {
 // 返回: string 字体匹配模式主干
 func fontPatternStem(pattern string) string {
 	stem := strings.TrimSuffix(pattern, "*")
-	if isFontFileName(stem) {
+	if basefont.IsFontFileName(stem) {
 		stem = strings.TrimSuffix(stem, path.Ext(stem))
 	}
 	if index := strings.IndexAny(stem, "*?["); index >= 0 {
 		stem = stem[:index]
 	}
-	return fontNormalizeName(stem)
+	return basefont.NormalizeName(stem)
 }
 
 // fontFilePatterns 获取字体文件匹配模式
@@ -293,7 +279,7 @@ func fontSystemNames(names ...string) []string {
 	seen := make(map[string]bool)
 	for _, name := range names {
 		for _, item := range fontCandidateNamesByLevel(fontMatchPartial, name) {
-			result = appendFontName(result, seen, item)
+			result = basefont.AppendFontName(result, seen, item)
 		}
 	}
 	return result
@@ -311,13 +297,13 @@ func fontCandidateNamesAtLevel(level int, names []string, levels []int) []string
 			continue
 		}
 		if level == fontMatchExact {
-			result = appendFontName(result, seen, name)
+			result = basefont.AppendFontName(result, seen, name)
 		}
 		for j, rule := range fontMatchRules {
 			if levels[i*len(fontMatchRules)+j] == level {
-				result = appendFontName(result, seen, rule.System)
+				result = basefont.AppendFontName(result, seen, rule.System)
 				for _, item := range rule.Names {
-					result = appendFontName(result, seen, item)
+					result = basefont.AppendFontName(result, seen, item)
 				}
 			}
 		}
@@ -339,7 +325,7 @@ func fontDefaultSystemNames() []string {
 // 返回: bool 是否禁用合成粗体
 func fontNoSyntheticBold(names ...string) bool {
 	for _, name := range names {
-		name = fontNormalizeName(name)
+		name = basefont.NormalizeName(name)
 		for _, rule := range fontMatchRules {
 			if !rule.NoSyntheticBold {
 				continue
@@ -353,25 +339,13 @@ func fontNoSyntheticBold(names ...string) bool {
 	return false
 }
 
-// isFontFileName 判断是否为字体文件名
-// 入参: name 文件名
-// 返回: bool 是否为字体文件
-func isFontFileName(name string) bool {
-	switch strings.ToLower(path.Ext(name)) {
-	case ".ttf", ".otf", ".ttc":
-		return true
-	default:
-		return false
-	}
-}
-
 // fontMatchLevels 按名称和规则顺序计算匹配等级
 // 入参: names 字体名称列表
 // 返回: []int 名称与规则的匹配等级
 func fontMatchLevels(names []string) []int {
 	levels := make([]int, len(names)*len(fontMatchRules))
 	for i, name := range names {
-		name = fontNormalizeName(name)
+		name = basefont.NormalizeName(name)
 		for j, rule := range fontMatchRules {
 			levels[i*len(fontMatchRules)+j] = fontRuleMatchLevel(rule, name)
 		}
@@ -398,22 +372,6 @@ func fontRuleMatchLevel(rule fontMatchRule, name string) int {
 		}
 	}
 	return level
-}
-
-// appendFontName 追加字体名称
-// 入参: names 字体名称列表, seen 去重映射, name 字体名称
-// 返回: []string 字体名称列表
-func appendFontName(names []string, seen map[string]bool, name string) []string {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return names
-	}
-	key := fontNormalizeName(name)
-	if key == "" || seen[key] {
-		return names
-	}
-	seen[key] = true
-	return append(names, name)
 }
 
 // appendFontPattern 追加字体文件匹配模式

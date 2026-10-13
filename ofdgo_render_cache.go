@@ -18,6 +18,8 @@ import (
 	"container/list"
 	"image"
 	"reflect"
+
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // renderCache 按估算字节数限制派生渲染数据，淘汰不修改源资源
@@ -113,7 +115,7 @@ func rasterCommandsCost(commands []RasterCommand, limit int) int {
 			}
 			images[command.Image] = true
 		}
-		part = imageResourceCost(command.Image, limit-cost)
+		part = baseimage.StorageCost(command.Image, limit-cost)
 		if part > limit-cost {
 			return limit + 1
 		}

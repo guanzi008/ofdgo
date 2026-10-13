@@ -21,6 +21,7 @@ import (
 	"math"
 	"runtime"
 
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -417,9 +418,9 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widg
 						externalNames = make(map[string]bool)
 					}
 					name := pdfEmbeddedFontName(mark.Font.Name)
-					if !externalNames[fontNormalizeName(name)] {
+					if !externalNames[basefont.NormalizeName(name)] {
 						for _, candidate := range fontExactCandidateNames(name) {
-							externalNames[fontNormalizeName(candidate)] = true
+							externalNames[basefont.NormalizeName(candidate)] = true
 						}
 					}
 				} else {
@@ -513,7 +514,7 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widg
 		return nil, err
 	}
 	for font := range embeddedFonts {
-		if !externalNames[fontNormalizeName(pdfEmbeddedFontName(font.Name))] {
+		if !externalNames[basefont.NormalizeName(pdfEmbeddedFontName(font.Name))] {
 			continue
 		}
 		if err := p.ctx.Err(); err != nil {

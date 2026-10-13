@@ -23,6 +23,7 @@ import (
 	"io"
 	"math"
 
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -36,10 +37,10 @@ type rasterDensity struct {
 // 入参: data 图片编码
 // 返回: string 标准资源格式，未识别时为空
 func outputImageFormat(data []byte) string {
-	if isJPEGData(data) {
+	if baseimage.IsJPEG(data) {
 		return "JPEG"
 	}
-	if isPNGData(data) {
+	if baseimage.IsPNG(data) {
 		return "PNG"
 	}
 	return ""
@@ -56,7 +57,7 @@ func optimizeImageResource(ctx context.Context, data []byte, options Compression
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if options.Mode != CompressionUnchanged && isTIFFData(data) {
+	if options.Mode != CompressionUnchanged && baseimage.IsTIFF(data) {
 		return optimizeTIFFResource(ctx, data, options, size)
 	}
 	if options.Mode == CompressionUnchanged || !bytes.HasPrefix(data, []byte("BM")) {
@@ -69,7 +70,7 @@ func optimizeImageResource(ctx context.Context, data []byte, options Compression
 // 入参: ctx 取消上下文, data BMP编码, options 压缩选项, size 像素需求
 // 返回: []byte 图片编码, error 解码、编码或取消错误
 func optimizeBMPResource(ctx context.Context, data []byte, options CompressionOptions, size image.Point) ([]byte, error) {
-	offset, width, height, depth, compression, err := parseBMPHeader(data)
+	offset, width, height, depth, compression, err := baseimage.ParseBMPHeader(data)
 	if err != nil {
 		return data, nil
 	}
@@ -98,13 +99,13 @@ func optimizeBMPResource(ctx context.Context, data []byte, options CompressionOp
 		return data, nil
 	}
 	if depth == 16 || depth == 32 {
-		masks, err := bmpColorMasks(data, offset, depth, compression)
+		masks, err := baseimage.BMPColorMasks(data, offset, depth, compression)
 		if err != nil {
 			return data, nil
 		}
 		if options.Mode == CompressionLossless {
 			for _, mask := range masks {
-				if mask.max > 255 {
+				if mask.Max > 255 {
 					return data, nil
 				}
 			}
@@ -112,7 +113,7 @@ func optimizeBMPResource(ctx context.Context, data []byte, options CompressionOp
 	}
 	var pixels image.Image
 	if depth == 16 || compression == 3 {
-		pixels, err = decodeBMPImageContext(ctx, data)
+		pixels, err = baseimage.DecodeBMPContext(ctx, data)
 	} else {
 		pixels, _, err = image.Decode(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
 	}

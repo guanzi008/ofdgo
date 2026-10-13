@@ -18,6 +18,7 @@ import (
 	"image"
 	"math"
 
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"golang.org/x/image/draw"
 	"golang.org/x/image/math/f64"
 )
@@ -101,7 +102,7 @@ func drawRasterImageCommand(backend RasterBackend, page *RasterPage, dst draw.Im
 		return nil
 	}
 	layer := image.NewRGBA64(bounds)
-	drawRasterImagePixels(layer, imagePixelSource(src), m, draw.Src)
+	drawRasterImagePixels(layer, baseimage.PixelSource(src), m, draw.Src)
 	draw.DrawMask(dst, bounds, layer, bounds.Min, mask, bounds.Min, draw.Over)
 	return nil
 }

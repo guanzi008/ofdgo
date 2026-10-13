@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"github.com/tdewolff/canvas"
 	canvastext "github.com/tdewolff/canvas/text"
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
 // textGlyphPathCacheKey 字形路径缓存键
@@ -52,14 +53,14 @@ func textGlyphWidth(face *canvas.FontFace, glyph textGlyph) float64 {
 // textGlyphPath 获取绘制字形路径
 // 入参: face 字体, glyph 绘制字形, outlines 轮廓解析器
 // 返回: *canvas.Path 字形路径, float64 字形宽度, error 字形解析错误
-func textGlyphPath(face *canvas.FontFace, glyph textGlyph, outlines *sfntOutliner) (*canvas.Path, float64, error) {
+func textGlyphPath(face *canvas.FontFace, glyph textGlyph, outlines *basefont.Outliner) (*canvas.Path, float64, error) {
 	p := &canvas.Path{}
 	width := 0.0
 	if glyph.GlyphID < 0 || glyph.GlyphID > 0xFFFF {
 		x, y := face.XOffset, face.YOffset
 		for _, shaped := range face.Glyphs(glyph.Text) {
 			part := &canvas.Path{}
-			if err := outlines.path(part, shaped.ID, face.MmPerEm); err != nil {
+			if err := outlines.Path(part, shaped.ID, face.MmPerEm); err != nil {
 				return nil, 0, err
 			}
 			p = p.Append(part.Translate(face.MmPerEm*float64(x+shaped.XOffset), face.MmPerEm*float64(y+shaped.YOffset)))
@@ -68,7 +69,7 @@ func textGlyphPath(face *canvas.FontFace, glyph textGlyph, outlines *sfntOutline
 		width = face.MmPerEm * float64(x)
 	} else {
 		glyphID := uint16(glyph.GlyphID)
-		if err := outlines.path(p, glyphID, face.MmPerEm); err != nil {
+		if err := outlines.Path(p, glyphID, face.MmPerEm); err != nil {
 			return nil, 0, err
 		}
 		width = face.MmPerEm * float64(face.Font.GlyphAdvance(glyphID))
@@ -106,19 +107,17 @@ func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (
 		cache := r.canvasFontOutlines()
 		outlines, _ = cache.get(face.Font)
 		if outlines == nil {
-			metrics, err := parseSFNTTables(face.Font.Tables)
+			metrics, err := basefont.ParseSFNTTables(face.Font.Tables)
 			if err != nil {
 				r.renderError = err
 				return &canvas.Path{}, 0
 			}
-			outlines = &sfntOutliner{font: metrics}
+			outlines = &basefont.Outliner{Font: metrics}
 			cost := uint64(512)
 			for _, data := range metrics.Tables {
 				cost += uint64(len(data)) * 8
 			}
-			for _, cmap := range metrics.cmaps {
-				cost += uint64(len(cmap.mapping)) * 48
-			}
+			cost += uint64(metrics.CmapEntries()) * 48
 			cache.put(face.Font, outlines, int(min(cost, uint64(cache.limit)+1)))
 		}
 		r.canvasState().fontOutlines[face.Font] = outlines

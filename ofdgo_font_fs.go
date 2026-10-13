@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
 // 字体文件系统及目录条目的接口检查
@@ -130,7 +132,7 @@ func NewFontFS(fonts []FontFile) *FontFS {
 	sort.Strings(fsys.names)
 	fsys.candidates = fontFileCandidates(fsys.names, path.Base)
 	for i, file := range fsys.candidates {
-		fsys.candidates = appendFontFileNames(fsys.candidates, i, fontFileNames(bytes.NewReader(fsys.files[file.name])))
+		fsys.candidates = appendFontFileNames(fsys.candidates, i, basefont.FileNames(bytes.NewReader(fsys.files[file.name])))
 	}
 	return fsys
 }
@@ -143,7 +145,7 @@ func NewLazyFontFS(names []string, load func(string) ([]byte, error)) *FontFS {
 	fsys := &FontFS{files: make(map[string][]byte), loaders: make(map[string]func() ([]byte, error))}
 	for _, original := range names {
 		name := cleanFontName(original)
-		if name == "." || !isFontFileName(name) {
+		if name == "." || !basefont.IsFontFileName(name) {
 			continue
 		}
 		if _, exists := fsys.files[name]; exists {
@@ -438,7 +440,7 @@ func fontFileMatches(candidates []fontFileCandidate, names []string, bold, itali
 			continue
 		}
 		for j, alias := range append([]string{name}, fontQualifiedNames(name)...) {
-			matcher := fontPatternMatcher{stem: fontNormalizeName(alias), priority: (i-len(names))*2 + min(j, 1)}
+			matcher := fontPatternMatcher{stem: basefont.NormalizeName(alias), priority: (i-len(names))*2 + min(j, 1)}
 			if matcher.stem == "" {
 				continue
 			}
@@ -507,9 +509,9 @@ func cleanFontName(name string) string {
 func fontFileCandidates(names []string, base func(string) string) []fontFileCandidate {
 	files := make([]fontFileCandidate, 0, len(names))
 	for _, name := range names {
-		if isFontFileName(name) {
+		if basefont.IsFontFileName(name) {
 			baseName := base(name)
-			normalized := fontNormalizeName(strings.TrimSuffix(baseName, path.Ext(baseName)))
+			normalized := basefont.NormalizeName(strings.TrimSuffix(baseName, path.Ext(baseName)))
 			files = append(files, fontFileCandidate{
 				name:       name,
 				base:       baseName,
@@ -534,7 +536,7 @@ func newFontPatternMatcher(pattern string) fontPatternMatcher {
 	}
 	if matcher.stem != "" {
 		for _, alias := range fontExactCandidateNames(matcher.stem) {
-			alias = fontNormalizeName(alias)
+			alias = basefont.NormalizeName(alias)
 			if alias != "" {
 				matcher.aliases = append(matcher.aliases, alias)
 			}
@@ -563,7 +565,7 @@ func (m fontPatternMatcher) rank(name string) int {
 	return m.rankCandidate(fontFileCandidate{
 		base:       name,
 		lowerBase:  strings.ToLower(name),
-		normalized: fontNormalizeName(name),
+		normalized: basefont.NormalizeName(name),
 	})
 }
 
@@ -656,7 +658,7 @@ func appendFontFileMatch(matches *[]fontFileMatch, seen map[fontFileKey]int, mat
 	}
 	suffix := matcher.styleSuffixNormalized(matcher.candidateName(file))
 	if rank == fontMatchFuzzy {
-		suffix = matcher.styleSuffixNormalized(fontNormalizeName(file.base))
+		suffix = matcher.styleSuffixNormalized(basefont.NormalizeName(file.base))
 	}
 	next := fontFileMatch{
 		name:      file.name,

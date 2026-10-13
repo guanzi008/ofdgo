@@ -20,6 +20,8 @@ import (
 	"encoding/binary"
 	"image"
 	"math"
+
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // optimizeTIFFResource 压缩单目录TIFF，保留方向、透明度、采样精度及像素密度
@@ -27,22 +29,22 @@ import (
 // 入参: ctx 取消上下文, data TIFF编码, options 压缩选项, size 显示像素需求
 // 返回: []byte 图片编码，不可完整转换时保留原文, error 编码或取消错误
 func optimizeTIFFResource(ctx context.Context, data []byte, options CompressionOptions, size image.Point) ([]byte, error) {
-	layout, err := readTIFFLayoutContext(ctx, bytes.NewReader(data))
+	layout, err := baseimage.ReadTIFFLayoutContext(ctx, bytes.NewReader(data))
 	if err != nil {
 		return data, ctx.Err()
 	}
-	pixelSize := int64(layout.decodedPixelBytes())
-	if int64(layout.width) > outputOptimizationBufferLimit/pixelSize/int64(layout.height) {
+	pixelSize := int64(layout.DecodedPixelBytes())
+	if int64(layout.Width) > outputOptimizationBufferLimit/pixelSize/int64(layout.Height) {
 		return data, ctx.Err()
 	}
-	if layout.tileWidth != 0 && int64(layout.tileWidth) > outputOptimizationBufferLimit/pixelSize/int64(layout.tileHeight) {
+	if layout.TileWidth != 0 && int64(layout.TileWidth) > outputOptimizationBufferLimit/pixelSize/int64(layout.TileHeight) {
 		return data, ctx.Err()
 	}
 	density, ok := tiffCompressionDensity(data, layout)
 	if !ok {
 		return data, ctx.Err()
 	}
-	pixels, err := decodeTIFFImage(ctx, data, layout)
+	pixels, err := baseimage.DecodeTIFF(ctx, data, layout)
 	if err != nil {
 		return data, ctx.Err()
 	}
@@ -53,16 +55,16 @@ func optimizeTIFFResource(ctx context.Context, data []byte, options CompressionO
 // 色彩配置、预乘透明度、扩展字段及其他目录需保留原始编码
 // 入参: data TIFF编码, layout 已校验的主图布局
 // 返回: rasterDensity PNG像素密度, bool 是否可完整转换
-func tiffCompressionDensity(data []byte, layout tiffImageLayout) (rasterDensity, bool) {
+func tiffCompressionDensity(data []byte, layout baseimage.TIFFLayout) (rasterDensity, bool) {
 	var density rasterDensity
 	var order binary.ByteOrder = binary.LittleEndian
 	if data[0] == 'M' {
 		order = binary.BigEndian
 	}
-	if layout.next != 0 || layout.offset != order.Uint32(data[4:]) || layout.reduced {
+	if layout.Next != 0 || layout.Offset != order.Uint32(data[4:]) || layout.Reduced {
 		return density, false
 	}
-	offset := int(layout.offset)
+	offset := int(layout.Offset)
 	count := int(order.Uint16(data[offset:]))
 	unit := uint32(2)
 	var resolutions [2][2]uint32
@@ -165,7 +167,7 @@ func tiffCompressionDensity(data []byte, layout tiffImageLayout) (rasterDensity,
 	if math.Round(density.x) < 1 || math.Round(density.y) < 1 || math.Round(density.x) > math.MaxInt32 || math.Round(density.y) > math.MaxInt32 {
 		return density, false
 	}
-	if layout.orientation >= 5 {
+	if layout.Orientation >= 5 {
 		density.x, density.y = density.y, density.x
 	}
 	return density, true

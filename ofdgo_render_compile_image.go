@@ -21,6 +21,8 @@ import (
 	"image"
 	"math"
 	"slices"
+
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // DrawStamp 保留签章图片和嵌套OFD的绘制顺序，不混入正文搜索
@@ -225,7 +227,7 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 		}
 		return nil
 	}
-	img, _, err := decodeImageDataContext(ctx, stamp.Data)
+	img, _, err := baseimage.DecodeContext(ctx, stamp.Data)
 	if err != nil {
 		return err
 	}
@@ -236,7 +238,7 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 // 入参: img 印章图像, stamp 印章
 // 返回: error 编译错误
 func (c *semanticCompiler) stampImage(img image.Image, stamp Stamp) error {
-	pixels, err := imagePixelDataContext(c.renderer.pageContext, img)
+	pixels, err := baseimage.PixelDataContext(c.renderer.pageContext, img)
 	if err != nil {
 		return err
 	}

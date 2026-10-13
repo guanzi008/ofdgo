@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"math"
 
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -99,7 +100,7 @@ func (c *pdfCompositor) shadingPattern(pattern *pdfgo.ShadingPattern, node pdfCo
 		}
 		shape := 0.0
 		if coverage != nil {
-			a := imageAlphaAt(coverage, i%c.width, i/c.width)
+			a := baseimage.AlphaAt(coverage, i%c.width, i/c.width)
 			shape = float64(a) / 65535
 		}
 		if nodes[0].image != nil && shape != 0 {

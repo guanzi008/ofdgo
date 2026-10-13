@@ -15,7 +15,7 @@
 package ofdgo
 
 import (
-	"encoding/binary"
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
 // FixFontDataAggressive 激进修复字体数据
@@ -24,50 +24,5 @@ import (
 // 入参: data 原始字体数据, fixCmap 是否修复cmap, fixName 是否修复name
 // 返回: bool 是否修复, []byte 修复后数据, map[rune]uint16 字符映射, bool 是否缺失cmap, error 错误信息
 func FixFontDataAggressive(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uint16, bool, error) {
-	if len(data) < 4 {
-		return false, data, nil, false, nil
-	}
-	tag := string(data[0:4])
-	u32Tag := binary.BigEndian.Uint32(data[0:4])
-	isTrueType := u32Tag == 0x00010000 || tag == "true"
-	isOpenType := tag == "OTTO"
-	isTTC := tag == "ttcf"
-	if isTTC {
-		return false, data, nil, false, nil
-	}
-	if isBareCFFData(data) {
-		otf, mapping, err := wrapCFFToOTF(data)
-		if err != nil {
-			return false, data, nil, false, err
-		}
-		return true, otf, mapping, false, nil
-	}
-	if !isTrueType && !isOpenType {
-		return false, data, nil, false, nil
-	}
-	fixed, newData, mapping, mc, err := fixTrueType(data, fixCmap, fixName)
-	return fixed, newData, mapping, mc, err
-}
-
-// fontSFNTData 保留字体原始表数据和时间，重新计算目录与校验和
-// 入参: tables 原始字体表
-// 返回: []byte 独立SFNT数据
-func fontSFNTData(tables map[string][]byte) []byte {
-	data, _ := serializeOTF(tables)
-	return data
-}
-
-// isBareCFFData 检查是否为CFF裸字体数据
-// 入参: data 字体数据
-// 返回: bool 是否为CFF裸数据
-func isBareCFFData(data []byte) bool {
-	if len(data) < 4 {
-		return false
-	}
-	if data[0] != 1 || data[1] != 0 {
-		return false
-	}
-	hdrSize := int(data[2])
-	offSize := int(data[3])
-	return 4 <= hdrSize && hdrSize <= len(data) && 1 <= offSize && offSize <= 4
+	return basefont.FixDataAggressive(data, fixCmap, fixName)
 }

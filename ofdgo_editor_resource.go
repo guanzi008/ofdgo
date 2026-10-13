@@ -23,6 +23,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // ResourceTarget 描述当前页可绑定资源动作的图元，Bound表示已有该资源的点击动作
@@ -175,7 +177,7 @@ func (e *Editor) ReplaceResource(ctx context.Context, kind, id, format string, d
 			return fmt.Errorf("empty media data")
 		}
 		if kind == "Image" {
-			img, actual, err := decodeImagePixelsContext(ctx, data)
+			img, actual, err := baseimage.DecodePixelsContext(ctx, data)
 			if err != nil {
 				return err
 			}
@@ -322,7 +324,7 @@ func validateResourceImageMask(ctx context.Context, catalog *resourceCatalog, id
 			if err != nil {
 				return err
 			}
-			config, _, err := decodeImageConfigDataContext(ctx, data)
+			config, _, err := baseimage.DecodeConfigDataContext(ctx, data)
 			if err != nil {
 				return err
 			}
@@ -341,7 +343,7 @@ func validateResourceImageMask(ctx context.Context, catalog *resourceCatalog, id
 			if err != nil {
 				return err
 			}
-			img, _, err = decodeImageDataContext(ctx, data)
+			img, _, err = baseimage.DecodeContext(ctx, data)
 			if err != nil {
 				return err
 			}

@@ -30,6 +30,7 @@ import (
 	"github.com/tdewolff/canvas"
 	canvasimage "github.com/tdewolff/canvas/image"
 	"github.com/tdewolff/canvas/renderers/svg"
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -146,7 +147,7 @@ func (s *svgResourceRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
 	font := text.MostCommonFontFace().Font
 	resource, ok := s.renderer.canvasState().svgFontCache[font]
 	if !ok {
-		data := fontSFNTData(font.Tables)
+		data := basefont.SFNTData(font.Tables)
 		resource = SVGFont{
 			Name:   fmt.Sprintf("ofdgo-%x-%d", sha256.Sum256(data), font.Style()),
 			Weight: font.Style().CSS(),

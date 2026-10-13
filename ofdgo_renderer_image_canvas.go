@@ -23,6 +23,7 @@ import (
 
 	"github.com/tdewolff/canvas"
 	canvasimage "github.com/tdewolff/canvas/image"
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"golang.org/x/image/draw"
 )
 
@@ -111,7 +112,7 @@ func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPa
 	if _, pdf := ctx.Renderer.(*pdfRenderer); !pdf {
 		var pad int
 		var err error
-		img, pad, err = imageWithTransparentEdge(r.pageContext, img)
+		img, pad, err = baseimage.WithTransparentEdge(r.pageContext, img)
 		if err != nil {
 			r.renderError = err
 			return
@@ -147,13 +148,13 @@ func (r *Renderer) canvasEncodedImage(img image.Image) image.Image {
 		return encoded
 	}
 	var encoded *canvasimage.Image
-	if source.format == "jpeg" {
+	if source.MIME() == "image/jpeg" {
 		encoded, _ = canvasimage.NewJPEGImage(bytes.NewReader(source.Bytes()))
 	} else {
 		encoded, _ = canvasimage.NewPNGImage(bytes.NewReader(source.Bytes()))
 	}
 	encoded.Bytes = source.Bytes()
-	state.images.put(source, encoded, 2*imageResourceCost(source, state.images.limit/2))
+	state.images.put(source, encoded, 2*baseimage.StorageCost(source, state.images.limit/2))
 	return encoded
 }
 
@@ -207,7 +208,7 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		return img
 	}
 	original := img
-	source, err := imagePixelDataContext(r.pageContext, img)
+	source, err := baseimage.PixelDataContext(r.pageContext, img)
 	if err != nil {
 		r.renderError = err
 		return img
@@ -218,7 +219,7 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 	if scale > 1 {
 		nw, nh := int(float64(w)*scale), int(float64(h)*scale)
 		var resized draw.Image
-		if imageHighPrecision(img) {
+		if baseimage.HighPrecision(img) {
 			resized = image.NewNRGBA64(image.Rect(0, 0, nw, nh))
 		} else {
 			resized = image.NewNRGBA(image.Rect(0, 0, nw, nh))
@@ -258,12 +259,12 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		r.renderError = fmt.Errorf("image clip raster dimensions differ from source")
 		return img
 	}
-	result, err = imagePixelDataContext(work, result)
+	result, err = baseimage.PixelDataContext(work, result)
 	if err != nil {
 		r.renderError = err
 		return img
 	}
-	if imageHighPrecision(img) || imageHighPrecision(result) {
+	if baseimage.HighPrecision(img) || baseimage.HighPrecision(result) {
 		out := image.NewNRGBA64(bounds)
 		maskBounds := result.Bounds()
 		opaque := true
@@ -279,8 +280,8 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 						return img
 					}
 				}
-				pixel := imageNRGBA64At(img, x, y)
-				alpha := imageAlphaAt(result, maskBounds.Min.X+x-bounds.Min.X, maskBounds.Min.Y+y-bounds.Min.Y)
+				pixel := baseimage.NRGBA64At(img, x, y)
+				alpha := baseimage.AlphaAt(result, maskBounds.Min.X+x-bounds.Min.X, maskBounds.Min.Y+y-bounds.Min.Y)
 				opaque = opaque && alpha == 65535
 				pixel.A = uint16(uint32(pixel.A) * alpha / 65535)
 				out.SetNRGBA64(x, y, pixel)
@@ -384,7 +385,7 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 					return img
 				}
 			}
-			c := imageNRGBAAt(source, x, y)
+			c := baseimage.NRGBAAt(source, x, y)
 			a := mask.RGBAAt(x-bounds.Min.X, y-bounds.Min.Y).A
 			c.A = uint8(int(c.A) * int(a) / 255)
 			out.SetNRGBA(x, y, c)

@@ -23,6 +23,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -137,22 +138,22 @@ func (p *pdfImporter) importedFont(source *pdfgo.Font) (*pdfImportedFont, error)
 	if cached := p.fonts[source]; cached != nil {
 		return cached, nil
 	}
-	var type1 *type1Program
+	var type1 *basefont.Type1Program
 	result := &pdfImportedFont{}
 	if source.ProgramType == "FontFile" {
-		parsed, err := parseType1Program(source.Program)
+		parsed, err := basefont.ParseType1Program(source.Program)
 		if err != nil {
 			return nil, fmt.Errorf("PDF font %s program: %w", source.Name, err)
 		}
 		type1 = &parsed
-		result.type1Glyphs = parsed.glyphIDs()
+		result.type1Glyphs = parsed.GlyphIDs()
 	}
 	program, repair, err := pdfFontProgram(source, type1)
 	if err != nil {
 		return nil, fmt.Errorf("PDF font %s program: %w", source.Name, err)
 	}
 	if repair.locations && p.warning == nil {
-		return nil, fmt.Errorf("PDF font %s program: %w", source.Name, errTTInvalidLocations)
+		return nil, fmt.Errorf("PDF font %s program: %w", source.Name, basefont.ErrTTInvalidLocations)
 	}
 	if p.editor.backends.FontResources == nil {
 		return nil, fmt.Errorf("PDF font %s resource: font resources: %w", source.Name, ErrBackendUnavailable)
@@ -206,7 +207,7 @@ func (p *pdfImporter) symbolFont(source *pdfgo.Font) (*pdfImportedFont, error) {
 		p.symbolFonts[source] = nil
 		return nil, nil
 	}
-	program, names, err := symbolFontProgram(p.ctx, resolved.Data, name)
+	program, names, err := basefont.SymbolProgram(p.ctx, resolved.Data, name)
 	if err != nil {
 		return nil, err
 	}
@@ -235,19 +236,19 @@ func (p *pdfImporter) symbolFont(source *pdfgo.Font) (*pdfImportedFont, error) {
 // 无效字符表按PDF已解码字形重建，不改变字符对应的字形编号
 // 入参: source PDF字体, type1 已解析的Type1程序，nil时按需解析
 // 返回: []byte 封装后的字体数据, pdfFontRepair 字体修复范围, error 错误信息
-func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, pdfFontRepair, error) {
+func pdfFontProgram(source *pdfgo.Font, type1 *basefont.Type1Program) ([]byte, pdfFontRepair, error) {
 	var repair pdfFontRepair
 	program := source.Program
 	if source.ProgramType == "FontFile" {
 		if type1 == nil {
-			parsed, err := parseType1Program(program)
+			parsed, err := basefont.ParseType1Program(program)
 			if err != nil {
 				return nil, repair, err
 			}
 			type1 = &parsed
 		}
 		var err error
-		program, err = type1.toCFF(pdfFontIdentity(source))
+		program, err = type1.ToCFF(pdfFontIdentity(source))
 		if err != nil {
 			return nil, repair, err
 		}
@@ -255,12 +256,12 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, pdfFontRep
 	bareCFF := len(program) >= 4 && program[0] == 1 && program[1] == 0 && program[2] >= 4 && program[3] >= 1 && program[3] <= 4
 	if source.ProgramType == "Type1C" || source.ProgramType == "CIDFontType0C" || bareCFF {
 		var err error
-		program, _, err = wrapCFFToOTF(program)
+		program, _, err = basefont.WrapCFFToOTF(program)
 		if err != nil {
 			return nil, repair, err
 		}
 	}
-	tables, err := fontFileTables(program, 0)
+	tables, err := basefont.FileTables(program, 0)
 	if err != nil {
 		return nil, repair, err
 	}
@@ -271,7 +272,7 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, pdfFontRep
 	if count == 0 {
 		return nil, repair, fmt.Errorf("embedded PDF font has no glyphs")
 	}
-	repair.locations, err = normalizeTrueTypeLocations(tables)
+	repair.locations, err = basefont.NormalizeTrueTypeLocations(tables)
 	if err != nil {
 		return nil, repair, err
 	}
@@ -281,11 +282,11 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, pdfFontRep
 		changed = true
 	}
 	if cff := tables["CFF "]; len(cff) != 0 {
-		sanitized, err := sanitizeCFF(cff)
+		sanitized, err := basefont.SanitizeCFF(cff)
 		if err != nil {
 			return nil, repair, err
 		}
-		normalized, err := normalizeCFFCharstringsAt(sanitized, binary.BigEndian.Uint16(tables["head"][18:20]))
+		normalized, err := basefont.NormalizeCFFCharstringsAt(sanitized, binary.BigEndian.Uint16(tables["head"][18:20]))
 		if err != nil {
 			return nil, repair, err
 		}
@@ -318,7 +319,7 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, pdfFontRep
 	}
 	invalidCmap := false
 	if source.Subtype == "TrueType" || source.Subtype == "Type0" {
-		mapping := parseCmapMappings(tables["cmap"])
+		mapping := basefont.ParseCmapMappings(tables["cmap"])
 		for char, glyph := range mapping {
 			if glyph >= count {
 				delete(mapping, char)
@@ -326,7 +327,7 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, pdfFontRep
 			}
 		}
 		if invalidCmap && source.Subtype == "TrueType" {
-			tables["cmap"] = buildCmapTable(count, mapping)
+			tables["cmap"] = basefont.BuildCmapTable(count, mapping)
 			changed = true
 		}
 	}
@@ -340,11 +341,11 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, pdfFontRep
 				return nil, repair, fmt.Errorf("PDF font glyph %d exceeds glyph count %d", glyph, count)
 			}
 		}
-		addPackedGlyphMapping(mapping, count)
-		tables["cmap"] = buildCmapTable(count, mapping)
+		basefont.AddPackedGlyphMapping(mapping, count)
+		tables["cmap"] = basefont.BuildCmapTable(count, mapping)
 		changed = true
 	}
-	if len(fontNamesFromTable(tables["name"])) == 0 {
+	if len(basefont.NamesFromTable(tables["name"])) == 0 {
 		fontName := pdfFontIdentity(source)
 		name := utf16.Encode([]rune(fontName))
 		if len(name) > 32767 {
@@ -368,12 +369,12 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, pdfFontRep
 		changed = true
 	}
 	if len(tables["post"]) == 0 {
-		tables["post"] = buildPostTable()
+		tables["post"] = basefont.BuildPostTable()
 		changed = true
 	}
 	if len(tables["OS/2"]) == 0 {
 		hhea := tables["hhea"]
-		tables["OS/2"] = buildOS2TableWithMetrics(int16(binary.BigEndian.Uint16(hhea[4:6])), int16(binary.BigEndian.Uint16(hhea[6:8])))
+		tables["OS/2"] = basefont.BuildOS2TableWithMetrics(int16(binary.BigEndian.Uint16(hhea[4:6])), int16(binary.BigEndian.Uint16(hhea[6:8])))
 		changed = true
 	}
 	for _, tag := range []string{"cvt ", "fpgm", "prep"} {
@@ -385,7 +386,7 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, pdfFontRep
 	if !changed && !pdfSFNTMissingPadding(program) {
 		return program, repair, nil
 	}
-	result, err := serializeOTF(tables)
+	result, err := basefont.SerializeOTF(tables)
 	return result, repair, err
 }
 

@@ -21,6 +21,7 @@ import (
 	"image"
 	"io"
 
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -164,7 +165,7 @@ func (r *pdfRenderer) writePDF(ctx context.Context, data []byte, writer io.Write
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		pixels, err := imagePixelDataContext(ctx, original)
+		pixels, err := baseimage.PixelDataContext(ctx, original)
 		if err != nil {
 			return err
 		}

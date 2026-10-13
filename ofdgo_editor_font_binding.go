@@ -27,6 +27,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
 const (
@@ -285,7 +287,7 @@ func (e *Editor) prepareFontBinding(ctx context.Context, scan *editorFontDocumen
 		return nil, err
 	}
 	if mode == FontEmbed {
-		if err := validateFontEmbedding(parsed.Data); err != nil {
+		if err := basefont.ValidateEmbedding(parsed.Data); err != nil {
 			return nil, err
 		}
 	}
@@ -490,11 +492,11 @@ func fontBindingFile(ctx context.Context, reader *Reader, pending map[string][]b
 // 入参: source 原字体, target 待嵌入字体
 // 返回: bool 是否保留原字体内容及字形编号
 func sameBindingFont(source, target []byte) bool {
-	a, err := fontFileTables(source, 0)
+	a, err := basefont.FileTables(source, 0)
 	if err != nil {
 		return false
 	}
-	b, err := fontFileTables(target, 0)
+	b, err := basefont.FileTables(target, 0)
 	if err != nil || len(a) != len(b) {
 		return false
 	}

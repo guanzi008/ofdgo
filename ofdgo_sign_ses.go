@@ -24,6 +24,7 @@ import (
 
 	"github.com/emmansun/gmsm/sm2"
 	"github.com/emmansun/gmsm/sm3"
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // SES摘要及签名算法的对象标识和ASN.1序列标签
@@ -593,7 +594,7 @@ func parseSESPicture(raw asn1.RawValue) (string, []byte, error) {
 	if !ok || len(items) < 4 {
 		return "", nil, fmt.Errorf("invalid ses picture")
 	}
-	picType := normalizeSealType(strings.ToLower(strings.TrimSpace(asn1String(items[0]))))
+	picType := baseimage.NormalizeFormat(strings.ToLower(strings.TrimSpace(asn1String(items[0]))))
 	picData, err := asn1OctetString(items[1])
 	if err != nil {
 		return "", nil, err

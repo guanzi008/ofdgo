@@ -1,0 +1,73 @@
+// Copyright 2025-2026 肖其顿 (XIAO QI DUN)
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package font
+
+import (
+	"encoding/binary"
+)
+
+// FixDataAggressive 激进修复字体数据
+// 尝试修复缺失表(OS/2, cmap等)的TrueType字体或包装CFF裸数据
+// 对显式字形映射补充私有字符cmap，便于按glyph id渲染
+// 入参: data 原始字体数据, fixCmap 是否修复cmap, fixName 是否修复name
+// 返回: bool 是否修复, []byte 修复后数据, map[rune]uint16 字符映射, bool 是否缺失cmap, error 错误信息
+func FixDataAggressive(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uint16, bool, error) {
+	if len(data) < 4 {
+		return false, data, nil, false, nil
+	}
+	tag := string(data[0:4])
+	u32Tag := binary.BigEndian.Uint32(data[0:4])
+	isTrueType := u32Tag == 0x00010000 || tag == "true"
+	isOpenType := tag == "OTTO"
+	isTTC := tag == "ttcf"
+	if isTTC {
+		return false, data, nil, false, nil
+	}
+	if isBareCFFData(data) {
+		otf, mapping, err := WrapCFFToOTF(data)
+		if err != nil {
+			return false, data, nil, false, err
+		}
+		return true, otf, mapping, false, nil
+	}
+	if !isTrueType && !isOpenType {
+		return false, data, nil, false, nil
+	}
+	fixed, newData, mapping, mc, err := fixTrueType(data, fixCmap, fixName)
+	return fixed, newData, mapping, mc, err
+}
+
+// SFNTData 保留字体原始表数据和时间，重新计算目录与校验和
+// 入参: tables 原始字体表
+// 返回: []byte 独立SFNT数据
+func SFNTData(tables map[string][]byte) []byte {
+	data, _ := SerializeOTF(tables)
+	return data
+}
+
+// isBareCFFData 检查是否为CFF裸字体数据
+// 入参: data 字体数据
+// 返回: bool 是否为CFF裸数据
+func isBareCFFData(data []byte) bool {
+	if len(data) < 4 {
+		return false
+	}
+	if data[0] != 1 || data[1] != 0 {
+		return false
+	}
+	hdrSize := int(data[2])
+	offSize := int(data[3])
+	return 4 <= hdrSize && hdrSize <= len(data) && 1 <= offSize && offSize <= 4
+}
