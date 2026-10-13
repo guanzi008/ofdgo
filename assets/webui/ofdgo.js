@@ -5713,6 +5713,7 @@ async function applyStyleResource(kind, clear = false) {
 function renderLayerSettings() {
 	const entries = settings.data.page.layers || [];
 	settingsPages(settingsElements.Context, "Page", settings.page, value => { settings.page = Number(value); settings.selected = -1; loadDocumentSettings(); });
+	if (!entries.length && !state.editing) { settingsElements.Status.textContent = "暂无图层"; return; }
 	if (settings.selected >= entries.length) settings.selected = -1;
 	if (!state.editing && settings.selected < 0 && entries.length) settings.selected = 0;
 	const types = {Background: "背景", Body: "正文", Foreground: "前景"};
@@ -5720,7 +5721,6 @@ function renderLayerSettings() {
 	if (state.editing) options.unshift([-1, "新增"]);
 	settingsSelect(settingsElements.Context, "图层", "Entry", options, settings.selected, value => { settings.selected = Number(value); renderDocumentSettings(); });
 	const entry = entries[settings.selected];
-	if (!entry && !state.editing) { settingsElements.Status.textContent = "暂无图层"; return; }
 	const properties = settingsSection("属性"), content = properties.section;
 	settingsSelect(content, "类型", "LayerType", Object.entries(types), entry?.Type || "Body");
 	settingsSelect(content, "样式", "DrawParam", [["", "无"], ...settings.data.resources.filter(item => item.kind === "DrawParam").map(item => [item.id, item.name])], referenceIDKey(entry?.DrawParam));
@@ -5753,13 +5753,13 @@ function renderLayerSettings() {
 function renderTemplateSettings() {
 	const entries = settings.data.page.templates || [], bindings = settings.data.page.bindings || [];
 	settingsPages(settingsElements.Context, "Page", settings.page, value => { settings.page = Number(value); loadDocumentSettings(); });
+	if (!entries.length && !state.editing) { settingsElements.Status.textContent = "暂无模板"; return; }
 	if (settings.selected >= entries.length) settings.selected = -1;
 	if (!state.editing && settings.selected < 0 && entries.length) settings.selected = 0;
 	const options = entries.map((entry, index) => [index, `${entry.Name || entry.ID}${bindings.some(binding => referenceIDKey(binding.TemplateID) === referenceIDKey(entry.ID)) ? " · 已绑定" : ""}`]);
 	if (state.editing) options.unshift([-1, "新增"]);
 	settingsSelect(settingsElements.Context, "模板", "Entry", options, settings.selected, value => { settings.selected = Number(value); renderDocumentSettings(); });
 	const entry = entries[settings.selected];
-	if (!entry && !state.editing) { settingsElements.Status.textContent = "暂无模板"; return; }
 	const properties = settingsSection("属性"), content = properties.section;
 	settingsField(content, "名称", "Name", entry?.Name);
 	settingsSelect(content, "层次", "TemplateOrder", [["Background", "背景"], ["Foreground", "前景"]], entry?.ZOrder || "Background");
@@ -5810,13 +5810,13 @@ function renderTemplateSettings() {
 
 function renderBookmarkSettings() {
 	const entries = settings.data.bookmarks || [];
+	if (!entries.length && !state.editing) { settingsElements.Status.textContent = "暂无书签"; return; }
 	if (settings.selected >= entries.length) settings.selected = -1;
 	if (!state.editing && settings.selected < 0 && entries.length) settings.selected = 0;
 	const options = entries.map((entry, index) => [index, entry.Name]);
 	if (state.editing) options.unshift([-1, "新增"]);
 	settingsSelect(settingsElements.Context, "书签", "Entry", options, settings.selected, value => { settings.selected = Number(value); renderDocumentSettings(); });
 	const entry = entries[settings.selected];
-	if (!entry && !state.editing) { settingsElements.Status.textContent = "暂无书签"; return; }
 	settingsField(settingsElements.Content, "名称", "Name", entry?.Name).required = true;
 	renderDestinationFields(settingsElements.Content, entry?.Dest);
 	settingsElements.Content.querySelectorAll("input,select").forEach(field => { field.disabled = !state.editing; });
