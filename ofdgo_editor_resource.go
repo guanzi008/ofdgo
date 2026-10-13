@@ -105,7 +105,7 @@ func (e *Editor) ImportMedia(ctx context.Context, kind, format string, data []by
 }
 
 // ReplaceResource 替换当前文档图片、音视频或附件的文件，保留标识和全部使用位置
-// 图片同时清除受影响对象的旧替换图及复合预览；字体须使用EmbedFont或ExternalizeFont
+// 图片同时清除受影响对象的旧替换图、底纹缩略图及复合预览；字体须使用EmbedFont或ExternalizeFont
 // 入参: ctx 取消上下文, kind 资源类型, id 资源标识, format 媒体格式，图片按实际数据确定, data 完整文件
 // 返回: error 校验或提交错误，失败时文档不变
 func (e *Editor) ReplaceResource(ctx context.Context, kind, id, format string, data []byte) error {
@@ -233,7 +233,7 @@ func (e *Editor) changeResource(ctx context.Context, kind, id string, replace fu
 	return e.commitResourceSnapshot(ctx, reader)
 }
 
-// invalidateResourcePreviews 移除图片内容变化后失效的替换图及逐级复合预览
+// invalidateResourcePreviews 沿绘制参数和复合引用移除图片变化后失效的替换图及底纹预览
 // 入参: ctx 取消上下文, scan 当前文档结构, id 图片标识, changes 待提交文件
 // 返回: error 解析或取消错误
 func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, id string, changes map[string][]byte) error {
@@ -259,7 +259,10 @@ func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, i
 					return false, nil
 				}
 				primary := affected[editorResourceID(node.attr("ResourceID"))] || affected[editorResourceID(node.attr("ImageMask"))]
-				changed := primary || affected[editorResourceID(node.attr("Substitution"))]
+				changed := primary || affected[editorResourceID(node.attr("Substitution"))] || affected[editorResourceID(node.attr("DrawParam"))]
+				if node.matchesOFD("DrawParam") {
+					changed = changed || affected[editorResourceID(node.attr("Relative"))]
+				}
 				if node.matchesOFD("ImageObject") && primary && node.hasAttr("Substitution") {
 					fragment, err := editorXMLStandalone(data[node.start:node.end], node)
 					if err != nil {
@@ -286,6 +289,16 @@ func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, i
 					}
 					changed = changed || used
 				}
+				if changed && node.matchesOFD("CellContent") && node.parent != nil && node.parent.matchesOFD("Pattern") && node.hasAttr("Thumbnail") {
+					patch, err := editorXMLAttributeChange(data, node, "Thumbnail", nil)
+					if err != nil {
+						return false, err
+					}
+					patches = append(patches, patch)
+				}
+				if changed && node.matchesOFD("DrawParam") && node.parent != nil && node.parent.matchesOFD("DrawParams") {
+					affected[editorResourceID(node.attr("ID"))] = true
+				}
 				if changed && node.matchesOFD("CompositeGraphicUnit") && node.parent != nil && node.parent.matchesOFD("CompositeGraphicUnits") {
 					affected[editorResourceID(node.attr("ID"))] = true
 					for _, key := range []string{"Thumbnail", "Substitution"} {
@@ -309,8 +322,9 @@ func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, i
 	}
 }
 
-// BindMedia 追加或移除指定图元的音视频点击动作，保留其余动作，重复绑定不新增动作
-// 入参: ctx 取消上下文, id 媒体标识, page 零基页码, object 图元标识, bind 为false时移除该媒体动作
+// BindMedia 追加或移除指定图元的音视频点击播放动作，保留停止、暂停等其他动作
+// 已有播放动作时保留其区域和参数，重复操作不产生修改
+// 入参: ctx 取消上下文, id 媒体标识, page 零基页码, object 图元标识, bind 为false时移除该媒体的点击播放动作
 // 返回: error 资源、对象或提交错误
 func (e *Editor) BindMedia(ctx context.Context, id string, page int, object string, bind bool) error {
 	kind := ""
@@ -354,7 +368,7 @@ func (e *Editor) BindMedia(ctx context.Context, id string, page int, object stri
 	}
 	found := false
 	actions = slices.DeleteFunc(slices.Clone(actions), func(action Action) bool {
-		match := action.Sound != nil && sameResourceID(action.Sound.ResourceID, id) || action.Movie != nil && sameResourceID(action.Movie.ResourceID, id)
+		match := action.Event == "CLICK" && (action.Sound != nil && sameResourceID(action.Sound.ResourceID, id) || action.Movie != nil && sameResourceID(action.Movie.ResourceID, id) && (action.Movie.Operator == "" || action.Movie.Operator == "Play"))
 		found = found || match
 		return match && !bind
 	})
@@ -369,6 +383,9 @@ func (e *Editor) BindMedia(ctx context.Context, id string, page int, object stri
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if bind == found {
+		return nil
 	}
 	return e.SetObjectActions(page, []string{object}, actions)
 }

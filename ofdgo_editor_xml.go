@@ -756,8 +756,15 @@ func editorXMLEncodedFragment(data []byte, node *editorXML, namespace string) ([
 // 入参: data 原文, node 节点, name 属性名, value 新值
 // 返回: editorXMLPatch 标签补丁, error 编码错误
 func editorXMLAttributePatch(data []byte, node *editorXML, name, value string) (editorXMLPatch, error) {
+	return editorXMLAttributeChange(data, node, name, &value)
+}
+
+// editorXMLAttributeChange 更新或删除标准属性，仅重写起始标签并保留命名空间前缀
+// 入参: data 原文, node 节点, name 属性名, value 新值，nil表示删除
+// 返回: editorXMLPatch 标签补丁, error 编码错误
+func editorXMLAttributeChange(data []byte, node *editorXML, name string, value *string) (editorXMLPatch, error) {
 	patch := editorXMLPatch{start: node.start, end: node.open, data: data[node.start:node.open]}
-	if node.hasAttr(name) && node.attr(name) == value {
+	if value == nil && !node.hasAttr(name) || value != nil && node.hasAttr(name) && node.attr(name) == *value {
 		return patch, nil
 	}
 	d := xml.NewDecoder(bytes.NewReader(patch.data))
@@ -767,13 +774,19 @@ func editorXMLAttributePatch(data []byte, node *editorXML, name, value string) (
 	}
 	start := token.(xml.StartElement)
 	found := false
-	for i := range start.Attr {
-		if attr := &start.Attr[i]; attr.Name.Space == "" && attr.Name.Local == name {
-			attr.Value, found = value, true
+	for i, attr := range start.Attr {
+		if attr.Name.Space == "" && attr.Name.Local == name {
+			if value == nil {
+				start.Attr = append(start.Attr[:i], start.Attr[i+1:]...)
+			} else {
+				start.Attr[i].Value = *value
+			}
+			found = true
+			break
 		}
 	}
-	if !found {
-		start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Local: name}, Value: value})
+	if !found && value != nil {
+		start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Local: name}, Value: *value})
 	}
 	if start.Name.Space != "" {
 		start.Name.Local = start.Name.Space + ":" + start.Name.Local
