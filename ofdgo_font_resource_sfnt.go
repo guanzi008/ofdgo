@@ -193,7 +193,7 @@ func subsetSFNTFont(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 			}
 		}
 		tables := make(map[string][]byte)
-		for _, tag := range []string{"cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "cvt ", "fpgm", "prep", "gasp"} {
+		for _, tag := range []string{"cmap", "head", "hhea", "hmtx", "vhea", "vmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "cvt ", "fpgm", "prep", "gasp"} {
 			if table := sfnt.Tables[tag]; table != nil {
 				tables[tag] = table
 			}
