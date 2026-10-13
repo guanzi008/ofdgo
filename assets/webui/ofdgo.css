@@ -1830,6 +1830,10 @@ body[data-hide-meta] .meta-panel {
 	overscroll-behavior: contain;
 }
 
+.settings-body:has(> #settingsContext:empty):has(> #settingsContent:empty) {
+	display: none;
+}
+
 .settings-dialog .settings-section {
 	min-width: 0;
 	padding-block: 12px;
@@ -1903,13 +1907,22 @@ body[data-hide-meta] .meta-panel {
 	.settings-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
-#settingsStatus {
+.settings-footer {
+	display: flex;
 	flex: none;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	padding: 12px;
+	border-top: 1px solid var(--line);
 }
 
-#settingsStatus:not(:empty) {
-	padding: 8px 12px;
-	border-top: 1px solid var(--line);
+#settingsStatus {
+	flex: 1 1 120px;
+}
+
+#settingsStatus:empty {
+	display: none;
 }
 
 .settings-dialog .info-line {
@@ -1980,20 +1993,13 @@ body[data-hide-meta] .meta-panel {
 
 #settingsActions {
 	display: flex;
-	flex: none;
+	flex: 1 1 auto;
 	flex-wrap: wrap;
 	gap: 8px;
-	padding: 12px;
-	border-top: 1px solid var(--line);
 }
 
 #settingsActions .settings-section-actions:not([hidden]) {
 	display: contents;
-}
-
-#settingsStatus:not(:empty) + #settingsActions {
-	padding-top: 0;
-	border-top: 0;
 }
 
 #settingsActions .settings-close {
