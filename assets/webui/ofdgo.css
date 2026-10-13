@@ -3059,6 +3059,10 @@ audio.page-media {
 	text-align-last: justify;
 }
 
+.structure-dialog .panel-actions {
+	gap: 8px;
+}
+
 .structure-dialog .form-actions {
 	margin-top: 12px;
 }
@@ -3086,9 +3090,6 @@ audio.page-media {
 .structure-attribute > button {
 	grid-column: -2;
 	grid-row: 1;
-	width: var(--control-height);
-	height: var(--control-height);
-	padding: 0;
 }
 
 @media (max-width: 480px) {
@@ -3103,12 +3104,18 @@ audio.page-media {
 
 .structure-reference + .structure-reference {
 	border-top: 1px solid var(--line);
-	padding-top: 8px;
+	padding-top: 12px;
+}
+
+.structure-reference .form-row:last-child {
+	margin-bottom: 0;
 }
 
 .structure-reference .form-unit {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) var(--control-height);
 	min-width: 0;
-	gap: 6px;
+	gap: 8px;
 }
 
 .structure-reference .form-unit > input,

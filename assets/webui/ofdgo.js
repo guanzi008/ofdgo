@@ -8353,7 +8353,7 @@ function addStructureAttribute(attribute = {}) {
 	}
 	const remove = document.createElement("button");
 	remove.type = "button";
-	remove.className = "small-button";
+	remove.className = "icon-button";
 	remove.textContent = "×";
 	remove.title = "删除属性";
 	remove.setAttribute("aria-label", remove.title);
@@ -8373,9 +8373,9 @@ function addStructureReference(reference = {}) {
 	for (const [index, item] of state.doc.pages.entries()) page.add(new Option(`第${index + 1}页`, item.id));
 	if (reference.pageId) page.value = reference.pageId;
 	const remove = document.createElement("button"), add = document.createElement("button");
-	for (const [button, label, text] of [[remove, "删除引用", "×"], [add, "添加图元", "添加"]]) {
+	for (const [button, label, text] of [[remove, "删除引用", "×"], [add, "添加图元", "+"]]) {
 		button.type = "button";
-		button.className = "small-button";
+		button.className = "icon-button";
 		button.textContent = text;
 		button.title = label;
 		button.setAttribute("aria-label", label);
