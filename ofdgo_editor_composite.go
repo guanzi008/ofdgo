@@ -973,6 +973,7 @@ func compositeBoundary(object GraphicObject, parent Matrix, inward bool) Graphic
 }
 
 // writeCompositeNode 保留原文逐级合并内部修改，仅复制发生变化的资源分支
+// 内容变化的矢量资源移除旧缩略图和替换图，不影响原资源及其引用者
 // 入参: node 实例节点
 // 返回: []byte 新片段, bool 是否变化, error 错误信息
 func (e *Editor) writeCompositeNode(node *editorCompositeNode) ([]byte, bool, error) {
@@ -993,8 +994,15 @@ func (e *Editor) writeCompositeNode(node *editorCompositeNode) ([]byte, bool, er
 			maps.Copy(states, child.states)
 		}
 	}
-	data := editorPatchXML(node.data, patches)
 	changed := node.changed || len(patches) != 0
+	if changed && node.node.name.Local == "CompositeGraphicUnit" {
+		for _, name := range []string{"Thumbnail", "Substitution"} {
+			if child := node.node.child(name); child != nil {
+				patches = append(patches, editorXMLPatch{start: child.start, end: child.end})
+			}
+		}
+	}
+	data := editorPatchXML(node.data, patches)
 	node.states = states
 	if node.ref != nil {
 		fragment, dirty, err := e.writeCompositeNode(node.ref)

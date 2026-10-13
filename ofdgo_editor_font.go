@@ -40,6 +40,14 @@ type editorFontSubset struct {
 	mapped bool
 }
 
+// editorFontRegistration 记录最近一次成功注册的输入与标识，不保留原始文件
+type editorFontRegistration struct {
+	checksum [32]byte
+	name     string
+	index    int
+	id       string
+}
+
 // editorSourceFontKey 区分原字体内容及完整用字集合
 type editorSourceFontKey struct {
 	source [32]byte
@@ -52,6 +60,7 @@ type editorSourceFontCache map[editorSourceFontKey][]byte
 // clearFontResourceCache 清除字体后端生成的解析与裁剪缓存，保留原始资源
 func (e *Editor) clearFontResourceCache() {
 	e.fonts = make(map[string]*FontResource)
+	e.fontRegistration = editorFontRegistration{}
 	for i := range e.resources {
 		e.resources[i].subset = nil
 	}
@@ -105,11 +114,21 @@ func (e *Editor) AddFont(file FontFile, index int) (string, error) {
 	if e.backends.FontResources == nil {
 		return "", fmt.Errorf("font resources: %w", ErrBackendUnavailable)
 	}
+	checksum := sha256.Sum256(file.Data)
+	previous := e.fontRegistration
+	if previous.id != "" && previous.checksum == checksum && previous.name == file.Name && previous.index == index {
+		return previous.id, nil
+	}
+	e.fontRegistration = editorFontRegistration{}
 	parsed, err := e.backends.FontResources.OpenFontResource(file, index)
 	if err != nil {
 		return "", err
 	}
-	return e.addFontResource(parsed, sha256.Sum256(parsed.Data))
+	id, err := e.addFontResource(parsed, sha256.Sum256(parsed.Data))
+	if err == nil {
+		e.fontRegistration = editorFontRegistration{checksum: checksum, name: file.Name, index: index, id: id}
+	}
+	return id, err
 }
 
 // addFontResource 注册已解析的只读字体，各文档独立分配标识和包内路径

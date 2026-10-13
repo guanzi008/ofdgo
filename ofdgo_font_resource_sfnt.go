@@ -224,7 +224,7 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 	}
 	for tag := range sfnt.Tables {
 		switch tag {
-		case "cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "CFF ", "cvt ", "fpgm", "prep", "gasp", "kern", "vhea", "vmtx", "VORG", "hdmx", "LTSH", "VDMX", "GDEF", "GPOS", "GSUB", "meta", "DSIG", "FFTM":
+		case "cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "CFF ", "cvt ", "fpgm", "prep", "gasp", "kern", "vhea", "vmtx", "VORG", "hdmx", "LTSH", "VDMX", "GDEF", "GPOS", "GSUB", "meta", "DSIG", "FFTM", "PCLT":
 		default:
 			return nil
 		}

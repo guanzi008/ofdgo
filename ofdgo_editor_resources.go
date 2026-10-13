@@ -48,7 +48,7 @@ type editorResourceRefs struct {
 
 // compactSourceReferences 合并自产页面引用，版本文档按当前版本范围扫描
 // 按GB/T33190-2016附录A检查标识和路径引用，保留扫描范围内孤立XML中的引用
-// 多文档压缩按文档归集引用，未知扩展或无法解析的XML不清理资源
+// 多文档按文档归集引用，未知扩展或无法解析的XML不清理资源
 // 入参: parts 输出条目, progress 保存进度回调, generated 自产页面及引用
 // 返回: map[string]bool 可移除条目, error 读取或取消错误
 func (e *Editor) compactSourceReferences(parts map[string][]byte, progress editorProgress, generated map[string]editorGeneratedReferences) (map[string]bool, error) {
@@ -61,10 +61,10 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Reader, progress editorProgress, generated map[string]editorGeneratedReferences, retired map[string]bool) (map[string]bool, error) {
 	multiple := reader != nil && reader.DocumentCount() > 1
 	prune := e.output != nil && e.output.options.Mode != CompressionUnchanged
-	if e.output != nil && e.output.protected || multiple && (e.output == nil || e.output.options.Mode == CompressionUnchanged) {
+	if e.output != nil && e.output.protected {
 		return nil, nil
 	}
-	if len(parts) == 0 && e.revision == 0 && (e.output == nil || e.output.options.Mode == CompressionUnchanged) {
+	if !multiple && len(parts) == 0 && e.revision == 0 && (e.output == nil || e.output.options.Mode == CompressionUnchanged) {
 		return nil, nil
 	}
 	generated = e.generatedVectorReferences(parts, generated)
@@ -72,9 +72,18 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 	if e.output != nil {
 		ctx = e.output.ctx
 	}
+	if multiple {
+		protected, err := reader.hasOutputSignatures(ctx)
+		if err != nil || protected {
+			return nil, err
+		}
+	}
 	progress = progress.withContext(ctx)
 	_, scope, err := reader.versionResourceFiles(ctx, parts, generated)
 	if err != nil {
+		if multiple && !prune {
+			return nil, ctx.Err()
+		}
 		return nil, err
 	}
 	names := make(map[string]bool)

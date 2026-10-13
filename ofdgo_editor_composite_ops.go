@@ -112,7 +112,8 @@ func (e *Editor) OrderCompositeObjects(page int, path ObjectPath, indexes []int,
 }
 
 // ReplaceCompositeImage 替换内部图片数据，保留变换、裁剪、蒙版、边框和透明度
-// 入参: page 页面索引, path 父复合路径, index 图片序号, data PNG或JPEG数据
+// 更换主图资源时清除旧替换图引用，不修改其他共享实例
+// 入参: page 页面索引, path 父复合路径, index 图片序号, data AddImage支持的图片数据
 // 返回: error 错误信息
 func (e *Editor) ReplaceCompositeImage(page int, path ObjectPath, index int, data []byte) error {
 	return e.editCompositeObjects(page, path, []int{index}, func(renderer *Renderer, nodes []*editorCompositeNode, _ []CompositeMember) error {
@@ -137,6 +138,9 @@ func (e *Editor) ReplaceCompositeImage(page int, path ObjectPath, index int, dat
 		id, err := e.AddImage(data)
 		if err != nil {
 			return err
+		}
+		if !sameResourceID(object.ImageObject.ResourceID, id) {
+			object.ImageObject.Substitution = ""
 		}
 		object.ImageObject.ResourceID = id
 		return node.update(object)

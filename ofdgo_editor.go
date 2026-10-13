@@ -49,6 +49,7 @@ type Editor struct {
 	pages            []PageContent
 	resources        []editorResource
 	fonts            map[string]*FontResource
+	fontRegistration editorFontRegistration
 	fontDirs         []string
 	fontFS           []fs.FS
 	fontRenderer     *Renderer
@@ -663,7 +664,8 @@ func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) err
 }
 
 // ReplaceImage 替换图片资源，保留对象标识和绘制顺序，一次撤销恢复资源及布局
-// 入参: page 页面索引, id 图片对象标识, data PNG或JPEG数据, fit 为contain、cover或空，空值保留原变换和裁剪
+// 更换主图资源时清除旧替换图引用，保留蒙版及其他绘制属性
+// 入参: page 页面索引, id 图片对象标识, data AddImage支持的图片数据, fit 为contain、cover或空，空值保留原变换和裁剪
 // 返回: error 错误信息
 func (e *Editor) ReplaceImage(page int, id string, data []byte, fit string) error {
 	object, err := e.Object(page, id)
@@ -682,10 +684,14 @@ func (e *Editor) ReplaceImage(page int, id string, data []byte, fit string) erro
 			return err
 		}
 	}
-	object.ImageObject.ResourceID, err = e.AddImage(data)
+	resource, err := e.AddImage(data)
 	if err != nil {
 		return err
 	}
+	if !sameResourceID(object.ImageObject.ResourceID, resource) {
+		object.ImageObject.Substitution = ""
+	}
+	object.ImageObject.ResourceID = resource
 	if fit != "" {
 		if err := e.fitImage(&object.ImageObject, fit); err != nil {
 			return err

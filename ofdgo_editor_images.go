@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"image"
 	"io"
@@ -43,6 +44,7 @@ type ImagePageOptions struct {
 
 // ImportImages 将PNG、JPEG、BMP、单页TIFF或JBIG2逐张建页并插入指定位置，一次操作计入一条撤销记录
 // 保留像素及透明度，方向通过对象变换实现，不重新采样；图片压缩沿用AddImage规则
+// 同一批次的相同图片复用解码校验结果，不额外保留像素数据
 // 失败或取消时不修改文档，读取期间仍需容纳单张图片的解码数据
 // 入参: ctx 取消上下文, sources 按页面顺序排列的图片, at 插入位置, options 建页选项
 // 返回: error 错误信息
@@ -80,6 +82,7 @@ func (e *Editor) ImportImages(ctx context.Context, sources []ImagePageSource, at
 	}
 	return e.Transaction(func(e *Editor) error {
 		indexes := make([]int, 0, len(sources))
+		verified := make(map[[32]byte]bool)
 		for i, source := range sources {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -91,7 +94,7 @@ func (e *Editor) ImportImages(ctx context.Context, sources []ImagePageSource, at
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			page, err := e.addImagePage(ctx, data, options)
+			page, err := e.addImagePage(ctx, data, options, verified)
 			if err != nil {
 				return fmt.Errorf("image %q: %w", source.Name, err)
 			}
@@ -108,9 +111,9 @@ func (e *Editor) ImportImages(ctx context.Context, sources []ImagePageSource, at
 }
 
 // addImagePage 保留原图并按方向、物理尺寸与纸张选项建页
-// 入参: ctx 取消上下文, data 图片数据, options 建页选项
+// 入参: ctx 取消上下文, data 图片数据, options 建页选项, verified 本批次已成功解码的图片摘要
 // 返回: int 从0开始的页面索引, error 错误信息
-func (e *Editor) addImagePage(ctx context.Context, data []byte, options ImagePageOptions) (int, error) {
+func (e *Editor) addImagePage(ctx context.Context, data []byte, options ImagePageOptions, verified map[[32]byte]bool) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -122,16 +125,20 @@ func (e *Editor) addImagePage(ctx context.Context, data []byte, options ImagePag
 		return 0, fmt.Errorf("only PNG, JPEG, BMP, single-page TIFF and JBIG2 images are supported")
 	}
 	var decoded image.Image
-	if format == "bmp" || format == "tiff" {
-		decoded, _, err = decodeImageDataContext(ctx, data)
-	} else {
-		decoded, _, err = image.Decode(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
-	}
-	if cancelErr := ctx.Err(); cancelErr != nil {
-		return 0, cancelErr
-	}
-	if err != nil {
-		return 0, err
+	checksum := sha256.Sum256(data)
+	if !verified[checksum] {
+		if format == "bmp" || format == "tiff" {
+			decoded, _, err = decodeImageDataContext(ctx, data)
+		} else {
+			decoded, _, err = image.Decode(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+		}
+		if cancelErr := ctx.Err(); cancelErr != nil {
+			return 0, cancelErr
+		}
+		if err != nil {
+			return 0, err
+		}
+		verified[checksum] = true
 	}
 	metadata, err := imagePageMetadataContext(ctx, data, format, options.DPI)
 	if err != nil {

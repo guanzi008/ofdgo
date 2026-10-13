@@ -202,6 +202,9 @@ func (e *Editor) retainDocumentResources(source *Editor) {
 	maps.Copy(e.fonts, source.fonts)
 	maps.Copy(e.images, source.images)
 	maps.Copy(e.resourceID, source.resourceID)
+	if sameBackend(e.backends.FontResources, source.backends.FontResources) {
+		e.fontRegistration = source.fontRegistration
+	}
 	e.maxID = max(e.maxID, source.maxID)
 	e.fontRenderer, e.fontMetrics = source.fontRenderer, source.fontMetrics
 }
