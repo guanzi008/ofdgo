@@ -458,6 +458,10 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 			if err != nil {
 				return nil, err
 			}
+			if value == nil && !strict {
+				p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF URI target missing; action omitted"})
+				return nil, nil
+			}
 			uri, ok := value.(pdfgo.String)
 			if !ok {
 				return nil, fmt.Errorf("invalid PDF URI")
