@@ -15,222 +15,14 @@
 package ofdgo
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
-	"image"
-	"image/color"
-	"io"
 	"math"
-	"reflect"
 	"slices"
 	"strconv"
 	"unicode/utf8"
 
-	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
-
-// pdfImageKey 区分图像流、渲染意图、原生输出空间、模板填充色及采样尺寸
-type pdfImageKey struct {
-	stream  *pdfgo.Stream
-	intent  pdfgo.Name
-	process pdfgo.Name
-	tint    color.NRGBA64
-	size    image.Point
-}
-
-// pdfImageResource 保存图像的有效颜色空间及对应资源，避免跨资源重映射复用
-type pdfImageResource struct {
-	space pdfgo.Object
-	id    string
-}
-
-// image 转换图像样本，不将整页或其他对象栅格化
-// 有损编码复用已解码像素，候选容量超限时沿用原编码路径
-// 入参: mark PDF图像绘制信息
-// 返回: error 错误信息
-func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
-	if err := p.ctx.Err(); err != nil {
-		return err
-	}
-	if mark.Style.BlendMode != "" && mark.Style.BlendMode != "Normal" && mark.Style.BlendMode != "Compatible" {
-		return &pdfgo.UnsupportedError{Feature: "image blend mode " + string(mark.Style.BlendMode)}
-	}
-	if err := p.flushPath(); err != nil {
-		return err
-	}
-	if mark.Image.ImageMask && (mark.Style.Fill.Axial != nil || mark.Style.Fill.Radial != nil || mark.Style.Fill.Function != nil || mark.Style.Fill.Mesh != nil || mark.Style.Fill.Shading != nil) {
-		if p.warning != nil {
-			return p.compositeRegion(nil, pdfCompositeNode{image: &mark}, &pdfgo.ColorSpace{Model: "DeviceRGB"}, false)
-		}
-		return &pdfgo.UnsupportedError{Feature: "gradient stencil image"}
-	}
-	var err error
-	mark.Style, err = p.maskStyle(mark.Style)
-	if err != nil {
-		if p.rasterMaskAllowed(err) {
-			mask := mark.Style.SoftMask
-			mark.Style.SoftMask = nil
-			return p.rasterGroup(pdfgo.GroupMark{Alpha: 1, SoftMask: mask}, func(v pdfgo.Visitor) error { return v.Image(mark) })
-		}
-		return err
-	}
-	if mark.Style.FillOverprint {
-		return &pdfgo.UnsupportedError{Feature: "image color separation overprint"}
-	}
-	source := mark.Image
-	key := pdfImageKey{stream: source.Stream, intent: source.Intent}
-	key.process, err = p.imageProcessModel(source)
-	if err != nil {
-		return err
-	}
-	if !source.ImageMask && p.compression.Mode == CompressionLossy {
-		m := p.matrix.Mul(mark.Matrix)
-		key.size = compressionImageSize(math.Hypot(m[0], m[1]), math.Hypot(m[2], m[3]), p.compression.ImageDPI())
-		if key.size.X >= source.Width || key.size.Y >= source.Height {
-			key.size = image.Point{}
-		}
-	}
-	if source.ImageMask {
-		fill := mark.Style.Fill.RGB
-		if values := mark.Style.Fill.CMYK; values != nil {
-			space := &pdfgo.ColorSpace{Model: "DeviceCMYK"}
-			fill, err = space.RGB(values[:], mark.Style.RenderingIntent)
-			if err != nil {
-				return err
-			}
-		}
-		key.tint = color.NRGBA64{
-			R: uint16(math.Round(fill[0] * 65535)),
-			G: uint16(math.Round(fill[1] * 65535)),
-			B: uint16(math.Round(fill[2] * 65535)),
-			A: 65535,
-		}
-	}
-	id := ""
-	for _, resource := range p.imageIDs[key] {
-		if reflect.DeepEqual(resource.space, source.ColorSpace) {
-			id = resource.id
-			break
-		}
-	}
-	streamCached := id != ""
-	var contentKey pdfImageContentKey
-	cacheable := false
-	if id == "" {
-		contentKey, cacheable, err = p.imageContentKey(source, key)
-		if err != nil {
-			return err
-		}
-		if cacheable {
-			if p.imageContents == nil {
-				p.imageContents = &renderCache[pdfImageContentKey, pdfImageContent]{limit: 8 << 20}
-			}
-			if cached, found := p.imageContents.get(contentKey); found && cached.matches(source) {
-				id = cached.id
-			}
-		}
-	}
-	if id == "" {
-		var jbig2Original, jpegOriginal []byte
-		var decoded image.Image
-		if key.process != "" {
-			decoded, err = p.imageProcess(source, key.process)
-			if err != nil {
-				return err
-			}
-			if key.size != (image.Point{}) {
-				decoded, err = pdfgo.ResizeImage(p.ctx, decoded, key.size)
-				if err != nil {
-					return err
-				}
-			}
-		} else {
-			jbig2Original, err = source.JBIG2FileContext(p.ctx)
-			if err != nil {
-				return err
-			}
-			jpegOriginal, err = source.JPEGFileContext(p.ctx)
-			if err != nil {
-				return err
-			}
-			if len(jbig2Original) == 0 && len(jpegOriginal) == 0 && (source.ImageMask || key.size != (image.Point{})) {
-				decoded, err = source.DecodeImageSizeContext(p.ctx, key.size)
-				if err != nil {
-					return err
-				}
-			}
-		}
-		if source.ImageMask {
-			decoded = &codecpdf.StencilImage{Source: decoded, Fill: key.tint}
-		}
-		data := jbig2Original
-		if len(data) == 0 {
-			data = jpegOriginal
-		}
-		optimized := false
-		if len(data) == 0 && decoded != nil && !source.ImageMask && p.compression.Mode == CompressionLossy {
-			data, err = pdfgo.EncodeImageResource(p.ctx, decoded, p.compression)
-			if err != nil && !errors.Is(err, io.ErrShortBuffer) {
-				return err
-			}
-			optimized = err == nil
-		}
-		if len(data) == 0 {
-			var encoded bytes.Buffer
-			if decoded != nil {
-				err = pdfgo.EncodePNG(p.ctx, &encoded, decoded)
-			} else {
-				err = source.EncodePNGContext(p.ctx, &encoded)
-			}
-			if err != nil {
-				return err
-			}
-			data = encoded.Bytes()
-		}
-		if !source.ImageMask && p.compression.Mode == CompressionLossy {
-			if !optimized {
-				data, err = pdfgo.OptimizeImageResource(p.ctx, data, p.compression, key.size)
-				if err != nil {
-					return err
-				}
-			}
-			decoded = nil
-		}
-		id, err = p.editor.addDecodedImageContext(p.ctx, data, decoded)
-		if err != nil {
-			return err
-		}
-		if cacheable {
-			p.imageContents.put(contentKey, pdfImageContent{source: source, id: id}, len(source.Stream.Data)+65536)
-		}
-	}
-	if !streamCached {
-		if p.imageIDs == nil {
-			p.imageIDs = map[pdfImageKey][]pdfImageResource{}
-		}
-		p.imageIDs[key] = append(p.imageIDs[key], pdfImageResource{space: source.ColorSpace, id: id})
-	}
-	return p.appendImage(mark, id)
-}
-
-// appendImage 定位已注册的图像资源，保留透明度与裁剪
-// 入参: mark 图像绘制信息, id 资源编号
-// 返回: error 裁剪错误
-func (p *pdfImporter) appendImage(mark pdfgo.ImageMark, id string) error {
-	m := p.matrix.Mul(mark.Matrix).Mul(pdfgo.Matrix{1, 0, 0, -1, 0, 1})
-	box := pdfBounds([]pdfgo.Point{m.Apply(pdfgo.Point{}), m.Apply(pdfgo.Point{X: 1}), m.Apply(pdfgo.Point{Y: 1}), m.Apply(pdfgo.Point{X: 1, Y: 1})})
-	alpha := int(math.Round(mark.Style.Fill.Alpha * 255))
-	clips, err := p.clips(mark.Style.Clips, box)
-	if err != nil {
-		return err
-	}
-	object := ImageObject{Boundary: pdfBoundary(box), ResourceID: id, CTM: pdfNumbers(m[0], m[1], m[2], m[3], m[4]-box.X, m[5]-box.Y), Alpha: &alpha, Clips: clips}
-	p.appendObject(GraphicObject{Type: "ImageObject", ImageObject: object})
-	p.report.ImageObjects++
-	return nil
-}
 
 // text 保留字形及逐字基线，外部字体优先复用同名内嵌资源
 // 入参: mark PDF文字绘制信息
@@ -631,4 +423,91 @@ func (p *pdfImporter) degenerateText(mark pdfgo.TextMark) error {
 		p.clipTexts[mark.Clip] = clips
 	}
 	return nil
+}
+
+// disjointText 检查实际字形轮廓是否互不相交，允许无重叠挖空文字直接保留
+// 入参: node 隐式文字组
+// 返回: bool 是否互不相交, error 轮廓编译错误
+func (p *pdfImporter) disjointText(node pdfCompositeNode) (bool, error) {
+	cache := p.compositingCache()
+	if result, found := cache.textDisjoint[node.group]; found {
+		return result, nil
+	}
+	geometry, err := p.renderer.Geometry()
+	if err != nil {
+		return false, err
+	}
+	var inverse pdfgo.Matrix
+	var boxes []Box
+	for _, child := range node.children {
+		mark := child.text
+		if mark == nil {
+			mark = child.glyph
+		}
+		if mark == nil || len(mark.Glyphs) != 1 {
+			return false, nil
+		}
+		if inverse == (pdfgo.Matrix{}) {
+			var ok bool
+			inverse, ok = p.matrix.Mul(mark.Matrix).Inverse()
+			if !ok {
+				return false, nil
+			}
+		}
+		scene, _, err := p.compileGroup(func(local *pdfImporter) error {
+			if child.group != nil {
+				return child.coverage(local, false)
+			}
+			_, fill, stroke := child.style()
+			if fill {
+				if err := child.coverage(local, false); err != nil {
+					return err
+				}
+			}
+			if stroke {
+				return child.coverage(local, true)
+			}
+			return nil
+		})
+		if err != nil {
+			return false, err
+		}
+		if scene == nil {
+			continue
+		}
+		var box Box
+		for _, command := range scene.Commands {
+			path, err := rasterCommandGeometry(geometry, command)
+			if err != nil {
+				return false, err
+			}
+			path, err = geometry.Transform(path, MatrixFromValues([6]float64(inverse)))
+			if err != nil {
+				return false, err
+			}
+			bounds, err := geometry.Bounds(path)
+			if err != nil {
+				return false, err
+			}
+			box = unionTextBox(box, bounds)
+		}
+		if box.W <= 0 || box.H <= 0 {
+			continue
+		}
+		for _, previous := range boxes {
+			if box.X < previous.X+previous.W && previous.X < box.X+box.W && box.Y < previous.Y+previous.H && previous.Y < box.Y+box.H {
+				if cache.textDisjoint == nil {
+					cache.textDisjoint = make(map[*pdfgo.GroupMark]bool)
+				}
+				cache.textDisjoint[node.group] = false
+				return false, nil
+			}
+		}
+		boxes = append(boxes, box)
+	}
+	if cache.textDisjoint == nil {
+		cache.textDisjoint = make(map[*pdfgo.GroupMark]bool)
+	}
+	cache.textDisjoint[node.group] = true
+	return true, nil
 }

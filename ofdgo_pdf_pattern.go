@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"fmt"
 	"math"
 	"reflect"
 
@@ -126,4 +127,92 @@ func pdfPatternCellCost(value reflect.Value, budget, depth int) int {
 		}
 	}
 	return cost
+}
+
+// buildTilingPattern 保留PDF图案单元与页面坐标之间的仿射关系
+// 入参: source 平铺图案, base 无色图案基色
+// 返回: *Pattern OFD图案, error 转换错误
+func (p *pdfImporter) buildTilingPattern(source *pdfgo.TilingPattern, base pdfgo.Paint) (*Pattern, error) {
+	const unit = 25.4 / 72
+	box := source.BBox
+	width, height := box.XMax-box.XMin, box.YMax-box.YMin
+	xstep, ystep := math.Abs(source.XStep), math.Abs(source.YStep)
+	if width <= 0 || height <= 0 || !finite(xstep) || !finite(ystep) || xstep == 0 || ystep == 0 {
+		return nil, fmt.Errorf("invalid PDF tiling pattern dimensions")
+	}
+	localToPDF := pdfgo.Matrix{1 / unit, 0, 0, -1 / unit, box.XMin, box.YMax}
+	m := p.matrix.Mul(source.Matrix).Mul(localToPDF)
+	pattern := &Pattern{Width: math.Min(width, xstep) * unit, Height: math.Min(height, ystep) * unit, XStep: xstep * unit, YStep: ystep * unit, RelativeTo: "Page", CTM: pdfNumbers(m[:]...)}
+	cell := *p
+	cell.matrix = pdfgo.Matrix{unit, 0, 0, -unit, -box.XMin * unit, box.YMax * unit}
+	cell.pageWidth, cell.pageHeight = width*unit, height*unit
+	cell.rasterDPI *= m.MaxScale()
+	if !finite(cell.rasterDPI) || cell.rasterDPI < 0 {
+		return nil, fmt.Errorf("invalid PDF tiling pattern raster scale")
+	}
+	cell.objects, cell.pendingPath = nil, nil
+	if err := source.Walk(p.ctx, base, cell.visitor()); err != nil {
+		return nil, err
+	}
+	if err := cell.flushPath(); err != nil {
+		return nil, err
+	}
+	objects, err := cell.objects.data(p.ctx)
+	if err != nil {
+		return nil, err
+	}
+	pattern.CellContent.Objects = objects
+	if len(objects) != 0 && (width > xstep || height > ystep) {
+		columns, rows := math.Ceil(width/xstep), math.Ceil(height/ystep)
+		if !finite(columns*rows) || columns*rows >= float64(uint(^uint(0)>>1)+1) {
+			return nil, fmt.Errorf("PDF tiling pattern instance count overflow")
+		}
+		bounds := make([]Box, len(objects))
+		for index, object := range objects {
+			boundary := ""
+			if object.Type == "PathObject" && object.PathObject.Stroke != nil && !*object.PathObject.Stroke {
+				boundary = object.PathObject.Boundary
+			} else if object.Type == "ImageObject" && object.ImageObject.Border == nil {
+				boundary = object.ImageObject.Boundary
+			}
+			if boundary != "" {
+				var err error
+				bounds[index], err = ParseBox(boundary)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+		left, right, top, bottom := pdfPatternInstanceRange(columns, rows, bounds, pattern.Width, pattern.Height, xstep*unit, ystep*unit)
+		var expanded pdfObjectBuffer
+		for row := top; row <= bottom; row++ {
+			for column := left; column <= right; column++ {
+				if err := p.ctx.Err(); err != nil {
+					return nil, err
+				}
+				dx, dy := float64(column)*xstep*unit, float64(row)*ystep*unit
+				for index, object := range objects {
+					if index%pdfObjectChunkLimit == 0 {
+						if err := p.ctx.Err(); err != nil {
+							return nil, err
+						}
+					}
+					b := bounds[index]
+					if b.W > 0 && b.H > 0 && (b.X+dx+b.W < 0 || b.Y+dy+b.H < 0 || b.X+dx > pattern.Width || b.Y+dy > pattern.Height) {
+						continue
+					}
+					translated, err := transformEditorObject(object, dx, dy, 1)
+					if err != nil {
+						return nil, err
+					}
+					expanded.append(translated)
+				}
+			}
+		}
+		pattern.CellContent.Objects, err = expanded.data(p.ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return pattern, nil
 }

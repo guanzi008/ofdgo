@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"math"
 
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -64,4 +65,53 @@ func ClipPathKey(ctx context.Context, path pdfgo.Path, matrix pdfgo.Matrix) ([32
 	var key [32]byte
 	hash.Sum(key[:0])
 	return key, nil
+}
+
+// ClipContainsBoundary 判断单一矩形裁剪是否完整覆盖对象边界，不近似曲线或斜边
+// 入参: path PDF裁剪路径, matrix 页面变换, boundary OFD对象边界
+// 返回: bool 是否可由对象边界代替裁剪
+func ClipContainsBoundary(path pdfgo.Path, matrix pdfgo.Matrix, boundary basegeom.Box) bool {
+	if len(path.Text) != 0 || len(path.Segments) < 4 || len(path.Segments) > 6 || !finite(boundary.X) || !finite(boundary.Y) || !finite(boundary.W) || !finite(boundary.H) || boundary.W <= 0 || boundary.H <= 0 {
+		return false
+	}
+	var points [4]pdfgo.Point
+	for index := range 4 {
+		segment := path.Segments[index]
+		operator := "L"
+		if index == 0 {
+			operator = "M"
+		}
+		if segment.Operator != operator || len(segment.Points) != 1 {
+			return false
+		}
+		points[index] = matrix.Apply(segment.Points[0])
+		if !finite(points[index].X) || !finite(points[index].Y) {
+			return false
+		}
+	}
+	end := 4
+	if end < len(path.Segments) && path.Segments[end].Operator == "L" {
+		segment := path.Segments[end]
+		if len(segment.Points) != 1 || matrix.Apply(segment.Points[0]) != points[0] {
+			return false
+		}
+		end++
+	}
+	if end < len(path.Segments) {
+		segment := path.Segments[end]
+		if segment.Operator != "C" || len(segment.Points) != 0 {
+			return false
+		}
+		end++
+	}
+	if end != len(path.Segments) {
+		return false
+	}
+	a, b, c, d := points[0], points[1], points[2], points[3]
+	if !(a.Y == b.Y && b.X == c.X && c.Y == d.Y && d.X == a.X || a.X == b.X && b.Y == c.Y && c.X == d.X && d.Y == a.Y) {
+		return false
+	}
+	left, right := math.Min(a.X, c.X), math.Max(a.X, c.X)
+	top, bottom := math.Min(a.Y, c.Y), math.Max(a.Y, c.Y)
+	return left < right && top < bottom && boundary.X >= left && boundary.Y >= top && boundary.X+boundary.W <= right && boundary.Y+boundary.H <= bottom
 }

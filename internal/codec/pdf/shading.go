@@ -48,11 +48,11 @@ func ShadingColorantSpace(paint pdfgo.Paint) *pdfgo.ColorantSpace {
 // 返回: *ShadingColorants 独立采样状态，不可原生映射时为nil
 func PrepareShadingColorants(paint pdfgo.Paint, space *pdfgo.ColorSpace, softMask bool) *ShadingColorants {
 	colorants := ShadingColorantSpace(paint)
-	Process := colorants.PrepareProcess(&pdfgo.ColorantDevice{Space: space}, space, softMask)
-	if Process == nil || Process.Mask() == ([4]bool{}) {
+	process := colorants.PrepareProcess(&pdfgo.ColorantDevice{Space: space}, space, softMask)
+	if process == nil || process.Mask() == ([4]bool{}) {
 		return nil
 	}
-	s := &ShadingColorants{paint: paint, Process: Process, tints: make([]float64, len(colorants.Names))}
+	s := &ShadingColorants{paint: paint, Process: process, tints: make([]float64, len(colorants.Names))}
 	if paint.Mesh != nil {
 		s.mesh = paint.Mesh.NewSampler()
 	}
@@ -93,4 +93,21 @@ func (s *ShadingColorants) MeshAt(patch int, u, v float64) ([4]float64, error) {
 		return [4]float64{}, err
 	}
 	return s.Process.Convert(s.tints)
+}
+
+// ShadingPosition 计算渐变参数，未延伸区域及不存在非负圆半径的位置不着色
+// 入参: paint 渐变画刷, point 页面坐标
+// 返回: float64 归一化参数, bool 是否着色
+func ShadingPosition(paint pdfgo.Paint, point pdfgo.Point) (float64, bool) {
+	var geometry pdfgo.GradientPosition
+	var err error
+	if g := paint.Axial; g != nil {
+		geometry, err = g.PreparePosition()
+	} else {
+		geometry, err = paint.Radial.PreparePosition()
+	}
+	if err != nil {
+		return 0, false
+	}
+	return geometry.PositionAt(point)
 }

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"image"
 	"math"
+	"strconv"
 
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
@@ -725,19 +726,108 @@ func pdfShadingClippedNode(node pdfCompositeNode, box pdfgo.Rectangle, matrix pd
 	return node
 }
 
-// pdfShadingPosition 计算渐变参数，未延伸区域及不存在非负圆半径的位置不着色
-// 入参: paint 渐变画刷, point 页面坐标
-// 返回: float64 归一化参数, bool 是否着色
-func pdfShadingPosition(paint pdfgo.Paint, point pdfgo.Point) (float64, bool) {
-	var geometry pdfgo.GradientPosition
+// color 保留设备色彩分量并复用文档颜色空间
+// 入参: paint PDF颜色与不透明度
+// 返回: *FillColor OFD颜色
+func (p *pdfImporter) color(paint pdfgo.Paint) *FillColor {
+	alpha := int(math.Round(paint.Alpha * 255))
+	if paint.CMYK != nil && (paint.Space == nil || !paint.Space.Calibrated()) {
+		if p.cmykSpace == "" {
+			p.cmykSpace = p.editor.nextID()
+			p.editor.resources = append(p.editor.resources, editorResource{space: &ColorSpace{ID: p.cmykSpace, Type: "CMYK", BitsPerComponent: 16}})
+		}
+		v := paint.CMYK
+		return &FillColor{ColorSpace: p.cmykSpace, Value: pdfNumbers(math.Round(v[0]*65535), math.Round(v[1]*65535), math.Round(v[2]*65535), math.Round(v[3]*65535)), Alpha: &alpha}
+	}
+	return &FillColor{Value: pdfNumbers(math.Round(paint.RGB[0]*255), math.Round(paint.RGB[1]*255), math.Round(paint.RGB[2]*255)), Alpha: &alpha}
+}
+
+// paintColor 将页面渐变转换为对象局部坐标
+// 入参: paint PDF画刷, box 对象边界
+// 返回: *FillColor OFD颜色或渐变, error 图案转换错误
+func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error) {
+	if err := p.gradientError(paint); err != nil {
+		return nil, err
+	}
+	if pdfGradientPattern(paint) {
+		return p.gradientPattern(paint, box)
+	}
+	if paint.Mesh != nil {
+		return p.meshColor(paint, box)
+	}
+	color := p.color(paint)
+	if paint.Tiling != nil {
+		pattern, err := p.tilingPattern(paint.Tiling, paint)
+		if err != nil {
+			return nil, err
+		}
+		color.Pattern = pattern
+		return color, nil
+	}
+	if paint.Radial != nil {
+		gradient := paint.Radial
+		matrix := p.matrix
+		if gradient.Matrix != (pdfgo.Matrix{}) {
+			matrix = matrix.Mul(gradient.Matrix)
+		}
+		start, end := matrix.Apply(gradient.Start), matrix.Apply(gradient.End)
+		xx, yy, xy := matrix[0]*matrix[0]+matrix[2]*matrix[2], matrix[1]*matrix[1]+matrix[3]*matrix[3], matrix[0]*matrix[1]+matrix[2]*matrix[3]
+		major := (xx + yy + math.Hypot(xx-yy, 2*xy)) / 2
+		determinant := matrix[0]*matrix[3] - matrix[1]*matrix[2]
+		if major <= 0 || determinant == 0 {
+			return nil, fmt.Errorf("invalid PDF radial gradient matrix")
+		}
+		scale := math.Sqrt(major)
+		eccentricity := math.Sqrt(math.Max(0, 1-determinant*determinant/(major*major)))
+		angle := math.Atan2(2*xy, xx-yy) * 90 / math.Pi
+		extend := 0
+		if gradient.Extend[0] {
+			extend |= 1
+		}
+		if gradient.Extend[1] {
+			extend |= 2
+		}
+		shading := &RadialShd{StartPoint: pdfNumbers(start.X-box.X, start.Y-box.Y), EndPoint: pdfNumbers(end.X-box.X, end.Y-box.Y), StartRadius: gradient.StartRadius * scale, EndRadius: gradient.EndRadius * scale, Eccentricity: eccentricity, Angle: angle, Extend: strconv.Itoa(extend)}
+		var err error
+		shading.Segment, err = p.gradientSegments(gradient.Stops, gradient.Space, gradient.Intent)
+		if err != nil {
+			return nil, err
+		}
+		color.Value = ""
+		color.RadialShd = shading
+		return color, nil
+	}
+	if paint.Axial == nil {
+		return color, nil
+	}
+	gradient := paint.Axial
+	start := p.matrix.Apply(gradient.Start)
+	inverse, ok := p.matrix.Inverse()
+	if !ok {
+		return nil, fmt.Errorf("invalid PDF gradient matrix")
+	}
+	dx, dy := gradient.End.X-gradient.Start.X, gradient.End.Y-gradient.Start.Y
+	gx, gy := inverse[0]*dx+inverse[1]*dy, inverse[2]*dx+inverse[3]*dy
+	length := gx*gx + gy*gy
+	if length == 0 {
+		return nil, fmt.Errorf("invalid PDF axial gradient axis")
+	}
+	factor := (dx*dx + dy*dy) / length
+	end := pdfgo.Point{X: start.X + gx*factor, Y: start.Y + gy*factor}
+	extend := 0
+	if gradient.Extend[0] {
+		extend |= 1
+	}
+	if gradient.Extend[1] {
+		extend |= 2
+	}
+	shading := &AxialShd{StartPoint: pdfNumbers(start.X-box.X, start.Y-box.Y), EndPoint: pdfNumbers(end.X-box.X, end.Y-box.Y), Extend: strconv.Itoa(extend)}
 	var err error
-	if g := paint.Axial; g != nil {
-		geometry, err = g.PreparePosition()
-	} else {
-		geometry, err = paint.Radial.PreparePosition()
-	}
+	shading.Segment, err = p.gradientSegments(gradient.Stops, gradient.Space, gradient.Intent)
 	if err != nil {
-		return 0, false
+		return nil, err
 	}
-	return geometry.PositionAt(point)
+	color.Value = ""
+	color.AxialShd = shading
+	return color, nil
 }

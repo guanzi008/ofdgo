@@ -247,7 +247,7 @@ func (p *pdfImporter) directCompositeNode(node pdfCompositeNode, space *pdfgo.Co
 		}
 		if space.Model == "DeviceCMYK" && style.ColorConversion != (pdfgo.ColorConversion{}) {
 			if node.image != nil && !node.image.Image.ImageMask {
-				_, native, err := pdfImageProcessColorants(node.image.Image)
+				_, native, err := codecpdf.ImageProcessColorants(node.image.Image)
 				if err != nil {
 					return false, err
 				}
@@ -348,7 +348,7 @@ func (p *pdfImporter) processOverprint(nodes []pdfCompositeNode) (bool, error) {
 		}
 		style, fill, stroke := node.style()
 		if node.image != nil && style.FillOverprint {
-			if _, found, err := pdfImageProcessColorants(node.image.Image); err != nil || found {
+			if _, found, err := codecpdf.ImageProcessColorants(node.image.Image); err != nil || found {
 				return found, err
 			}
 		}
@@ -371,7 +371,7 @@ func (p *pdfImporter) processOverprint(nodes []pdfCompositeNode) (bool, error) {
 				if native := codecpdf.PrepareShadingColorants(paint, &pdfgo.ColorSpace{Model: "DeviceCMYK"}, false); native != nil {
 					return true, nil
 				}
-				native, _, err := pdfCompositeNativePaint(paint, &pdfgo.ColorSpace{Model: "DeviceCMYK"}, style.RenderingIntent)
+				native, _, err := codecpdf.NativePaint(paint, &pdfgo.ColorSpace{Model: "DeviceCMYK"}, style.RenderingIntent)
 				if err != nil {
 					return false, err
 				}

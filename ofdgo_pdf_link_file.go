@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -34,6 +35,32 @@ type pdfEmbeddedFile struct {
 	reader *pdfgo.Reader
 	file   *pdfgo.FileSpecification
 	data   []byte
+}
+
+// documentAttachments 导入文档名称树中的附件，与注解及动作引用共用附件资源
+// 入参: ctx 取消上下文
+// 返回: error 名称树、附件读取或写入错误
+func (p *pdfImporter) documentAttachments(ctx context.Context) error {
+	return p.reader.WalkEmbeddedFiles(ctx, func(_ string, file pdfgo.FileSpecification) error {
+		if file.Embedded == nil {
+			if p.warning == nil {
+				return fmt.Errorf("PDF embedded file has no embedded data")
+			}
+			p.warning(pdfgo.Diagnostic{Message: "PDF embedded file without embedded data ignored"})
+			return nil
+		}
+		data, err := file.Embedded.DecodeContext(ctx)
+		if err != nil {
+			var unsupported *pdfgo.UnsupportedError
+			if p.warning != nil && errors.As(err, &unsupported) {
+				p.warning(pdfgo.Diagnostic{Message: "PDF document attachment not transferred to OFD: " + err.Error()})
+				return nil
+			}
+			return err
+		}
+		_, err = p.attachmentFile(file.Name, data)
+		return err
+	})
 }
 
 // launchLinkAction 保留文件打开目标，不执行应用程序或猜测平台启动参数

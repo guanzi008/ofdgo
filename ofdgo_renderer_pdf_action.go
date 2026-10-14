@@ -17,6 +17,8 @@ package ofdgo
 import (
 	"context"
 	"fmt"
+	"io"
+	"maps"
 	"slices"
 
 	"github.com/tdewolff/canvas"
@@ -101,6 +103,38 @@ func (n *pdfNavigation) addActions(renderer *Renderer, page int, source actionSo
 			continue
 		}
 		n.Link[page] = append(n.Link[page], pdfLink{Rect: pdfSourceRect(box, pages[page].Box.H), Region: region, Actions: area.Actions})
+		n.nativeWrite = true
+	}
+	return nil
+}
+
+// addLifecycleActions 按事件归属收集打开动作，不受点击区域限制
+// 入参: ctx 取消上下文, source 动作来源, page 页面索引，负值表示文档, bookmarks 书签, pageIndex 页面索引表, pages 页面数据
+// 返回: error 目标或取消错误
+func (n *pdfNavigation) addLifecycleActions(ctx context.Context, source actionSource, page int, bookmarks map[string]Dest, pageIndex map[string]int, pages []RenderDocumentPage) error {
+	event := "PO"
+	if page < 0 {
+		event = "DO"
+	}
+	for _, action := range source.Actions {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if action.Event != event || source.Graphic {
+			continue
+		}
+		value, err := n.actionTarget(action, page, source, bookmarks, pageIndex, pages)
+		if err != nil {
+			return err
+		}
+		if value == nil {
+			continue
+		}
+		if action.Event == "DO" {
+			n.Open = append(n.Open, *value)
+		} else {
+			n.PageOpen[page] = append(n.PageOpen[page], *value)
+		}
 		n.nativeWrite = true
 	}
 	return nil
@@ -218,4 +252,34 @@ func pdfNavigationValues(actions []pdfNavigationAction, pages []pdfgo.Reference)
 		values = append(values, value)
 	}
 	return values
+}
+
+// writeAttachments 在页面绘制后读取附件，保留文件字节，不自动添加个人信息和时间
+// 入参: ctx 取消上下文, options PDF写出配置
+// 返回: error 附件读取或取消错误
+func (n *pdfNavigation) writeAttachments(ctx context.Context, options *pdfgo.RewriteOptions) error {
+	if len(n.attachments) == 0 {
+		return nil
+	}
+	options.Attachments = make(map[string]*pdfgo.EmbeddedFile, len(n.attachments))
+	for _, id := range slices.Sorted(maps.Keys(n.attachments)) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		attachment := n.attachments[id]
+		input, err := n.source.openFile(n.source.ResPath(attachment.FileLoc))
+		if err != nil {
+			return fmt.Errorf("read attachment %s: %w", id, err)
+		}
+		data, err := io.ReadAll(imageInput{ReadCloser: input, context: ctx})
+		closeErr := input.Close()
+		if err != nil {
+			return fmt.Errorf("read attachment %s: %w", id, err)
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		options.Attachments[id] = &pdfgo.EmbeddedFile{Name: attachment.FileName(), Data: data}
+	}
+	return ctx.Err()
 }

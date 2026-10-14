@@ -217,3 +217,43 @@ func (p *pdfImporter) transferOpaque(node pdfCompositeNode) (bool, error) {
 	}
 	return true, nil
 }
+
+// halftone 检查连续色调转换，避免将打印网屏误用于屏幕显示
+// 入参: style 图形状态
+// 返回: error 严格模式无法保留设备网屏
+func (p *pdfImporter) halftone(style pdfgo.Style) error {
+	h := style.Halftone
+	message := "PDF continuous-tone appearance retained; device halftone not transferred to OFD"
+	if h == nil || h.Type == 0 {
+		if style.HalftoneOrigin == nil {
+			return nil
+		}
+		message = "PDF continuous-tone appearance retained; device halftone origin not transferred to OFD"
+	}
+	if p.warning == nil {
+		return &pdfgo.UnsupportedError{Feature: "device halftone conversion"}
+	}
+	if p.halftoneWarnings == nil {
+		p.halftoneWarnings = make(map[*pdfgo.Halftone]bool)
+	}
+	if !p.halftoneWarnings[h] {
+		p.halftoneWarnings[h] = true
+		p.warning(pdfgo.Diagnostic{Message: message})
+	}
+	return nil
+}
+
+// pdfOpaqueBlack 判断不受底层分色影响的全黑设备色
+// 入参: paint PDF颜色与不透明度
+// 返回: bool 是否为不透明全黑CMYK颜色
+func pdfOpaqueBlack(paint pdfgo.Paint) bool {
+	return paint.Alpha == 1 && paint.CMYK != nil && paint.CMYK[3] == 1
+}
+
+// pdfOverprintNeedsSeparation 判断彩色CMYK套印是否依赖分色输出
+// 入参: paint PDF颜色与不透明度
+// 返回: bool 是否需要保留分色语义
+func pdfOverprintNeedsSeparation(paint pdfgo.Paint) bool {
+	_, process := paint.Process.CMYKMask()
+	return (paint.CMYK != nil || process) && !pdfOpaqueBlack(paint)
+}

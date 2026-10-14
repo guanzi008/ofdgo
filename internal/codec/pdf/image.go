@@ -93,3 +93,17 @@ func (s *NativeImage) NRGBA64At(x, y int) color.NRGBA64 {
 	rgb, _ := OutputColor(s.Space, values)
 	return color.NRGBA64{R: uint16(math.Round(rgb[0] * 65535)), G: uint16(math.Round(rgb[1] * 65535)), B: uint16(math.Round(rgb[2] * 65535)), A: uint16(math.Round(alpha * 65535))}
 }
+
+// ImageProcessColorants 识别可在四色设备上直接绘制的专色色料
+// 入参: image PDF图像
+// 返回: [4]bool 参与绘制的四色通道, bool 是否全部属于印刷原色, error 色空间错误
+func ImageProcessColorants(image *pdfgo.Image) ([4]bool, bool, error) {
+	source, err := image.ColorantSpace()
+	if err != nil {
+		return [4]bool{}, false, err
+	}
+	space := &pdfgo.ColorSpace{Model: "DeviceCMYK"}
+	process := source.PrepareProcess(&pdfgo.ColorantDevice{Space: space}, space, false)
+	mask := process.Mask()
+	return mask, mask != ([4]bool{}), nil
+}

@@ -14,7 +14,9 @@
 
 package ofdgo
 
-import "context"
+import (
+	"context"
+)
 
 // pdfObjectChunkLimit 限制导入暂存片段的容量，不限制页面对象数量
 const pdfObjectChunkLimit = 256
@@ -125,4 +127,25 @@ func (b *pdfObjectBuffer) data(ctx context.Context) ([]GraphicObject, error) {
 	clear(b.parts[1:])
 	b.parts = b.parts[:1]
 	return objects, nil
+}
+
+// commitObjects 将当前页面待转换对象写入编辑文档
+// 返回: error 对象写入错误
+func (p *pdfImporter) commitObjects() error {
+	if p.objects.len() == 0 {
+		return nil
+	}
+	objects, err := p.objects.data(p.ctx)
+	if err != nil {
+		return err
+	}
+	objects, err = p.sharedClipObjects(objects)
+	if err != nil {
+		return err
+	}
+	if err := p.objectValidation().appendOwnedObjects(p.ctx, p.page, objects); err != nil {
+		return err
+	}
+	p.objects = nil
+	return nil
 }
