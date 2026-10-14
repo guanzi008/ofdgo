@@ -275,7 +275,7 @@ func (e *Editor) prepareFontBinding(ctx context.Context, scan *editorFontDocumen
 		}
 		file = FontFile{Data: data}
 		if bytes.HasPrefix(data, []byte("ttcf")) {
-			index = fontCollectionIndex(data, []string{declaration.font.FontName, declaration.font.FamilyName}, declaration.font.Bold, declaration.font.Italic)
+			index = basefont.CollectionIndex(data, []string{declaration.font.FontName, declaration.font.FamilyName}, declaration.font.Bold, declaration.font.Italic)
 		}
 	} else if len(file.Data) == 0 {
 		file, err = e.resolveBindingFont(ctx, scan, declaration)
@@ -415,7 +415,7 @@ func originalBindingFont(ctx context.Context, scan *editorFontDocument, declarat
 	}
 	index := 0
 	if bytes.HasPrefix(data, []byte("ttcf")) {
-		index = fontCollectionIndex(data, []string{declaration.font.FontName, declaration.font.FamilyName}, declaration.font.Bold, declaration.font.Italic)
+		index = basefont.CollectionIndex(data, []string{declaration.font.FontName, declaration.font.FamilyName}, declaration.font.Bold, declaration.font.Italic)
 	}
 	data, err = (FontFile{Data: data}).Face(index)
 	if cancelErr := ctx.Err(); cancelErr != nil {

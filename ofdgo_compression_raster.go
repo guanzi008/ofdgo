@@ -19,21 +19,12 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"hash/crc32"
 	"image"
 	"io"
-	"math"
-	"math/big"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"github.com/xiaoqidun/pdfgo"
 )
-
-// rasterDensity 保存横纵像素密度，unit为0表示比例、1表示每米像素数
-type rasterDensity struct {
-	x, y float64
-	unit byte
-}
 
 // outputImageFormat 识别可由资源压缩生成的图片格式
 // 入参: data 图片编码
@@ -96,8 +87,8 @@ func optimizeBMPResource(ctx context.Context, data []byte, options CompressionOp
 	if int64(offset)+stride*int64(height) != int64(len(data)) {
 		return data, nil
 	}
-	xdpi, ydpi := int32(binary.LittleEndian.Uint32(data[38:42])), int32(binary.LittleEndian.Uint32(data[42:46]))
-	if xdpi < 0 || ydpi < 0 {
+	density, ok := baseimage.BMPDensity(data)
+	if !ok {
 		return data, nil
 	}
 	if depth == 16 || depth == 32 {
@@ -122,7 +113,7 @@ func optimizeBMPResource(ctx context.Context, data []byte, options CompressionOp
 	if err != nil {
 		return nil, err
 	}
-	return optimizeRasterResource(ctx, data, pixels, options, size, rasterDensity{x: float64(xdpi), y: float64(ydpi), unit: 1})
+	return optimizeRasterResource(ctx, data, pixels, options, size, density)
 }
 
 // optimizeRasterResource 编码已解码的资源图片，同步降采样后的像素密度，仅采用更小结果
@@ -130,8 +121,8 @@ func optimizeBMPResource(ctx context.Context, data []byte, options CompressionOp
 // 有密度时保留PNG，未知密度按最终像素选择编码格式
 // 入参: ctx 取消上下文, data 原编码, pixels 像素, options 压缩选项, size 像素需求, density 像素密度
 // 返回: []byte 图片编码, error 编码或取消错误
-func optimizeRasterResource(ctx context.Context, data []byte, pixels image.Image, options CompressionOptions, size image.Point, density rasterDensity) ([]byte, error) {
-	hasDensity := density.x != 0 || density.y != 0
+func optimizeRasterResource(ctx context.Context, data []byte, pixels image.Image, options CompressionOptions, size image.Point, density baseimage.Density) ([]byte, error) {
+	hasDensity := density.X != 0 || density.Y != 0
 	before := pixels.Bounds().Size()
 	if options.Mode == CompressionLossy {
 		var err error
@@ -140,18 +131,10 @@ func optimizeRasterResource(ctx context.Context, data []byte, pixels image.Image
 			return nil, err
 		}
 	}
-	if after := pixels.Bounds().Size(); hasDensity && before != after {
-		if density.unit == 0 {
-			ratio := new(big.Rat).SetFrac64(int64(density.x)*int64(after.X), int64(density.y)*int64(after.Y))
-			ratio.Mul(ratio, new(big.Rat).SetFrac64(int64(before.Y), int64(before.X)))
-			if ratio.Num().BitLen() > 31 || ratio.Denom().BitLen() > 31 {
-				return data, ctx.Err()
-			}
-			density.x, density.y = float64(ratio.Num().Int64()), float64(ratio.Denom().Int64())
-		} else {
-			density.x *= float64(after.X) / float64(before.X)
-			density.y *= float64(after.Y) / float64(before.Y)
-		}
+	var ok bool
+	density, ok = density.Scale(before, pixels.Bounds().Size())
+	if !ok {
+		return data, ctx.Err()
 	}
 	var candidate []byte
 	var err error
@@ -169,23 +152,13 @@ func optimizeRasterResource(ctx context.Context, data []byte, pixels image.Image
 		return nil, err
 	}
 	if hasDensity {
-		x, y := math.Round(density.x), math.Round(density.y)
-		if x > math.MaxInt32 || y > math.MaxInt32 || density.x > 0 && x < 1 || density.y > 0 && y < 1 || len(candidate) > outputOptimizationBufferLimit-21 {
+		if len(candidate) > outputOptimizationBufferLimit-baseimage.PNGDensityChunkSize {
 			return data, ctx.Err()
 		}
-		chunk := make([]byte, 21)
-		binary.BigEndian.PutUint32(chunk, 9)
-		copy(chunk[4:], "pHYs")
-		binary.BigEndian.PutUint32(chunk[8:], uint32(x))
-		binary.BigEndian.PutUint32(chunk[12:], uint32(y))
-		chunk[16] = density.unit
-		binary.BigEndian.PutUint32(chunk[17:], crc32.ChecksumIEEE(chunk[4:17]))
-		var output bytes.Buffer
-		writer := imageMetadataWriter{writer: &output, skip: 33, data: chunk}
-		if _, err := writer.Write(candidate); err != nil {
-			return nil, err
+		candidate, ok = baseimage.WithPNGDensity(candidate, density)
+		if !ok {
+			return data, ctx.Err()
 		}
-		candidate = output.Bytes()
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -194,4 +167,31 @@ func optimizeRasterResource(ctx context.Context, data []byte, pixels image.Image
 		return candidate, nil
 	}
 	return data, nil
+}
+
+// optimizeTIFFResource 压缩单目录TIFF，保留方向、透明度、采样精度及像素密度
+// 主图或单个瓦片的预计缓冲超限时保留原编码
+// 入参: ctx 取消上下文, data TIFF编码, options 压缩选项, size 显示像素需求
+// 返回: []byte 图片编码，不可完整转换时保留原文, error 编码或取消错误
+func optimizeTIFFResource(ctx context.Context, data []byte, options CompressionOptions, size image.Point) ([]byte, error) {
+	layout, err := baseimage.ReadTIFFLayoutContext(ctx, bytes.NewReader(data))
+	if err != nil {
+		return data, ctx.Err()
+	}
+	pixelSize := int64(layout.DecodedPixelBytes())
+	if int64(layout.Width) > outputOptimizationBufferLimit/pixelSize/int64(layout.Height) {
+		return data, ctx.Err()
+	}
+	if layout.TileWidth != 0 && int64(layout.TileWidth) > outputOptimizationBufferLimit/pixelSize/int64(layout.TileHeight) {
+		return data, ctx.Err()
+	}
+	density, ok := baseimage.TIFFConversionDensity(data, layout)
+	if !ok {
+		return data, ctx.Err()
+	}
+	pixels, err := baseimage.DecodeTIFF(ctx, data, layout)
+	if err != nil {
+		return data, ctx.Err()
+	}
+	return optimizeRasterResource(ctx, data, pixels, options, size, density)
 }

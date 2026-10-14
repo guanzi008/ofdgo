@@ -15,10 +15,62 @@
 package pdf
 
 import (
+	"context"
 	"fmt"
+	"image"
 
 	"github.com/xiaoqidun/pdfgo"
 )
+
+// compositeCancelInterval 保持像素合成的取消检查间隔
+const compositeCancelInterval = 256
+
+// CompositePixel 保存非预乘源空间分量及累计透明度
+type CompositePixel struct {
+	Values [4]float64
+	Alpha  float64
+	Effect float64
+	Shape  float64
+}
+
+// transferKey 区分图形状态、网屏覆盖函数及输出设备
+type transferKey struct {
+	transfer *pdfgo.TransferFunction
+	halftone *pdfgo.Halftone
+	model    pdfgo.Name
+}
+
+// TransferCache 在页面内复用设备传递函数，零值可用
+// 缓存与所属阅读器同生命周期，不用于并发解析
+type TransferCache struct {
+	functions map[transferKey]*pdfgo.TransferFunction
+}
+
+// Resolve 在页面内复用输出设备的有效函数，不修改原始图形状态
+// 入参: reader 原始阅读器, style 原始图形状态, model 原生设备颜色空间
+// 返回: *pdfgo.TransferFunction 有效函数, error 网屏传递函数错误
+func (c *TransferCache) Resolve(reader *pdfgo.Reader, style pdfgo.Style, model pdfgo.Name) (*pdfgo.TransferFunction, error) {
+	if style.Halftone == nil && style.Transfer == nil {
+		return nil, nil
+	}
+	if model == "" {
+		model = "DeviceRGB"
+	}
+	if c.functions == nil {
+		c.functions = make(map[transferKey]*pdfgo.TransferFunction)
+	}
+	key := transferKey{style.Transfer, style.Halftone, model}
+	transfer, found := c.functions[key]
+	if !found {
+		var err error
+		transfer, err = reader.DeviceTransfer(style.Transfer, style.Halftone, model)
+		if err != nil {
+			return nil, err
+		}
+		c.functions[key] = transfer
+	}
+	return transfer, nil
+}
 
 // OutputColor 将合成结果映射到OFD输出，与保留的设备四色对象使用相同显示换算
 // 入参: space 合成空间, values 非预乘分量
@@ -146,4 +198,140 @@ func CompositeColor(paint pdfgo.Paint, point pdfgo.Point, space *pdfgo.ColorSpac
 	}
 	values, err := space.ConvertWith(values[:source.Components()], source, intent, conversion)
 	return values, true, err
+}
+
+// CompositeInterpolate 按形状覆盖混合预乘颜色及累计透明度
+// 入参: target 原像素与输出, source 替换像素, shape 覆盖率
+// 返回: error 像素或覆盖率错误
+func CompositeInterpolate(target *CompositePixel, source CompositePixel, shape float64) error {
+	pixel := pdfgo.ColorantPixel{Values: target.Values[:], Alpha: target.Alpha, Shape: target.Shape, Effect: target.Effect}
+	if err := pixel.Interpolate(pdfgo.ColorantPixel{Values: source.Values[:], Alpha: source.Alpha, Shape: source.Shape, Effect: source.Effect}, shape); err != nil {
+		return err
+	}
+	target.Alpha, target.Effect = pixel.Alpha, pixel.Effect
+	return nil
+}
+
+// CompositeKnockout 移除未覆盖区域的初始背景贡献，保留形状与不透明度差异
+// 入参: target 累计组结果, initial 初始背景, source 单个对象合成结果
+// 返回: error 像素错误
+func CompositeKnockout(target *CompositePixel, initial, source CompositePixel) error {
+	pixel := pdfgo.ColorantPixel{Values: target.Values[:], Alpha: target.Alpha, Shape: target.Shape, Effect: target.Effect}
+	if err := pixel.Knockout(
+		pdfgo.ColorantPixel{Values: initial.Values[:], Alpha: initial.Alpha, Shape: initial.Shape, Effect: initial.Effect},
+		pdfgo.ColorantPixel{Values: source.Values[:], Alpha: source.Alpha, Shape: source.Shape, Effect: source.Effect},
+	); err != nil {
+		return err
+	}
+	target.Alpha, target.Effect, target.Shape = pixel.Alpha, pixel.Effect, pixel.Shape
+	return nil
+}
+
+// CompositeGroupRegion 在组覆盖区域合成像素，保留原栅格及形状贡献
+// 入参: ctx 取消上下文, pixels 父组输出, initial 初始背景, result 组结果, stride 行跨度, region 覆盖区域, space 组空间, parent 父空间, opacity 组不透明度, mask 蒙版, mode 混合模式, intent 渲染意图, conversion 设备转换函数
+// 返回: error 缓冲、区域、颜色或混合错误
+func CompositeGroupRegion(ctx context.Context, pixels, initial, result []CompositePixel, stride int, region image.Rectangle, space, parent *pdfgo.ColorSpace, opacity float64, mask []float64, mode, intent pdfgo.Name, conversion pdfgo.ColorConversion) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(pixels) != len(initial) || len(pixels) != len(result) || mask != nil && len(mask) != len(pixels) {
+		return fmt.Errorf("invalid PDF transparency group buffers")
+	}
+	if stride <= 0 || region.Min.X < 0 || region.Min.Y < 0 || region.Max.X > stride || !region.Empty() && region.Max.Y > len(pixels)/stride {
+		return fmt.Errorf("invalid PDF transparency group region")
+	}
+	group, destination := pdfgo.ColorantGroup{Space: space}, pdfgo.ColorantGroup{Space: parent}
+	compositor, err := destination.PrepareGroup(&group, mode, intent, conversion)
+	if err != nil {
+		return err
+	}
+	if region.Empty() {
+		return nil
+	}
+	components, parentComponents := space.Components(), parent.Components()
+	var target pdfgo.ColorantPixel
+	for y := region.Min.Y; y < region.Max.Y; y++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		for i, end := y*stride+region.Min.X, y*stride+region.Max.X; i < end; i++ {
+			if i%compositeCancelInterval == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
+			alpha := opacity
+			if mask != nil {
+				alpha *= mask[i]
+			}
+			pixel := &result[i]
+			target.Values = pixels[i].Values[:parentComponents]
+			target.Alpha = pixels[i].Alpha
+			target.Shape = pixels[i].Shape
+			target.Effect = pixels[i].Effect
+			if err := compositor.Composite(&target,
+				pdfgo.ColorantPixel{Values: initial[i].Values[:components], Alpha: initial[i].Alpha, Shape: initial[i].Shape, Effect: initial[i].Effect},
+				pdfgo.ColorantPixel{Values: pixel.Values[:components], Alpha: pixel.Alpha, Shape: pixel.Shape, Effect: pixel.Effect},
+				alpha,
+			); err != nil {
+				return err
+			}
+			pixels[i].Alpha, pixels[i].Effect, pixels[i].Shape = target.Alpha, target.Effect, target.Shape
+		}
+	}
+	return nil
+}
+
+// CompositePaintOver 以兼容叠印计算零色料分量，再应用对象混合模式
+// 入参: backdrop 背景及输出, source 源分量, alpha 源透明度, space 混合空间, mode 混合模式, compatible 是否保留零色料背景, marked 原生过程通道，nil使用普通空间
+// 返回: error 未支持的混合模式
+func CompositePaintOver(backdrop *CompositePixel, source [4]float64, alpha float64, space *pdfgo.ColorSpace, mode pdfgo.Name, compatible bool, marked *[4]bool) error {
+	if !compatible && marked == nil {
+		return CompositeOver(backdrop, source, alpha, space, mode)
+	}
+	if alpha == 0 {
+		return nil
+	}
+	mask := PaintChannels(source, compatible, marked)
+	values, combined, err := space.CompositeOverprint(backdrop.Values[:space.Components()], source[:space.Components()], backdrop.Alpha, alpha, mode, mask[:space.Components()])
+	if err != nil {
+		return err
+	}
+	copy(backdrop.Values[:space.Components()], values[:space.Components()])
+	backdrop.Alpha = combined
+	backdrop.Effect = alpha + backdrop.Effect*(1-alpha)
+	return nil
+}
+
+// CompositeOver 按PDF透明模型合成源颜色，四色混合使用分量补色
+// 入参: backdrop 背景及输出, source 源分量, alpha 源透明度, space 混合空间, mode 混合模式
+// 返回: error 未支持的混合模式
+func CompositeOver(backdrop *CompositePixel, source [4]float64, alpha float64, space *pdfgo.ColorSpace, mode pdfgo.Name) error {
+	if alpha == 0 {
+		return nil
+	}
+	values, combined, err := space.Composite(backdrop.Values[:space.Components()], source[:space.Components()], backdrop.Alpha, alpha, mode)
+	if err != nil {
+		return err
+	}
+	copy(backdrop.Values[:space.Components()], values[:space.Components()])
+	backdrop.Alpha = combined
+	backdrop.Effect = alpha + backdrop.Effect*(1-alpha)
+	return nil
+}
+
+// PaintChannels 选择兼容叠印实际使用源颜色的通道
+// 入参: values 源四色分量, compatible 是否保留零分量背景, marked 指定通道，nil表示全部
+// 返回: [4]bool 各通道是否取源颜色
+func PaintChannels(values [4]float64, compatible bool, marked *[4]bool) [4]bool {
+	channels := [4]bool{true, true, true, true}
+	if marked != nil {
+		channels = *marked
+	}
+	if compatible {
+		for i := range channels {
+			channels[i] = channels[i] && values[i] != 0
+		}
+	}
+	return channels
 }

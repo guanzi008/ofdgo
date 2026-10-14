@@ -64,8 +64,8 @@ type fontSourceKey struct {
 // fontSourceCache 保存字体候选及独立字体数据，原始集合按字节预算淘汰，不包含绘图库对象
 type fontSourceCache struct {
 	candidates   map[string][]fontSource
-	directories  map[string][]fontFileCandidate
-	filesystems  map[int][]fontFileCandidate
+	directories  map[string][]basefont.FileCandidate
+	filesystems  map[int][]basefont.FileCandidate
 	data         map[fontSourceKey]fontSourceData
 	collections  *renderCache[fontSourceKey, []byte]
 	fallback     ResolvedFont
@@ -81,7 +81,7 @@ type fontSourceData struct {
 // newFontSourceCache 创建独立字体来源缓存
 // 返回: *fontSourceCache 字体来源缓存
 func newFontSourceCache() *fontSourceCache {
-	return &fontSourceCache{candidates: make(map[string][]fontSource), directories: make(map[string][]fontFileCandidate), filesystems: make(map[int][]fontFileCandidate), data: make(map[fontSourceKey]fontSourceData), collections: &renderCache[fontSourceKey, []byte]{limit: 32 << 20}}
+	return &fontSourceCache{candidates: make(map[string][]fontSource), directories: make(map[string][]basefont.FileCandidate), filesystems: make(map[int][]basefont.FileCandidate), data: make(map[fontSourceKey]fontSourceData), collections: &renderCache[fontSourceKey, []byte]{limit: 32 << 20}}
 }
 
 // child 复用相同来源的文件索引与数据，匹配和回退状态保持独立
@@ -99,11 +99,11 @@ func (c *fontSourceCache) child() *fontSourceCache {
 func (r *Renderer) readFontSource(source fontSource, definition *Font) ([]byte, error) {
 	key := fontSourceKey{kind: source.kind, index: source.index, face: source.face, name: source.name}
 	if source.kind == fontSourceSystem {
-		matches := fontFileMatches(systemFontIndex(), []string{source.name}, definition.Bold, definition.Italic)
+		matches := basefont.FileMatches(systemFontIndex(), []string{source.name}, definition.Bold, definition.Italic)
 		if len(matches) == 0 {
 			return nil, fmt.Errorf("font %q not found", source.name)
 		}
-		key = fontSourceKey{kind: fontSourceFile, name: matches[0].name, face: matches[0].face}
+		key = fontSourceKey{kind: fontSourceFile, name: matches[0].Name, face: matches[0].Face}
 	}
 	if cached, ok := r.fontSourcesCache.data[key]; ok {
 		return cached.data, cached.err
@@ -192,7 +192,7 @@ func (r *Renderer) resolveFontSource(backend FontBackend, id string, exact bool)
 	if !r.fontSourcesCache.fallbackRead {
 		r.fontSourcesCache.fallbackRead = true
 		if canLoadSystemFonts() {
-			for _, name := range fontDefaultSystemNames() {
+			for _, name := range basefont.DefaultSystemNames() {
 				data, err := r.readFontSource(fontSource{kind: fontSourceSystem, name: name}, &Font{})
 				if err != nil {
 					continue
@@ -221,12 +221,12 @@ func (r *Renderer) fontSources(fontID string, font *Font) []fontSource {
 	seen := make(map[fontSourceKey]bool)
 	for _, dir := range r.fontDirs {
 		for _, match := range r.matchFontFiles(dir, names, bold, italic) {
-			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.name, face: match.face, exact: match.rank == fontMatchExact, priority: min(match.priority, 0)})
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.Name, face: match.Face, exact: match.Rank == basefont.MatchExact, priority: min(match.Priority, 0)})
 		}
 	}
 	for index := range r.fontFS {
 		for _, match := range r.matchFontFS(index, names, bold, italic) {
-			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: match.name, face: match.face, exact: match.rank == fontMatchExact, priority: min(match.priority, 0)})
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: match.Name, face: match.Face, exact: match.Rank == basefont.MatchExact, priority: min(match.Priority, 0)})
 		}
 	}
 	sortFontSources(sources)
@@ -234,10 +234,10 @@ func (r *Renderer) fontSources(fontID string, font *Font) []fontSource {
 	if canLoadSystemFonts() {
 		for _, dir := range systemFontDirs() {
 			for _, match := range r.matchFontFiles(dir, names, bold, italic) {
-				sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.name, face: match.face, exact: match.rank == fontMatchExact, priority: min(match.priority, 0)})
+				sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.Name, face: match.Face, exact: match.Rank == basefont.MatchExact, priority: min(match.Priority, 0)})
 			}
 		}
-		for _, name := range fontSystemNames(names...) {
+		for _, name := range basefont.SystemNames(names...) {
 			source := fontSource{kind: fontSourceSystem, name: name, exact: true}
 			for i, requested := range names {
 				if basefont.NormalizeName(name) == basefont.NormalizeName(requested) {
@@ -251,12 +251,12 @@ func (r *Renderer) fontSources(fontID string, font *Font) []fontSource {
 	sortFontSources(sources[systemStart:])
 	for _, dir := range r.fontDirs {
 		for _, match := range r.matchFontFiles(dir, nil, bold, italic) {
-			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.name, face: match.face})
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.Name, face: match.Face})
 		}
 	}
 	for index := range r.fontFS {
 		for _, match := range r.matchFontFS(index, nil, bold, italic) {
-			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: match.name, face: match.face})
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: match.Name, face: match.Face})
 		}
 	}
 	for index, fsys := range r.fontFS {
@@ -294,39 +294,39 @@ func appendFontSource(sources []fontSource, seen map[fontSourceKey]bool, source 
 
 // matchFontFiles 查找字体文件
 // 入参: dir 字体目录, names 字体名称, bold 是否粗体, italic 是否斜体
-// 返回: []fontFileMatch 字体匹配列表
-func (r *Renderer) matchFontFiles(dir string, names []string, bold, italic bool) []fontFileMatch {
+// 返回: []basefont.FileMatch 字体匹配列表
+func (r *Renderer) matchFontFiles(dir string, names []string, bold, italic bool) []basefont.FileMatch {
 	candidates, ok := r.fontSourcesCache.directories[dir]
 	if !ok {
 		files, _ := filepath.Glob(filepath.Join(dir, "*"))
-		candidates = fontFileCandidates(files, filepath.Base)
+		candidates = basefont.FileCandidates(files, filepath.Base)
 		for i, candidate := range candidates {
-			file, err := os.Open(candidate.name)
+			file, err := os.Open(candidate.Name)
 			if err != nil {
 				continue
 			}
-			candidates = appendFontFileNames(candidates, i, basefont.FileNames(file))
+			candidates = basefont.AppendFileNames(candidates, i, basefont.FileNames(file))
 			file.Close()
 		}
 		r.fontSourcesCache.directories[dir] = candidates
 	}
-	return fontFileMatches(candidates, names, bold, italic)
+	return basefont.FileMatches(candidates, names, bold, italic)
 }
 
 // matchFontFS 匹配字体文件系统中的字体名称
 // 入参: index 字体文件系统索引, names 字体名称, bold 是否粗体, italic 是否斜体
-// 返回: []fontFileMatch 字体匹配列表
-func (r *Renderer) matchFontFS(index int, names []string, bold, italic bool) []fontFileMatch {
+// 返回: []basefont.FileMatch 字体匹配列表
+func (r *Renderer) matchFontFS(index int, names []string, bold, italic bool) []basefont.FileMatch {
 	fsys := r.fontFS[index]
 	if fonts, ok := fsys.(*FontFS); ok {
-		return fonts.matchStyle(names, bold, italic)
+		return basefont.FileMatches(fonts.candidates, names, bold, italic)
 	}
 	candidates, ok := r.fontSourcesCache.filesystems[index]
 	if !ok {
 		files, _ := fs.Glob(fsys, "*")
-		candidates = fontFileCandidates(files, path.Base)
+		candidates = basefont.FileCandidates(files, path.Base)
 		for i, candidate := range candidates {
-			file, err := fsys.Open(candidate.name)
+			file, err := fsys.Open(candidate.Name)
 			if err != nil {
 				continue
 			}
@@ -335,12 +335,12 @@ func (r *Renderer) matchFontFS(index int, names []string, bold, italic bool) []f
 				data, _ := io.ReadAll(file)
 				reader = bytes.NewReader(data)
 			}
-			candidates = appendFontFileNames(candidates, i, basefont.FileNames(reader))
+			candidates = basefont.AppendFileNames(candidates, i, basefont.FileNames(reader))
 			file.Close()
 		}
 		r.fontSourcesCache.filesystems[index] = candidates
 	}
-	return fontFileMatches(candidates, names, bold, italic)
+	return basefont.FileMatches(candidates, names, bold, italic)
 }
 
 // systemFontDirs 获取系统字体目录
@@ -378,8 +378,8 @@ func systemFontDirs() []string {
 }
 
 // indexSystemFonts 递归读取系统字体名称，保留集合索引
-// 返回: []fontFileCandidate 字体候选
-func indexSystemFonts() []fontFileCandidate {
+// 返回: []basefont.FileCandidate 字体候选
+func indexSystemFonts() []basefont.FileCandidate {
 	var files []string
 	seen := make(map[string]bool)
 	for _, dir := range systemFontDirs() {
@@ -391,13 +391,13 @@ func indexSystemFonts() []fontFileCandidate {
 			return nil
 		})
 	}
-	candidates := fontFileCandidates(files, filepath.Base)
+	candidates := basefont.FileCandidates(files, filepath.Base)
 	for i, candidate := range candidates {
-		file, err := os.Open(candidate.name)
+		file, err := os.Open(candidate.Name)
 		if err != nil {
 			continue
 		}
-		candidates = appendFontFileNames(candidates, i, basefont.FileNames(file))
+		candidates = basefont.AppendFileNames(candidates, i, basefont.FileNames(file))
 		file.Close()
 	}
 	return candidates

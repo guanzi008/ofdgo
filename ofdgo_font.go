@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	"path"
 	"unicode/utf8"
 
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
@@ -66,4 +67,39 @@ func (f FontFile) MissingGlyphs(index int, text string) (string, error) {
 		return "", err
 	}
 	return basefont.MissingGlyphs(data, text)
+}
+
+// FontNormalizeName 规范化字体名称
+// 入参: name 字体名称
+// 返回: string 规范化后的字体名称
+func FontNormalizeName(name string) string {
+	return basefont.NormalizeName(name)
+}
+
+// FontCandidateNames 获取字体候选名称
+// 入参: names 字体名称列表
+// 返回: []string 字体候选名称列表
+func FontCandidateNames(names ...string) []string {
+	return basefont.CandidateNames(names...)
+}
+
+// FontFilePatterns 获取字体文件匹配模式
+// 入参: names 字体名称列表
+// 返回: []string 字体文件匹配模式
+func FontFilePatterns(names ...string) []string {
+	return basefont.FilePatterns(names...)
+}
+
+// FontSystemNames 获取系统字体名称
+// 入参: names 字体名称列表
+// 返回: []string 系统字体名称
+func FontSystemNames(names ...string) []string {
+	return basefont.SystemNames(names...)
+}
+
+// FontFileMatches 匹配指定样式的字体文件名称
+// 入参: files 可用字体文件名, bold 是否粗体, italic 是否斜体, names 字体名称，留空匹配默认回退字体
+// 返回: []string 按优先级排列的匹配文件名
+func FontFileMatches(files []string, bold, italic bool, names ...string) []string {
+	return basefont.FileMatchNames(basefont.FileMatches(basefont.FileCandidates(files, path.Base), names, bold, italic))
 }

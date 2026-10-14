@@ -114,17 +114,17 @@ func (c *pdfCompositor) shadingPattern(pattern *pdfgo.ShadingPattern, node pdfCo
 		}
 		remaining := 1.0
 		if shape != 0 {
-			remaining -= math.Min(1, result[i].shape/shape)
+			remaining -= math.Min(1, result[i].Shape/shape)
 		}
-		alpha := result[i].alpha + background[i].alpha*remaining
+		alpha := result[i].Alpha + background[i].Alpha*remaining
 		if alpha != 0 {
 			for j := 0; j < space.Components(); j++ {
-				result[i].values[j] = (result[i].values[j]*result[i].alpha + background[i].values[j]*background[i].alpha*remaining) / alpha
+				result[i].Values[j] = (result[i].Values[j]*result[i].Alpha + background[i].Values[j]*background[i].Alpha*remaining) / alpha
 			}
 		}
-		result[i].alpha, result[i].effect = alpha, alpha
-		result[i].shape += background[i].shape * remaining
-		if channels != nil && background[i].shape*remaining > 0 {
+		result[i].Alpha, result[i].Effect = alpha, alpha
+		result[i].Shape += background[i].Shape * remaining
+		if channels != nil && background[i].Shape*remaining > 0 {
 			channels[i] |= backgroundChannels[i]
 		}
 	}
@@ -190,7 +190,7 @@ func (c *pdfCompositor) shadingSourcePixels(node pdfCompositeNode, backdrop []pd
 		}
 	}()
 	for i, pixel := range backdrop {
-		result[i] = pdfCompositePixel{values: pixel.values, alpha: pixel.alpha}
+		result[i] = pdfCompositePixel{Values: pixel.Values, Alpha: pixel.Alpha}
 	}
 	if err := c.drawMark(node, result, space); err != nil {
 		return nil, err
@@ -202,12 +202,12 @@ func (c *pdfCompositor) shadingSourcePixels(node pdfCompositeNode, backdrop []pd
 			}
 		}
 		pixel := &result[i]
-		if pixel.effect != 0 {
+		if pixel.Effect != 0 {
 			for j := 0; j < space.Components(); j++ {
-				pixel.values[j] = math.Max(0, math.Min(1, (pixel.values[j]*pixel.alpha-backdrop[i].values[j]*backdrop[i].alpha*(1-pixel.effect))/pixel.effect))
+				pixel.Values[j] = math.Max(0, math.Min(1, (pixel.Values[j]*pixel.Alpha-backdrop[i].Values[j]*backdrop[i].Alpha*(1-pixel.Effect))/pixel.Effect))
 			}
 		}
-		pixel.alpha = pixel.effect
+		pixel.Alpha = pixel.Effect
 	}
 	complete = true
 	return result, nil

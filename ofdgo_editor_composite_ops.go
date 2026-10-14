@@ -18,10 +18,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"maps"
 	"slices"
 
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
@@ -365,4 +365,80 @@ func (e *Editor) collectCompositeIDs(node *editorXML, ids map[string]string) err
 		}
 	}
 	return nil
+}
+
+// Style 获取内部成员的独立样式快照，文字和路径CTM只表达页面描边倍率
+// 可传入CopyStyle或CopyCompositeStyle，不作为几何复制快照
+// 返回: GraphicObject 有效样式来源
+func (m CompositeMember) Style() GraphicObject {
+	object := cloneEditorData(m.Object)
+	if object.Type == "PathObject" {
+		object.PathObject.CTM = Matrix{a: m.StrokeScale, d: m.StrokeScale}.String()
+	} else if object.Type == "TextObject" {
+		object.TextObject.CTM = Matrix{a: m.StrokeScale, d: m.StrokeScale}.String()
+	}
+	return object
+}
+
+// CopyCompositeStyle 将同类型样式复制到内部选区，保留内容、位置、裁剪及其他实例
+// 描边复制页面实际线宽和虚线，文字沿用目标段落和基线，全部成功后提交一次撤销
+// 入参: page 页面索引, path 父路径, indexes 成员序号, source Object或CompositeMember.Style取得的样式快照
+// 返回: error 错误信息
+func (e *Editor) CopyCompositeStyle(page int, path ObjectPath, indexes []int, source GraphicObject) error {
+	if err := e.validateCopyStyle(source); err != nil {
+		return err
+	}
+	return e.editCompositeObjects(page, path, indexes, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
+		if len(nodes) == 0 {
+			return nil
+		}
+		var err error
+		source, err = e.explicitDefaultPaint(source)
+		if err != nil {
+			return err
+		}
+		for i, node := range nodes {
+			member := members[i]
+			if node.object.Type != source.Type || !member.Capabilities.Transform || source.Type != "ImageObject" && !member.Capabilities.Paint {
+				return fmt.Errorf("style requires editable members of the same type")
+			}
+			object := cloneEditorData(member.Object)
+			switch source.Type {
+			case "TextObject":
+				if err := e.updateCompositeText(node, member, nil, TextStyle{Font: source.TextObject.Font, Size: source.TextObject.Size}, nil, nil); err != nil {
+					return err
+				}
+				var err error
+				object, err = e.compositeMemberStyle(node)
+				if err != nil {
+					return err
+				}
+				style := copyEditorPathStyle(object.TextObject.pathStyle(), source.TextObject.pathStyle(), editorStrokeScale(source.TextObject.CTM)/member.StrokeScale)
+				if err := validateEditorStroke(style); err != nil {
+					return err
+				}
+				object.TextObject = object.TextObject.withPathStyle(style)
+				object.TextObject.DrawParam, err = e.neutralDrawParam()
+				if err != nil {
+					return err
+				}
+			case "PathObject":
+				object.PathObject = copyEditorPathStyle(object.PathObject, source.PathObject, editorStrokeScale(source.PathObject.CTM)/member.StrokeScale)
+				if err := validateEditorStroke(object.PathObject); err != nil {
+					return err
+				}
+				var err error
+				object.PathObject.DrawParam, err = e.neutralDrawParam()
+				if err != nil {
+					return err
+				}
+			case "ImageObject":
+				object.ImageObject.Alpha = cloneEditorData(source.ImageObject.Alpha)
+			}
+			if err := node.update(object); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

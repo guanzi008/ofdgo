@@ -71,7 +71,7 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 				return nil, err
 			}
 		}
-		result[i] = pdfCompositePixel{values: pixel.values, alpha: pixel.alpha}
+		result[i] = pdfCompositePixel{Values: pixel.Values, Alpha: pixel.Alpha}
 	}
 	candidate := c.acquirePixels(len(backdrop))
 	defer c.releasePixels(candidate)
@@ -113,7 +113,7 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 					if disjoint {
 						initial = backdrop[index]
 					}
-					pixels[y*width+x] = pdfCompositePixel{values: initial.values, alpha: initial.alpha}
+					pixels[y*width+x] = pdfCompositePixel{Values: initial.Values, Alpha: initial.Alpha}
 					if cellChannels != nil {
 						cellChannels[y*width+x] = 0
 						if !disjoint {
@@ -136,7 +136,7 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 				for x := range width {
 					index := (top+y)*c.width + left + x
 					pdfCompositePatternCell(&result[index], backdrop[index], pixels[y*width+x], disjoint)
-					if channels != nil && pixels[y*width+x].shape != 0 {
+					if channels != nil && pixels[y*width+x].Shape != 0 {
 						if disjoint {
 							channels[index] |= cellChannels[y*width+x]
 						} else {
@@ -154,12 +154,12 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 			}
 		}
 		pixel := &result[i]
-		if pixel.effect != 0 {
+		if pixel.Effect != 0 {
 			for j := 0; j < space.Components(); j++ {
-				pixel.values[j] = math.Max(0, math.Min(1, (pixel.values[j]*pixel.alpha-backdrop[i].values[j]*backdrop[i].alpha*(1-pixel.effect))/pixel.effect))
+				pixel.Values[j] = math.Max(0, math.Min(1, (pixel.Values[j]*pixel.Alpha-backdrop[i].Values[j]*backdrop[i].Alpha*(1-pixel.Effect))/pixel.Effect))
 			}
 		}
-		pixel.alpha = pixel.effect
+		pixel.Alpha = pixel.Effect
 	}
 	complete = true
 	return result, nil
@@ -168,23 +168,23 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 // pdfCompositePatternCell 合并互不重叠单元的覆盖贡献，避免相邻抗锯齿边缘重复混合
 // 入参: target 图案累计结果, initial 原始背景, source 单元结果, disjoint 单元边界是否互不重叠
 func pdfCompositePatternCell(target *pdfCompositePixel, initial, source pdfCompositePixel, disjoint bool) {
-	if source.shape == 0 {
+	if source.Shape == 0 {
 		return
 	}
 	if disjoint {
-		alpha := math.Max(0, math.Min(1, target.alpha+source.alpha-initial.alpha))
+		alpha := math.Max(0, math.Min(1, target.Alpha+source.Alpha-initial.Alpha))
 		if alpha != 0 {
-			for i := range target.values {
-				target.values[i] = (target.values[i]*target.alpha + source.values[i]*source.alpha - initial.values[i]*initial.alpha) / alpha
+			for i := range target.Values {
+				target.Values[i] = (target.Values[i]*target.Alpha + source.Values[i]*source.Alpha - initial.Values[i]*initial.Alpha) / alpha
 			}
 		}
-		target.alpha = alpha
-		target.effect = math.Min(1, target.effect+source.effect)
-		target.shape = math.Min(1, target.shape+source.shape)
+		target.Alpha = alpha
+		target.Effect = math.Min(1, target.Effect+source.Effect)
+		target.Shape = math.Min(1, target.Shape+source.Shape)
 	} else {
-		target.values, target.alpha = source.values, source.alpha
-		target.effect += source.effect * (1 - target.effect)
-		target.shape += source.shape * (1 - target.shape)
+		target.Values, target.Alpha = source.Values, source.Alpha
+		target.Effect += source.Effect * (1 - target.Effect)
+		target.Shape += source.Shape * (1 - target.Shape)
 	}
 }
 

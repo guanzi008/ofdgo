@@ -25,38 +25,14 @@ const (
 	pdfTransferShape    uint8 = 16
 )
 
-// pdfTransferKey 区分图形状态、网屏覆盖函数及输出设备
-type pdfTransferKey struct {
-	transfer *pdfgo.TransferFunction
-	halftone *pdfgo.Halftone
-	model    pdfgo.Name
-}
-
-// resolveTransfer 在页面内复用输出设备的有效函数，不修改原始图形状态
+// resolveTransfer 无设备函数时保留无缓存快速路径，按需绑定单页解析缓存
 // 入参: style 原始图形状态, model 原生设备颜色空间
 // 返回: *pdfgo.TransferFunction 有效函数, error 网屏传递函数错误
 func (p *pdfImporter) resolveTransfer(style pdfgo.Style, model pdfgo.Name) (*pdfgo.TransferFunction, error) {
 	if style.Halftone == nil && style.Transfer == nil {
 		return nil, nil
 	}
-	if model == "" {
-		model = "DeviceRGB"
-	}
-	cache := p.compositingCache()
-	if cache.transfers == nil {
-		cache.transfers = make(map[pdfTransferKey]*pdfgo.TransferFunction)
-	}
-	key := pdfTransferKey{style.Transfer, style.Halftone, model}
-	transfer, found := cache.transfers[key]
-	if !found {
-		var err error
-		transfer, err = p.reader.DeviceTransfer(style.Transfer, style.Halftone, model)
-		if err != nil {
-			return nil, err
-		}
-		cache.transfers[key] = transfer
-	}
-	return transfer, nil
+	return p.compositingCache().transfers.Resolve(p.reader, style, model)
 }
 
 // compositeHasTransfer 检查最终设备使用的通道，不将备用通道误判为有效函数
@@ -132,22 +108,6 @@ func (c *pdfCompositor) selectTransfer(node pdfCompositeNode, outline bool) (*pd
 		}
 	}
 	return transfer, nil
-}
-
-// pdfPaintChannels 选择兼容叠印实际使用源颜色的通道
-// 入参: values 源四色分量, compatible 是否保留零分量背景, marked 指定通道，nil表示全部
-// 返回: [4]bool 各通道是否取源颜色
-func pdfPaintChannels(values [4]float64, compatible bool, marked *[4]bool) [4]bool {
-	channels := [4]bool{true, true, true, true}
-	if marked != nil {
-		channels = *marked
-	}
-	if compatible {
-		for i := range channels {
-			channels[i] = channels[i] && values[i] != 0
-		}
-	}
-	return channels
 }
 
 // opaqueTransfer 复用图案不透明性检查，图案内部函数不提前作用于源颜色

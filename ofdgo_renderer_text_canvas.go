@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/tdewolff/canvas"
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 )
 
@@ -138,7 +139,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	embeddedFont := false
 	if of := r.Reader.fontDefinition(fontID); of != nil {
 		embeddedFont = of.FontFile != ""
-		if syntheticBold && !embeddedFont && fontNoSyntheticBold(of.FontName, of.FamilyName) {
+		if syntheticBold && !embeddedFont && basefont.NoSyntheticBold(of.FontName, of.FamilyName) {
 			syntheticBold = false
 		}
 		if of.Bold {

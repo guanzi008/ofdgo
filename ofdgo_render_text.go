@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"math"
 	"strings"
@@ -133,7 +134,7 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 	bold := weight >= 700
 	if definition := r.Reader.fontDefinition(id); definition != nil {
 		bold = bold && !definition.Bold
-		if definition.FontFile == "" && fontNoSyntheticBold(definition.FontName, definition.FamilyName) {
+		if definition.FontFile == "" && basefont.NoSyntheticBold(definition.FontName, definition.FamilyName) {
 			bold = false
 		}
 		italic = italic && !definition.Italic

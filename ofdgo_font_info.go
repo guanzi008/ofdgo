@@ -129,7 +129,7 @@ func (r *Reader) fontData(id string, readonly bool) ([]byte, error) {
 		return nil, err
 	}
 	if bytes.HasPrefix(data, []byte("ttcf")) {
-		index := fontCollectionIndex(data, []string{f.FontName, f.FamilyName}, f.Bold, f.Italic)
+		index := basefont.CollectionIndex(data, []string{f.FontName, f.FamilyName}, f.Bold, f.Italic)
 		return basefont.ExtractCollectionFont(data, index)
 	}
 	return data, nil
@@ -268,7 +268,7 @@ func (r *Reader) embeddedFontFace(of Font) (*FontFace, error) {
 			names[index] = face.Names
 		}
 	}
-	index := fontNameIndex(names, []string{of.FontName, of.FamilyName}, of.Bold, of.Italic)
+	index := basefont.NameIndex(names, []string{of.FontName, of.FamilyName}, of.Bold, of.Italic)
 	if faces[index] == nil {
 		return nil, nil
 	}

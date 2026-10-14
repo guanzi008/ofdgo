@@ -20,6 +20,7 @@ import (
 	"slices"
 
 	"github.com/tdewolff/canvas"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
 // clipRenderer 收集图形和文字的绘制轮廓
@@ -260,6 +261,117 @@ func intersectClipPath(parent, current *canvas.Path) *canvas.Path {
 		return result.Settle(canvas.NonZero)
 	}
 	return parent.And(current)
+}
+
+// intersectConvexCanvasPaths 逐边裁剪单个凸多边形，避免仿射矩形共边进入曲线扫线
+// 入参: left 左侧路径, right 右侧路径
+// 返回: *canvas.Path 交集路径, bool 是否适用凸多边形裁剪
+func intersectConvexCanvasPaths(left, right *canvas.Path) (*canvas.Path, bool) {
+	a, ok := convexCanvasPolygon(left)
+	if !ok {
+		return nil, false
+	}
+	b, ok := convexCanvasPolygon(right)
+	if !ok {
+		return nil, false
+	}
+	return intersectCanvasPolygons(a, b)
+}
+
+// intersectLinearCanvasContours 精确裁剪直线轮廓，不展开曲线或改变填充绕数
+// 入参: path 绘制路径, clip 单个凸裁剪窗口
+// 返回: *canvas.Path 交集路径, bool 是否适用直线轮廓裁剪
+func intersectLinearCanvasContours(path, clip *canvas.Path) (*canvas.Path, bool) {
+	if path == nil {
+		return nil, false
+	}
+	data := path.Data()
+	for i := 0; i < len(data); i += 4 {
+		if i+4 > len(data) || data[i] != canvas.MoveToCmd && data[i] != canvas.LineToCmd && data[i] != canvas.CloseCmd {
+			return nil, false
+		}
+	}
+	return intersectCanvasContours(path, clip)
+}
+
+// intersectCanvasContours 按凸窗口裁剪闭合轮廓，保留绕向、孔洞和重叠透明度
+// 入参: path 绘制路径, clip 单个凸裁剪路径
+// 返回: *canvas.Path 交集路径, bool 是否适用分段裁剪
+func intersectCanvasContours(path, clip *canvas.Path) (*canvas.Path, bool) {
+	if path == nil {
+		return nil, false
+	}
+	b, ok := convexCanvasPolygon(clip)
+	if !ok {
+		return nil, false
+	}
+	parts := path.Split()
+	polygons := make([][]canvas.Point, 0, len(parts))
+	for _, part := range parts {
+		part = part.Flatten(canvas.Tolerance)
+		if !part.Closed() {
+			return nil, false
+		}
+		a := part.Coords()
+		if len(a) < 4 || a[0] != a[len(a)-1] {
+			continue
+		}
+		for _, point := range a {
+			if !finite(point.X) || !finite(point.Y) {
+				return nil, false
+			}
+		}
+		polygons = append(polygons, a[:len(a)-1])
+	}
+	result := &canvas.Path{}
+	for _, polygon := range polygons {
+		part, ok := intersectCanvasPolygons(polygon, b)
+		if !ok {
+			return nil, false
+		}
+		result = result.Append(part)
+	}
+	return result, true
+}
+
+// intersectCanvasPolygons 按凸窗口逐边裁剪多边形，保留原顶点绕向
+// 入参: a 绘制顶点, b 裁剪顶点
+// 返回: *canvas.Path 交集路径, bool 是否满足数值精度
+func intersectCanvasPolygons(a, b []canvas.Point) (*canvas.Path, bool) {
+	a, ok := basegeom.ClipPolygon(a, b)
+	if !ok {
+		return nil, false
+	}
+	result := &canvas.Path{}
+	if len(a) >= 3 {
+		result.MoveTo(a[0].X, a[0].Y)
+		for _, p := range a[1:] {
+			result.LineTo(p.X, p.Y)
+		}
+		result.Close()
+	}
+	return result, true
+}
+
+// convexCanvasPolygon 检查单个闭合直线轮廓的所有顶点位于各边的同一侧
+// 入参: path 路径
+// 返回: []canvas.Point 独立顶点, bool 是否为非退化凸多边形
+func convexCanvasPolygon(path *canvas.Path) ([]canvas.Point, bool) {
+	if path == nil || path.HasSubpaths() || !path.Closed() {
+		return nil, false
+	}
+	data := path.Data()
+	for i := 0; i < len(data); i += 4 {
+		if i+4 > len(data) || data[i] != canvas.MoveToCmd && data[i] != canvas.LineToCmd && data[i] != canvas.CloseCmd {
+			return nil, false
+		}
+	}
+	points := path.Coords()
+	if len(points) < 4 || points[0] != points[len(points)-1] {
+		return nil, false
+	}
+	points = points[:len(points)-1]
+	return basegeom.ConvexPolygon(points)
 }
 
 // unionClipPath 合并裁剪区域

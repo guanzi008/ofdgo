@@ -20,7 +20,19 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"image"
+	"math"
+	"math/big"
 )
+
+// PNGDensityChunkSize 为PNG像素密度块占用的字节数
+const PNGDensityChunkSize = 21
+
+// Density 保存横纵像素密度，Unit为0表示比例、1表示每米像素数
+type Density struct {
+	X, Y float64
+	Unit byte
+}
 
 // PageInfo 图片方向与像素密度，不改变原始编码
 type PageInfo struct {
@@ -231,4 +243,180 @@ func imageExifMetadata(data []byte, dpi float64, directory uint32) (int, float64
 		x, y = 0, 0
 	}
 	return orientation, x, y, nil
+}
+
+// BMPDensity 提取已校验BMP头中的每米像素数
+// 入参: data 含至少40字节信息头的BMP编码
+// 返回: Density 像素密度, bool 密度是否可保留
+func BMPDensity(data []byte) (Density, bool) {
+	xdpi, ydpi := int32(binary.LittleEndian.Uint32(data[38:42])), int32(binary.LittleEndian.Uint32(data[42:46]))
+	if xdpi < 0 || ydpi < 0 {
+		return Density{}, false
+	}
+	return Density{X: float64(xdpi), Y: float64(ydpi), Unit: 1}, true
+}
+
+// TIFFConversionDensity 校验可转换的TIFF字段并提取规范化后的像素密度
+// 色彩配置、预乘透明度、扩展字段及其他目录需保留原始编码
+// 入参: data TIFF编码, layout 已校验的主图布局
+// 返回: Density PNG像素密度, bool 是否可完整转换
+func TIFFConversionDensity(data []byte, layout TIFFLayout) (Density, bool) {
+	var density Density
+	var order binary.ByteOrder = binary.LittleEndian
+	if data[0] == 'M' {
+		order = binary.BigEndian
+	}
+	if layout.Next != 0 || layout.Offset != order.Uint32(data[4:]) || layout.Reduced {
+		return density, false
+	}
+	offset := int(layout.Offset)
+	count := int(order.Uint16(data[offset:]))
+	unit := uint32(2)
+	var resolutions [2][2]uint32
+	for i := range count {
+		entry := data[offset+2+i*12 : offset+14+i*12]
+		tag, kind, number := order.Uint16(entry), order.Uint16(entry[2:]), order.Uint32(entry[4:])
+		value := order.Uint32(entry[8:])
+		if kind == 3 && number == 1 {
+			value = uint32(order.Uint16(entry[8:]))
+		}
+		switch tag {
+		case 256, 257, 258, 259, 273, 274, 277, 278, 279, 320, 322, 323, 324, 325:
+		case 262:
+			if value == 5 {
+				return density, false
+			}
+		case 254:
+			if value != 0 {
+				return density, false
+			}
+		case 255:
+			if value != 1 {
+				return density, false
+			}
+		case 266:
+			if kind != 3 || number != 1 || value != 1 && value != 2 {
+				return density, false
+			}
+		case 284:
+			if kind != 3 || number != 1 || value != 1 && value != 2 {
+				return density, false
+			}
+		case 292, 293:
+			mask := uint32(7)
+			if tag == 293 {
+				mask = 2
+			}
+			if kind != 4 || number != 1 || value & ^mask != 0 {
+				return density, false
+			}
+		case 317:
+			if kind != 3 || number != 1 || value != 1 && value != 2 {
+				return density, false
+			}
+		case 338:
+			if kind != 3 || number != 1 || value != 2 {
+				return density, false
+			}
+		case 339:
+			if kind != 3 || number == 0 || number > 4 {
+				return density, false
+			}
+			values := entry[8:]
+			if number > 2 {
+				if uint64(value)+uint64(number)*2 > uint64(len(data)) {
+					return density, false
+				}
+				values = data[value:]
+			}
+			for j := uint32(0); j < number; j++ {
+				if order.Uint16(values[j*2:]) != 1 {
+					return density, false
+				}
+			}
+		case 282, 283:
+			if kind != 5 || number != 1 || uint64(value)+8 > uint64(len(data)) {
+				return density, false
+			}
+			resolutions[tag-282] = [2]uint32{order.Uint32(data[value:]), order.Uint32(data[value+4:])}
+		case 296:
+			if kind != 3 || number != 1 || value < 1 || value > 3 {
+				return density, false
+			}
+			unit = value
+		default:
+			return density, false
+		}
+	}
+	if resolutions == [2][2]uint32{} {
+		return density, true
+	}
+	x, y := resolutions[0], resolutions[1]
+	if x[0] == 0 || x[1] == 0 || y[0] == 0 || y[1] == 0 {
+		return density, false
+	}
+	if unit == 1 {
+		a, b := uint64(x[0])*uint64(y[1]), uint64(y[0])*uint64(x[1])
+		divisor, next := a, b
+		for next != 0 {
+			divisor, next = next, divisor%next
+		}
+		density.X, density.Y = float64(a/divisor), float64(b/divisor)
+	} else {
+		factor := 1 / 0.0254
+		if unit == 3 {
+			factor = 100
+		}
+		density = Density{X: float64(x[0]) / float64(x[1]) * factor, Y: float64(y[0]) / float64(y[1]) * factor, Unit: 1}
+	}
+	if math.Round(density.X) < 1 || math.Round(density.Y) < 1 || math.Round(density.X) > math.MaxInt32 || math.Round(density.Y) > math.MaxInt32 {
+		return density, false
+	}
+	if layout.Orientation >= 5 {
+		density.X, density.Y = density.Y, density.X
+	}
+	return density, true
+}
+
+// Scale 按最终像素尺寸保留绝对密度或精确相对比例
+// 入参: before 原始像素尺寸, after 最终像素尺寸
+// 返回: Density 缩放后密度, bool 相对比例是否可完整保留
+func (density Density) Scale(before, after image.Point) (Density, bool) {
+	hasDensity := density.X != 0 || density.Y != 0
+	if hasDensity && before != after {
+		if density.Unit == 0 {
+			ratio := new(big.Rat).SetFrac64(int64(density.X)*int64(after.X), int64(density.Y)*int64(after.Y))
+			ratio.Mul(ratio, new(big.Rat).SetFrac64(int64(before.Y), int64(before.X)))
+			if ratio.Num().BitLen() > 31 || ratio.Denom().BitLen() > 31 {
+				return density, false
+			}
+			density.X, density.Y = float64(ratio.Num().Int64()), float64(ratio.Denom().Int64())
+		} else {
+			density.X *= float64(after.X) / float64(before.X)
+			density.Y *= float64(after.Y) / float64(before.Y)
+		}
+	}
+	return density, true
+}
+
+// WithPNGDensity 在无密度块的PNG头后插入pHYs，保留源编码不变
+// 入参: data 完整PNG编码, density 像素密度
+// 返回: []byte 带密度的编码, bool 密度是否可完整保留
+func WithPNGDensity(data []byte, density Density) ([]byte, bool) {
+	x, y := math.Round(density.X), math.Round(density.Y)
+	if x > math.MaxInt32 || y > math.MaxInt32 || density.X > 0 && x < 1 || density.Y > 0 && y < 1 {
+		return nil, false
+	}
+	chunk := make([]byte, 21)
+	binary.BigEndian.PutUint32(chunk, 9)
+	copy(chunk[4:], "pHYs")
+	binary.BigEndian.PutUint32(chunk[8:], uint32(x))
+	binary.BigEndian.PutUint32(chunk[12:], uint32(y))
+	chunk[16] = density.Unit
+	binary.BigEndian.PutUint32(chunk[17:], crc32.ChecksumIEEE(chunk[4:17]))
+	output := make([]byte, 0, len(data)+PNGDensityChunkSize)
+	output = append(output, data[:33]...)
+	output = append(output, chunk...)
+	output = append(output, data[33:]...)
+	return output, true
 }

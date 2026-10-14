@@ -48,44 +48,7 @@ type FontFS struct {
 	files      map[string][]byte
 	loaders    map[string]func() ([]byte, error)
 	names      []string
-	candidates []fontFileCandidate
-}
-
-// fontFileCandidate 字体文件候选
-type fontFileCandidate struct {
-	name       string
-	face       int
-	base       string
-	lowerBase  string
-	filename   string
-	normalized string
-	names      []string
-	fold       string
-}
-
-// fontPatternMatcher 字体文件匹配器
-type fontPatternMatcher struct {
-	pattern      string
-	lowerPattern string
-	stem         string
-	aliases      []string
-	priority     int
-}
-
-// fontFileMatch 字体文件匹配结果
-type fontFileMatch struct {
-	name      string
-	face      int
-	priority  int
-	rank      int
-	styleRank int
-	sortName  string
-}
-
-// fontFileKey 字体文件与集合索引的去重键
-type fontFileKey struct {
-	name string
-	face int
+	candidates []basefont.FileCandidate
 }
 
 // fontMemFile 内存字体文件
@@ -130,9 +93,9 @@ func NewFontFS(fonts []FontFile) *FontFS {
 		fsys.files[name] = append([]byte(nil), font.Data...)
 	}
 	sort.Strings(fsys.names)
-	fsys.candidates = fontFileCandidates(fsys.names, path.Base)
+	fsys.candidates = basefont.FileCandidates(fsys.names, path.Base)
 	for i, file := range fsys.candidates {
-		fsys.candidates = appendFontFileNames(fsys.candidates, i, basefont.FileNames(bytes.NewReader(fsys.files[file.name])))
+		fsys.candidates = basefont.AppendFileNames(fsys.candidates, i, basefont.FileNames(bytes.NewReader(fsys.files[file.Name])))
 	}
 	return fsys
 }
@@ -159,7 +122,7 @@ func NewLazyFontFS(names []string, load func(string) ([]byte, error)) *FontFS {
 		})
 	}
 	sort.Strings(fsys.names)
-	fsys.candidates = fontFileCandidates(fsys.names, path.Base)
+	fsys.candidates = basefont.FileCandidates(fsys.names, path.Base)
 	return fsys
 }
 
@@ -238,21 +201,14 @@ func (fsys *FontFS) Match(names ...string) (string, bool) {
 // 返回: string 匹配字体文件, bool 是否为名称匹配
 func (fsys *FontFS) MatchStyle(bold, italic bool, names ...string) (string, bool) {
 	if len(names) > 0 {
-		if matches := fsys.matchStyle(names, bold, italic); len(matches) > 0 {
-			return matches[0].name, true
+		if matches := basefont.FileMatches(fsys.candidates, names, bold, italic); len(matches) > 0 {
+			return matches[0].Name, true
 		}
 	}
 	if matches := fsys.fallbackFonts(bold, italic); len(matches) > 0 {
 		return matches[0], false
 	}
 	return "", false
-}
-
-// FontFileMatches 匹配指定样式的字体文件名称
-// 入参: files 可用字体文件名, bold 是否粗体, italic 是否斜体, names 字体名称，留空匹配默认回退字体
-// 返回: []string 按优先级排列的匹配文件名
-func FontFileMatches(files []string, bold, italic bool, names ...string) []string {
-	return fontFileMatchNames(fontFileMatches(fontFileCandidates(files, path.Base), names, bold, italic))
 }
 
 // MatchFontFiles 按文档字体名称和样式选择首选文件，未声明的使用编号按默认规则回退
@@ -268,19 +224,19 @@ func (r *Reader) MatchFontFiles(files []string, ids ...string) ([]string, error)
 			fonts = append(fonts, Font{ID: id})
 		}
 	}
-	candidates := fontFileCandidates(files, path.Base)
+	candidates := basefont.FileCandidates(files, path.Base)
 	names := make([]string, 0, len(fonts))
 	seen := make(map[string]bool)
 	for _, font := range fonts {
 		if font.FontFile != "" {
 			continue
 		}
-		matches := fontFileMatches(candidates, []string{font.FontName, font.FamilyName}, font.Bold, font.Italic)
+		matches := basefont.FileMatches(candidates, []string{font.FontName, font.FamilyName}, font.Bold, font.Italic)
 		if len(matches) == 0 {
-			matches = fontFileMatches(candidates, nil, font.Bold, font.Italic)
+			matches = basefont.FileMatches(candidates, nil, font.Bold, font.Italic)
 		}
 		if len(matches) > 0 {
-			name := matches[0].name
+			name := matches[0].Name
 			if !seen[name] {
 				names = append(names, name)
 				seen[name] = true
@@ -405,68 +361,12 @@ func (i fontFileInfo) Sys() any {
 	return nil
 }
 
-// matchStyle 匹配指定样式的字体名称
-// 入参: names 字体名称列表, bold 是否粗体, italic 是否斜体
-// 返回: []fontFileMatch 字体匹配列表
-func (fsys *FontFS) matchStyle(names []string, bold, italic bool) []fontFileMatch {
-	return fontFileMatches(fsys.candidates, names, bold, italic)
-}
-
-// fontFileMatches 匹配字体文件候选
-// 入参: candidates 字体候选, names 字体名称, bold 是否粗体, italic 是否斜体
-// 返回: []fontFileMatch 按优先级排列的字体匹配
-func fontFileMatches(candidates []fontFileCandidate, names []string, bold, italic bool) []fontFileMatch {
-	matches := make([]fontFileMatch, 0, len(candidates))
-	seen := make(map[fontFileKey]int, len(candidates))
-	if len(names) == 0 {
-		for _, name := range fontDefaultSystemNames() {
-			matches = append(matches, fontFileMatches(candidates, []string{name}, bold, italic)...)
-		}
-		sort.SliceStable(matches, func(i, j int) bool {
-			return matches[i].rank < matches[j].rank
-		})
-		unique := matches[:0]
-		for _, match := range matches {
-			key := fontFileKey{strings.ToLower(match.name), match.face}
-			if _, ok := seen[key]; !ok {
-				seen[key] = len(unique)
-				unique = append(unique, match)
-			}
-		}
-		return unique
-	}
-	for i, name := range names {
-		if name == "" {
-			continue
-		}
-		for j, alias := range append([]string{name}, fontQualifiedNames(name)...) {
-			matcher := fontPatternMatcher{stem: basefont.NormalizeName(alias), priority: (i-len(names))*2 + min(j, 1)}
-			if matcher.stem == "" {
-				continue
-			}
-			for _, file := range candidates {
-				if rank := matcher.rankCandidate(file); rank == fontMatchExact {
-					appendFontFileMatch(&matches, seen, matcher, file, rank, bold, italic)
-				}
-			}
-		}
-	}
-	for _, matcher := range newFontPatternMatchers(fontFilePatterns(names...)) {
-		for _, file := range candidates {
-			rank := matcher.rankCandidate(file)
-			appendFontFileMatch(&matches, seen, matcher, file, rank, bold, italic)
-		}
-	}
-	sortFontFileMatches(matches)
-	return matches
-}
-
 // fallbackFonts 获取回退字体文件
 // 入参: bold 是否粗体, italic 是否斜体
 // 返回: []string 字体文件列表
 func (fsys *FontFS) fallbackFonts(bold, italic bool) []string {
-	if matches := fsys.matchStyle(nil, bold, italic); len(matches) > 0 {
-		return fontFileMatchNames(matches)
+	if matches := basefont.FileMatches(fsys.candidates, nil, bold, italic); len(matches) > 0 {
+		return basefont.FileMatchNames(matches)
 	}
 	if len(fsys.names) > 0 {
 		return []string{fsys.names[0]}
@@ -501,285 +401,4 @@ func cleanFontName(name string) string {
 		return "."
 	}
 	return strings.ToLower(name)
-}
-
-// fontFileCandidates 筛选字体文件候选
-// 入参: names 文件名列表, base 文件名提取函数
-// 返回: []fontFileCandidate 字体文件候选列表
-func fontFileCandidates(names []string, base func(string) string) []fontFileCandidate {
-	files := make([]fontFileCandidate, 0, len(names))
-	for _, name := range names {
-		if basefont.IsFontFileName(name) {
-			baseName := base(name)
-			normalized := basefont.NormalizeName(strings.TrimSuffix(baseName, path.Ext(baseName)))
-			files = append(files, fontFileCandidate{
-				name:       name,
-				base:       baseName,
-				lowerBase:  strings.ToLower(baseName),
-				filename:   normalized,
-				normalized: normalized,
-				fold:       strings.ToLower(name),
-			})
-		}
-	}
-	return files
-}
-
-// newFontPatternMatcher 创建字体文件匹配器
-// 入参: pattern 匹配模式
-// 返回: fontPatternMatcher 字体文件匹配器
-func newFontPatternMatcher(pattern string) fontPatternMatcher {
-	matcher := fontPatternMatcher{
-		pattern:      pattern,
-		lowerPattern: strings.ToLower(pattern),
-		stem:         fontPatternStem(pattern),
-	}
-	if matcher.stem != "" {
-		for _, alias := range fontExactCandidateNames(matcher.stem) {
-			alias = basefont.NormalizeName(alias)
-			if alias != "" {
-				matcher.aliases = append(matcher.aliases, alias)
-			}
-		}
-	}
-	return matcher
-}
-
-// newFontPatternMatchers 创建字体文件匹配器列表
-// 入参: patterns 匹配模式列表
-// 返回: []fontPatternMatcher 字体文件匹配器列表
-func newFontPatternMatchers(patterns []string) []fontPatternMatcher {
-	matchers := make([]fontPatternMatcher, 0, len(patterns))
-	for priority, pattern := range patterns {
-		matcher := newFontPatternMatcher(pattern)
-		matcher.priority = priority
-		matchers = append(matchers, matcher)
-	}
-	return matchers
-}
-
-// rank 获取字体文件匹配等级
-// 入参: name 字体文件名
-// 返回: int 匹配等级
-func (m fontPatternMatcher) rank(name string) int {
-	return m.rankCandidate(fontFileCandidate{
-		base:       name,
-		lowerBase:  strings.ToLower(name),
-		normalized: basefont.NormalizeName(name),
-	})
-}
-
-// rankCandidate 获取字体文件候选匹配等级
-// 入参: file 字体文件候选
-// 返回: int 匹配等级
-func (m fontPatternMatcher) rankCandidate(file fontFileCandidate) int {
-	exactPath, _ := path.Match(m.pattern, file.base)
-	lowerPath, _ := path.Match(m.lowerPattern, file.lowerBase)
-	if m.stem == "" {
-		if exactPath || lowerPath {
-			return fontMatchFuzzy
-		}
-		return fontMatchNone
-	}
-	name := m.candidateName(file)
-	if name == m.stem {
-		return fontMatchExact
-	}
-	for _, alias := range m.aliases {
-		if name == alias {
-			return fontMatchExact
-		}
-	}
-	if fontFileKnownStyleSuffix(m.styleSuffixNormalized(name)) {
-		return fontMatchExact
-	}
-	if strings.HasPrefix(name, m.stem) {
-		return fontMatchPartial
-	}
-	for _, alias := range m.aliases {
-		if strings.HasPrefix(name, alias) {
-			return fontMatchPartial
-		}
-	}
-	if exactPath || lowerPath || strings.Contains(name, m.stem) {
-		return fontMatchFuzzy
-	}
-	for _, alias := range m.aliases {
-		if strings.Contains(name, alias) {
-			return fontMatchFuzzy
-		}
-	}
-	return fontMatchNone
-}
-
-// candidateName 保留同族内部名称的区分，只有无关联时使用调用方文件别名
-// 入参: file 字体文件候选
-// 返回: string 用于统一匹配名称与样式的规范名称
-func (m fontPatternMatcher) candidateName(file fontFileCandidate) string {
-	if len(file.names) == 0 || file.base == "" || m.stem == "" {
-		return file.normalized
-	}
-	for _, name := range file.names {
-		if strings.HasPrefix(name, m.stem) {
-			return file.normalized
-		}
-		for _, alias := range m.aliases {
-			if strings.HasPrefix(name, alias) {
-				return file.normalized
-			}
-		}
-	}
-	return file.filename
-}
-
-// styleSuffixNormalized 获取规范字体名称的样式后缀
-// 入参: name 规范字体名称
-// 返回: string 样式后缀
-func (m fontPatternMatcher) styleSuffixNormalized(name string) string {
-	if m.stem == "" || name == "" {
-		return ""
-	}
-	if strings.HasPrefix(name, m.stem) {
-		return strings.TrimPrefix(name, m.stem)
-	}
-	for _, alias := range m.aliases {
-		if strings.HasPrefix(name, alias) {
-			return strings.TrimPrefix(name, alias)
-		}
-	}
-	return ""
-}
-
-// appendFontFileMatch 追加字体文件匹配结果
-// 入参: matches 匹配结果, seen 已匹配文件, matcher 匹配器, file 字体文件候选, rank 匹配等级, bold 是否粗体, italic 是否斜体
-func appendFontFileMatch(matches *[]fontFileMatch, seen map[fontFileKey]int, matcher fontPatternMatcher, file fontFileCandidate, rank int, bold, italic bool) {
-	if rank == fontMatchNone {
-		return
-	}
-	suffix := matcher.styleSuffixNormalized(matcher.candidateName(file))
-	if rank == fontMatchFuzzy {
-		suffix = matcher.styleSuffixNormalized(basefont.NormalizeName(file.base))
-	}
-	next := fontFileMatch{
-		name:      file.name,
-		face:      file.face,
-		priority:  matcher.priority,
-		rank:      rank,
-		styleRank: fontFileStyleRank(suffix, bold, italic),
-		sortName:  file.lowerBase,
-	}
-	key := fontFileKey{file.fold, file.face}
-	if index, ok := seen[key]; ok {
-		if fontFileMatchLess(next, (*matches)[index]) {
-			(*matches)[index] = next
-		}
-		return
-	}
-	seen[key] = len(*matches)
-	*matches = append(*matches, next)
-}
-
-// sortFontFileMatches 排序字体文件匹配结果
-// 入参: matches 匹配结果
-func sortFontFileMatches(matches []fontFileMatch) {
-	sort.SliceStable(matches, func(i, j int) bool {
-		return fontFileMatchLess(matches[i], matches[j])
-	})
-}
-
-// fontFileMatchLess 判断字体文件匹配结果优先级
-// 入参: left 左侧匹配结果, right 右侧匹配结果
-// 返回: bool 左侧是否优先
-func fontFileMatchLess(left, right fontFileMatch) bool {
-	if left.priority != right.priority {
-		return left.priority < right.priority
-	}
-	if left.rank != right.rank {
-		return left.rank < right.rank
-	}
-	if left.styleRank != right.styleRank {
-		return left.styleRank < right.styleRank
-	}
-	return left.sortName < right.sortName
-}
-
-// fontFileMatchNames 获取字体文件匹配名称
-// 入参: matches 匹配结果
-// 返回: []string 字体文件列表
-func fontFileMatchNames(matches []fontFileMatch) []string {
-	names := make([]string, 0, len(matches))
-	seen := make(map[string]bool, len(matches))
-	for _, match := range matches {
-		key := strings.ToLower(match.name)
-		if !seen[key] {
-			seen[key] = true
-			names = append(names, match.name)
-		}
-	}
-	return names
-}
-
-// fontFileStyleRank 获取字体文件样式匹配等级
-// 入参: suffix 样式后缀, bold 是否粗体, italic 是否斜体
-// 返回: int 样式匹配等级
-func fontFileStyleRank(suffix string, bold, italic bool) int {
-	fileBold, fileItalic := fontFileStyleFromSuffix(suffix)
-	rank := 0
-	if fileBold != bold {
-		rank += 2
-	}
-	if fileItalic != italic {
-		rank += 2
-	}
-	if !bold && !italic && !fileBold && !fileItalic && suffix != "" && !fontFileRegularSuffix(suffix) {
-		rank++
-	}
-	return rank
-}
-
-// fontFileStyleFromSuffix 获取样式后缀对应的字体样式
-// 入参: suffix 样式后缀
-// 返回: bool 是否粗体, bool 是否斜体
-func fontFileStyleFromSuffix(suffix string) (bool, bool) {
-	bold := suffix == "b" ||
-		suffix == "bd" ||
-		suffix == "bold" ||
-		suffix == "bi" ||
-		suffix == "bolditalic" ||
-		suffix == "boldoblique"
-	italic := suffix == "i" ||
-		suffix == "it" ||
-		suffix == "italic" ||
-		suffix == "oblique" ||
-		suffix == "bi" ||
-		suffix == "bolditalic" ||
-		suffix == "boldoblique"
-	return bold, italic
-}
-
-// fontFileRegularSuffix 判断是否为常规样式后缀
-// 入参: suffix 样式后缀
-// 返回: bool 是否为常规样式后缀
-func fontFileRegularSuffix(suffix string) bool {
-	switch suffix {
-	case "r", "regular", "normal", "常规":
-		return true
-	default:
-		return false
-	}
-}
-
-// fontFileKnownStyleSuffix 判断是否为已知样式后缀
-// 入参: suffix 样式后缀
-// 返回: bool 是否为已知样式后缀
-func fontFileKnownStyleSuffix(suffix string) bool {
-	switch suffix {
-	case "r", "regular", "normal", "常规",
-		"b", "bd", "bold",
-		"i", "it", "italic", "oblique",
-		"bi", "bolditalic", "boldoblique":
-		return true
-	default:
-		return false
-	}
 }

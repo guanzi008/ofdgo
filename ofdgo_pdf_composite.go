@@ -38,13 +38,8 @@ type pdfCompositeNode struct {
 	formCount  int
 }
 
-// pdfCompositePixel 保存非预乘源空间分量及累计透明度
-type pdfCompositePixel struct {
-	values [4]float64
-	alpha  float64
-	effect float64
-	shape  float64
-}
+// pdfCompositePixel 复用内部PDF像素布局
+type pdfCompositePixel = codecpdf.CompositePixel
 
 // pdfCompositor 在指定局部区域中按源颜色空间合成PDF图元
 type pdfCompositor struct {
@@ -121,7 +116,7 @@ type pdfCompositeCache struct {
 	shadingPatterns map[*pdfgo.ShadingPattern][]pdfCompositeNode
 	shadingSources  map[pdfShadingSourceKey][]pdfCompositeNode
 	shadings        map[pdfGradientKey]pdfCompositeGeometry
-	transfers       map[pdfTransferKey]*pdfgo.TransferFunction
+	transfers       codecpdf.TransferCache
 	textDisjoint    map[*pdfgo.GroupMark]bool
 	groups          map[*pdfgo.GroupMark]Box
 }
@@ -420,7 +415,7 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widg
 					}
 					name := codecpdf.EmbeddedFontName(mark.Font.Name)
 					if !externalNames[basefont.NormalizeName(name)] {
-						for _, candidate := range fontExactCandidateNames(name) {
+						for _, candidate := range basefont.ExactCandidateNames(name) {
 							externalNames[basefont.NormalizeName(candidate)] = true
 						}
 					}
@@ -907,7 +902,7 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 				return err
 			}
 			for i := range pixels {
-				pixels[i].effect = 0
+				pixels[i].Effect = 0
 			}
 			copy(previousTransfers, c.transfers)
 			if err := c.draw([]pdfCompositeNode{node}, pixels, space); err != nil {
@@ -919,16 +914,16 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 						return err
 					}
 				}
-				if pixel.effect == 0 && (c.transfers == nil || c.transfers[i] == previousTransfers[i]) {
+				if pixel.Effect == 0 && (c.transfers == nil || c.transfers[i] == previousTransfers[i]) {
 					continue
 				}
 				var rgb [3]float64
 				var err error
 				if c.transfers != nil && device == "DeviceCMYK" {
-					values := pixel.values
+					values := pixel.Values
 					if flatten {
 						for j := range values {
-							values[j] *= pixel.alpha
+							values[j] *= pixel.Alpha
 						}
 					}
 					values, err = c.transfers[i].Apply(values[:], device, "")
@@ -936,18 +931,18 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 						rgb, err = codecpdf.OutputColor(space, values)
 					}
 				} else if c.transfers != nil {
-					rgb, err = space.RGB(pixel.values[:space.Components()], "RelativeColorimetric")
+					rgb, err = space.RGB(pixel.Values[:space.Components()], "RelativeColorimetric")
 				} else {
-					rgb, err = codecpdf.OutputColor(space, pixel.values)
+					rgb, err = codecpdf.OutputColor(space, pixel.Values)
 				}
 				if err != nil {
 					return err
 				}
-				alpha := pixel.alpha
+				alpha := pixel.Alpha
 				if flatten {
 					if c.transfers == nil || device != "DeviceCMYK" {
 						for j := range rgb {
-							rgb[j] = pixel.alpha*rgb[j] + 1 - pixel.alpha
+							rgb[j] = pixel.Alpha*rgb[j] + 1 - pixel.Alpha
 						}
 					}
 					alpha = 1
