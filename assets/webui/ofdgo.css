@@ -3824,7 +3824,7 @@ audio.page-media {
 	}
 }
 
-@media (min-width: 901px) and (max-width: 1600px) {
+@media (min-width: 901px) and (max-width: 1900px) {
 	.editor-toolbar {
 		--editor-control-width: 44px;
 	}
@@ -3858,7 +3858,9 @@ audio.page-media {
 	.editor-group:has(#shapeFill) {
 		grid-template-columns: repeat(2, 76px);
 	}
+}
 
+@media (min-width: 901px) and (max-width: 1600px) {
 	.toolbar {
 		--tool-gap: 6px;
 	}
