@@ -2708,7 +2708,7 @@ button.outline-link:hover {
 	z-index: 1;
 	margin: -2px;
 	padding: 1px;
-	border: 1px solid var(--accent);
+	border: 1px dashed var(--accent);
 	border-radius: 0;
 	background: #fff;
 	outline: none;
@@ -2776,7 +2776,10 @@ button.outline-link:hover {
 	cursor: move;
 }
 
-.edit-object:hover,
+.edit-object:hover {
+	outline: calc(1px / var(--surface-scale)) dashed var(--accent);
+}
+
 .edit-object.selected,
 .edit-object.erasing,
 .edit-selection,

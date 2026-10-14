@@ -551,7 +551,10 @@ export class CanvasEditor {
 		viewer.addEventListener("blur", () => this.commitNudge());
 		viewer.addEventListener("dblclick", (event) => {
 			const item = this.selected;
-			if (!event.altKey && this.enabled && item && !item.items && !this.input && !this.options.busy()) {
+			const target = event.target === viewer ? document.elementFromPoint?.(event.clientX, event.clientY) : event.target;
+			if (!event.altKey && this.enabled && item && !item.items && !this.input && !this.options.busy()
+				&& target && (!target.dataset.corner || item.type === "TextObject")
+				&& this.targetAt({ target, clientX: event.clientX, clientY: event.clientY }) === item) {
 				this.options.onEdit(item);
 			}
 		});
@@ -640,7 +643,10 @@ export class CanvasEditor {
 				item.contour = { svg, path: contour };
 			}
 			this.nodes.set(node, item);
-			node.addEventListener("focus", () => this.select(item));
+			node.addEventListener("focus", () => {
+				if (this.input) this.selectAfterText(item);
+				else this.select(item);
+			});
 			this.place(item);
 			layer.append(node);
 			if (selected.has(object.id)) {
@@ -830,7 +836,13 @@ export class CanvasEditor {
 			return;
 		}
 		if (this.input) {
-			if (!this.input.input.contains(event.target)) this.commitText();
+			if (event.button === 0 && !this.input.input.contains(event.target)) {
+				if (this.input.composing) this.commitText();
+				else {
+					event.preventDefault();
+					this.selectAfterText(this.targetAt(event));
+				}
+			}
 			return;
 		}
 		if (!this.enabled || this.options.busy() || this.nudgeCommit || event.button !== 0 || this.drag) {
@@ -859,11 +871,8 @@ export class CanvasEditor {
 			this.cycleSelection(event);
 			return;
 		}
-		let node = event.target.closest(".edit-object, .edit-selection");
-		const direct = this.nodes.get(node);
-		const target = event.target.dataset.corner || direct && !direct.contours ? direct : this.itemsAt(event)[0];
-		if (node || target) event.preventDefault();
-		node = target?.node;
+		const target = this.targetAt(event), node = target?.node;
+		if (event.target.closest(".edit-object, .edit-selection") || target) event.preventDefault();
 		this.focus();
 		const additive = event.shiftKey || event.ctrlKey || event.metaKey || this.multiple;
 		if (!target) {
@@ -909,6 +918,16 @@ export class CanvasEditor {
 			|| tolerance > 0 && this.hitContext.isPointInStroke(path, point.x, point.y));
 	}
 
+	targetAt(event) {
+		if (event.target === this.viewer) {
+			const target = document.elementFromPoint?.(event.clientX, event.clientY);
+			if (!target || target === this.viewer) return;
+			event = { target, clientX: event.clientX, clientY: event.clientY };
+		}
+		const direct = this.nodes.get(event.target.closest(".edit-object, .edit-selection"));
+		return event.target.dataset.corner || direct && !direct.contours ? direct : this.itemsAt(event)[0];
+	}
+
 	itemsAt(event) {
 		const surface = event.target.closest(".page-surface");
 		const page = this.pages.get(surface);
@@ -916,7 +935,19 @@ export class CanvasEditor {
 		const rect = surface.getBoundingClientRect(), rotation = this.options.rotation();
 		const point = pagePoint(event.clientX, event.clientY, rect, page, rotation);
 		const tolerance = 3 * page.width / (rotation % 180 ? rect.height : rect.width);
-		return [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)).reverse().filter(item => this.contains(item, point, tolerance));
+		return [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)).reverse().filter(item => item.type === "TextObject"
+			? point.x >= item.x - tolerance && point.x <= item.x + item.width + tolerance
+				&& point.y >= item.y - tolerance && point.y <= item.y + item.height + tolerance
+			: this.contains(item, point, tolerance));
+	}
+
+	async selectAfterText(target) {
+		if (!await this.commitText() || this.input || !this.enabled || this.options.busy() || this.tool) return;
+		if (target) {
+			const item = this.pageItems(target.index).find(item => item.id === target.id);
+			if (item) this.select(item);
+		}
+		this.focus();
 	}
 
 	pageItems(index) {
@@ -1561,6 +1592,7 @@ export class CanvasEditor {
 			editing.rich?.remember();
 			const selection = document.getSelection();
 			if (selection?.rangeCount && input.contains(selection.anchorNode)) editing.range = selection.getRangeAt(0).cloneRange();
+			if (event.relatedTarget?.closest(".edit-object") && this.viewer.contains(event.relatedTarget)) return;
 			if (!this.options.textControls?.some(control => control === event.relatedTarget || control.contains(event.relatedTarget))
 				&& !this.options.keepTextFocus?.() && !this.options.busy()) this.commitText();
 		});

@@ -2803,6 +2803,10 @@ func editorRichText(page int, item map[string]any, object ofdgo.GraphicObject, v
 	}
 	capabilities["enter"], capabilities["ungroup"] = false, false
 	capabilities["stretch"] = false
+	if capabilities["reasonCode"] == string(ofdgo.EditUnsupportedObject) && capabilities["transform"] == true && capabilities["copy"] == true && object.CompositeGraphicUnit.Clips == nil {
+		delete(capabilities, "reason")
+		delete(capabilities, "reasonCode")
+	}
 }
 
 // getRichText 读取文字分段与段落选项，颜色转换为浏览器RGB格式
