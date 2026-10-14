@@ -76,6 +76,9 @@ type signatureWriteInfo struct {
 	Seal              *SignatureSeal      `xml:"Seal,omitempty"`
 }
 
+// signatureIDSequence 签名及签章注释共用的编号上限，与文档图元编号相互独立
+type signatureIDSequence uint64
+
 // SignPackage 签署最终OFD包，失败时返回nil且不修改输入
 // 含版本列表的文档需先通过ExtractVersion提取后签署
 // 入参: data 最终包字节, options 签署选项
@@ -619,4 +622,23 @@ func signatureWriteZIP(parts map[string][]byte, compression CompressionOptions) 
 		return nil, err
 	}
 	return out.Bytes(), nil
+}
+
+// observe 记录已有签章标识的编号上限，其他命名形式保持不变
+// 入参: id 已有标识
+func (s *signatureIDSequence) observe(id string) {
+	n, err := strconv.ParseUint(strings.TrimPrefix(id, "s"), 10, 64)
+	if err == nil && n > uint64(*s) {
+		*s = signatureIDSequence(n)
+	}
+}
+
+// next 分配采用sNNN格式的签章标识
+// 返回: string 新标识, error 编号耗尽错误
+func (s *signatureIDSequence) next() (string, error) {
+	if uint64(*s) == ^uint64(0) {
+		return "", fmt.Errorf("signature ID exhausted")
+	}
+	*s++
+	return "s" + strconv.FormatUint(uint64(*s), 10), nil
 }

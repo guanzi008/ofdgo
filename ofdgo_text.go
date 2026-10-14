@@ -266,19 +266,6 @@ func textCodePositioned(textCode TextCode, xs, ys textPositionValues) bool {
 	return multipleX || multipleY
 }
 
-// textDelta 获取文本偏移量
-// 入参: deltas 偏移量数组, index 偏移量索引
-// 返回: float64 偏移量, bool 是否存在
-func textDelta(deltas []float64, index int) (float64, bool) {
-	if len(deltas) == 0 {
-		return 0, false
-	}
-	if index < len(deltas) {
-		return deltas[index], true
-	}
-	return deltas[len(deltas)-1], true
-}
-
 // textCodeXMLValue 将空格转义还原为字符，供XML写出层统一编码
 // 入参: value OFD文字编码
 // 返回: string 待写出的文字编码
