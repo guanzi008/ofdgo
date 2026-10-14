@@ -19,6 +19,38 @@ import (
 	"encoding/binary"
 )
 
+// NormalizeOS2 去除已知版本OS/2表的冗余零尾部，保留所有标准字段
+// 入参: data 原始表数据
+// 返回: []byte 规范化表数据，未知版本、截断或非零尾部保持原样
+func NormalizeOS2(data []byte) []byte {
+	if len(data) < 2 {
+		return data
+	}
+	var size int
+	switch binary.BigEndian.Uint16(data) {
+	case 0:
+		// 旧式68字节表保持原样，不将截断的78字节表推断为旧式表。
+		size = 78
+	case 1:
+		size = 86
+	case 2, 3, 4:
+		size = 96
+	case 5:
+		size = 100
+	default:
+		return data
+	}
+	if len(data) <= size {
+		return data
+	}
+	for _, value := range data[size:] {
+		if value != 0 {
+			return data
+		}
+	}
+	return data[:size]
+}
+
 // fixTrueType 尝试修复TrueType/OpenType字体数据
 // 入参: data 原始字体数据, fixCmap 是否修复cmap, fixName 是否修复name
 // 返回: bool 是否修复, []byte 修复后数据, map[rune]uint16 字符映射, bool 是否缺失cmap, error 错误信息
@@ -81,6 +113,10 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 	}
 	if !bytes.Equal(cmap, existingTables["cmap"]) {
 		existingTables["cmap"] = cmap
+		malformedDirectory = true
+	}
+	if os2 := NormalizeOS2(existingTables["OS/2"]); len(os2) != len(existingTables["OS/2"]) {
+		existingTables["OS/2"] = os2
 		malformedDirectory = true
 	}
 	missingHead := existingTables["head"] == nil

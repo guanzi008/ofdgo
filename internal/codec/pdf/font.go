@@ -91,6 +91,10 @@ func FontProgram(source *pdfgo.Font, type1 *basefont.Type1Program) ([]byte, Font
 		return nil, repair, err
 	}
 	changed := repair.Locations
+	if os2 := basefont.NormalizeOS2(tables["OS/2"]); len(os2) != len(tables["OS/2"]) {
+		tables["OS/2"] = os2
+		changed = true
+	}
 	if head := tables["head"]; len(head) == 56 && binary.BigEndian.Uint32(head[:4]) == 0x00010000 && head[54] == 0 && head[55] == 0 {
 		tables["head"] = head[:54]
 		changed = true
