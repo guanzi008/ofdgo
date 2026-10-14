@@ -103,7 +103,7 @@ export class FontPicker {
 		if (!this.open) return;
 		const rect = this.input.parentElement.getBoundingClientRect();
 		if (rect.right <= 0 || rect.left >= window.innerWidth) { this.close(); return; }
-		const width = Math.min(rect.width, window.innerWidth - 16);
+		const width = Math.min(Math.max(rect.width, 300), window.innerWidth - 16);
 		Object.assign(this.list.style, { left: `${Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))}px`,
 			top: `${rect.bottom + 4}px`, width: `${width}px`, maxHeight: `${Math.max(40, Math.min(280, window.innerHeight - rect.bottom - 12))}px` });
 	}

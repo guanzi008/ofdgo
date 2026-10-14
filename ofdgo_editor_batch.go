@@ -66,6 +66,7 @@ func (e *Editor) Objects(page int, ids []string) ([]GraphicObject, error) {
 			return nil, err
 		}
 		objects[i].origin = e.objectOrigin(editorObjectID(object))
+		e.attachRichTextSnapshot(page, &objects[i])
 	}
 	return objects, nil
 }
@@ -82,6 +83,45 @@ func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) 
 // 入参: ctx 取消上下文, page 目标页, objects 对象快照, dx 横向位移，单位为毫米, dy 纵向位移，单位为毫米
 // 返回: []string 新对象标识, error 校验或取消错误
 func (e *Editor) CopyObjectsContext(ctx context.Context, page int, objects []GraphicObject, dx, dy float64) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	metadata, err := e.copiedRichTextMetadata(objects)
+	if err != nil {
+		return nil, err
+	}
+	if len(metadata) == 0 {
+		return e.copyObjectsContext(ctx, page, objects, dx, dy)
+	}
+	var ids []string
+	err = e.Transaction(func(e *Editor) error {
+		var err error
+		ids, err = e.copyObjectsContext(ctx, page, objects, dx, dy)
+		if err != nil {
+			return err
+		}
+		for i := range objects {
+			if meta, ok := metadata[i]; ok {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if err := e.putRichTextMetadata(page, ids[i], meta, -1); err != nil {
+					return err
+				}
+			}
+		}
+		return ctx.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// copyObjectsContext 复制标准对象及资源来源，由上层按需同步富文本标引。
+// 入参: ctx 取消上下文, page 目标页, objects 对象快照, dx 横向位移, dy 纵向位移
+// 返回: []string 新对象标识, error 校验或取消错误
+func (e *Editor) copyObjectsContext(ctx context.Context, page int, objects []GraphicObject, dx, dy float64) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -456,6 +496,43 @@ func (e *Editor) AlignObjects(page int, ids []string, alignment string) error {
 // 入参: page 页面索引, ids 对象标识
 // 返回: error 错误信息
 func (e *Editor) DeleteObjects(page int, ids []string) error {
+	if _, _, err := e.selectedObjects(page, ids); err != nil {
+		return err
+	}
+	entries := make(map[int]bool)
+	if e.source != nil {
+		index := e.richTextMetadataIndex()
+		for _, id := range ids {
+			if entry, ok := index.entries[editorResourceID(e.pages[page].ID)+"/"+editorResourceID(id)]; ok {
+				entries[entry.index] = true
+			}
+		}
+	}
+	if len(entries) == 0 {
+		return e.deleteObjects(page, ids)
+	}
+	order := make([]int, 0, len(entries))
+	for index := range entries {
+		order = append(order, index)
+	}
+	slices.Sort(order)
+	return e.Transaction(func(e *Editor) error {
+		if err := e.deleteObjects(page, ids); err != nil {
+			return err
+		}
+		for _, index := range slices.Backward(order) {
+			if err := e.DeleteStructure(index); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// deleteObjects 删除已选择图元，由上层同步必要的富文本标引。
+// 入参: page 页面索引, ids 对象标识
+// 返回: error 校验或删除错误
+func (e *Editor) deleteObjects(page int, ids []string) error {
 	objects, indexes, err := e.selectedObjects(page, ids)
 	if err != nil || len(indexes) == 0 {
 		return err

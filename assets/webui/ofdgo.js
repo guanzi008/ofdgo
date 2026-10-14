@@ -1,4 +1,4 @@
-import { CanvasEditor, canEditObject, editTextValue, missingGlyphMessage, objectEditReason, selectedText, lineShape, selectionBounds, pagePoint } from "./ofdgo_edit.js";
+import { CanvasEditor, canEditObject, editTextValue, richTextModel, fontFaceStyle, missingGlyphMessage, objectEditReason, selectedText, lineShape, selectionBounds, pagePoint } from "./ofdgo_edit.js";
 import { FontManager, FontPicker } from "./ofdgo_font.js";
 
 const MM_TO_PX = 96 / 25.4;
@@ -594,11 +594,15 @@ const fontManager = new FontManager({
 	onPermissionChange: updateFontPermissionHint,
 });
 const fontPicker = new FontPicker(el.textFont, el.textFontToggle, el.textFontList, changeTextFont, loadEditorFonts);
+const textFormatButtons = [...document.querySelectorAll("[data-text-format]")];
+const textBackground = document.querySelector("#textBackground");
 const annotationFields = Object.fromEntries(["CreateForm", "CreateCancel", "Content", "Old", "Font", "Text", "TextRow", "Image", "ImageRow", "Author", "LinkKind", "Address", "AddressRow", "Target", "TargetRow", "X", "Y", "Width", "Height", "Angle", "Opacity", "Tile", "Placement", "PlacementLabel", "Pick", "Scope", "Pages"].map(key => [key, document.querySelector(`#annotation${key}`)]));
 el.editorTools.addEventListener("scroll", () => fontPicker.position());
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
-	textControls: [el.textFont, el.textFontToggle, el.textFontAdd, el.textSize, el.textColor],
+	textControls: [el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.fontInput],
+	keepTextFocus: () => fontPicker.open || canvasEditor.input?.fontDialog,
+	textClipboardScope: () => `${state.wasmSeq}:${state.fileName}:${state.doc?.documents?.[state.doc.documentIndex || 0]?.root}:${state.doc?.documentIndex || 0}:${state.doc?.documentVersion || ""}`,
 	busy: () => document.body.hasAttribute("aria-busy"),
 	rotation: () => state.rotation,
 	canInsert: (index) => pageCan("insert", index),
@@ -618,7 +622,9 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	},
 	onReshape: (item, box) => changeDocument("ofdgoReshapeObject", item, box.x, box.y, box.width, box.height, Boolean(item.oriented)),
 	onResize: (item, box) => changeDocument("ofdgoResizeObjects", { ...item, id: [item.id] }, box.x, box.y, box.width, box.height),
-	onTextWidth: (item, box) => changeDocument("ofdgoLayoutText", item, box.x - item.x, box.width, true, item.align || "", item.paragraphHeight || 0, item.letterSpacing || 0, ...textIndents(item)),
+	onTextWidth: (item, box) => item.richText
+		? saveRichText(item, { ...item.richText, layout: { ...item.richText.layout, wrap: true } }, [], { ...item, frameWidth: box.width, frameOffset: box.x - item.x })
+		: changeDocument("ofdgoLayoutText", item, box.x - item.x, box.width, true, item.align || "", item.paragraphHeight || 0, item.letterSpacing || 0, ...textIndents(item)),
 	onCrop: (item, box) => changeDocument("ofdgoCropImage", item, box.x, box.y, box.width, box.height),
 	onCropChange: () => {
 		updatePendingChanges();
@@ -665,12 +671,15 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onDrawAnnotation: placeAnnotation,
 	onDrawInk: (index, points, style, pressure) => changeDocument("ofdgoInsertInk", null, index, JSON.stringify(points), style.lineWidth, pressure, style.strokeColor),
 	onPreviewText: (item, value, font, size) => callWASM("ofdgoPreviewText", item.index, item.id, value, font || null, size),
+	onCommitRichText: saveRichText,
+	onPreviewRichText: validateRichText,
 	onCommitText: (item, value, fontData, color = null) => item.draft
 		? changeDocument("ofdgoInsertText", null, item.index, value, fontData || item.fontData, item.x, item.y, item.size, item.color, item.width, item.wrap, item.align, item.paragraphHeight, item.letterSpacing, ...textIndents(item))
 		: changeDocument("ofdgoUpdateText", item, value, fontData || null, item.size, color),
 	onTextChange: () => {
 		const editing = canvasEditor.input;
 		updatePendingChanges();
+		if (editing?.rich) updateObjectControls(canvasEditor.selected);
 		if (!editing) {
 			updateObjectControls(canvasEditor.selected);
 			updateTextFonts(canvasEditor.selected, true);
@@ -728,6 +737,8 @@ editorClick(el.editObjectButton, () => {
 });
 el.textSize.addEventListener("change", () => changeTextStyle(false));
 el.textColor.addEventListener("change", () => changeTextStyle(true));
+for (const button of textFormatButtons) button.addEventListener("click", () => changeRangeFormat(button.dataset.textFormat));
+textBackground.addEventListener("change", () => changeRangeFormat("background", textBackground.value));
 editorClick(el.textWrap, () => changeParagraph(!currentTextStyle().wrap));
 el.textAlign.addEventListener("change", () => changeParagraph());
 el.textLineHeight.addEventListener("change", () => changeParagraph());
@@ -1007,8 +1018,9 @@ el.paragraphForm.addEventListener("submit", async event => {
 		Object.assign(item, indents);
 	} else {
 		if (!confirmTextReflow(item)) return;
-		const saved = await changeDocument("ofdgoLayoutText", item, null, null, Boolean(item.wrap), item.align || "left",
-			item.paragraphHeight || 0, item.letterSpacing || 0, ...textIndents(indents));
+		const saved = item.richText ? await saveRichText(item, { ...item.richText, layout: { ...item.richText.layout, ...indents } })
+			: await changeDocument("ofdgoLayoutText", item, null, null, Boolean(item.wrap), item.align || "left",
+				item.paragraphHeight || 0, item.letterSpacing || 0, ...textIndents(indents));
 		if (!saved) return;
 	}
 	el.paragraphPanel.close();
@@ -1095,8 +1107,13 @@ el.resetCropButton.addEventListener("click", () => {
 	if (canEditObject(item, "resetCrop")) return changeDocument("ofdgoResetImageCrop", item);
 	if (item?.imageBounds) return canvasEditor.options.onCrop(item, item.imageBounds);
 });
-editorClick(el.undoButton, () => changeDocument("ofdgoUndo"));
-editorClick(el.redoButton, () => changeDocument("ofdgoRedo"));
+for (const [button, direction, command] of [[el.undoButton, -1, "ofdgoUndo"], [el.redoButton, 1, "ofdgoRedo"]]) {
+	button.addEventListener("click", async () => {
+		if (canvasEditor.input?.rich) { canvasEditor.textUndo(direction); return; }
+		if (!await canvasEditor.commitNudge() || !await canvasEditor.commitText() || !await canvasEditor.commitCrop()) return;
+		await changeDocument(command);
+	});
+}
 for (const [button, tool] of [[el.drawLineButton, "line"], [el.drawRectangleButton, "rectangle"], [el.drawEllipseButton, "ellipse"]]) {
 	editorClick(button, () => toggleDrawingTool(tool));
 }
@@ -1190,6 +1207,7 @@ editorClick(el.objectBoundsButton, openObjectBounds);
 for (const [button, ungroup] of [[el.groupObjectsButton, false], [el.ungroupObjectButton, true]]) {
 	button.addEventListener("click", async () => {
 		const item = canvasEditor.selected;
+		if (ungroup && canvasEditor.items().some(member => member.richText)) return;
 		if (await changeDocument("ofdgoGroupObjects", { ...item, id: canvasEditor.items().map(member => member.id) }, ungroup)) el.objectStylePanel.close();
 	});
 }
@@ -1211,6 +1229,7 @@ el.arrowTool.addEventListener("change", async () => {
 });
 el.copyStyleButton.addEventListener("click", async () => {
 	const item = canvasEditor.selected, seq = state.openSeq;
+	if (!canCopyStyle(item)) return;
 	setBusy(true);
 	try {
 		await callWASM("ofdgoCaptureStyle", item.index, item.id, state.composite?.key || "");
@@ -1220,6 +1239,7 @@ el.copyStyleButton.addEventListener("click", async () => {
 });
 el.pasteStyleButton.addEventListener("click", async () => {
 	const item = canvasEditor.selected;
+	if (canvasEditor.items().some(member => member.richText)) return;
 	if (await changeDocument("ofdgoPasteStyle", { ...item, id: canvasEditor.items().map(member => member.id) })) el.objectStylePanel.close();
 });
 el.objectBoundsCancel.addEventListener("click", () => el.objectBoundsPanel.close());
@@ -1311,6 +1331,7 @@ el.structureForm.addEventListener("submit", async event => {
 	event.preventDefault();
 	if (!state.editing || document.body.hasAttribute("aria-busy")) return;
 	const index = Number(el.structureEntry.value), path = JSON.parse(el.structureNodeSelect.value || "[]");
+	if (state.doc.structures?.[index]?.internal) return;
 	const action = index < 0 ? "create" : el.structureAction.value;
 	let original = state.doc.structures?.[index]?.root;
 	for (const part of path) original = original?.children?.[part];
@@ -1830,7 +1851,7 @@ function openObjectBounds() {
 }
 
 function canCopyStyle(item) {
-	if (item?.type === "Annotation") return false;
+	if (item?.type === "Annotation" || item?.richText) return false;
 	if (!item?.scoped) return canEditObject(item, "update");
 	if (item.type === "TextObject") return canEditObject(item, "replaceFont") && canEditObject(item, "paint");
 	if (item.type === "PathObject") return canEditObject(item, "transform") && canEditObject(item, "paint");
@@ -1854,7 +1875,7 @@ function openObjectStyle() {
 	if (!items.length) return;
 	const ordered = [...items].sort((a, b) => a.position - b.position);
 	el.groupObjectsButton.disabled = items.length < 2 || !ordered.every((item, index) => canEditObject(item, "copy") && canEditObject(item, "order") && item.container === ordered[0].container && item.position === ordered[0].position + index);
-	el.ungroupObjectButton.disabled = items.length !== 1 || !canEditObject(items[0], "ungroup");
+	el.ungroupObjectButton.disabled = items.length !== 1 || Boolean(items[0].richText) || !canEditObject(items[0], "ungroup");
 	el.copyStyleButton.disabled = items.length !== 1 || !canCopyStyle(items[0]);
 	el.pasteStyleButton.disabled = !state.styleClipboard || !items.every(item => item.type === state.styleClipboard && canCopyStyle(item));
 	const shared = (key, fallback) => items.every(item => (item[key] ?? fallback) === (items[0][key] ?? fallback)) ? items[0][key] ?? fallback : null;
@@ -1893,7 +1914,7 @@ function openObjectStyle() {
 	loadGradientForm("fill");
 	state.patternForms = {};
 	for (const target of ["fill", "stroke"]) {
-		const pattern = items.length === 1 && !items[0].scoped ? items[0][`${target}Pattern`] : null;
+		const pattern = items.length === 1 && !items[0].scoped && !items[0].richText ? items[0][`${target}Pattern`] : null;
 		if (pattern) state.patternForms[target] = Object.fromEntries(Object.entries(pattern).map(([key, value]) => [key, String(value)]));
 	}
 	state.patternOriginal = JSON.stringify(state.patternForms);
@@ -2330,6 +2351,7 @@ async function switchReadingVersion(id) {
 		const doc = await callWASM("ofdgoSelectVersion", id);
 		if (openSeq !== state.openSeq) return;
 		state.objectClipboard = state.styleClipboard = null;
+		canvasEditor.richClipboard = null;
 		resetCompositeScope();
 		canvasEditor.clear();
 		canvasEditor.setTool("");
@@ -2511,6 +2533,7 @@ async function switchDocument(index) {
 		state.savedRevision = doc.revision;
 		state.editorViews.clear();
 		state.objectClipboard = state.styleClipboard = null;
+		canvasEditor.richClipboard = null;
 		resetCompositeScope();
 		canvasEditor.clear();
 		canvasEditor.setTool("");
@@ -2600,6 +2623,7 @@ async function toggleEditor() {
 		state.conversionWarnings = [];
 		state.objectClipboard = null;
 		state.styleClipboard = null;
+		canvasEditor.richClipboard = null;
 		canvasEditor.clear();
 		setPan(false);
 		await openDocument({ doc, openSeq, skipAutoFonts: true, pageIndex, fitMode, scale,
@@ -2704,6 +2728,7 @@ async function createDocument(event) {
 		state.objectClipboard = null;
 		state.editorViews.clear();
 		state.styleClipboard = null;
+		canvasEditor.richClipboard = null;
 		state.fontRenderPending = false;
 		state.annotationCreate = null;
 		canvasEditor.setTool("");
@@ -2865,7 +2890,7 @@ function updateAnnotationFields() {
 
 async function editCanvasObject(item) {
 	if (!state.editing || document.body.hasAttribute("aria-busy") || canvasEditor.input || item.items) return;
-	if (canEditObject(item, "enter")) return enterCompositeScope(item.index, item.id);
+	if (!item.richText && canEditObject(item, "enter")) return enterCompositeScope(item.index, item.id);
 	if (item.type === "Annotation") {
 		editAnnotationDetails(item);
 		return;
@@ -2895,11 +2920,16 @@ async function editCanvasObject(item) {
 	setBusy(true);
 	try {
 		const data = await callWASM("ofdgoEditorFont", item.font);
-		const face = new FontFace(`ofdgo-edit-${item.font}`, data.bytes);
+		const face = new FontFace(`ofdgo-edit-${item.font}`, data.bytes, fontFaceStyle(data.bytes));
 		await face.load();
-		const source = canEditObject(item, "layoutKnown") ? null : await callWASM("ofdgoPreviewText", item.index, item.id, item.text);
+		let rich = null;
+		if (item.richText) rich = await loadRichText(item, face);
+		else if (!item.scoped && canEditObject(item, "layoutKnown")) {
+			try { rich = await loadRichText(item, face); } catch {}
+		}
+		const source = rich || canEditObject(item, "layoutKnown") ? null : await callWASM("ofdgoPreviewText", item.index, item.id, item.text);
 		if (openSeq === state.openSeq && item.node.isConnected) {
-			canvasEditor.editText(item, face, source);
+			canvasEditor.editText(item, face, source, rich);
 		}
 	} catch (err) {
 		if (openSeq === state.openSeq) {
@@ -3030,7 +3060,107 @@ function openInsertPanel(item = null) {
 
 function currentTextStyle() {
 	const text = selectedText(canvasEditor.selected) || state.textDefaults;
+	if (canvasEditor.input?.rich) return { ...text, ...canvasEditor.input.rich.state() };
+	if (text.richText) {
+		const formats = text.richText.runs.map(run => run.format);
+		return { ...text, ...Object.fromEntries(["font", "size", "color", "bold", "italic", "underline", "strikeout", "shadow", "background"]
+			.map(key => [key, formats.every(format => format[key] === formats[0]?.[key]) ? formats[0]?.[key] : undefined])) };
+	}
 	return canvasEditor.input?.style ? { ...text, ...canvasEditor.input.style } : text;
+}
+
+async function loadRichText(item, firstFace) {
+	const model = item.richText || await callWASM("ofdgoGetRichText", item.index, item.id);
+	const faces = new Map();
+	for (const id of new Set(model.runs.map(run => run.format.font))) {
+		const data = id === item.font && firstFace ? null : (await callWASM("ofdgoEditorFont", id)).bytes;
+		const face = data ? await new FontFace(`ofdgo-rich-${id}`, data, fontFaceStyle(data)).load() : firstFace;
+		faces.set(id, face);
+	}
+	return { model, faces };
+}
+
+async function ensureRichInput() {
+	let editing = canvasEditor.input;
+	if (!editing) {
+		const item = canvasEditor.selected;
+		if (!item || item.items || item.scoped || item.type !== "TextObject") return false;
+		await editCanvasObject(item);
+		editing = canvasEditor.input;
+	}
+	if (!editing) return false;
+	if (editing.rich) return true;
+	if (editing.composing || editing.saving) return false;
+	const rich = await loadRichText(editing.item, editing.face);
+	if (canvasEditor.input !== editing) return false;
+	return canvasEditor.promoteText(rich);
+}
+
+async function changeRangeFormat(key, value) {
+	if (!state.ready || document.body.hasAttribute("aria-busy") || canvasEditor.input?.composing) return;
+	try {
+		if (!canvasEditor.selected && !canvasEditor.input) {
+			state.textDefaults[key] = value ?? (key === "background" ? state.textDefaults.background ? "" : textBackground.value : !state.textDefaults[key]);
+			updateObjectControls(null); return;
+		}
+		if (!await ensureRichInput()) return;
+		const rich = canvasEditor.input.rich, current = rich.state()[key];
+		rich.apply({ [key]: value ?? (key === "background" ? current ? "" : textBackground.value : current !== true) });
+	} catch (error) { showError(error, false); }
+}
+
+async function validateRichText(item, model, width, fonts = []) {
+	const openSeq = state.openSeq, editing = canvasEditor.input;
+	model = structuredClone(model);
+	const prepared = [...fonts], attempted = new Set();
+	while (true) {
+		try {
+			await callWASM("ofdgoPreviewRichText", item.index, item.draft ? "" : item.id, JSON.stringify(model), width, prepared);
+			if (openSeq !== state.openSeq) throw new Error("文档已更改");
+			return prepared;
+		} catch (error) {
+			const id = error.missingGlyphs?.fontID;
+			if (!id || attempted.has(id) || prepared.some(font => font.key === id) || openSeq !== state.openSeq) throw error;
+			attempted.add(id);
+			const original = (await callWASM("ofdgoEditorFont", id)).bytes;
+			const [source] = await callWASM("ofdgoFontFaces", original);
+			if (!source?.postscriptName) throw error;
+			await fontManager.loadFaces(data => callWASM("ofdgoFontFaces", data));
+			const candidates = fontManager.editorFonts().filter(font => !font.disabled && font.postscriptName === source.postscriptName);
+			let recovered;
+			for (const choice of candidates) {
+				try {
+					const data = await readTextFont(choice);
+					const [face] = await callWASM("ofdgoFontFaces", data);
+					if (face?.postscriptName !== source.postscriptName) continue;
+					await callWASM("ofdgoCheckTextFont", data, model.runs.filter(run => run.format.font === id).map(run => run.text).join(""));
+					recovered = { key: id, data, choice };
+					break;
+				} catch {}
+			}
+			if (!recovered || openSeq !== state.openSeq) throw error;
+			prepared.push({ key: id, data: recovered.data });
+			if (editing?.rich && canvasEditor.input === editing) {
+				const rich = editing.rich;
+				const face = await new FontFace(`ofdgo-recovered-${crypto.randomUUID()}`, recovered.data, fontFaceStyle(recovered.data)).load();
+				if (openSeq !== state.openSeq || canvasEditor.input !== editing) throw error;
+				rich.imports.set(id, recovered.data);
+				rich.choices.set(id, recovered.choice);
+				const previous = rich.faces.get(id);
+				if (previous) document.fonts.delete(previous);
+				rich.faces.set(id, face); document.fonts.add(face);
+				if (!editing.composing && !editing.saving) { rich.selection(); rich.render(); updateObjectControls(canvasEditor.selected); }
+			}
+		}
+	}
+}
+
+async function saveRichText(item, model, fonts = [], box = item) {
+	const boundary = { x: box.x, y: box.y, width: box.width, height: box.height };
+	if (box.frameWidth !== undefined) Object.assign(boundary, { frameWidth: box.frameWidth, frameOffset: box.frameOffset || 0 });
+	fonts = await validateRichText(item, model, box.frameWidth ?? item.textFrame?.width ?? item.width, fonts);
+	return changeDocument("ofdgoSaveRichText", item.draft ? null : item,
+		...(item.draft ? [item.index, ""] : []), JSON.stringify(model), boundary, fonts);
 }
 
 function textIndents(item) {
@@ -3052,6 +3182,7 @@ async function toggleTextTool() {
 	const style = !canvasEditor.selected?.items && canEditObject(canvasEditor.selected, "layoutKnown") ? currentTextStyle() : state.textDefaults;
 	const font = state.textFonts[Number(fontPicker.value)];
 	state.textDefaults = { type: "TextObject", size: style.size, color: style.color, wrap: style.wrap,
+		bold: Boolean(style.bold), italic: Boolean(style.italic), underline: Boolean(style.underline), strikeout: Boolean(style.strikeout), shadow: Boolean(style.shadow), background: style.background || "",
 		wrapOverride: style === state.textDefaults ? style.wrapOverride : style.wrap,
 		align: style.align || "left", paragraphHeight: style.paragraphHeight || 0, letterSpacing: style.letterSpacing || 0,
 		leftIndent: style.leftIndent || 0, rightIndent: style.rightIndent || 0, firstLineIndent: style.firstLineIndent || 0,
@@ -3073,13 +3204,16 @@ async function beginCanvasText(index, box, surface, page) {
 	setBusy(true);
 	try {
 		const data = await readTextFont(font);
-		const face = new FontFace("ofdgo-draft", data);
+		const face = new FontFace("ofdgo-draft", data, fontFaceStyle(data));
 		await face.load();
 		if (openSeq !== state.openSeq || !surface.isConnected) return;
 		const node = document.createElement("div");
 		const item = { ...state.textDefaults, ...box, wrap: state.textDefaults.wrapOverride ?? box.wrap ?? state.textDefaults.wrap,
 			index, page, surface, node, text: "", draft: true, fontData: data };
-		canvasEditor.editText(item, face);
+		const model = richTextModel(item);
+		const key = `temp-font-${crypto.randomUUID()}`;
+		model.runs[0].format.font = key;
+		canvasEditor.editText(item, face, null, state.composite ? null : { model, faces: new Map([[key, face]]), fonts: [{ key, data }] });
 	} catch (err) {
 		if (openSeq === state.openSeq) showError(err, false);
 	} finally {
@@ -3139,6 +3273,24 @@ async function readTextFont(font) {
 
 function updateTextFonts(item, refresh = false) {
 	item = selectedText(item);
+	const rich = canvasEditor.input?.rich;
+	if (rich) {
+		const format = rich.state(), id = format.font;
+		const key = `rich:${id ?? "mixed"}:${rich.faces.size}`;
+		if (refresh || state.textFontID !== key) {
+			if (document.activeElement === el.textFont && fontPicker.open) return;
+			state.textFontID = key;
+			state.textFonts = editorFonts(null);
+			for (const [font, face] of rich.faces) {
+				const choice = rich.choices?.get(font);
+				state.textFonts.unshift(choice || { id: `embedded:${font}`, name: font === rich.editing.item.font ? rich.editing.item.fontName || font : face.family, embedded: !rich.imports.has(font), richKey: font });
+			}
+			fontPicker.setFonts(state.textFonts, id === undefined ? null : state.textFonts.find(font => font.richKey === id || rich.choices?.get(id) === font));
+			el.textFont.placeholder = id === undefined ? "混合" : "";
+		}
+		return;
+	}
+	if (item?.richText) item = { ...item, font: currentTextStyle().font };
 	const id = item?.type === "TextObject" && !item.draft ? item.font : null;
 	const key = item?.items ? `selection:${item.items.map(member => member.id).join(",")}:${id || ""}` : id;
 	if (refresh || state.textFontID !== key) {
@@ -3149,9 +3301,10 @@ function updateTextFonts(item, refresh = false) {
 			&& !state.textFonts.some(font => (font.id || font.postscriptName) === (selected.id || selected.postscriptName))) {
 			state.textFonts.unshift(selected);
 		}
-		fontPicker.setFonts(state.textFonts, item?.items && !id ? null : selected || state.textFonts[0]);
-		el.textFont.placeholder = item?.items && !id ? "混合" : "";
-		if (!id && !item?.items) state.textDefaults.fontChoice = state.textFonts[Number(fontPicker.value)];
+		const mixed = (item?.items || item?.richText) && !id;
+		fontPicker.setFonts(state.textFonts, mixed ? null : selected || state.textFonts[0]);
+		el.textFont.placeholder = mixed ? "混合" : "";
+		if (!id && !item?.items && !item?.richText) state.textDefaults.fontChoice = state.textFonts[Number(fontPicker.value)];
 	}
 }
 
@@ -3159,19 +3312,30 @@ async function changeTextFont() {
 	const item = selectedText(canvasEditor.selected);
 	const font = state.textFonts[Number(fontPicker.value)];
 	if (!state.ready || document.body.hasAttribute("aria-busy") || !font || font.disabled) return;
+	if (item?.richText && !canvasEditor.input) {
+		try { if (!await ensureRichInput()) return; } catch (error) { showError(error, false); return; }
+	}
 	const editing = canvasEditor.input;
 	if (editing) {
+		if (editing.composing) return;
+		editing.rich?.remember();
 		const openSeq = state.openSeq;
 		setBusy(true);
 		try {
-			const data = await readTextFont(font);
-			await callWASM("ofdgoCheckTextFont", data, editTextValue(editing.input));
-			const face = new FontFace("ofdgo-edit-font", data);
+			const data = font.richKey && editing.rich?.imports.has(font.richKey) ? editing.rich.imports.get(font.richKey) : await readTextFont(font);
+			const [start, end] = editing.rich?.selection() || [0, editTextValue(editing.input).length];
+			await callWASM("ofdgoCheckTextFont", data, editTextValue(editing.input).slice(start, end));
+			const face = new FontFace(`ofdgo-edit-font-${crypto.randomUUID()}`, data, fontFaceStyle(data));
 			await face.load();
 			if (openSeq !== state.openSeq || canvasEditor.input !== editing) return;
 			editing.fontChoice = font;
 			if (item.draft) state.textDefaults.fontChoice = font;
-			canvasEditor.setTextFont(face, data);
+			if (editing.rich) {
+				const key = font.richKey || (font.embedded ? font.id.slice(9) : `temp-font-${crypto.randomUUID()}`);
+				editing.rich.choices ||= new Map();
+				editing.rich.choices.set(key, font);
+				canvasEditor.setTextFont(face, font.embedded ? null : data, key);
+			} else canvasEditor.setTextFont(face, data);
 		} catch (err) {
 			if (openSeq === state.openSeq) {
 				updateTextFonts(canvasEditor.selected, true);
@@ -3181,6 +3345,7 @@ async function changeTextFont() {
 			if (openSeq === state.openSeq) setBusy(false);
 		}
 	} else if (item?.type === "TextObject") {
+		if (item.items?.some(member => member.richText)) return;
 		if (canEditObject(item, "replaceFont") && (!font.embedded || item.font !== font.id.slice(9))) {
 			await changeDocument("ofdgoStyleText", { ...item, id: (item.items || [item]).map(member => member.id) }, readTextFont(font), 0, null);
 			updateTextFonts(canvasEditor.selected, true);
@@ -3281,7 +3446,8 @@ async function changeParagraph(wrap) {
 		updateObjectControls(item, true);
 		return;
 	}
-	await changeDocument("ofdgoLayoutText", item, null, null, Boolean(wrap), el.textAlign.value, height, spacing, ...textIndents(item));
+	if (item.richText) await saveRichText(item, { ...item.richText, layout: { ...item.richText.layout, wrap: Boolean(wrap), align: el.textAlign.value, lineHeight: height, letterSpacing: spacing } });
+	else await changeDocument("ofdgoLayoutText", item, null, null, Boolean(wrap), el.textAlign.value, height, spacing, ...textIndents(item));
 	updateObjectControls(canvasEditor.selected, true);
 }
 
@@ -3297,6 +3463,9 @@ async function changeTextStyle(color) {
 	}
 	const size = color ? item.size : inputMillimeters(el.textSize, item.size);
 	const fill = color && el.textColor.value !== item.color ? el.textColor.value : null;
+	if (item.richText && !canvasEditor.input) {
+		try { if (!await ensureRichInput()) return; } catch (error) { showError(error, false); return; }
+	}
 	if (canvasEditor.input) {
 		canvasEditor.setTextStyle(color ? { color: el.textColor.value } : { size });
 		updateObjectControls(canvasEditor.selected, true);
@@ -3310,6 +3479,7 @@ async function changeTextStyle(color) {
 		return;
 	}
 	if (item.items) {
+		if (item.items.some(member => member.richText)) return;
 		if (color ? !canEditObject(item, "paint") : !canEditObject(item, "layoutKnown") || !canEditObject(item, "reflow")) return;
 		if (!color && !el.textSize.value) return;
 		if (size !== item.size || fill !== null) {
@@ -3423,6 +3593,7 @@ async function changeDocument(name, item, ...args) {
 	const previous = currentPageInfo();
 	const before = editorLocation(), revision = state.editorInfo.revision;
 	const restoring = name === "ofdgoUndo" || name === "ofdgoRedo";
+	if (restoring) canvasEditor.richClipboard = null;
 	const { scrollLeft, scrollTop } = el.viewerPanel;
 	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages";
 	const changingFont = name === "ofdgoChangeFontBinding";
@@ -3451,8 +3622,9 @@ async function changeDocument(name, item, ...args) {
 		const scoped = scope && members.length && members.every(member => member.scoped);
 		const ids = item ? Array.isArray(item.id) ? item.id : members.map(member => member.id) : [];
 		const annotated = !scoped && ids.some(id => id.startsWith("annotation:"));
-		const inserting = ["ofdgoInsertShape", "ofdgoInsertText", "ofdgoInsertImage", "ofdgoInsertInk"].includes(name);
+		const inserting = ["ofdgoInsertShape", "ofdgoInsertText", "ofdgoInsertImage", "ofdgoInsertInk"].includes(name) || name === "ofdgoSaveRichText" && !item;
 		const editingAnnotation = name === "ofdgoWriteAnnotation" && Boolean(state.annotationCreate?.item);
+		if (scope && inserting && name === "ofdgoSaveRichText") throw new Error("组合内部暂不支持新增富文本");
 		if (scope && inserting) args.push(scope.key);
 		if (scoped && !operation) throw new Error("内部对象暂不支持此操作");
 		const doc = scoped
@@ -3462,8 +3634,17 @@ async function changeDocument(name, item, ...args) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		if (doc.revision === state.editorInfo?.revision) {
+		if (doc.revision === state.editorInfo?.revision && !(name === "ofdgoSaveRichText" && canvasEditor.input?.refreshPending)) {
 			return true;
+		}
+		const richEditing = name === "ofdgoSaveRichText" && canvasEditor.input?.rich && canvasEditor.input;
+		if (richEditing?.saving) {
+			richEditing.rich.initial = JSON.stringify(richEditing.rich.model);
+			richEditing.refreshPending = true;
+		}
+		if (richEditing?.saving && richEditing.item.draft && doc.selectedIDs?.length) {
+			richEditing.item.id = doc.selectedIDs[0];
+			richEditing.item.draft = false;
 		}
 		const restoredView = name === "ofdgoUndo" ? state.editorViews.get(revision) : name === "ofdgoRedo" ? state.editorViews.get(doc.revision) : null;
 		if (restoredView?.reading && state.savedRevision === revision) state.savedRevision = doc.revision;
@@ -3482,6 +3663,7 @@ async function changeDocument(name, item, ...args) {
 			}
 			resetCompositeScope();
 			state.objectClipboard = state.styleClipboard = null;
+			canvasEditor.richClipboard = null;
 			state.pageSelection.clear();
 			state.pageSelectionAnchor = null;
 			state.pageMultiSelect = false;
@@ -3700,13 +3882,17 @@ async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 		setStatus(pageStatus(state.pageIndex, doc.pageCount));
 	} catch (err) {
 		if (openSeq === state.openSeq) {
-			state.pageCache.delete(index);
-			canvasEditor.clear();
-			const shell = pageShell(index);
-			shell.querySelector(".page-surface").replaceChildren();
-			shell.classList.remove("rendered");
-			markFlowPageError(index, err);
-			markThumbnailError(index);
+			if (canvasEditor.input?.saving && canvasEditor.input.rich && canvasEditor.input.item.index === index) {
+				canvasEditor.select(canvasEditor.input.item);
+			} else {
+				state.pageCache.delete(index);
+				canvasEditor.clear();
+				const shell = pageShell(index);
+				shell.querySelector(".page-surface").replaceChildren();
+				shell.classList.remove("rendered");
+				markFlowPageError(index, err);
+				markThumbnailError(index);
+			}
 		}
 		throw err;
 	} finally {
@@ -3779,6 +3965,19 @@ async function openOFDFromDrop(event) {
 function openFontFile(input) {
 	if (document.body.hasAttribute("aria-busy")) {
 		return;
+	}
+	const editing = canvasEditor.input;
+	if (editing) {
+		editing.rich?.remember();
+		editing.fontDialog = true;
+		const finish = () => {
+			editing.fontDialog = false;
+			input.removeEventListener("change", finish);
+			input.removeEventListener("cancel", finish);
+			if (canvasEditor.input === editing) editing.input.focus({ preventScroll: true });
+		};
+		input.addEventListener("change", finish);
+		input.addEventListener("cancel", finish);
 	}
 	input.value = "";
 	input.click();
@@ -4146,6 +4345,7 @@ async function loadWASM() {
 				} else {
 					const err = new Error(missingGlyphMessage(data.missingGlyphs) || (data.reasonCode === "layoutRequired" ? "跨段或换行修改需先设置段落排版" : data.error));
 					err.code = data.code;
+					err.missingGlyphs = data.missingGlyphs;
 					if (data.canceled) {
 						err.name = "AbortError";
 					}
@@ -4343,6 +4543,7 @@ async function openOFD(file, remote = null) {
 		state.pageMultiSelect = false;
 		state.objectClipboard = null;
 		state.styleClipboard = null;
+		canvasEditor.richClipboard = null;
 		state.editorInfo = null;
 		state.editorViews.clear();
 		state.fontRenderPending = false;
@@ -9538,9 +9739,11 @@ function openStructureDialog() {
 	if (!state.editing || !state.doc || document.body.hasAttribute("aria-busy")) return;
 	el.structureEntry.replaceChildren();
 	for (const [index, structure] of (state.doc.structures || []).entries()) {
+		if (structure.internal) continue;
 		el.structureEntry.add(new Option(`${index + 1} · ${structure.root?.name || structure.typeId}`, index));
 	}
 	el.structureEntry.add(new Option("新建标引", -1));
+	el.structureEntry.value = String((state.doc.structures || []).findIndex(structure => !structure.internal));
 	el.structureAction.value = "update";
 	refreshStructureNodes();
 	el.structureDialog.showModal();
@@ -9677,12 +9880,14 @@ function addStructureReference(reference = {}) {
 
 function renderStructures() {
 	const structures = state.doc?.structures || [];
-	el.structurePanel.hidden = !structures.length && !state.doc?.structureError && !(state.doc && state.editing);
+	const count = structures.reduce((total, structure) => total + !structure.internal, 0);
+	el.structurePanel.hidden = !count && !state.doc?.structureError && !(state.doc && state.editing);
 	el.structureManage.hidden = !state.editing;
-	el.structureSummary.textContent = structures.length;
+	el.structureSummary.textContent = count;
 	el.structureList.replaceChildren();
 	if (state.doc?.structureError) appendInfoLine(el.structureList, "错误", state.doc.structureError, "fail");
 	for (const [index, structure] of structures.entries()) {
+		if (structure.internal) continue;
 		if (structure.root) el.structureList.append(structureNode(structure.root, index, []));
 		if (structure.error) appendInfoLine(el.structureList, "错误", structure.error, "fail");
 	}
@@ -10594,9 +10799,9 @@ function updateEditorTools() {
 	el.movePageNextButton.disabled = moveDisabled || selectedPages.at(-1) === state.doc?.pageCount - 1;
 	const enabled = state.editing && state.selectObjects && !state.panMode && !sealPreview && !resourceManager.pick;
 	canvasEditor.setEnabled(enabled);
-	updateObjectControls(canvasEditor.selected);
 	el.undoButton.disabled = !state.editorInfo?.canUndo || !state.ready || state.exporting;
 	el.redoButton.disabled = !state.editorInfo?.canRedo || !state.ready || state.exporting;
+	updateObjectControls(canvasEditor.selected);
 }
 
 function updateObjectControls(item, reset = false) {
@@ -10630,11 +10835,26 @@ function updateObjectControls(item, reset = false) {
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const selection = selectedText(item);
 	const text = selection ? currentTextStyle() : state.textDefaults;
-	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items && !selection);
+	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items && (!selection || item.items.some(member => member.richText))) || Boolean(canvasEditor.input?.composing || canvasEditor.input?.saving);
 	fontPicker.setDisabled(textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "replaceFont"));
 	el.textSize.disabled = textDisabled || text !== state.textDefaults && !item.draft && (!canEditObject(item, "reflow") || Boolean(item?.items) && !canEditObject(item, "layoutKnown"));
-	el.textColor.disabled = textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "paint");
+	el.textColor.disabled = textDisabled || text !== state.textDefaults && !item.draft && !item.richText && !canEditObject(item, "paint");
 	el.textFontAdd.disabled = !state.editing || !state.ready || state.exporting;
+	const formatsDisabled = textDisabled || Boolean(item?.items || item?.scoped) || Boolean(item && !item.draft && (!selection || !canEditObject(item, "textContent")));
+	for (const button of textFormatButtons) {
+		button.disabled = formatsDisabled;
+		const key = button.dataset.textFormat;
+		button.setAttribute("aria-pressed", text[key] === undefined && (canvasEditor.input?.rich || item?.richText) ? "mixed" : String(Boolean(text[key])));
+	}
+	textBackground.disabled = formatsDisabled;
+	textBackground.classList.toggle("mixed-color", Boolean((canvasEditor.input?.rich || item?.richText) && text.background === undefined));
+	if (text.background) textBackground.value = text.background;
+	document.querySelector("#textHighlight").style.setProperty("--highlight-color", textBackground.value);
+	const richHistory = canvasEditor.input?.rich;
+	if (richHistory) {
+		el.undoButton.disabled = textDisabled || richHistory.index === 0;
+		el.redoButton.disabled = textDisabled || richHistory.index === richHistory.entries.length - 1;
+	}
 	el.textAlign.disabled = el.textWrap.disabled = el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled || Boolean(item?.items || item?.draft) || Boolean(canvasEditor.input);
 	el.paragraphButton.disabled = el.textAlign.disabled;
 	const layoutKnown = text === state.textDefaults || Boolean(item?.draft) || canEditObject(item, "layoutKnown");
@@ -10654,8 +10874,8 @@ function updateObjectControls(item, reset = false) {
 	}
 	el.textSize.placeholder = text.size === undefined ? "混合" : "";
 	el.textSize.title = text.size === undefined ? "字号不同" : `字号${displayPoints(text.size)}pt`;
-	el.textColor.classList.toggle("mixed-color", Boolean(selection?.items && !text.color));
-	el.textColor.title = selection?.items && !text.color ? "文字颜色不同" : "文字颜色";
+	el.textColor.classList.toggle("mixed-color", Boolean(selection && !text.color));
+	el.textColor.title = selection && !text.color ? "文字颜色不同" : "文字颜色";
 	if (reset || el.textColor.disabled || document.activeElement !== el.textColor) {
 		el.textColor.value = text.color || "#000000";
 	}

@@ -109,6 +109,15 @@ func scanEditorFontFiles(ctx context.Context, reader *Reader, index int, inspect
 				return nil
 			}
 			if slices.Contains([]string{"CustomTags", "Extensions", "ExtendData", "Data"}, node.name.Local) {
+				if node.matchesOFD("CustomTags") {
+					safe, err := richTextTagsFontSafe(ctx, reader, index)
+					if err != nil {
+						return err
+					}
+					if safe {
+						return nil
+					}
+				}
 				scan.unsafe = true
 				return nil
 			}

@@ -246,8 +246,18 @@ func (e *Editor) ImportObjectsContext(ctx context.Context, source *Editor, sourc
 			imported[i].origin = &editorObjectOrigin{editor: editor, document: editor.documentIdentity(), data: data, node: root.child("Layer").children[0], object: object}
 		}
 		copied, err = editor.CopyObjectsContext(ctx, page, imported, options.DX, options.DY)
-		return err
+		if err != nil {
+			return err
+		}
+		orderedIDs := make([]string, len(objects))
+		for i, object := range objects {
+			orderedIDs[i] = editorObjectID(object)
+		}
+		return editor.copyRichTextMetadata(source, sourcePage, orderedIDs, page, copied)
 	})
+	if err != nil {
+		return nil, err
+	}
 	return copied, err
 }
 

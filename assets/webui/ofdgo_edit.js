@@ -1,5 +1,288 @@
 const PX_PER_MM = 96 / 25.4;
 
+const FORMAT_KEYS = ["font", "size", "color", "bold", "italic", "underline", "strikeout", "shadow", "background"];
+const RICH_CLIPBOARD = "application/x-ofdgo-rich-text";
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+export function fontFaceStyle(data) {
+	const style = { weight: "400", style: "normal" };
+	const bytes = ArrayBuffer.isView(data) ? new DataView(data.buffer, data.byteOffset, data.byteLength) : new DataView(data);
+	if (bytes.byteLength < 12) return style;
+	const count = bytes.getUint16(4);
+	for (let i = 0; i < count && 12 + (i + 1) * 16 <= bytes.byteLength; i++) {
+		const record = 12 + i * 16;
+		if (bytes.getUint32(record) !== 0x68656164) continue;
+		const offset = bytes.getUint32(record + 8), length = bytes.getUint32(record + 12);
+		if (length < 46 || offset + length > bytes.byteLength) return style;
+		const flags = bytes.getUint16(offset + 44);
+		return { weight: flags & 1 ? "700" : "400", style: flags & 2 ? "italic" : "normal" };
+	}
+	return style;
+}
+
+function graphemeRange(text, start, end) {
+	const boundaries = [0, ...Array.from(graphemes.segment(text), segment => segment.index + segment.segment.length)];
+	const from = boundaries.findLast(offset => offset <= start) ?? 0;
+	return start === end ? [from, from] : [from, boundaries.find(offset => offset >= end) ?? text.length];
+}
+
+export function richTextModel(item) {
+	return { runs: [{ text: item.text || "", format: { font: item.font || "", size: item.size, color: item.color || "#000000",
+		bold: Boolean(item.bold), italic: Boolean(item.italic), underline: Boolean(item.underline), strikeout: Boolean(item.strikeout),
+		shadow: Boolean(item.shadow), background: item.background || "" } }],
+		layout: { wrap: Boolean(item.wrap), align: item.align || "left", lineHeight: item.paragraphHeight || 0,
+			letterSpacing: item.letterSpacing || 0, leftIndent: item.leftIndent || 0, rightIndent: item.rightIndent || 0,
+			firstLineIndent: item.firstLineIndent || 0, autoBidi: true } };
+}
+
+function normalizeRuns(runs) {
+	const result = [];
+	for (const run of runs) {
+		if (!run.text) continue;
+		const format = Object.fromEntries(FORMAT_KEYS.map(key => [key, run.format[key] ?? (["font", "color", "background"].includes(key) ? "" : key === "size" ? 0 : false)]));
+		const previous = result.at(-1);
+		if (previous && FORMAT_KEYS.every(key => previous.format[key] === format[key])) previous.text += run.text;
+		else result.push({ text: run.text, format });
+	}
+	const text = result.map(run => run.text).join(""), whole = [];
+	let index = 0, end = result[0]?.text.length || 0;
+	for (const part of graphemes.segment(text)) {
+		while (part.index >= end && index < result.length - 1) end += result[++index].text.length;
+		const format = result[index].format, previous = whole.at(-1);
+		if (previous && FORMAT_KEYS.every(key => previous.format[key] === format[key])) previous.text += part.segment;
+		else whole.push({ text: part.segment, format: { ...format } });
+	}
+	return whole;
+}
+
+function sliceRuns(runs, start, end) {
+	let offset = 0;
+	return runs.flatMap(run => {
+		const text = run.text.slice(Math.max(0, start - offset), Math.max(0, end - offset));
+		offset += run.text.length;
+		return text ? [{ text, format: { ...run.format } }] : [];
+	});
+}
+
+export class RichTextSession {
+	constructor(editor, model, faces = new Map(), imports = []) {
+		this.editor = editor;
+		this.editing = editor.input;
+		this.model = structuredClone(model);
+		this.model.runs = normalizeRuns(model.runs);
+		this.initial = JSON.stringify(this.model);
+		this.faces = faces;
+		for (const face of faces.values()) document.fonts.add(face);
+		this.imports = new Map(imports.map(font => [font.key, font.data]));
+		this.choices = new Map();
+		if (this.editing.item.fontChoice && imports.length === 1) this.choices.set(imports[0].key, this.editing.item.fontChoice);
+		this.typing = { ...(model.runs[0]?.format || richTextModel(this.editing.item).runs[0].format) };
+		this.caret = [0, 0];
+		this.entries = [this.snapshot()];
+		this.index = 0;
+		this.selectionListener = () => {
+			if (editor.input !== this.editing || this.rendering || this.editing.composing) return;
+			const caret = editTextSelection(this.editing.input);
+			if (!caret) return;
+			if (caret.join() !== this.caret.join()) {
+				this.caret = caret;
+				this.typing = { ...this.formatAt(Math.min(...caret)) };
+			}
+			editor.options.onTextChange();
+		};
+		document.addEventListener("selectionchange", this.selectionListener);
+	}
+
+	get text() { return this.model.runs.map(run => run.text).join(""); }
+	get changed() { return JSON.stringify(this.model) !== this.initial; }
+	get fonts() { return [...this.imports].filter(([key]) => this.model.runs.some(run => run.format.font === key)).map(([key, data]) => ({ key, data })); }
+	selection() {
+		const caret = editTextSelection(this.editing.input);
+		if (caret) this.caret = caret;
+		return graphemeRange(this.text, ...[...this.caret].sort((a, b) => a - b));
+	}
+	formatAt(position) {
+		let offset = 0;
+		for (const run of this.model.runs) {
+			offset += run.text.length;
+			if (position <= offset) return run.format;
+		}
+		return this.model.runs.at(-1)?.format || this.typing;
+	}
+	state() {
+		const [start, end] = this.selection();
+		if (start === end) return { ...this.typing };
+		const runs = sliceRuns(this.model.runs, start, end);
+		return Object.fromEntries(FORMAT_KEYS.map(key => [key, runs.every(run => run.format[key] === runs[0]?.format[key]) ? runs[0]?.format[key] : undefined]));
+	}
+	snapshot() { return { model: structuredClone(this.model), typing: { ...this.typing }, caret: [...this.caret] }; }
+	remember() {
+		this.selection();
+		this.entries[this.index].caret = [...this.caret];
+	}
+	record() {
+		const entry = this.snapshot(), old = this.entries[this.index];
+		const changed = JSON.stringify(entry.model) !== JSON.stringify(old.model);
+		if (!changed && JSON.stringify(entry.typing) === JSON.stringify(old.typing)) return;
+		this.entries.splice(++this.index, Infinity, entry);
+		if (changed) this.preview();
+	}
+	undo(direction) {
+		if (this.editing.composing || this.editing.saving) return;
+		const entry = this.entries[this.index + direction];
+		if (!entry) return;
+		this.index += direction;
+		this.model = structuredClone(entry.model);
+		this.typing = { ...entry.typing };
+		this.caret = [...entry.caret];
+		this.render();
+		this.editor.options.onTextChange();
+		this.preview();
+	}
+	preview() {
+		if (!this.editor.options.onPreviewRichText) return;
+		clearTimeout(this.previewTimer);
+		const sequence = this.previewSequence = (this.previewSequence || 0) + 1;
+		this.previewTimer = setTimeout(async () => {
+			const editing = this.editing;
+			if (this.editor.input !== editing || editing.composing || editing.saving) return;
+			const current = () => this.editor.input === editing && this.previewSequence === sequence && !editing.composing && !editing.saving;
+			try {
+				await this.editor.options.onPreviewRichText(editing.item, this.model, editing.frame.width, this.fonts);
+				if (!current()) return;
+				editing.input.removeAttribute("aria-invalid");
+				editing.input.removeAttribute("title");
+			} catch (error) {
+				if (!current()) return;
+				editing.input.setAttribute("aria-invalid", "true");
+				editing.input.title = error.message;
+			}
+		}, 300);
+	}
+	apply(values) {
+		if (this.editing.composing || this.editing.saving) return;
+		this.remember();
+		const [start, end] = this.selection();
+		this.caret = this.caret[0] > this.caret[1] ? [end, start] : [start, end];
+		if (start !== end) this.model.runs = normalizeRuns([
+			...sliceRuns(this.model.runs, 0, start),
+			...sliceRuns(this.model.runs, start, end).map(run => ({ ...run, format: { ...run.format, ...values } })),
+			...sliceRuns(this.model.runs, end, this.text.length),
+		]);
+		this.typing = { ...this.typing, ...values };
+		this.record();
+		this.render();
+		this.editor.options.onTextChange();
+	}
+	replace(runs) {
+		this.remember();
+		const [start, end] = this.selection();
+		this.model.runs = normalizeRuns([...sliceRuns(this.model.runs, 0, start), ...runs, ...sliceRuns(this.model.runs, end, this.text.length)]);
+		this.caret = [start + runs.reduce((length, run) => length + run.text.length, 0)];
+		this.caret.push(this.caret[0]);
+		if (runs.length) this.typing = { ...runs.at(-1).format };
+		this.record();
+		this.render();
+		this.editor.options.onTextChange();
+	}
+	readInput() {
+		if (this.editing.composing) return;
+		const value = editTextValue(this.editing.input), previous = this.text;
+		if (value === previous) return;
+		const caret = editTextSelection(this.editing.input) || this.caret;
+		let start = 0, end = previous.length, nextEnd = value.length;
+		const before = this.beforeCaret;
+		if (before && value.startsWith(previous.slice(0, before[0])) && value.endsWith(previous.slice(before[1]))
+			&& value.length >= previous.length - before[1] + before[0]) {
+			start = before[0]; end = before[1]; nextEnd = value.length - (previous.length - end);
+		} else {
+			while (start < end && start < nextEnd && previous[start] === value[start]) start++;
+			if (start && /[\uD800-\uDBFF]/.test(previous[start - 1])) start--;
+			while (end > start && nextEnd > start && previous[end - 1] === value[nextEnd - 1]) { end--; nextEnd--; }
+			if (end < previous.length && /[\uDC00-\uDFFF]/.test(previous[end])) { end++; nextEnd++; }
+		}
+		this.model.runs = normalizeRuns([...sliceRuns(this.model.runs, 0, start),
+			{ text: value.slice(start, nextEnd), format: { ...this.typing } }, ...sliceRuns(this.model.runs, end, previous.length)]);
+		this.caret = caret;
+		this.beforeCaret = null;
+		this.record();
+		this.render();
+	}
+	copy(event, cut = false) {
+		if (this.editing.composing || this.editing.saving) return;
+		const [start, end] = this.selection();
+		if (start === end || !event.clipboardData) return;
+		const runs = sliceRuns(this.model.runs, start, end), text = runs.map(run => run.text).join("");
+		this.editor.richClipboard = { token: crypto.randomUUID(), runs, text, scope: this.editor.options.textClipboardScope?.(),
+			fonts: new Map(this.imports), faces: new Map(this.faces), choices: new Map(this.choices) };
+		event.preventDefault();
+		event.clipboardData.setData("text/plain", text);
+		event.clipboardData.setData(RICH_CLIPBOARD, this.editor.richClipboard.token);
+		if (cut) this.replace([]);
+	}
+	paste(event) {
+		event.preventDefault();
+		if (this.editing.composing || this.editing.saving) return;
+		const text = event.clipboardData.getData("text/plain").replace(/\r\n?/g, "\n");
+		const copy = this.editor.richClipboard;
+		const internal = copy && copy.scope === this.editor.options.textClipboardScope?.() && event.clipboardData.getData(RICH_CLIPBOARD) === copy.token && text === copy.text;
+		if (internal) {
+			for (const [key, data] of copy.fonts) this.imports.set(key, data);
+			for (const [key, face] of copy.faces) { this.faces.set(key, face); document.fonts.add(face); }
+			this.choices = new Map([...copy.choices, ...(this.choices || [])]);
+		}
+		this.replace(internal ? structuredClone(copy.runs) : [{ text, format: { ...this.typing } }]);
+	}
+	setFont(face, data, key) {
+		key ||= `temp-font-${crypto.randomUUID()}`;
+		this.faces.set(key, face);
+		if (data) this.imports.set(key, data);
+		document.fonts.add(face);
+		this.apply({ font: key });
+	}
+	render() {
+		this.rendering = true;
+		const input = this.editing.input, fragment = document.createDocumentFragment(), positions = [];
+		let paragraph = document.createElement("div"), offset = 0;
+		fragment.append(paragraph);
+		for (const run of this.model.runs) {
+			const pieces = run.text.split("\n"), format = run.format;
+			for (let i = 0; i < pieces.length; i++) {
+				if (i) { paragraph = document.createElement("div"); fragment.append(paragraph); offset++; }
+				const span = document.createElement("span"), node = document.createTextNode(pieces[i]);
+				const face = this.faces.get(format.font) || this.editing.face;
+				Object.assign(span.style, { fontFamily: `"${face.family}"`, fontSize: `${format.size * PX_PER_MM}px`, color: format.color,
+					fontWeight: format.bold ? "700" : face.weight || "400", fontStyle: format.italic ? "italic" : face.style || "normal",
+					textDecoration: [format.underline && "underline", format.strikeout && "line-through"].filter(Boolean).join(" ") || "none",
+					textShadow: format.shadow ? "0.06em 0.06em 0 #808080" : "none", backgroundColor: format.background || "transparent" });
+				span.append(node); paragraph.append(span);
+				positions.push({ node, start: offset, end: offset + pieces[i].length });
+				offset += pieces[i].length;
+			}
+		}
+		if (!positions.length) {
+			const node = document.createTextNode(""); paragraph.append(node);
+			positions.push({ node, start: 0, end: 0 });
+		}
+		input.style.fontSize = this.model.runs.length ? "0px" : `${this.typing.size * PX_PER_MM}px`;
+		input.style.caretColor = this.typing.color || "#000000";
+		for (const line of fragment.children) if (!line.textContent) {
+			line.style.fontSize = line.querySelector("span")?.style.fontSize || `${this.typing.size * PX_PER_MM}px`;
+			line.append(document.createElement("br"));
+		}
+		input.replaceChildren(fragment);
+		this.editing.range = null;
+		input.focus({ preventScroll: true });
+		restoreTextSelection(positions, this.caret);
+		this.rendering = false;
+	}
+	destroy() {
+		clearTimeout(this.previewTimer);
+		document.removeEventListener("selectionchange", this.selectionListener);
+		for (const face of this.faces.values()) document.fonts.delete(face);
+	}
+}
+
 export function editTextValue(input) {
 	let text = "", previous;
 	for (const node of input.childNodes) {
@@ -1182,7 +1465,7 @@ export class CanvasEditor {
 		}
 	}
 
-	editText(item, face, source = null) {
+	editText(item, face, source = null, rich = null) {
 		this.cancel();
 		this.closeText();
 		this.select(item);
@@ -1223,33 +1506,47 @@ export class CanvasEditor {
 		});
 		this.input = { input, item, face, frame, source: Boolean(source), fontChoice: item.fontChoice };
 		const editing = this.input;
+		if (rich) editing.rich = new RichTextSession(this, rich.model, rich.faces, rich.fonts);
+		if (rich && !rich.model.layout.lineHeight) input.style.lineHeight = "normal";
 		if (source) editing.history = { entries: [{ value: item.text }], index: 0 };
 		item.artwork?.classList.add("edit-text-source");
 		item.node.classList.add("edit-text-source");
 		item.surface.append(input);
 		if (source) this.paintSourceText(source);
 		input.addEventListener("input", () => {
+			editing.rich?.readInput();
 			this.recordSourceText();
 			this.options.onTextChange();
 			this.previewSourceText();
 		});
 		input.addEventListener("compositionstart", () => {
+			editing.rich?.remember();
+			if (editing.rich) editing.rich.beforeCaret = editing.rich.selection();
 			this.rememberSourceSelection();
 			editing.composing = true;
 		});
 		input.addEventListener("compositionend", () => {
 			editing.composing = false;
+			editing.rich?.readInput();
 			this.recordSourceText();
+			this.options.onTextChange();
 			Promise.resolve().then(() => {
 				if (this.input === editing && editing.commitAfterComposition) this.commitText();
 				else this.previewSourceText();
 			});
 		});
 		input.addEventListener("paste", event => {
+			if (editing.rich) { editing.rich.paste(event); return; }
 			event.preventDefault();
 			document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
 		});
 		input.addEventListener("beforeinput", event => {
+			if (editing.rich) {
+				if (event.inputType === "historyUndo" || event.inputType === "historyRedo") {
+					event.preventDefault(); editing.rich.undo(event.inputType === "historyUndo" ? -1 : 1); return;
+				}
+				if (!editing.composing) { editing.rich.remember(); editing.rich.beforeCaret = editing.rich.selection(); }
+			}
 			if (editing.source && (event.inputType === "historyUndo" || event.inputType === "historyRedo")) {
 				event.preventDefault();
 				this.restoreSourceText(event.inputType === "historyUndo" ? -1 : 1);
@@ -1263,9 +1560,11 @@ export class CanvasEditor {
 			}
 		});
 		input.addEventListener("blur", (event) => {
+			editing.rich?.remember();
 			const selection = document.getSelection();
 			if (selection?.rangeCount && input.contains(selection.anchorNode)) editing.range = selection.getRangeAt(0).cloneRange();
-			if (!this.options.textControls?.includes(event.relatedTarget)) this.commitText();
+			if (!this.options.textControls?.some(control => control === event.relatedTarget || control.contains(event.relatedTarget))
+				&& !this.options.keepTextFocus?.() && !this.options.busy()) this.commitText();
 		});
 		input.addEventListener("focus", () => {
 			if (editing.range) {
@@ -1281,9 +1580,13 @@ export class CanvasEditor {
 			if (event.isComposing || editing.composing || editing.saving) {
 				return;
 			}
-			if (editing.source && (event.ctrlKey || event.metaKey) && !event.altKey && ["z", "y"].includes(event.key.toLowerCase())) {
+			if (editing.rich && (event.ctrlKey || event.metaKey) && !event.altKey && ["b", "i", "u"].includes(event.key.toLowerCase())) {
 				event.preventDefault();
-				this.restoreSourceText(event.key.toLowerCase() === "y" || event.shiftKey ? 1 : -1);
+				const key = { b: "bold", i: "italic", u: "underline" }[event.key.toLowerCase()];
+				editing.rich.apply({ [key]: editing.rich.state()[key] !== true });
+			} else if ((editing.source || editing.rich) && (event.ctrlKey || event.metaKey) && !event.altKey && ["z", "y"].includes(event.key.toLowerCase())) {
+				event.preventDefault();
+				this.textUndo(event.key.toLowerCase() === "y" || event.shiftKey ? 1 : -1);
 			} else if (event.key === "Escape") {
 				event.preventDefault();
 				this.closeText();
@@ -1293,8 +1596,54 @@ export class CanvasEditor {
 				this.commitText();
 			}
 		});
+		input.addEventListener("copy", event => editing.rich?.copy(event));
+		input.addEventListener("cut", event => editing.rich?.copy(event, true));
+		if (editing.rich) editing.rich.render();
 		input.focus({ preventScroll: true });
 		if (!item.draft) document.getSelection().selectAllChildren(input);
+		if (editing.rich) { editing.rich.selection(); this.options.onTextChange(); }
+	}
+
+	textUndo(direction) {
+		if (this.input?.rich) this.input.rich.undo(direction);
+		else this.restoreSourceText(direction);
+	}
+
+	promoteText(rich) {
+		const editing = this.input;
+		if (!editing || editing.rich || editing.composing || editing.saving) return false;
+		const caret = editTextSelection(editing.input, editing.range) || [0, 0];
+		const value = editTextValue(editing.input);
+		const session = new RichTextSession(this, rich.model, rich.faces, rich.fonts);
+		const original = session.snapshot();
+		const format = { ...session.typing, ...editing.style };
+		if (editing.fontData) {
+			const key = `temp-font-${crypto.randomUUID()}`;
+			format.font = key;
+			session.imports.set(key, editing.fontData);
+			session.faces.set(key, editing.face);
+			if (editing.fontChoice) session.choices.set(key, editing.fontChoice);
+		}
+		const history = editing.history;
+		const values = history ? history.entries.slice(0, history.index + 1) : [{ value: editing.item.text }, { value }];
+		const entries = [original];
+		for (const entry of values) {
+			const snapshot = { model: { ...structuredClone(rich.model), runs: normalizeRuns([{ text: entry.value, format }]) },
+				typing: { ...format }, caret: entry.caret || caret };
+			if (JSON.stringify(snapshot.model) !== JSON.stringify(entries.at(-1).model)) entries.push(snapshot);
+		}
+		const current = { model: { ...structuredClone(rich.model), runs: normalizeRuns([{ text: value, format }]) }, typing: { ...format }, caret };
+		if (JSON.stringify(current.model) !== JSON.stringify(entries.at(-1).model)) entries.push(current);
+		Object.assign(session, { entries, index: entries.length - 1, model: current.model, typing: format, caret });
+		editing.rich = session;
+		editing.source = false;
+		editing.history = null;
+		editing.range = null;
+		if (!rich.model.layout.lineHeight) editing.input.style.lineHeight = "normal";
+		session.render();
+		session.preview();
+		this.options.onTextChange();
+		return true;
 	}
 
 	rememberSourceSelection() {
@@ -1337,7 +1686,7 @@ export class CanvasEditor {
 		const editing = this.input;
 		if (!editing?.source || editing.composing || editing.saving) return;
 		const value = editTextValue(editing.input), font = editing.fontData, size = editing.style?.size || editing.item.size;
-		const current = () => this.input === editing && !editing.composing && !editing.saving && editing.fontData === font
+		const current = () => this.input === editing && !editing.rich && !editing.composing && !editing.saving && editing.fontData === font
 			&& (editing.style?.size || editing.item.size) === size && editTextValue(editing.input) === value;
 		try {
 			const source = await this.options.onPreviewText(editing.item, value, font, size);
@@ -1412,8 +1761,9 @@ export class CanvasEditor {
 		restoreTextSelection(positions, caret, editing.range);
 	}
 
-	setTextFont(face, data) {
+	setTextFont(face, data, key) {
 		const editing = this.input;
+		if (editing.rich) { editing.rich.setFont(face, data, key); return; }
 		document.fonts.add(face);
 		document.fonts.delete(editing.face);
 		editing.face = face;
@@ -1426,6 +1776,7 @@ export class CanvasEditor {
 
 	setTextStyle(values) {
 		const editing = this.input;
+		if (editing.rich) { editing.rich.apply(values); return; }
 		const style = { ...editing.style, ...values };
 		for (const key of Object.keys(style)) if (style[key] === editing.item[key]) delete style[key];
 		editing.style = Object.keys(style).length ? style : null;
@@ -1439,6 +1790,7 @@ export class CanvasEditor {
 	textChanged() {
 		const editing = this.input;
 		if (!editing) return false;
+		if (editing.rich) return Boolean(editing.refreshPending) || (!editing.item.draft || Boolean(editing.rich.text.trim())) && editing.rich.changed;
 		const value = editTextValue(editing.input);
 		return (!editing.item.draft || Boolean(value.trim()))
 			&& (value !== editing.item.text || Boolean(editing.fontData || editing.style));
@@ -1460,7 +1812,14 @@ export class CanvasEditor {
 		}
 		editing.saving = true;
 		editing.input.contentEditable = "false";
-		const saved = await this.options.onCommitText(editing.style ? { ...editing.item, ...editing.style } : editing.item, value, editing.fontData, editing.style?.color ?? null);
+		let saved = false;
+		try {
+			saved = editing.rich ? await this.options.onCommitRichText(editing.item, editing.rich.model, editing.rich.fonts)
+				: await this.options.onCommitText(editing.style ? { ...editing.item, ...editing.style } : editing.item, value, editing.fontData, editing.style?.color ?? null);
+		} catch (error) {
+			editing.input.setAttribute("aria-invalid", "true");
+			editing.input.title = error.message;
+		}
 		if (this.input !== editing) {
 			return Boolean(saved);
 		}
@@ -1478,6 +1837,7 @@ export class CanvasEditor {
 		const editing = this.input;
 		this.input = null;
 		if (editing) {
+			editing.rich?.destroy();
 			editing.input.remove();
 			editing.item.artwork?.classList.remove("edit-text-source");
 			editing.item.node.classList.remove("edit-text-source");

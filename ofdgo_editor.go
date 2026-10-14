@@ -74,6 +74,7 @@ type Editor struct {
 	encryption       *encryptionState
 	output           *outputOptimization
 	validatedPaths   *renderCache[string, bool]
+	richIndex        *richTextIndex
 }
 
 // editorResource 文档内嵌资源
@@ -588,6 +589,7 @@ func (e *Editor) Object(page int, id string) (GraphicObject, error) {
 	}
 	object, err := cloneEditorObject(layer.Objects[index])
 	object.origin = e.objectOrigin(id)
+	e.attachRichTextSnapshot(page, &object)
 	return object, err
 }
 

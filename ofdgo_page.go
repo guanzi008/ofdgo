@@ -63,6 +63,7 @@ type GraphicObject struct {
 	CompositeGraphicUnit CompositeGraphicUnit
 	origin               *editorObjectOrigin
 	state                editorCompositeState
+	richText             *richTextMetadata
 }
 
 // Clips 相对于对象外接矩形的裁剪集合

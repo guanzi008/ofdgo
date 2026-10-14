@@ -271,6 +271,9 @@ func RunWASM() {
 	registerCallback("ofdgoUpdateText", updateText)
 	registerCallback("ofdgoPreviewText", previewText)
 	registerCallback("ofdgoStyleText", styleText)
+	registerCallback("ofdgoGetRichText", getRichText)
+	registerCallback("ofdgoSaveRichText", saveRichText)
+	registerCallback("ofdgoPreviewRichText", previewRichText)
 	registerCallback("ofdgoCheckTextFont", checkTextFont)
 	registerCallback("ofdgoInsertImage", insertImage)
 	registerCallback("ofdgoInsertShape", insertShape)
@@ -1069,6 +1072,15 @@ func changeStructure(args []js.Value) (any, error) {
 		return nil, err
 	}
 	return changeObjects(func() error {
+		if request.Action != "create" {
+			structures, err := currentEditor.Structure()
+			if err != nil {
+				return err
+			}
+			if request.Index >= 0 && request.Index < len(structures) && structures[request.Index].Internal {
+				return fmt.Errorf("internal text metadata must be edited through the text editor")
+			}
+		}
 		switch request.Action {
 		case "create":
 			_, err := currentEditor.AddStructure(ofdgo.CustomTag{TypeID: request.TypeID, NameSpace: request.Node.Namespace}, request.Node)
@@ -1623,6 +1635,11 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 						first, _ := strconv.ParseFloat(codes[0].Y, 64)
 						second, _ := strconv.ParseFloat(codes[1].Y, 64)
 						item["lineHeight"] = second - first
+					}
+				}
+				if object.Type == "CompositeObject" {
+					if value, richErr := currentEditor.RichText(index, id); richErr == nil {
+						editorRichText(index, item, object, value, fontNames)
 					}
 				}
 				objects = append(objects, item)
@@ -2744,6 +2761,239 @@ func styleText(args []js.Value) (any, error) {
 		}
 		return currentEditor.StyleText(page, ids, style)
 	})
+}
+
+// editorRichText 将富文本复合图元作为一个文本框提供给编辑器
+// 入参: page 页面索引, item 浏览器对象, object 标准复合图元, value 富文本, fonts 字体名称
+func editorRichText(page int, item map[string]any, object ofdgo.GraphicObject, value ofdgo.RichText, fonts map[string]string) {
+	if len(value.Runs) == 0 {
+		return
+	}
+	local, matrix, err := currentEditor.RichTextFrame(page, object.CompositeGraphicUnit.ID)
+	if err != nil {
+		return
+	}
+	width, height := local.W, local.H
+	frame := matrix.TransformBox(local)
+	format, layout := value.Runs[0].Format, value.Layout
+	var content strings.Builder
+	for _, run := range value.Runs {
+		content.WriteString(run.Text)
+	}
+	item["actualType"], item["type"], item["richText"] = object.Type, "TextObject", browserRichText(value)
+	item["text"], item["font"], item["fontName"], item["size"] = content.String(), format.Font, fonts[format.Font], format.Size
+	item["color"] = richTextColorHex(format.Color)
+	item["bold"], item["italic"], item["underline"], item["strikeout"], item["shadow"] = format.Bold, format.Italic, format.Underline, format.Strikeout, format.Shadow
+	item["background"] = ""
+	if format.Background != "" {
+		item["background"] = richTextColorHex(format.Background)
+	}
+	item["wrap"], item["align"], item["paragraphHeight"] = layout.Wrap, layout.Align, layout.LineHeight
+	item["letterSpacing"], item["leftIndent"], item["rightIndent"], item["firstLineIndent"] = layout.LetterSpacing, layout.LeftIndent, layout.RightIndent, layout.FirstLineIndent
+	item["paragraphWidth"], item["bounds"] = width, editorBox(frame)
+	item["x"], item["y"], item["width"], item["height"] = frame.X, frame.Y, frame.W, frame.H
+	item["textFrame"] = map[string]any{"width": width, "height": height, "matrix": editorMatrix(matrix)}
+	capabilities := item["capabilities"].(map[string]any)
+	for _, key := range []string{"textContent", "rewriteText", "replaceFont", "reflow", "layoutKnown", "paint"} {
+		capabilities[key] = true
+	}
+	capabilities["enter"], capabilities["ungroup"] = false, false
+	capabilities["stretch"] = false
+}
+
+// getRichText 读取文字分段与段落选项，颜色转换为浏览器RGB格式
+// 入参: args 页码和对象标识
+// 返回: any 富文本快照, error 错误信息
+func getRichText(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	value, err := currentEditor.RichText(args[0].Int(), args[1].String())
+	if err != nil {
+		return nil, err
+	}
+	return browserRichText(value), nil
+}
+
+// browserRichText 提供独立富文本快照和浏览器颜色，不改变库层样式
+// 入参: value 库层富文本
+// 返回: map[string]any 文字分段和段落选项
+func browserRichText(value ofdgo.RichText) map[string]any {
+	runs := make([]any, len(value.Runs))
+	for i, run := range value.Runs {
+		format := run.Format
+		background := ""
+		if format.Background != "" {
+			background = richTextColorHex(format.Background)
+		}
+		runs[i] = map[string]any{"text": run.Text, "format": map[string]any{
+			"font": format.Font, "size": format.Size, "color": richTextColorHex(format.Color),
+			"bold": format.Bold, "italic": format.Italic, "underline": format.Underline,
+			"strikeout": format.Strikeout, "shadow": format.Shadow, "background": background,
+		}}
+	}
+	layout := value.Layout
+	return map[string]any{"runs": runs, "layout": map[string]any{
+		"autoBidi": layout.AutoBidi, "shape": layout.Shape,
+		"shaping": map[string]any{
+			"Bidi": layout.Shaping.Bidi, "Direction": layout.Shaping.Direction,
+			"Script": layout.Shaping.Script, "Language": layout.Shaping.Language, "Features": layout.Shaping.Features,
+		},
+		"wrap": layout.Wrap, "align": layout.Align, "lineHeight": layout.LineHeight,
+		"letterSpacing": layout.LetterSpacing, "leftIndent": layout.LeftIndent,
+		"rightIndent": layout.RightIndent, "firstLineIndent": layout.FirstLineIndent,
+	}}
+}
+
+// richTextColorHex 将富文本的RGB分量转换为浏览器颜色，不套用文档颜色空间
+// 入参: value RGB分量
+// 返回: string 十六进制颜色
+func richTextColorHex(value string) string {
+	var r, g, b int
+	fmt.Sscan(value, &r, &g, &b)
+	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
+}
+
+// readRichText 读取浏览器富文本并转换显式RGB颜色
+// 入参: value 富文本JSON
+// 返回: ofdgo.RichText 库层快照, error 数据错误
+func readRichText(value js.Value) (ofdgo.RichText, error) {
+	var text ofdgo.RichText
+	if err := json.Unmarshal([]byte(value.String()), &text); err != nil {
+		return text, err
+	}
+	for i := range text.Runs {
+		format := &text.Runs[i].Format
+		for _, field := range []*string{&format.Color, &format.Background} {
+			if *field == "" {
+				continue
+			}
+			if len(*field) != 7 || (*field)[0] != '#' {
+				return text, fmt.Errorf("invalid RGB color %q", *field)
+			}
+			rgb, err := hex.DecodeString((*field)[1:])
+			if err != nil {
+				return text, err
+			}
+			*field = fmt.Sprintf("%d %d %d", rgb[0], rgb[1], rgb[2])
+		}
+	}
+	return text, nil
+}
+
+// saveRichText 原子保存文字、样式和新增字体，空标识创建文本框
+// 入参: args 页码、标识、富文本JSON、新建边界和可选字体集合
+// 返回: any 文档信息及文字选区, error 错误信息
+func saveRichText(args []js.Value) (any, error) {
+	value, err := readRichText(args[2])
+	if err != nil {
+		return nil, err
+	}
+	page, id := args[0].Int(), args[1].String()
+	result, err := changeObjects(func() error {
+		if len(args) > 4 {
+			if err := importRichTextFonts(&value, args[4]); err != nil {
+				return err
+			}
+		}
+		if id != "" {
+			if err := currentEditor.UpdateRichText(page, id, value); err != nil {
+				return err
+			}
+			box := args[3]
+			if !box.IsNull() && !box.IsUndefined() && box.Get("frameWidth").Type() == js.TypeNumber {
+				offset := 0.0
+				if box.Get("frameOffset").Type() == js.TypeNumber {
+					offset = box.Get("frameOffset").Float()
+				}
+				return currentEditor.ResizeRichTextFrame(page, id, offset, box.Get("frameWidth").Float())
+			}
+			return nil
+		}
+		box := args[3]
+		id, err = currentEditor.AddRichText(page, ofdgo.Box{X: box.Get("x").Float(), Y: box.Get("y").Float(), W: box.Get("width").Float(), H: box.Get("height").Float()}, value)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	info, ok := result.(editorInfo)
+	if !ok {
+		return result, nil
+	}
+	return editorSelectionInfo{editorInfo: info, SelectedIDs: []string{id}}, nil
+}
+
+// importRichTextFonts 在当前事务内注册实际使用的新字体并替换临时标识
+// 入参: value 富文本快照, fonts 浏览器字体集合
+// 返回: error 数据或字体错误
+func importRichTextFonts(value *ofdgo.RichText, fonts js.Value) error {
+	if fonts.IsNull() || fonts.IsUndefined() {
+		return nil
+	}
+	registered := make(map[string]string)
+	for i := 0; i < fonts.Length(); i++ {
+		entry := fonts.Index(i)
+		key := entry.Get("key").String()
+		if key == "" || registered[key] != "" {
+			return fmt.Errorf("invalid rich text font key")
+		}
+		used := false
+		for _, run := range value.Runs {
+			used = used || run.Format.Font == key
+		}
+		if !used {
+			continue
+		}
+		data, err := bytesFromJS(entry.Get("data"))
+		if err != nil {
+			return err
+		}
+		font, err := currentEditor.AddFont(FontFile{Data: data}, 0)
+		if err != nil {
+			return err
+		}
+		registered[key] = font
+	}
+	for i := range value.Runs {
+		if font := registered[value.Runs[i].Format.Font]; font != "" {
+			value.Runs[i].Format.Font = font
+		}
+	}
+	return nil
+}
+
+// previewRichText 使用库层排版校验富文本并测量边界，临时资源及历史始终回滚
+// 入参: args 页码、对象标识、富文本JSON、局部宽度和可选字体集合
+// 返回: any 局部边界, error 排版错误
+func previewRichText(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	value, err := readRichText(args[2])
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	finished := errors.New("rich text preview complete")
+	err = currentEditor.Transaction(func(editor *ofdgo.Editor) error {
+		if len(args) > 4 {
+			if err := importRichTextFonts(&value, args[4]); err != nil {
+				return err
+			}
+		}
+		width := args[3].Float()
+		_, bounds, err := editor.LayoutRichText(value, width)
+		if err != nil {
+			return err
+		}
+		result = map[string]any{"x": bounds.X, "y": bounds.Y, "width": bounds.W, "height": bounds.H}
+		return finished
+	})
+	if !errors.Is(err, finished) {
+		return nil, err
+	}
+	return result, nil
 }
 
 // setTextColor 将浏览器RGB色值写入文字对象，保留颜色透明度

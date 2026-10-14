@@ -113,6 +113,12 @@
 				<div class="text-font"><div class="font-picker"><input id="textFont" type="text" role="combobox" aria-label="字体" title="字体" aria-autocomplete="list" aria-controls="textFontList" aria-expanded="false" autocomplete="off" spellcheck="false" disabled><button id="textFontToggle" type="button" title="选择字体" aria-label="选择字体" tabindex="-1" disabled></button></div><button id="textFontAdd" class="icon-button" type="button" title="添加字体" aria-label="添加字体">+</button></div>
 				<div id="textFontList" class="font-listbox" role="listbox" aria-label="字体列表" popover="manual"></div>
 				<label class="editor-field"><span>字号</span><span class="editor-number"><input id="textSize" type="number" min="1" step="any" required aria-label="字号" disabled><span>pt</span></span></label>
+				<button id="textBold" class="button text-format-bold" data-text-format="bold" type="button" title="粗体" aria-label="粗体" aria-pressed="false" disabled>B</button>
+				<button id="textItalic" class="button text-format-italic" data-text-format="italic" type="button" title="斜体" aria-label="斜体" aria-pressed="false" disabled>I</button>
+				<button id="textUnderline" class="button text-format-underline" data-text-format="underline" type="button" title="下划线" aria-label="下划线" aria-pressed="false" disabled>U</button>
+				<button id="textStrikeout" class="button text-format-strikeout" data-text-format="strikeout" type="button" title="删除线" aria-label="删除线" aria-pressed="false" disabled>S</button>
+				<button id="textShadow" class="button text-format-shadow" data-text-format="shadow" type="button" title="阴影" aria-label="阴影" aria-pressed="false" disabled>A</button>
+				<div class="text-highlight"><button id="textHighlight" class="button" data-text-format="background" type="button" title="突出显示" aria-label="突出显示" aria-pressed="false" disabled><span aria-hidden="true">A</span></button><input id="textBackground" class="color-input" type="color" value="#ffff00" title="突出显示颜色" aria-label="突出显示颜色" disabled></div>
 				<input id="textColor" class="color-input" type="color" value="#000000" aria-label="文字颜色" title="文字颜色" disabled>
 				<span>文字</span>
 			</div>

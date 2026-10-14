@@ -30,19 +30,22 @@ const structureTypeOfficial = "od"
 const structureNamespaceEGov2013 = "http://www.nits.org.cn/eGovDoc/2013"
 
 // Structure 保存自定义标引入口及结构树，单个文件解析失败时通过Error报告，不影响其他标引
-// CanBind表示已识别公文引用语义，具体节点和目标仍由绑定接口校验
+// CanBind表示已识别标引引用规则，包括公文标引及本库富文本标引，具体节点和目标仍由绑定接口校验
+// Internal标记本库内部编辑标引，不删除或重排入口；界面跳过此项时必须保留原始数组索引
+// 此标记不限制通用低级编辑接口，也不表示内部元数据内容已通过有效性校验
 type Structure struct {
 	TypeID    string         `json:"typeId,omitempty"`
 	Namespace string         `json:"namespace,omitempty"`
 	FileLoc   string         `json:"fileLoc"`
 	CanBind   bool           `json:"canBind,omitempty"`
+	Internal  bool           `json:"internal,omitempty"`
 	Root      *StructureNode `json:"root,omitempty"`
 	Error     string         `json:"error,omitempty"`
 }
 
 // StructureNode 保存标引节点的名称、属性、直接文本和有序子节点，不改变原始XML
 // Text按文档顺序汇总直接文本并保留空白，不包含子节点文本
-// References仅解释公文标引中的ObjectRef；未知扩展保留结构，不推定其引用语义
+// References仅解释已识别公文标引或本库富文本标引中的ObjectRef；未知扩展保留结构，不推定其引用语义
 type StructureNode struct {
 	Name       string               `json:"name"`
 	Namespace  string               `json:"namespace,omitempty"`
@@ -120,6 +123,7 @@ func (r *Reader) readStructureContext(ctx context.Context, tag CustomTag) (Struc
 		return item, fmt.Errorf("read custom tag %s: %w", tag.FileLoc, err)
 	}
 	item.CanBind = structureOfficial(tag, item.Root.Namespace)
+	item.Internal = tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace && item.Root.Namespace == richTextNamespace && item.Root.Name == "RichText"
 	return item, nil
 }
 
@@ -211,10 +215,13 @@ func parseStructure(ctx context.Context, data []byte, tag CustomTag) (*Structure
 	return root, nil
 }
 
-// structureOfficial 识别公文类型标识及既有公文命名空间，不以节点名称推断未知行业语义
+// structureOfficial 识别公文和本库富文本标引的明确引用规则，不推断未知行业语义
 // 入参: tag 标引入口, namespace 内容根节点命名空间
 // 返回: bool 是否使用公文引用规则
 func structureOfficial(tag CustomTag, namespace string) bool {
+	if tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace && namespace == richTextNamespace {
+		return true
+	}
 	if tag.TypeID == structureTypeOfficial {
 		return true
 	}
