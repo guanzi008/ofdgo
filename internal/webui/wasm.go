@@ -2774,7 +2774,11 @@ func editorRichText(page int, item map[string]any, object ofdgo.GraphicObject, v
 		return
 	}
 	width, height := local.W, local.H
-	frame := matrix.TransformBox(local)
+	_, contentBounds, err := currentEditor.LayoutRichText(value, width)
+	if err != nil {
+		return
+	}
+	frame := matrix.TransformBox(contentBounds)
 	format, layout := value.Runs[0].Format, value.Layout
 	var content strings.Builder
 	for _, run := range value.Runs {
@@ -2792,7 +2796,7 @@ func editorRichText(page int, item map[string]any, object ofdgo.GraphicObject, v
 	item["letterSpacing"], item["leftIndent"], item["rightIndent"], item["firstLineIndent"] = layout.LetterSpacing, layout.LeftIndent, layout.RightIndent, layout.FirstLineIndent
 	item["paragraphWidth"], item["bounds"] = width, editorBox(frame)
 	item["x"], item["y"], item["width"], item["height"] = frame.X, frame.Y, frame.W, frame.H
-	item["textFrame"] = map[string]any{"width": width, "height": height, "matrix": editorMatrix(matrix)}
+	item["textFrame"] = map[string]any{"width": width, "height": height, "matrix": editorMatrix(matrix), "content": editorBox(contentBounds)}
 	capabilities := item["capabilities"].(map[string]any)
 	for _, key := range []string{"textContent", "rewriteText", "replaceFont", "reflow", "layoutKnown", "paint"} {
 		capabilities[key] = true

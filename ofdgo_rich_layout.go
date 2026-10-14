@@ -61,7 +61,7 @@ type richContextShaper struct {
 }
 
 // LayoutRichText 生成局部坐标的标准文字和路径，不修改页面或编辑历史。
-// 边界包含排版高度和溢出墨迹，可能有负的X或Y，不截断文字。
+// 边界包含内容的排版高度和溢出墨迹，不包含空余段落宽度，可能有负的X或Y。
 // 非标准RGB文档按需复用或注册RGB颜色空间，返回对象可直接用于当前文档。
 // 注册不产生修订或撤销记录；失败时不保留新增资源和资源编号。
 // 提交对象后应创建新的Reader；已有Reader是独立快照，不包含新注册的资源。
@@ -100,7 +100,7 @@ func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, erro
 		return richLayout{}, err
 	}
 	metrics := make([]richMetrics, len(value.Runs))
-	result := richLayout{anchors: make([]int, len(value.Runs)), bounds: Box{W: width}}
+	result := richLayout{anchors: make([]int, len(value.Runs))}
 	owners := make([]int, 0, value.Len())
 	for i, run := range value.Runs {
 		font, err := e.editorFont(run.Format.Font)
@@ -205,7 +205,12 @@ func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, erro
 			if err := richPositionSpans(spans, steps, local, x); err != nil {
 				return richLayout{}, err
 			}
-			result.bounds = richUnion(result.bounds, Box{X: x, Y: y, H: height})
+			lineBounds := Box{X: x, Y: y, H: height}
+			if result.bounds.H == 0 {
+				result.bounds = lineBounds
+			} else {
+				result.bounds = richUnion(result.bounds, lineBounds)
+			}
 			for _, span := range spans {
 				format := value.Runs[span.owner].Format
 				for _, glyph := range span.glyphs {
@@ -290,6 +295,9 @@ func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, erro
 	}
 	if !finite(result.bounds.X) || !finite(result.bounds.Y) || !finite(result.bounds.W) || !finite(result.bounds.H) || result.bounds.H <= 0 {
 		return richLayout{}, fmt.Errorf("rich text layout overflow")
+	}
+	if result.bounds.W == 0 {
+		result.bounds.W = min(width, value.Runs[0].Format.Size)
 	}
 	for i, anchor := range result.anchors {
 		if anchor >= 0 {

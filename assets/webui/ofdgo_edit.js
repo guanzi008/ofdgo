@@ -689,11 +689,12 @@ export class CanvasEditor {
 		if (item.contour) item.contour.svg.setAttribute("viewBox", `${item.x} ${item.y} ${item.width} ${item.height}`);
 		if (item.textFrame) {
 			const { matrix: [a, b, c, d, e, f], width, height } = item.textFrame;
+			const box = item.textFrame.content || { x: 0, y: 0, width, height };
 			for (const handle of item.node.children) {
 				if (handle.dataset.corner !== "w" && handle.dataset.corner !== "e") continue;
-				const x = handle.dataset.corner === "e" ? width : 0;
-				handle.style.left = `${(a * x + c * height / 2 + e - item.x) * change.scale * PX_PER_MM}px`;
-				handle.style.top = `${(b * x + d * height / 2 + f - item.y) * change.scale * PX_PER_MM}px`;
+				const x = box.x + (handle.dataset.corner === "e" ? box.width : 0), y = box.y + box.height / 2;
+				handle.style.left = `${(a * x + c * y + e - item.x) * change.scale * PX_PER_MM}px`;
+				handle.style.top = `${(b * x + d * y + f - item.y) * change.scale * PX_PER_MM}px`;
 				handle.style.cursor = a === 0 ? "var(--resize-vertical, ns-resize)" : "var(--resize-horizontal, ew-resize)";
 			}
 		}
@@ -969,7 +970,7 @@ export class CanvasEditor {
 			if (drag.item.textFrame) {
 				const frame = drag.item.textFrame, [a, b, c, d] = frame.matrix;
 				const dx = (d * (to.x - from.x) - c * (to.y - from.y)) / (a * d - b * c);
-				const box = reshapeBox({ geometry: { x: 0, y: 0, width: frame.width, height: frame.height } }, dx, 0, drag.corner, false);
+				const box = reshapeBox({ geometry: frame.content || { x: 0, y: 0, width: frame.width, height: frame.height } }, dx, 0, drag.corner, false);
 				drag.box = { x: drag.item.x + box.x, width: box.width };
 				const bounds = transformedBox(box, frame.matrix);
 				Object.assign(drag.item.node.style, { left: `${bounds.x * PX_PER_MM}px`, top: `${bounds.y * PX_PER_MM}px`,
@@ -1130,7 +1131,8 @@ export class CanvasEditor {
 		if (drag.corner && drag.box) {
 			this.drag = null;
 			this.viewer.releasePointerCapture(drag.pointerID);
-			const geometry = drag.item.oriented?.box || drag.item.geometry || (drag.item.textFrame ? { x: drag.item.x, width: drag.item.textFrame.width } : drag.item);
+			const frame = drag.item.textFrame;
+			const geometry = drag.item.oriented?.box || drag.item.geometry || (frame ? { x: drag.item.x + (frame.content?.x || 0), width: frame.content?.width ?? frame.width } : drag.item);
 			const changed = Object.keys(drag.box).some((key) => drag.box[key] !== geometry[key]);
 			const apply = drag.item.shape || drag.item.oriented ? this.options.onReshape : canEditObject(drag.item, "stretch") ? this.options.onResize : this.options.onTextWidth;
 			Promise.resolve(changed && apply(drag.item, drag.box)).finally(() => {
