@@ -8767,7 +8767,7 @@ async function loadAnnotationSummary() {
 		summary.items = items || [];
 		const labels = {Path: "批注", Highlight: "高亮", Stamp: "印章", Watermark: "水印", Link: "链接"};
 		const kind = el.annotationsKind.value;
-		el.annotationsKind.replaceChildren(new Option("全部", ""), ...[...new Set(summary.items.map(item => item.type))].map(type => new Option(labels[type] || type, type)));
+		el.annotationsKind.replaceChildren(new Option("全部", ""), ...[...new Set(summary.items.map(annotationKind))].map(type => new Option(labels[type] || type, type)));
 		el.annotationsKind.value = [...el.annotationsKind.options].some(option => option.value === kind) ? kind : "";
 		summary.loading = false;
 		renderAnnotationSummary();
@@ -8779,13 +8779,17 @@ async function loadAnnotationSummary() {
 	}
 }
 
+function annotationKind(annotation) {
+	return annotation.type === "Path" && annotation.subtype === "Link" ? "Link" : annotation.type;
+}
+
 function renderAnnotationSummary() {
 	const summary = state.annotationSummary;
 	if (!summary || summary.loading || summary.seq !== state.openSeq) return;
 	const query = el.annotationsFilter.value.trim().toLocaleLowerCase();
 	const kind = el.annotationsKind.value;
 	const labels = {Path: "批注", Highlight: "高亮", Stamp: "印章", Watermark: "水印", Link: "链接"};
-	const items = summary.items.filter(item => (!kind || item.type === kind) && `${item.remark || ""}\n${item.creator || ""}\n${item.id}`.toLocaleLowerCase().includes(query));
+	const items = summary.items.filter(item => (!kind || annotationKind(item) === kind) && `${item.remark || ""}\n${item.creator || ""}\n${item.id}`.toLocaleLowerCase().includes(query));
 	el.annotationsStatus.textContent = summary.items.length ? `${items.length} / ${summary.items.length}` : "";
 	el.annotationsList.replaceChildren(...items.map(item => {
 		const row = document.createElement("div");
@@ -8795,7 +8799,7 @@ function renderAnnotationSummary() {
 		target.className = "annotation-summary-target";
 		target.title = "定位注解";
 		const heading = document.createElement("span"), content = document.createElement("span");
-		heading.textContent = `第${item.page}页 · ${labels[item.type] || item.type}${item.visible ? "" : " · 隐藏"}`;
+		heading.textContent = `第${item.page}页 · ${labels[annotationKind(item)] || item.type}${item.visible ? "" : " · 隐藏"}`;
 		content.textContent = item.remark || item.id;
 		target.append(heading, content);
 		target.addEventListener("click", () => focusPageRegion(item, "注解", "center"));
@@ -10214,6 +10218,13 @@ async function focusPageRegion(region, label, alignment = "nearest") {
 		return;
 	}
 	highlightPageRegion(region, alignment);
+	if (label === "注解") {
+		for (const note of pageShell(pageIndex)?.querySelectorAll(".annotation-note") || []) {
+			if (note.dataset.annotationId !== String(region.id)) continue;
+			note.classList.add("located");
+			window.setTimeout(() => note.classList.remove("located"), 1800);
+		}
+	}
 	setStatus(`已定位${label}（第${region.page}页）`);
 }
 
@@ -10243,6 +10254,7 @@ function highlightPageRegion(region, alignment = "nearest") {
 }
 
 function clearRegionHighlights() {
+	for (const note of el.svgHost.querySelectorAll(".annotation-note.located")) note.classList.remove("located");
 	for (const mark of el.svgHost.querySelectorAll(".region-highlight")) {
 		mark.remove();
 	}
@@ -10250,13 +10262,16 @@ function clearRegionHighlights() {
 
 function mountAnnotationNotes(index, surface, annotations) {
 	for (const note of surface.querySelectorAll(".annotation-note")) note.remove();
+	surface.onpointermove = surface.onpointerleave = null;
 	if (!state.renderAnnotations) return;
 	const page = state.doc.pages[index];
+	const notes = [];
 	for (const annotation of annotations || []) {
-		if (!annotation.visible || annotation.page !== index + 1 || !annotation.remark?.trim()) continue;
+		if (!annotation.visible || annotationKind(annotation) === "Link" || annotation.page !== index + 1 || !annotation.remark?.trim()) continue;
 		const note = document.createElement("button");
 		note.type = "button";
 		note.className = "annotation-note";
+		note.dataset.annotationId = annotation.id;
 		note.classList.toggle("no-zoom", !!annotation.noZoom);
 		note.classList.toggle("no-rotate", !!annotation.noRotate);
 		note.textContent = "\u24d8";
@@ -10280,7 +10295,24 @@ function mountAnnotationNotes(index, surface, annotations) {
 			el.annotationNote.showModal();
 		});
 		surface.append(note);
+		notes.push({note, annotation});
 	}
+	if (!notes.length) return;
+	// 从页面监听悬停，不用透明热区拦截正文选择和链接操作。
+	surface.onpointermove = event => {
+		if (event.pointerType === "touch" || state.editing) return;
+		const point = pagePoint(event.clientX, event.clientY, surface.getBoundingClientRect(), page, state.rotation);
+		const hovered = notes.map(({note, annotation}) => {
+			const rect = note.getBoundingClientRect();
+			const overNote = event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
+			const overRegion = point.x >= annotation.x && point.x <= annotation.x + annotation.width && point.y >= annotation.y && point.y <= annotation.y + annotation.height;
+			return overNote || overRegion;
+		});
+		notes.forEach(({note}, i) => note.classList.toggle("active", hovered[i]));
+	};
+	surface.onpointerleave = () => {
+		for (const {note} of notes) note.classList.remove("active");
+	};
 }
 
 function renderDocumentFonts() {

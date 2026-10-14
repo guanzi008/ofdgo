@@ -3130,6 +3130,8 @@ audio.page-media {
 .annotation-note {
 	position: absolute;
 	z-index: 2;
+	opacity: 0;
+	pointer-events: none;
 	width: 22px;
 	height: 22px;
 	padding: 0;
@@ -3141,6 +3143,13 @@ audio.page-media {
 	text-align: center;
 	transform-origin: 0 0;
 	transform: rotate(var(--note-rotation, 0deg)) scale(var(--note-scale, 1)) translateX(-100%);
+}
+
+.annotation-note.active,
+.annotation-note.located,
+.annotation-note:focus {
+	opacity: 1;
+	pointer-events: auto;
 }
 
 .annotation-note.no-zoom {
