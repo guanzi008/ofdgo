@@ -10221,8 +10221,9 @@ async function focusPageRegion(region, label, alignment = "nearest") {
 	if (label === "注解") {
 		for (const note of pageShell(pageIndex)?.querySelectorAll(".annotation-note") || []) {
 			if (note.dataset.annotationId !== String(region.id)) continue;
+			window.clearTimeout(note.locateTimer);
 			note.classList.add("located");
-			window.setTimeout(() => note.classList.remove("located"), 1800);
+			note.locateTimer = window.setTimeout(() => note.classList.remove("located"), 1800);
 		}
 	}
 	setStatus(`已定位${label}（第${region.page}页）`);
@@ -10254,20 +10255,30 @@ function highlightPageRegion(region, alignment = "nearest") {
 }
 
 function clearRegionHighlights() {
-	for (const note of el.svgHost.querySelectorAll(".annotation-note.located")) note.classList.remove("located");
+	for (const note of el.svgHost.querySelectorAll(".annotation-note.located")) {
+		window.clearTimeout(note.locateTimer);
+		note.classList.remove("located");
+	}
 	for (const mark of el.svgHost.querySelectorAll(".region-highlight")) {
 		mark.remove();
 	}
 }
 
 function mountAnnotationNotes(index, surface, annotations) {
-	for (const note of surface.querySelectorAll(".annotation-note")) note.remove();
+	for (const note of surface.querySelectorAll(".annotation-note")) {
+		window.clearTimeout(note.locateTimer);
+		note.remove();
+	}
 	surface.onpointermove = surface.onpointerleave = null;
 	if (!state.renderAnnotations) return;
 	const page = state.doc.pages[index];
 	const notes = [];
 	for (const annotation of annotations || []) {
 		if (!annotation.visible || annotationKind(annotation) === "Link" || annotation.page !== index + 1 || !annotation.remark?.trim()) continue;
+		const bounds = annotation.bounds;
+		const region = !bounds ? annotation : bounds.W > 0 && bounds.H > 0
+			? {x: bounds.X, y: bounds.Y, width: bounds.W, height: bounds.H, contours: annotation.contours || []}
+			: {x: annotation.x, y: annotation.y, width: 22 / MM_TO_PX, height: 22 / MM_TO_PX, contours: []};
 		const note = document.createElement("button");
 		note.type = "button";
 		note.className = "annotation-note";
@@ -10278,8 +10289,8 @@ function mountAnnotationNotes(index, surface, annotations) {
 		note.title = "查看注解";
 		note.setAttribute("aria-label", "查看注解");
 		note.setAttribute("aria-haspopup", "dialog");
-		note.style.left = `${Math.max(22 / MM_TO_PX, Math.min(page.width, annotation.x + annotation.width)) * MM_TO_PX}px`;
-		note.style.top = `${Math.max(0, Math.min(page.height - 22 / MM_TO_PX, annotation.y)) * MM_TO_PX}px`;
+		note.style.left = `${Math.max(22 / MM_TO_PX, Math.min(page.width, region.x + region.width)) * MM_TO_PX}px`;
+		note.style.top = `${Math.max(0, Math.min(page.height - 22 / MM_TO_PX, region.y)) * MM_TO_PX}px`;
 		note.addEventListener("click", () => {
 			if (state.editing || document.body.hasAttribute("aria-busy")) return;
 			el.annotationDetail.replaceChildren();
@@ -10295,18 +10306,17 @@ function mountAnnotationNotes(index, surface, annotations) {
 			el.annotationNote.showModal();
 		});
 		surface.append(note);
-		notes.push({note, annotation});
+		notes.push({note, region});
 	}
 	if (!notes.length) return;
-	// 从页面监听悬停，不用透明热区拦截正文选择和链接操作。
 	surface.onpointermove = event => {
 		if (event.pointerType === "touch" || state.editing) return;
 		const point = pagePoint(event.clientX, event.clientY, surface.getBoundingClientRect(), page, state.rotation);
-		const hovered = notes.map(({note, annotation}) => {
+		const overAction = event.target?.closest?.(".page-link, .page-media");
+		const hovered = notes.map(({note, region}) => {
 			const rect = note.getBoundingClientRect();
 			const overNote = event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
-			const overRegion = point.x >= annotation.x && point.x <= annotation.x + annotation.width && point.y >= annotation.y && point.y <= annotation.y + annotation.height;
-			return overNote || overRegion;
+			return !overAction && (overNote || canvasEditor.contains(region, point));
 		});
 		notes.forEach(({note}, i) => note.classList.toggle("active", hovered[i]));
 	};

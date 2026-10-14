@@ -158,16 +158,23 @@ type PageInfo struct {
 
 // PageSVG 页面SVG结果
 type PageSVG struct {
-	Index       int                    `json:"index"`
-	Number      int                    `json:"number"`
-	ID          string                 `json:"id"`
-	Width       float64                `json:"width"`
-	Height      float64                `json:"height"`
-	SVG         string                 `json:"svg"`
-	Links       []ofdgo.PageLink       `json:"-"`
-	Fonts       []ofdgo.SVGFont        `json:"-"`
-	Images      []ofdgo.SVGImage       `json:"-"`
-	Annotations []ofdgo.AnnotationInfo `json:"annotations,omitempty"`
+	Index       int                 `json:"index"`
+	Number      int                 `json:"number"`
+	ID          string              `json:"id"`
+	Width       float64             `json:"width"`
+	Height      float64             `json:"height"`
+	SVG         string              `json:"svg"`
+	Links       []ofdgo.PageLink    `json:"-"`
+	Fonts       []ofdgo.SVGFont     `json:"-"`
+	Images      []ofdgo.SVGImage    `json:"-"`
+	Annotations []AnnotationPreview `json:"annotations,omitempty"`
+}
+
+// AnnotationPreview 注解预览信息及页面坐标中的交互范围
+type AnnotationPreview struct {
+	ofdgo.AnnotationInfo
+	Bounds   ofdgo.Box             `json:"bounds"`
+	Contours []ofdgo.ObjectContour `json:"contours,omitempty"`
 }
 
 // ExportFormat 导出格式
@@ -617,9 +624,20 @@ func (s *Session) RenderPage(index int, backend string, dpi float64, raster bool
 	if err != nil {
 		return PageSVG{}, err
 	}
-	annotations, err := s.Reader.AnnotationInfosByIndex(index)
+	infos, err := s.Reader.AnnotationInfosByIndex(index)
 	if err != nil {
 		return PageSVG{}, err
+	}
+	annotations := make([]AnnotationPreview, len(infos))
+	for i, info := range infos {
+		annotations[i].AnnotationInfo = info
+		if !renderer.RenderAnnotations || !info.Visible || strings.TrimSpace(info.Remark) == "" || info.Type == "Link" || info.Type == "Path" && info.Subtype == "Link" {
+			continue
+		}
+		bounds, contours, err := renderer.AnnotationGeometry(s.Reader.Annots[page.ID][i])
+		if err == nil {
+			annotations[i].Bounds, annotations[i].Contours = bounds, contours
+		}
 	}
 	clear(s.svgFonts)
 	for i, font := range resources.Fonts {

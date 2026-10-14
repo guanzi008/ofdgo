@@ -3129,7 +3129,6 @@ audio.page-media {
 
 .annotation-note {
 	position: absolute;
-	z-index: 2;
 	opacity: 0;
 	pointer-events: none;
 	width: 22px;
