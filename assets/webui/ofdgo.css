@@ -3817,13 +3817,6 @@ audio.page-media {
 	}
 }
 
-@media (min-width: 901px) {
-	.editor-toolbar {
-		flex-wrap: wrap;
-		row-gap: 8px;
-	}
-}
-
 @media (min-width: 901px) and (max-width: 1900px) {
 	.editor-toolbar {
 		--editor-control-width: 44px;
