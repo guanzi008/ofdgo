@@ -3466,12 +3466,13 @@ async function changeTextStyle(color) {
 		return;
 	}
 	const size = color ? item.size : inputMillimeters(el.textSize, item.size);
-	const fill = color && el.textColor.value !== item.color ? el.textColor.value : null;
+	const selectedColor = el.textColor.value;
+	const fill = color && selectedColor !== item.color ? selectedColor : null;
 	if (item.richText && !canvasEditor.input) {
 		try { if (!await ensureRichInput()) return; } catch (error) { showError(error, false); return; }
 	}
 	if (canvasEditor.input) {
-		canvasEditor.setTextStyle(color ? { color: el.textColor.value } : { size });
+		canvasEditor.setTextStyle(color ? { color: selectedColor } : { size });
 		updateObjectControls(canvasEditor.selected, true);
 		return;
 	}
