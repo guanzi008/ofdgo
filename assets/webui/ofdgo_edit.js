@@ -150,12 +150,10 @@ export class RichTextSession {
 			try {
 				await this.editor.options.onPreviewRichText(editing.item, this.model, editing.frame.width, this.fonts);
 				if (!current()) return;
-				editing.input.removeAttribute("aria-invalid");
-				editing.input.removeAttribute("title");
+				this.editor.setTextError(null);
 			} catch (error) {
 				if (!current()) return;
-				editing.input.setAttribute("aria-invalid", "true");
-				editing.input.title = error.message;
+				this.editor.setTextError(error);
 			}
 		}, 300);
 	}
@@ -271,6 +269,7 @@ export class RichTextSession {
 			line.append(document.createElement("br"));
 		}
 		input.replaceChildren(fragment);
+		this.editor.fitTextInput();
 		this.editing.range = null;
 		input.focus({ preventScroll: true });
 		restoreTextSelection(positions, this.caret);
@@ -1485,16 +1484,12 @@ export class CanvasEditor {
 			else paragraph.append(document.createElement("br"));
 			input.append(paragraph);
 		}
-		const left = item.leftIndent || 0, right = item.rightIndent || 0;
+		const left = item.leftIndent || 0;
 		const frame = { ...(item.textFrame || { width: item.width, height: item.height, matrix: [1, 0, 0, 1, item.x, item.y] }) };
 		if (item.wrap && item.paragraphWidth != null) frame.width = item.paragraphWidth;
 		const [a, b, c, d, e, f] = frame.matrix;
-		const autoSize = !source && !item.wrap && (!item.align || item.align === "left");
 		Object.assign(input.style, {
 			left: "0px", top: "0px",
-			width: autoSize ? "max-content" : `${(frame.width - left - right) * PX_PER_MM + 4}px`,
-			minWidth: autoSize ? "calc(1em + 4px)" : "0px",
-			minHeight: autoSize ? "0px" : `${frame.height * PX_PER_MM + 4}px`,
 			transform: `matrix(${a},${b},${c},${d},${(e + a * left) * PX_PER_MM},${(f + b * left) * PX_PER_MM})`,
 			whiteSpace: item.wrap ? "pre-wrap" : "pre",
 			unicodeBidi: "plaintext",
@@ -1512,6 +1507,7 @@ export class CanvasEditor {
 		item.artwork?.classList.add("edit-text-source");
 		item.node.classList.add("edit-text-source");
 		item.surface.append(input);
+		this.fitTextInput();
 		if (source) this.paintSourceText(source);
 		input.addEventListener("input", () => {
 			editing.rich?.readInput();
@@ -1609,6 +1605,36 @@ export class CanvasEditor {
 		else this.restoreSourceText(direction);
 	}
 
+	fitTextInput() {
+		const editing = this.input;
+		if (!editing || editing.source) return;
+		const { input, frame, item, rich } = editing;
+		const layout = rich?.model.layout || item;
+		const width = Math.max(0, frame.width - (layout.leftIndent || 0) - (layout.rightIndent || 0)) * PX_PER_MM + 4;
+		const autoWidth = !layout.align || layout.align === "left";
+		Object.assign(input.style, {
+			width: autoWidth ? "max-content" : `${width}px`,
+			maxWidth: layout.wrap ? `${width}px` : "none",
+			minWidth: `${Math.min(width, (rich?.typing.size || editing.style?.size || item.size) * PX_PER_MM + 4)}px`,
+			minHeight: "0px", height: "auto",
+		});
+	}
+
+	setTextError(error) {
+		const editing = this.input;
+		if (!editing) return;
+		const previous = editing.error || "";
+		editing.error = error ? String(error.message || error) : "";
+		if (editing.error) {
+			editing.input.setAttribute("aria-invalid", "true");
+			editing.input.title = editing.error;
+		} else {
+			editing.input.removeAttribute("aria-invalid");
+			editing.input.removeAttribute("title");
+		}
+		if (editing.error || previous) this.options.onTextError?.(editing.error, previous);
+	}
+
 	promoteText(rich) {
 		const editing = this.input;
 		if (!editing || editing.rich || editing.composing || editing.saving) return false;
@@ -1691,13 +1717,11 @@ export class CanvasEditor {
 		try {
 			const source = await this.options.onPreviewText(editing.item, value, font, size);
 			if (!current()) return;
-			editing.input.removeAttribute("aria-invalid");
-			editing.input.removeAttribute("title");
+			this.setTextError(null);
 			this.paintSourceText(source);
 		} catch (err) {
 			if (!current()) return;
-			editing.input.setAttribute("aria-invalid", "true");
-			editing.input.title = err.message;
+			this.setTextError(err);
 		}
 	}
 
@@ -1783,6 +1807,7 @@ export class CanvasEditor {
 		const item = { ...editing.item, ...editing.style };
 		editing.input.style.fontSize = `${item.size * PX_PER_MM}px`;
 		editing.input.style.color = item.color;
+		this.fitTextInput();
 		this.options.onTextChange();
 		if ("size" in values) this.previewSourceText();
 	}
@@ -1817,8 +1842,7 @@ export class CanvasEditor {
 			saved = editing.rich ? await this.options.onCommitRichText(editing.item, editing.rich.model, editing.rich.fonts)
 				: await this.options.onCommitText(editing.style ? { ...editing.item, ...editing.style } : editing.item, value, editing.fontData, editing.style?.color ?? null);
 		} catch (error) {
-			editing.input.setAttribute("aria-invalid", "true");
-			editing.input.title = error.message;
+			if (this.input === editing) this.setTextError(error);
 		}
 		if (this.input !== editing) {
 			return Boolean(saved);
@@ -1835,6 +1859,7 @@ export class CanvasEditor {
 
 	closeText() {
 		const editing = this.input;
+		this.setTextError(null);
 		this.input = null;
 		if (editing) {
 			editing.rich?.destroy();

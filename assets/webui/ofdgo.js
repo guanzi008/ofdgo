@@ -673,6 +673,10 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onPreviewText: (item, value, font, size) => callWASM("ofdgoPreviewText", item.index, item.id, value, font || null, size),
 	onCommitRichText: saveRichText,
 	onPreviewRichText: validateRichText,
+	onTextError: (message, previous) => {
+		if (message) setStatus(message);
+		else if (el.statusText.textContent === previous) setStatus(state.doc ? pageStatus(state.pageIndex, state.doc.pageCount) : STATUS.ready);
+	},
 	onCommitText: (item, value, fontData, color = null) => item.draft
 		? changeDocument("ofdgoInsertText", null, item.index, value, fontData || item.fontData, item.x, item.y, item.size, item.color, item.width, item.wrap, item.align, item.paragraphHeight, item.letterSpacing, ...textIndents(item))
 		: changeDocument("ofdgoUpdateText", item, value, fontData || null, item.size, color),
