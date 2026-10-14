@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math"
 
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -237,8 +238,8 @@ func (p *pdfImporter) directCompositeNode(node pdfCompositeNode, space *pdfgo.Co
 				if i == 0 && !fill || i == 1 && !stroke {
 					continue
 				}
-				if native := pdfPrepareShadingColorants(paint, space, false); native != nil {
-					if !native.process.AlternateEquivalent() || i == 0 && style.FillOverprint || i == 1 && style.StrokeOverprint {
+				if native := codecpdf.PrepareShadingColorants(paint, space, false); native != nil {
+					if !native.Process.AlternateEquivalent() || i == 0 && style.FillOverprint || i == 1 && style.StrokeOverprint {
 						return false, nil
 					}
 				}
@@ -287,7 +288,7 @@ func (p *pdfImporter) directCompositeNode(node pdfCompositeNode, space *pdfgo.Co
 		}
 	}
 	directGroup := false
-	if group := node.group; group != nil && !group.Knockout && group.Alpha == 1 && group.SoftMask == nil && pdfNormalBlend(group.BlendMode) && (group.ColorSpace == nil || group.ColorSpace.SRGBEquivalent()) {
+	if group := node.group; group != nil && !group.Knockout && group.Alpha == 1 && group.SoftMask == nil && codecpdf.NormalBlend(group.BlendMode) && (group.ColorSpace == nil || group.ColorSpace.SRGBEquivalent()) {
 		directGroup = true
 	}
 	opaque, err := p.opaque(node, space)
@@ -367,7 +368,7 @@ func (p *pdfImporter) processOverprint(nodes []pdfCompositeNode) (bool, error) {
 		}
 		for i, paint := range []pdfgo.Paint{style.Fill, style.Stroke} {
 			if i == 0 && fill && style.FillOverprint || i == 1 && stroke && style.StrokeOverprint {
-				if native := pdfPrepareShadingColorants(paint, &pdfgo.ColorSpace{Model: "DeviceCMYK"}, false); native != nil {
+				if native := codecpdf.PrepareShadingColorants(paint, &pdfgo.ColorSpace{Model: "DeviceCMYK"}, false); native != nil {
 					return true, nil
 				}
 				native, _, err := pdfCompositeNativePaint(paint, &pdfgo.ColorSpace{Model: "DeviceCMYK"}, style.RenderingIntent)

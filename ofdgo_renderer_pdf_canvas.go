@@ -24,6 +24,7 @@ import (
 	"github.com/tdewolff/canvas"
 	cimage "github.com/tdewolff/canvas/image"
 	"github.com/tdewolff/canvas/renderers/pdf"
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -36,14 +37,8 @@ type pdfRenderer struct {
 	exactImages bool
 	imageError  error
 	navigation  *pdfNavigation
-	text        []pdfPageText
+	text        []codecpdf.TextPage
 	exactText   bool
-}
-
-// pdfPageText 记录后端文字对象数量及OFD原文所属区段
-type pdfPageText struct {
-	count        int
-	replacements []pdfgo.TextReplacement
 }
 
 // pdfNavigation PDF导航信息

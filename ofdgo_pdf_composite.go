@@ -22,6 +22,7 @@ import (
 	"runtime"
 
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -93,7 +94,7 @@ type pdfCompositeColorSampler struct {
 	values     map[float64][4]float64
 	position   pdfgo.GradientPosition
 	converter  pdfgo.ColorConverter
-	colorants  *pdfShadingColorants
+	colorants  *codecpdf.ShadingColorants
 	prepared   bool
 	converted  bool
 }
@@ -417,7 +418,7 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widg
 					if externalNames == nil {
 						externalNames = make(map[string]bool)
 					}
-					name := pdfEmbeddedFontName(mark.Font.Name)
+					name := codecpdf.EmbeddedFontName(mark.Font.Name)
 					if !externalNames[basefont.NormalizeName(name)] {
 						for _, candidate := range fontExactCandidateNames(name) {
 							externalNames[basefont.NormalizeName(candidate)] = true
@@ -441,7 +442,7 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widg
 				if err := p.halftone(mark.Style); err != nil {
 					return err
 				}
-				if len(mark.Glyphs) > 1 && (mark.Object != nil && !mark.Object.Knockout || mark.Style.AlphaIsShape || mark.Style.Fill.Alpha != 1 || mark.Style.Stroke.Alpha != 1 || mark.Style.SoftMask != nil || !pdfNormalBlend(mark.Style.BlendMode) || mark.Mode%4 == 1 || mark.Mode%4 == 2) {
+				if len(mark.Glyphs) > 1 && (mark.Object != nil && !mark.Object.Knockout || mark.Style.AlphaIsShape || mark.Style.Fill.Alpha != 1 || mark.Style.Stroke.Alpha != 1 || mark.Style.SoftMask != nil || !codecpdf.NormalBlend(mark.Style.BlendMode) || mark.Mode%4 == 1 || mark.Mode%4 == 2) {
 					for i := range mark.Glyphs {
 						glyph := mark
 						glyph.Glyphs, glyph.Positions, glyph.Clip = mark.Glyphs[i:i+1], mark.Positions[i:i+1], nil
@@ -514,7 +515,7 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widg
 		return nil, err
 	}
 	for font := range embeddedFonts {
-		if !externalNames[basefont.NormalizeName(pdfEmbeddedFontName(font.Name))] {
+		if !externalNames[basefont.NormalizeName(codecpdf.EmbeddedFontName(font.Name))] {
 			continue
 		}
 		if err := p.ctx.Err(); err != nil {
@@ -640,7 +641,7 @@ func (p *pdfImporter) opaque(n pdfCompositeNode, space *pdfgo.ColorSpace) (bool,
 	}
 	if n.group != nil {
 		g := n.group
-		if g.Knockout && n.textObject == nil || g.Alpha != 1 || g.SoftMask != nil || !pdfNormalBlend(g.BlendMode) || g.ColorSpace != nil && !g.ColorSpace.Equal(space) {
+		if g.Knockout && n.textObject == nil || g.Alpha != 1 || g.SoftMask != nil || !codecpdf.NormalBlend(g.BlendMode) || g.ColorSpace != nil && !g.ColorSpace.Equal(space) {
 			return false, nil
 		}
 		for _, child := range n.children {
@@ -654,7 +655,7 @@ func (p *pdfImporter) opaque(n pdfCompositeNode, space *pdfgo.ColorSpace) (bool,
 	if n.image != nil && style.FillOverprint {
 		return false, nil
 	}
-	if style.SoftMask != nil || !pdfNormalBlend(style.BlendMode) || fill && style.Fill.Alpha != 1 || stroke && style.Stroke.Alpha != 1 {
+	if style.SoftMask != nil || !codecpdf.NormalBlend(style.BlendMode) || fill && style.Fill.Alpha != 1 || stroke && style.Stroke.Alpha != 1 {
 		return false, nil
 	}
 	if fill && style.FillOverprint && pdfOverprintNeedsSeparation(style.Fill) || stroke && style.StrokeOverprint && pdfOverprintNeedsSeparation(style.Stroke) {
@@ -675,7 +676,7 @@ func (p *pdfImporter) opaque(n pdfCompositeNode, space *pdfgo.ColorSpace) (bool,
 func (n pdfCompositeNode) direct() bool {
 	if g := n.group; g != nil {
 		single := n.textObject != nil && len(n.children) == 1 && (n.children[0].glyph != nil || n.children[0].text != nil && len(n.children[0].text.Glyphs) == 1)
-		if g.Knockout && !single || !pdfNormalBlend(g.BlendMode) || g.ColorSpace != nil && !g.ColorSpace.SRGBEquivalent() {
+		if g.Knockout && !single || !codecpdf.NormalBlend(g.BlendMode) || g.ColorSpace != nil && !g.ColorSpace.SRGBEquivalent() {
 			return false
 		}
 		for _, child := range n.children {
@@ -701,7 +702,7 @@ func (n pdfCompositeNode) direct() bool {
 	if n.image != nil && s.FillOverprint {
 		return false
 	}
-	return pdfNormalBlend(s.BlendMode) && !(fill && s.FillOverprint && pdfOverprintNeedsSeparation(s.Fill) || stroke && s.StrokeOverprint && pdfOverprintNeedsSeparation(s.Stroke))
+	return codecpdf.NormalBlend(s.BlendMode) && !(fill && s.FillOverprint && pdfOverprintNeedsSeparation(s.Fill) || stroke && s.StrokeOverprint && pdfOverprintNeedsSeparation(s.Stroke))
 }
 
 // style 获取图元实际使用的图形状态
@@ -932,12 +933,12 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 					}
 					values, err = c.transfers[i].Apply(values[:], device, "")
 					if err == nil {
-						rgb, err = pdfCompositeOutputColor(space, values)
+						rgb, err = codecpdf.OutputColor(space, values)
 					}
 				} else if c.transfers != nil {
 					rgb, err = space.RGB(pixel.values[:space.Components()], "RelativeColorimetric")
 				} else {
-					rgb, err = pdfCompositeOutputColor(space, pixel.values)
+					rgb, err = codecpdf.OutputColor(space, pixel.values)
 				}
 				if err != nil {
 					return err
@@ -964,22 +965,4 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 		}
 	}
 	return p.appendRasterGroup(output, box, 1)
-}
-
-// pdfCompositeOutputColor 将合成结果映射到OFD输出，与保留的设备四色对象使用相同显示换算
-// 入参: space 合成空间, values 非预乘分量
-// 返回: [3]float64 显示颜色, error 校准颜色转换错误
-func pdfCompositeOutputColor(space *pdfgo.ColorSpace, values [4]float64) ([3]float64, error) {
-	if space.Model == "DeviceCMYK" && !space.Calibrated() {
-		black := 1 - values[3]
-		return [3]float64{(1 - values[0]) * black, (1 - values[1]) * black, (1 - values[2]) * black}, nil
-	}
-	return space.RGB(values[:space.Components()], "RelativeColorimetric")
-}
-
-// pdfNormalBlend 判断混合模式是否为普通覆盖
-// 入参: mode 混合模式
-// 返回: bool 是否普通覆盖
-func pdfNormalBlend(mode pdfgo.Name) bool {
-	return mode == "" || mode == "Normal" || mode == "Compatible"
 }

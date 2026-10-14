@@ -22,6 +22,7 @@ import (
 	"math"
 	"reflect"
 
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -634,7 +635,7 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 		return &pdfgo.UnsupportedError{Feature: "image mask graphic"}
 	}
 	visitor.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
-		if mark.Alpha != 1 || mark.SoftMask != nil || !pdfNormalBlend(mark.BlendMode) || mark.ColorSpace != nil && !mark.ColorSpace.Equal(mask.ColorSpace) {
+		if mark.Alpha != 1 || mark.SoftMask != nil || !codecpdf.NormalBlend(mark.BlendMode) || mark.ColorSpace != nil && !mark.ColorSpace.Equal(mask.ColorSpace) {
 			return &pdfgo.UnsupportedError{Feature: "transparent mask group"}
 		}
 		return walk(visitor)
@@ -644,7 +645,7 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 			return err
 		}
 		paint := mark.Style.Fill
-		if !mark.Fill || mark.Stroke || paint.Alpha != 1 || paint.CMYK != nil || paint.Axial != nil || paint.Radial != nil || paint.Function != nil || paint.Mesh != nil || paint.Tiling != nil || paint.Shading != nil || paint.Space != nil && paint.Space.Calibrated() || paint.RGB[0] != paint.RGB[1] || paint.RGB[1] != paint.RGB[2] || mark.Style.SoftMask != nil || !pdfNormalBlend(mark.Style.BlendMode) {
+		if !mark.Fill || mark.Stroke || paint.Alpha != 1 || paint.CMYK != nil || paint.Axial != nil || paint.Radial != nil || paint.Function != nil || paint.Mesh != nil || paint.Tiling != nil || paint.Shading != nil || paint.Space != nil && paint.Space.Calibrated() || paint.RGB[0] != paint.RGB[1] || paint.RGB[1] != paint.RGB[2] || mark.Style.SoftMask != nil || !codecpdf.NormalBlend(mark.Style.BlendMode) {
 			return &pdfgo.UnsupportedError{Feature: "nonbinary mask graphic"}
 		}
 		visible, err := opacity(paint.RGB[0])

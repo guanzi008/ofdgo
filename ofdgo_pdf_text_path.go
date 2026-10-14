@@ -15,39 +15,14 @@
 package ofdgo
 
 import (
-	"fmt"
-
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// pdfGlyphPath 将字形轮廓变换到PDF页面坐标，二次曲线精确转换为三次曲线
+// pdfGlyphPath 将OFD字形几何交给PDF路径适配器转换
 // 入参: outline 字形轮廓, matrix 字形到页面的变换
 // 返回: pdfgo.Path 页面路径, error 非字体轮廓指令
 func pdfGlyphPath(outline GeometryPath, matrix pdfgo.Matrix) (pdfgo.Path, error) {
-	path := pdfgo.Path{Segments: make([]pdfgo.Segment, 0, len(outline))}
-	var current, start Point
-	point := func(p Point) pdfgo.Point { return matrix.Apply(pdfgo.Point{X: p.X, Y: p.Y}) }
-	for _, segment := range outline {
-		switch segment.Verb {
-		case GeometryMove:
-			start = segment.End
-			path.Segments = append(path.Segments, pdfgo.Segment{Operator: "M", Points: []pdfgo.Point{point(segment.End)}})
-		case GeometryLine:
-			path.Segments = append(path.Segments, pdfgo.Segment{Operator: "L", Points: []pdfgo.Point{point(segment.End)}})
-		case GeometryQuad:
-			c1 := Point{X: current.X + (segment.Control1.X-current.X)*2/3, Y: current.Y + (segment.Control1.Y-current.Y)*2/3}
-			c2 := Point{X: segment.End.X + (segment.Control1.X-segment.End.X)*2/3, Y: segment.End.Y + (segment.Control1.Y-segment.End.Y)*2/3}
-			path.Segments = append(path.Segments, pdfgo.Segment{Operator: "B", Points: []pdfgo.Point{point(c1), point(c2), point(segment.End)}})
-		case GeometryCubic:
-			path.Segments = append(path.Segments, pdfgo.Segment{Operator: "B", Points: []pdfgo.Point{point(segment.Control1), point(segment.Control2), point(segment.End)}})
-		case GeometryClose:
-			path.Segments = append(path.Segments, pdfgo.Segment{Operator: "C"})
-			current = start
-			continue
-		default:
-			return pdfgo.Path{}, fmt.Errorf("unsupported PDF glyph geometry verb %d", segment.Verb)
-		}
-		current = segment.End
-	}
-	return path, nil
+	return codecpdf.GlyphPath(basegeom.Path(outline), matrix)
 }

@@ -19,57 +19,20 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"image/color"
 	"math"
 
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// pdfGeometryPath 直接转换PDF路径坐标，不经文本编码或曲线展平
+// pdfGeometryPath 转换PDF路径并衔接OFD几何类型
 // 入参: ctx 取消上下文, source PDF路径, matrix 坐标变换
 // 返回: GeometryPath 独立几何路径, error 指令、坐标或取消错误
 func pdfGeometryPath(ctx context.Context, source pdfgo.Path, matrix pdfgo.Matrix) (GeometryPath, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	path := make(GeometryPath, len(source.Segments))
-	for i, segment := range source.Segments {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		var count int
-		switch segment.Operator {
-		case "M":
-			path[i].Verb, count = GeometryMove, 1
-		case "L":
-			path[i].Verb, count = GeometryLine, 1
-		case "B":
-			path[i].Verb, count = GeometryCubic, 3
-		case "C":
-			path[i].Verb = GeometryClose
-		default:
-			return nil, fmt.Errorf("invalid PDF path operator %q", segment.Operator)
-		}
-		if len(segment.Points) != count {
-			return nil, fmt.Errorf("invalid PDF path operands for %s", segment.Operator)
-		}
-		var points [3]Point
-		for j, point := range segment.Points {
-			point = matrix.Apply(point)
-			points[j] = Point{X: point.X, Y: point.Y}
-		}
-		if count != 0 {
-			path[i].End = points[count-1]
-		}
-		if count == 3 {
-			path[i].Control1, path[i].Control2 = points[0], points[1]
-		}
-	}
-	if err := path.validate(); err != nil {
-		return nil, err
-	}
-	return path, ctx.Err()
+	path, err := codecpdf.GeometryPath(ctx, source, matrix)
+	return GeometryPath(path), err
 }
 
 // compileCoverage 直接编译无文字裁剪的填充覆盖，其他语义交给配置的页面编译器
@@ -200,7 +163,7 @@ func (p *pdfImporter) coverageClip(paths []pdfgo.Path, geometry GeometryBackend)
 	binary.LittleEndian.PutUint64(size[8:], math.Float64bits(p.pageHeight))
 	hash.Write(size[:])
 	for _, path := range paths {
-		key, err := pdfClipPathKey(p.ctx, path, p.matrix)
+		key, err := codecpdf.ClipPathKey(p.ctx, path, p.matrix)
 		if err != nil {
 			return nil, err
 		}

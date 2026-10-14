@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -26,7 +27,7 @@ import (
 // 入参: ctx 取消上下文, file 文件说明, attachment 是否作为附件保存
 // 返回: string 媒体或附件标识，缺少外部资源时为空, error 读取、注册或取消错误
 func (p *pdfImporter) movieResource(ctx context.Context, file pdfgo.FileSpecification, attachment bool) (string, error) {
-	return p.mediaResource(ctx, file, "Video", pdfMediaFormat(file), attachment)
+	return p.mediaResource(ctx, file, "Video", codecpdf.MediaFormat(file), attachment)
 }
 
 // movieAnnotation 保留视频外观及可表示的播放动作，无法等价转换时按策略处理

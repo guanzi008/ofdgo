@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"strconv"
 
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -204,7 +205,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		}
 	}
 	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
-		_, width, height := pdfPageMatrix(page)
+		_, width, height := codecpdf.PageMatrix(page)
 		if _, err := editor.AddPage(width, height); err != nil {
 			return err
 		}
@@ -239,7 +240,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		}
 	}
 	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
-		matrix, width, height := pdfPageMatrix(page)
+		matrix, width, height := codecpdf.PageMatrix(page)
 		importer.matrix = matrix
 		importer.page = index
 		importer.rasterWarned = false
@@ -343,27 +344,6 @@ func (p *pdfImporter) commitObjects() error {
 	}
 	p.objects = nil
 	return nil
-}
-
-// pdfPageMatrix 将裁剪框、用户单位及页面旋转转换为OFD毫米坐标
-// 入参: page PDF页面
-// 返回: pdfgo.Matrix 坐标变换, float64 页面宽度, float64 页面高度
-func pdfPageMatrix(page *pdfgo.Page) (pdfgo.Matrix, float64, float64) {
-	b := page.CropBox
-	scale := 25.4 / 72 * page.UserUnit
-	width, height := (b.XMax-b.XMin)*scale, (b.YMax-b.YMin)*scale
-	m := pdfgo.Matrix{scale, 0, 0, -scale, -b.XMin * scale, b.YMax * scale}
-	switch page.Rotation {
-	case 90:
-		m = pdfgo.Matrix{0, 1, -1, 0, height, 0}.Mul(m)
-		width, height = height, width
-	case 180:
-		m = pdfgo.Matrix{-1, 0, 0, -1, width, height}.Mul(m)
-	case 270:
-		m = pdfgo.Matrix{0, -1, 1, 0, 0, width}.Mul(m)
-		width, height = height, width
-	}
-	return m, width, height
 }
 
 // pdfNumbers 按OFD数值格式序列化坐标

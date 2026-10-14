@@ -27,7 +27,7 @@ import (
 	"strconv"
 	"unicode/utf8"
 
-	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -44,46 +44,6 @@ type pdfImageKey struct {
 type pdfImageResource struct {
 	space pdfgo.Object
 	id    string
-}
-
-// pdfStencilImage 按当前填充色读取模板图像，不分配整幅彩色样本
-type pdfStencilImage struct {
-	source image.Image
-	fill   color.NRGBA64
-}
-
-// ColorModel 保留填充色和模板的有效采样精度
-// 返回: color.Model 非预乘颜色模型
-func (s *pdfStencilImage) ColorModel() color.Model {
-	model := s.source.ColorModel()
-	if s.fill.R%257 == 0 && s.fill.G%257 == 0 && s.fill.B%257 == 0 && (model == color.GrayModel || model == color.NRGBAModel || model == color.RGBAModel) {
-		return color.NRGBAModel
-	}
-	return color.NRGBA64Model
-}
-
-// Bounds 返回模板图像的采样边界
-// 返回: image.Rectangle 图像边界
-func (s *pdfStencilImage) Bounds() image.Rectangle { return s.source.Bounds() }
-
-// At 以模板灰度计算填充覆盖率，不重复变换颜色
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.Color 非预乘颜色
-func (s *pdfStencilImage) At(x, y int) color.Color {
-	return s.NRGBA64At(x, y)
-}
-
-// NRGBA64At 直接读取模板覆盖率，保留填充色的有效精度
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.NRGBA64 非预乘颜色
-func (s *pdfStencilImage) NRGBA64At(x, y int) color.NRGBA64 {
-	if !image.Pt(x, y).In(s.Bounds()) {
-		return color.NRGBA64{}
-	}
-	gray := baseimage.NRGBA64At(s.source, x, y)
-	pixel := s.fill
-	pixel.A = uint16(65535 - gray.R)
-	return pixel
 }
 
 // image 转换图像样本，不将整页或其他对象栅格化
@@ -203,7 +163,7 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 			}
 		}
 		if source.ImageMask {
-			decoded = &pdfStencilImage{source: decoded, fill: key.tint}
+			decoded = &codecpdf.StencilImage{Source: decoded, Fill: key.tint}
 		}
 		data := jbig2Original
 		if len(data) == 0 {

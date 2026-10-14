@@ -16,10 +16,11 @@ package ofdgo
 
 import (
 	"fmt"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"image"
 	"math"
 
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -593,7 +594,7 @@ func (c *pdfCompositor) gradient(paint pdfgo.Paint, space *pdfgo.ColorSpace, nod
 	if err != nil {
 		return nil, err
 	}
-	colorants := pdfPrepareShadingColorants(paint, space, c.softMask)
+	colorants := codecpdf.PrepareShadingColorants(paint, space, c.softMask)
 	step := 25.4 / c.importer.rasterDPI
 	pixels := make([]pdfShadingPixel, c.width*c.height)
 	for y := range c.height {
@@ -634,7 +635,7 @@ func (c *pdfCompositor) gradient(paint pdfgo.Paint, space *pdfgo.ColorSpace, nod
 						visible = domainClipped || local.X >= g.Domain.XMin && local.X <= g.Domain.XMax && local.Y >= g.Domain.YMin && local.Y <= g.Domain.YMax
 						if visible {
 							if colorants != nil {
-								values, err = colorants.pointAt(local)
+								values, err = colorants.PointAt(local)
 							} else {
 								values, err = g.ValuesAt(local)
 								if err == nil {
@@ -647,7 +648,7 @@ func (c *pdfCompositor) gradient(paint pdfgo.Paint, space *pdfgo.ColorSpace, nod
 						parameter, visible = position.PositionAt(point)
 						if visible {
 							if colorants != nil {
-								values, err = colorants.at(parameter)
+								values, err = colorants.At(parameter)
 							} else if paint.Axial != nil {
 								values, err = paint.Axial.ValuesAt(parameter)
 							} else {

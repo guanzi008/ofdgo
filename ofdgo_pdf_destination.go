@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math"
 
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -52,7 +53,7 @@ func (p *pdfImporter) destinationBounds(page *pdfgo.Page) (Box, error) {
 		p.page = index
 		defer func() { p.page = previous }()
 	}
-	matrix, width, height := pdfPageMatrix(page)
+	matrix, width, height := codecpdf.PageMatrix(page)
 	editor := NewEditor()
 	editor.SetRenderBackends(p.editor.Backends())
 	editor.SetFontDirs(p.editor.fontDirs...)

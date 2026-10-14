@@ -17,10 +17,11 @@ package ofdgo
 import (
 	"context"
 	"fmt"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"slices"
 
 	"github.com/tdewolff/canvas"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -63,10 +64,10 @@ func (n *pdfNavigation) addActions(renderer *Renderer, page int, source actionSo
 			if err != nil {
 				return err
 			}
-			if parsed.Len() > pdfLinkEdgeLimit {
+			if parsed.Len() > codecpdf.LinkEdgeLimit {
 				return fmt.Errorf("PDF link region exceeds edge limit")
 			}
-			parsed, err = flattenPDFLink(ctx, parsed)
+			parsed, err = codecpdf.FlattenLink(ctx, parsed)
 			if err != nil {
 				return err
 			}
@@ -92,7 +93,7 @@ func (n *pdfNavigation) addActions(renderer *Renderer, page int, source actionSo
 		if err != nil {
 			return err
 		}
-		region, err := pdfActionRegion(ctx, outline, pages[page].Box.H)
+		region, err := codecpdf.ActionRegion(ctx, outline, pages[page].Box.H)
 		if err != nil {
 			return err
 		}
@@ -158,20 +159,20 @@ func partitionPDFActions(ctx context.Context, renderer *Renderer, areas []pdfAct
 		if err != nil {
 			return nil, err
 		}
-		if len(result) > pdfLinkEdgeLimit {
+		if len(result) > codecpdf.LinkEdgeLimit {
 			return nil, fmt.Errorf("PDF action partition exceeds region limit")
 		}
 	}
 	if len(remaining) != 0 {
 		result = append(result, pdfActionArea{Path: remaining, Actions: []pdfNavigationAction{action}})
 	}
-	if len(result) > pdfLinkEdgeLimit {
+	if len(result) > codecpdf.LinkEdgeLimit {
 		return nil, fmt.Errorf("PDF action partition exceeds region limit")
 	}
 	edges := 0
 	for _, area := range result {
 		edges += len(area.Path)
-		if edges > pdfLinkQuadLimit {
+		if edges > codecpdf.LinkQuadLimit {
 			return nil, fmt.Errorf("PDF action partition exceeds total edge limit")
 		}
 	}
@@ -185,14 +186,14 @@ func combinePDFActionRegion(ctx context.Context, geometry GeometryBackend, left,
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if len(left) > pdfLinkEdgeLimit || len(right) > pdfLinkEdgeLimit {
+	if len(left) > codecpdf.LinkEdgeLimit || len(right) > codecpdf.LinkEdgeLimit {
 		return nil, fmt.Errorf("PDF action partition exceeds edge limit")
 	}
 	result, err := geometry.Combine(left, right, operation)
 	if err != nil {
 		return nil, err
 	}
-	if len(result) > pdfLinkEdgeLimit {
+	if len(result) > codecpdf.LinkEdgeLimit {
 		return nil, fmt.Errorf("PDF action partition exceeds edge limit")
 	}
 	return result, ctx.Err()

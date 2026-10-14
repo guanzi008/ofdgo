@@ -26,6 +26,7 @@ import (
 	"github.com/tdewolff/canvas/renderers/pdf"
 	"github.com/tdewolff/canvas/renderers/ps"
 	"github.com/tdewolff/canvas/renderers/svg"
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -136,7 +137,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	}
 	start := buf.Len()
 	p := pdf.New(buf, pages[0].Box.W, pages[0].Box.H, nil)
-	renderer := &pdfRenderer{PDF: p, glyphPaths: renderCache[*canvas.Path, *canvas.Path]{limit: 16 << 20}, images: make([][]image.Image, 1), text: make([]pdfPageText, 1), navigation: navigation}
+	renderer := &pdfRenderer{PDF: p, glyphPaths: renderCache[*canvas.Path, *canvas.Path]{limit: 16 << 20}, images: make([][]image.Image, 1), text: make([]codecpdf.TextPage, 1), navigation: navigation}
 	defer func() {
 		if renderer.imageError != nil {
 			r.canvasState().images = renderCache[*EncodedImage, image.Image]{limit: imageCacheLimit}
@@ -160,7 +161,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		if i > 0 {
 			p.NewPage(page.Box.W, page.Box.H)
 			renderer.images = append(renderer.images, nil)
-			renderer.text = append(renderer.text, pdfPageText{})
+			renderer.text = append(renderer.text, codecpdf.TextPage{})
 		}
 		navigation.apply(p, i)
 		if err := r.renderCanvasPageToContext(canvas.NewContext(renderer), content, !r.TransparentBackground); err != nil {

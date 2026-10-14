@@ -14,7 +14,10 @@
 
 package ofdgo
 
-import "github.com/xiaoqidun/pdfgo"
+import (
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
+	"github.com/xiaoqidun/pdfgo"
+)
 
 // 图案标记保留设备四色通道及非零对象形状
 const (
@@ -99,7 +102,7 @@ func (c *pdfCompositor) selectTransfer(node pdfCompositeNode, outline bool) (*pd
 	if outline {
 		paint = style.Stroke
 	}
-	if c.transferBlocked || paint.Alpha != 1 || style.SoftMask != nil || !pdfNormalBlend(style.BlendMode) {
+	if c.transferBlocked || paint.Alpha != 1 || style.SoftMask != nil || !codecpdf.NormalBlend(style.BlendMode) {
 		return nil, nil
 	}
 	transfer, err := c.importer.resolveTransfer(style, c.transferModel)
@@ -108,7 +111,7 @@ func (c *pdfCompositor) selectTransfer(node pdfCompositeNode, outline bool) (*pd
 	}
 	if pattern := paint.Shading; pattern != nil && (node.image == nil || node.image.Image.ImageMask) {
 		inner := pattern.Style
-		if inner.Fill.Alpha != 1 || inner.SoftMask != nil || !pdfNormalBlend(inner.BlendMode) {
+		if inner.Fill.Alpha != 1 || inner.SoftMask != nil || !codecpdf.NormalBlend(inner.BlendMode) {
 			return nil, nil
 		}
 	}
@@ -171,7 +174,7 @@ func (p *pdfCompositePattern) opaqueTransfer() (bool, error) {
 // 返回: bool 是否不透明, error 图案或图片遮罩引用错误
 func (p *pdfImporter) transferOpaque(node pdfCompositeNode) (bool, error) {
 	if group := node.group; group != nil {
-		if group.Alpha != 1 || group.SoftMask != nil || !pdfNormalBlend(group.BlendMode) {
+		if group.Alpha != 1 || group.SoftMask != nil || !codecpdf.NormalBlend(group.BlendMode) {
 			return false, nil
 		}
 		for _, child := range node.children {
@@ -182,7 +185,7 @@ func (p *pdfImporter) transferOpaque(node pdfCompositeNode) (bool, error) {
 		return true, nil
 	}
 	style, fill, stroke := node.style()
-	if style.SoftMask != nil || !pdfNormalBlend(style.BlendMode) || fill && style.Fill.Alpha != 1 || stroke && style.Stroke.Alpha != 1 {
+	if style.SoftMask != nil || !codecpdf.NormalBlend(style.BlendMode) || fill && style.Fill.Alpha != 1 || stroke && style.Stroke.Alpha != 1 {
 		return false, nil
 	}
 	if node.image != nil {
@@ -197,7 +200,7 @@ func (p *pdfImporter) transferOpaque(node pdfCompositeNode) (bool, error) {
 	for i, paint := range [2]pdfgo.Paint{style.Fill, style.Stroke} {
 		if pattern := paint.Shading; pattern != nil && (i == 0 && fill || i == 1 && stroke) {
 			inner := pattern.Style
-			if inner.Fill.Alpha != 1 || inner.SoftMask != nil || !pdfNormalBlend(inner.BlendMode) {
+			if inner.Fill.Alpha != 1 || inner.SoftMask != nil || !codecpdf.NormalBlend(inner.BlendMode) {
 				return false, nil
 			}
 		}

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package threed 提供U3D模型解码、场景求值及软件绘制能力
 package threed
 
 import (

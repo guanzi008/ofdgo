@@ -21,6 +21,7 @@ import (
 	"slices"
 	"sync"
 
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -380,7 +381,7 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, 
 	}
 	sampleRows := func(start, end int) error {
 		colors := make(map[[4]float64][4]float64)
-		colorants := pdfPrepareShadingColorants(pdfgo.Paint{Mesh: mesh}, space, c.softMask)
+		colorants := codecpdf.PrepareShadingColorants(pdfgo.Paint{Mesh: mesh}, space, c.softMask)
 		var sampler *pdfgo.MeshSampler
 		if colorants == nil {
 			sampler = mesh.NewSampler()
@@ -404,7 +405,7 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, 
 				if sample.patch != 0 {
 					var err error
 					if colorants != nil {
-						values, err = colorants.meshAt(sample.patch-1, sample.u, sample.v)
+						values, err = colorants.MeshAt(sample.patch-1, sample.u, sample.v)
 					} else {
 						values, err = sampler.ValuesAt(sample.patch-1, sample.u, sample.v)
 					}

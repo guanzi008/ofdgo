@@ -17,17 +17,10 @@ package ofdgo
 import (
 	"fmt"
 	"image"
-	"image/color"
-	"math"
 
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
-
-// pdfNativeImage 按源像素输出原生过程色，不分配完整显示颜色缓冲
-type pdfNativeImage struct {
-	source *pdfgo.ImageProcess
-	space  *pdfgo.ColorSpace
-}
 
 // imageProcessModel 选择与页面原生过程色一致的图像输出，已等价的备用色沿用现有编码路径
 // 入参: source 源图像
@@ -61,7 +54,7 @@ func (p *pdfImporter) imageProcess(source *pdfgo.Image, model pdfgo.Name) (image
 	if process == nil {
 		return nil, fmt.Errorf("invalid native PDF image process space %s", model)
 	}
-	return &pdfNativeImage{source: process, space: space}, nil
+	return &codecpdf.NativeImage{Source: process, Space: space}, nil
 }
 
 // imageProcess 复用同组原生采样，仅在需要备用颜色时保留完整分量
@@ -88,29 +81,4 @@ func (c *pdfCompositeCache) imageProcess(importer *pdfImporter, source *pdfgo.Im
 	}
 	c.imageProcesses[key] = process
 	return process, nil
-}
-
-// ColorModel 保留16位原生分量与源透明度
-// 返回: color.Model 非预乘颜色模型
-func (s *pdfNativeImage) ColorModel() color.Model { return color.NRGBA64Model }
-
-// Bounds 返回源图像的完整采样边界
-// 返回: image.Rectangle 原始像素边界
-func (s *pdfNativeImage) Bounds() image.Rectangle { return s.source.Bounds() }
-
-// At 获取按OFD输出映射的原生颜色
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.Color 非预乘颜色
-func (s *pdfNativeImage) At(x, y int) color.Color { return s.NRGBA64At(x, y) }
-
-// NRGBA64At 按原始精度转换设备过程色，不进行页面采样或备用变换
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.NRGBA64 非预乘颜色
-func (s *pdfNativeImage) NRGBA64At(x, y int) color.NRGBA64 {
-	if !image.Pt(x, y).In(s.Bounds()) {
-		return color.NRGBA64{}
-	}
-	values, alpha := s.source.ValuesAt(x, y)
-	rgb, _ := pdfCompositeOutputColor(s.space, values)
-	return color.NRGBA64{R: uint16(math.Round(rgb[0] * 65535)), G: uint16(math.Round(rgb[1] * 65535)), B: uint16(math.Round(rgb[2] * 65535)), A: uint16(math.Round(alpha * 65535))}
 }

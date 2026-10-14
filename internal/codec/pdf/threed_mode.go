@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ofdgo
+package pdf
 
-import "github.com/xiaoqidun/pdfgo"
+import (
+	basethreed "github.com/xiaoqidun/ofdgo/internal/base/threed"
+	"github.com/xiaoqidun/pdfgo"
+)
 
-// pdfThreeDRenderMode 将PDF标准绘制模式映射到通用几何绘制参数
+// threeDRenderMode 将PDF标准绘制模式映射到通用几何绘制参数
 // 入参: source 三维参数, options 绘制选项
 // 返回: error 未支持的模式错误
-func pdfThreeDRenderMode(source pdfgo.ThreeD, options *U3DRenderOptions) error {
+func threeDRenderMode(source pdfgo.ThreeD, options *basethreed.U3DRenderOptions) error {
 	mode := source.Presentation.RenderMode
 	if mode == nil {
 		return nil
@@ -29,35 +32,35 @@ func pdfThreeDRenderMode(source pdfgo.ThreeD, options *U3DRenderOptions) error {
 	case "Transparent":
 		options.Opacity = &mode.Opacity
 	case "SolidWireframe", "TransparentWireframe":
-		options.Mode, options.AuxiliaryColor = U3DRenderSolidWireframe, &mode.AuxiliaryColor
+		options.Mode, options.AuxiliaryColor = basethreed.U3DRenderSolidWireframe, &mode.AuxiliaryColor
 		if mode.Subtype == "TransparentWireframe" {
 			options.Opacity = &mode.Opacity
 		}
 	case "Wireframe":
-		options.Mode, options.AuxiliaryColor = U3DRenderWireframe, &mode.AuxiliaryColor
+		options.Mode, options.AuxiliaryColor = basethreed.U3DRenderWireframe, &mode.AuxiliaryColor
 	case "ShadedWireframe":
-		options.Mode = U3DRenderShadedWireframe
+		options.Mode = basethreed.U3DRenderShadedWireframe
 	case "HiddenWireframe":
-		options.Mode, options.AuxiliaryColor = U3DRenderHiddenWireframe, &mode.AuxiliaryColor
+		options.Mode, options.AuxiliaryColor = basethreed.U3DRenderHiddenWireframe, &mode.AuxiliaryColor
 	case "Vertices":
-		options.Mode, options.AuxiliaryColor = U3DRenderVertices, &mode.AuxiliaryColor
+		options.Mode, options.AuxiliaryColor = basethreed.U3DRenderVertices, &mode.AuxiliaryColor
 	case "ShadedVertices":
-		options.Mode = U3DRenderShadedVertices
+		options.Mode = basethreed.U3DRenderShadedVertices
 	case "BoundingBox":
-		options.Mode, options.AuxiliaryColor = U3DRenderBoundingBox, &mode.AuxiliaryColor
+		options.Mode, options.AuxiliaryColor = basethreed.U3DRenderBoundingBox, &mode.AuxiliaryColor
 	case "TransparentBoundingBox", "TransparentBoundingBoxOutline":
-		options.Mode = U3DRenderBoundingBoxFaces
+		options.Mode = basethreed.U3DRenderBoundingBoxFaces
 		options.FaceColor, options.Opacity = mode.FaceColor, &mode.Opacity
 		if mode.Subtype == "TransparentBoundingBoxOutline" {
-			options.Mode, options.AuxiliaryColor = U3DRenderBoundingBoxOutline, &mode.AuxiliaryColor
+			options.Mode, options.AuxiliaryColor = basethreed.U3DRenderBoundingBoxOutline, &mode.AuxiliaryColor
 		}
 	case "Illustration":
-		options.Mode = U3DRenderIllustration
+		options.Mode = basethreed.U3DRenderIllustration
 		options.AuxiliaryColor, options.FaceColor, options.CreaseAngle = &mode.AuxiliaryColor, mode.FaceColor, &mode.CreaseAngle
 	case "SolidOutline", "ShadedIllustration":
-		options.Mode = U3DRenderSolidOutline
+		options.Mode = basethreed.U3DRenderSolidOutline
 		if mode.Subtype == "ShadedIllustration" {
-			options.Mode = U3DRenderShadedIllustration
+			options.Mode = basethreed.U3DRenderShadedIllustration
 		}
 		options.AuxiliaryColor, options.CreaseAngle = &mode.AuxiliaryColor, &mode.CreaseAngle
 	default:

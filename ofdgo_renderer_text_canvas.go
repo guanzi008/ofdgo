@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/tdewolff/canvas"
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 )
 
 // ptPerMM 为毫米转换为排版点的比例
@@ -212,9 +213,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	}
 	if pdfText {
 		if len(pdfOutput.text) == 0 {
-			pdfOutput.text = append(pdfOutput.text, pdfPageText{})
+			pdfOutput.text = append(pdfOutput.text, codecpdf.TextPage{})
 		}
-		defer pdfOutput.preserveText(pdfOutput.text[len(pdfOutput.text)-1].count, obj.Text())
+		defer pdfOutput.preserveText(pdfOutput.text[len(pdfOutput.text)-1].Count, obj.Text())
 	}
 	codePos := 0
 	textPos := 0

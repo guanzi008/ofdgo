@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"maps"
 
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -497,7 +498,7 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 			}
 			return nil, fmt.Errorf("PDF destination page missing")
 		}
-		matrix, _, _ := pdfPageMatrix(targetPage)
+		matrix, _, _ := codecpdf.PageMatrix(targetPage)
 		if destination.Mode == "FitBH" || destination.Mode == "FitBV" {
 			return nil, &pdfgo.UnsupportedError{Feature: "destination mode " + string(destination.Mode)}
 		}

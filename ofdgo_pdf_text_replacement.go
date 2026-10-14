@@ -20,6 +20,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -273,7 +274,7 @@ func pdfMergeReplacement(nodes []pdfCompositeNode, replacement *pdfgo.Replacemen
 	first := nodes[0].text
 	style := first.Style
 	paint := style.Fill
-	if first.Font == nil || len(first.Font.Program) == 0 || first.Mode != 0 || first.Size <= 0 || first.HorizontalScale <= 0 || first.Clip != nil || style.SoftMask != nil || style.Transfer != nil || style.AlphaIsShape || style.FillOverprint || paint.Alpha != 1 || !pdfNormalBlend(style.BlendMode) || paint.Tiling != nil || paint.Axial != nil || paint.Radial != nil || paint.Mesh != nil || paint.Function != nil {
+	if first.Font == nil || len(first.Font.Program) == 0 || first.Mode != 0 || first.Size <= 0 || first.HorizontalScale <= 0 || first.Clip != nil || style.SoftMask != nil || style.Transfer != nil || style.AlphaIsShape || style.FillOverprint || paint.Alpha != 1 || !codecpdf.NormalBlend(style.BlendMode) || paint.Tiling != nil || paint.Axial != nil || paint.Radial != nil || paint.Mesh != nil || paint.Function != nil {
 		return nil, false
 	}
 	inverse, ok := first.Matrix.Inverse()

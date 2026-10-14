@@ -18,6 +18,7 @@ import (
 	"github.com/tdewolff/canvas"
 	canvastext "github.com/tdewolff/canvas/text"
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -25,12 +26,12 @@ import (
 // 入参: text 画布文字, matrix 文字变换
 func (r *pdfRenderer) RenderText(text *canvas.Text, matrix canvas.Matrix) {
 	if len(r.text) == 0 {
-		r.text = append(r.text, pdfPageText{})
+		r.text = append(r.text, codecpdf.TextPage{})
 	}
 	page := &r.text[len(r.text)-1]
 	text.WalkSpans(func(_, _ float64, span canvas.TextSpan) {
 		if span.IsText() {
-			page.count++
+			page.Count++
 		}
 	})
 	r.PDF.RenderText(text, matrix)
@@ -40,8 +41,8 @@ func (r *pdfRenderer) RenderText(text *canvas.Text, matrix canvas.Matrix) {
 // 入参: first 起始文字对象序号, text 原文
 func (r *pdfRenderer) preserveText(first int, text string) {
 	page := &r.text[len(r.text)-1]
-	if page.count > first {
-		page.replacements = append(page.replacements, pdfgo.TextReplacement{First: first, Count: page.count - first, Text: text})
+	if page.Count > first {
+		page.Replacements = append(page.Replacements, pdfgo.TextReplacement{First: first, Count: page.Count - first, Text: text})
 		r.exactText = true
 	}
 }

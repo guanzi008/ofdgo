@@ -22,6 +22,7 @@ import (
 	"mime"
 	"strings"
 
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -106,7 +107,7 @@ func (p *pdfImporter) renditionLinkActions(object pdfgo.Object, source pdfgo.Ann
 		return nil, err
 	}
 	if kind == "Video" {
-		parameters, _, err := p.renditionParameters(selected.Screen, map[pdfgo.Name]func(pdfgo.Object) bool{
+		parameters, _, err := codecpdf.RenditionParameters(p.reader, selected.Screen, map[pdfgo.Name]func(pdfgo.Object) bool{
 			"W": func(value pdfgo.Object) bool { return value == pdfgo.Integer(0) || value == pdfgo.Integer(3) },
 		})
 		if err != nil {
@@ -155,7 +156,7 @@ func (p *pdfImporter) renditionLinkActions(object pdfgo.Object, source pdfgo.Ann
 // 入参: selected 已选择的原生呈现, kind 媒体类型, playback 播放目标
 // 返回: string 资源标识，不可用时为空, error 文件或资源错误
 func (p *pdfImporter) renditionResource(selected *pdfgo.Rendition, kind string, playback pdfgo.RenditionPlayback) (string, error) {
-	format := pdfMediaFormat(*selected.Clip.File)
+	format := codecpdf.MediaFormat(*selected.Clip.File)
 	if format == "" {
 		mediaType, _, _ := mime.ParseMediaType(selected.Clip.ContentType)
 		format = strings.TrimPrefix(strings.SplitN(mediaType, "/", 2)[1], "x-")
@@ -183,7 +184,7 @@ func (p *pdfImporter) renditionActionLoss(reason string, strict bool) error {
 // 返回: Action 播放动作, string 媒体类别, bool 是否可用, error 参数错误
 func (p *pdfImporter) nativeRendition(rendition *pdfgo.Rendition) (Action, string, bool, error) {
 	result := Action{Event: "CLICK"}
-	viable, err := p.renditionCriteria(rendition)
+	viable, err := codecpdf.RenditionCriteria(p.reader, rendition)
 	if err != nil || !viable {
 		return result, "", false, err
 	}
@@ -217,7 +218,7 @@ func (p *pdfImporter) nativeRendition(rendition *pdfgo.Rendition) (Action, strin
 		return result, "", false, nil
 	}
 	audio := strings.HasPrefix(mediaType, "audio/")
-	play, viable, err := p.renditionParameters(rendition.Play, map[pdfgo.Name]func(pdfgo.Object) bool{
+	play, viable, err := codecpdf.RenditionParameters(p.reader, rendition.Play, map[pdfgo.Name]func(pdfgo.Object) bool{
 		"V": func(value pdfgo.Object) bool {
 			number, ok := value.(pdfgo.Integer)
 			return ok && number >= 0 && number <= 100 && (audio || number == 100)
@@ -231,14 +232,14 @@ func (p *pdfImporter) nativeRendition(rendition *pdfgo.Rendition) (Action, strin
 	if err != nil || !viable {
 		return result, "", false, err
 	}
-	screen, viable, err := p.renditionParameters(rendition.Screen, map[pdfgo.Name]func(pdfgo.Object) bool{
+	screen, viable, err := codecpdf.RenditionParameters(p.reader, rendition.Screen, map[pdfgo.Name]func(pdfgo.Object) bool{
 		"W": func(value pdfgo.Object) bool { return !audio && value == pdfgo.Integer(0) || value == pdfgo.Integer(3) },
 	})
 	if err != nil || !viable {
 		return result, "", false, err
 	}
 	if screen["W"] == pdfgo.Integer(0) {
-		valid, err := p.renditionFloatingWindow(rendition.Screen)
+		valid, err := codecpdf.RenditionFloatingWindow(p.reader, rendition.Screen)
 		if err != nil || !valid {
 			return result, "", false, err
 		}
@@ -257,141 +258,4 @@ func (p *pdfImporter) nativeRendition(rendition *pdfgo.Rendition) (Action, strin
 	}
 	result.Movie = &Movie{Operator: "Play"}
 	return result, "Video", true, nil
-}
-
-// renditionFloatingWindow 校验浮窗必需的像素尺寸，呈现偏好不写成视频固有尺寸
-// 入参: screen 媒体屏幕参数
-// 返回: bool 是否具备合法尺寸, error 引用错误
-func (p *pdfImporter) renditionFloatingWindow(screen pdfgo.Dictionary) (bool, error) {
-	value, err := p.reader.Resolve(screen["BE"])
-	if err != nil {
-		return false, err
-	}
-	preferences, _ := value.(pdfgo.Dictionary)
-	value, err = p.reader.Resolve(preferences["F"])
-	if err != nil {
-		return false, err
-	}
-	window, ok := value.(pdfgo.Dictionary)
-	if !ok {
-		return false, nil
-	}
-	value, err = p.reader.Resolve(window["D"])
-	if err != nil {
-		return false, err
-	}
-	size, ok := value.(pdfgo.Array)
-	if !ok || len(size) != 2 {
-		return false, nil
-	}
-	for _, part := range size {
-		value, err = p.reader.Resolve(part)
-		if err != nil {
-			return false, err
-		}
-		number, ok := value.(pdfgo.Integer)
-		if !ok || number < 0 {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-// renditionCriteria 检查媒体环境条件，未知尽力处理字段不影响候选可用性
-// 入参: rendition 媒体呈现或选择器
-// 返回: bool 是否可用, error 条件字典或引用错误
-func (p *pdfImporter) renditionCriteria(rendition *pdfgo.Rendition) (bool, error) {
-	for _, constraints := range []struct {
-		dict     pdfgo.Dictionary
-		required bool
-	}{{rendition.MustHonor, true}, {rendition.BestEffort, false}} {
-		for key, object := range constraints.dict {
-			if key != "C" {
-				if constraints.required {
-					return false, nil
-				}
-				continue
-			}
-			value, err := p.reader.Resolve(object)
-			if err != nil {
-				return false, err
-			}
-			criteria, ok := value.(pdfgo.Dictionary)
-			if !ok {
-				return false, fmt.Errorf("invalid media criteria")
-			}
-			for name, object := range criteria {
-				value, err := p.reader.Resolve(object)
-				if err != nil {
-					return false, err
-				}
-				if name == "Type" && value == pdfgo.Name("MediaCriteria") {
-					continue
-				}
-				switch name {
-				case "Type", "A", "C", "O", "S", "R", "D", "Z", "V", "P", "L":
-					return false, nil
-				default:
-					if constraints.required {
-						return false, nil
-					}
-				}
-			}
-		}
-	}
-	return true, nil
-}
-
-// renditionParameters 合并可等价表达的播放参数，不支持的偏好不阻断播放
-// 入参: dict 参数字典, supported 字段及可表达值的检查
-// 返回: pdfgo.Dictionary 合并后的值, bool 是否可用, error 字典或引用错误
-func (p *pdfImporter) renditionParameters(dict pdfgo.Dictionary, supported map[pdfgo.Name]func(pdfgo.Object) bool) (pdfgo.Dictionary, bool, error) {
-	values := make(pdfgo.Dictionary)
-	for key := range dict {
-		if key != "Type" && key != "MH" && key != "BE" {
-			return nil, false, nil
-		}
-	}
-	value, err := p.reader.Resolve(dict["MH"])
-	if err != nil {
-		return nil, false, err
-	}
-	mandatory, _ := value.(pdfgo.Dictionary)
-	for _, key := range []pdfgo.Name{"BE", "MH"} {
-		value, err := p.reader.Resolve(dict[key])
-		if err != nil {
-			return nil, false, err
-		}
-		if value == nil {
-			continue
-		}
-		parameters, ok := value.(pdfgo.Dictionary)
-		if !ok {
-			return nil, false, fmt.Errorf("invalid media playback constraints")
-		}
-		for name, object := range parameters {
-			if _, overridden := mandatory[name]; key == "BE" && overridden {
-				continue
-			}
-			check := supported[name]
-			if check == nil {
-				if key == "MH" {
-					return nil, false, nil
-				}
-				continue
-			}
-			resolved, err := p.reader.Resolve(object)
-			if err != nil {
-				return nil, false, err
-			}
-			if !check(resolved) {
-				if key == "MH" {
-					return nil, false, nil
-				}
-				continue
-			}
-			values[name] = resolved
-		}
-	}
-	return values, true, nil
 }

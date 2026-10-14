@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ofdgo
+package pdf
 
 import (
 	"context"
@@ -23,10 +23,10 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// pdfThreeDSections 按XYZ顺序构造剖切方向，中心保持为世界坐标固定点
+// threeDSections 按XYZ顺序构造剖切方向，中心保持为世界坐标固定点
 // 入参: ctx 取消上下文, sections PDF剖切面, options 绘制选项
 // 返回: error 方向、预算或取消错误
-func pdfThreeDSections(ctx context.Context, sections []pdfgo.ThreeDCrossSection, options *U3DRenderOptions) error {
+func threeDSections(ctx context.Context, sections []pdfgo.ThreeDCrossSection, options *basethreed.U3DRenderOptions) error {
 	if len(sections) == 0 {
 		return nil
 	}
@@ -38,7 +38,7 @@ func pdfThreeDSections(ctx context.Context, sections []pdfgo.ThreeDCrossSection,
 		return fmt.Errorf("PDF 3D section memory exceeds limit")
 	}
 	options.MaxMemoryBytes = limit - int64(len(sections))*136
-	options.Sections = make([]U3DCrossSection, len(sections))
+	options.Sections = make([]basethreed.U3DCrossSection, len(sections))
 	for i, source := range sections {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -46,7 +46,7 @@ func pdfThreeDSections(ctx context.Context, sections []pdfgo.ThreeDCrossSection,
 		if source.Axis < 0 || source.Axis > 2 {
 			return fmt.Errorf("invalid PDF 3D section axis")
 		}
-		section := U3DCrossSection{Center: source.Center, Color: source.Color, Opacity: source.Opacity}
+		section := basethreed.U3DCrossSection{Center: source.Center, Color: source.Color, Opacity: source.Opacity}
 		section.AxisU[(source.Axis+1)%3], section.AxisV[(source.Axis+2)%3] = 1, 1
 		for axis, angle := range source.Rotation {
 			if axis == source.Axis {

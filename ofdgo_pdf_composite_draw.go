@@ -21,6 +21,7 @@ import (
 	"math"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -162,11 +163,11 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 			}
 		}
 	}
-	var colorants *pdfShadingColorants
+	var colorants *codecpdf.ShadingColorants
 	if node.image == nil || node.image.Image.ImageMask {
-		colorants = pdfPrepareShadingColorants(paint, space, c.softMask)
+		colorants = codecpdf.PrepareShadingColorants(paint, space, c.softMask)
 		if colorants != nil && overprint {
-			processMask, processOverprint = colorants.process.Mask(), true
+			processMask, processOverprint = colorants.Process.Mask(), true
 		}
 	}
 	step := 25.4 / c.importer.rasterDPI
@@ -449,7 +450,7 @@ func (c *pdfCompositor) drawGroup(node pdfCompositeNode, pixels []pdfCompositePi
 	}
 	region := c.pixelBounds(b)
 	blocked := c.transferBlocked
-	c.transferBlocked = blocked || g.Alpha != 1 || g.SoftMask != nil || !pdfNormalBlend(g.BlendMode)
+	c.transferBlocked = blocked || g.Alpha != 1 || g.SoftMask != nil || !codecpdf.NormalBlend(g.BlendMode)
 	defer func() { c.transferBlocked = blocked }()
 	if c.transfers != nil && node.textObject != nil && !c.transferBlocked {
 		for _, child := range node.children {
@@ -469,7 +470,7 @@ func (c *pdfCompositor) drawGroup(node pdfCompositeNode, pixels []pdfCompositePi
 	}
 	sameSpace := space.Equal(parent)
 	sharedInitial := !g.Isolated && !g.Knockout && sameSpace
-	if sharedInitial && g.Alpha == 1 && g.SoftMask == nil && pdfNormalBlend(g.BlendMode) {
+	if sharedInitial && g.Alpha == 1 && g.SoftMask == nil && codecpdf.NormalBlend(g.BlendMode) {
 		return c.draw(node.children, pixels, space)
 	}
 	initial := pixels
@@ -1015,7 +1016,7 @@ func (s *pdfCompositeColorSampler) color(point pdfgo.Point) ([4]float64, bool, e
 	var intent pdfgo.Name
 	var err error
 	if s.colorants != nil {
-		values, err = s.colorants.at(position)
+		values, err = s.colorants.At(position)
 	} else if g != nil {
 		values, err = g.ValuesAt(position)
 		source, intent = g.Space, g.Intent
