@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"image/color"
@@ -381,8 +382,25 @@ func (e *Editor) neutralDrawParam() (string, error) {
 // 入参: draw 绘制参数
 // 返回: string 资源标识, error 错误信息
 func (e *Editor) addEditorDrawParam(draw DrawParam) (string, error) {
+	ctx := context.Background()
+	if e.output != nil && e.output.ctx != nil {
+		ctx = e.output.ctx
+	}
+	return e.addEditorDrawParamContext(ctx, draw)
+}
+
+// addEditorDrawParamContext 注册已校验的参数，编码及引用收集期间响应取消
+// 入参: ctx 取消上下文, draw 绘制参数
+// 返回: string 资源标识, error 编码、扫描或取消错误
+func (e *Editor) addEditorDrawParamContext(ctx context.Context, draw DrawParam) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	draw.ID, draw.ResourceID, draw.BaseLoc, draw.Link = "", "", "", ""
 	for _, resource := range e.resources {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if resource.draw != nil {
 			previous := *resource.draw
 			previous.ID = ""
@@ -391,11 +409,11 @@ func (e *Editor) addEditorDrawParam(draw DrawParam) (string, error) {
 			}
 		}
 	}
-	if err := e.prepareSourceIDs(); err != nil {
+	if err := e.prepareSourceIDsContext(ctx); err != nil {
 		return "", err
 	}
 	draw.ID = e.nextID()
-	data, err := e.encodeXML(func(x *ofdXML) {
+	data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) {
 		x.root("Res", ofdAttrs{{Name: xml.Name{Local: "BaseLoc"}, Value: "."}})
 		x.start("DrawParams", nil)
 		attrs := ofdAttrs{}
@@ -431,7 +449,7 @@ func (e *Editor) addEditorDrawParam(draw DrawParam) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	refs, err := editorResourceReferences(data)
+	refs, err := editorResourceReferencesContext(ctx, data)
 	if err != nil {
 		return "", err
 	}

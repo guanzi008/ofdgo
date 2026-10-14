@@ -150,16 +150,20 @@ func SubsetSourceSFNT(data []byte, usage *Usage) []byte {
 	if usage.Unsafe || len(usage.Characters)+len(usage.Glyphs) == 0 || bytes.HasPrefix(data, []byte("ttcf")) {
 		return nil
 	}
-	sfnt, err := ParseSFNT(data)
-	if err != nil || !sfnt.IsTrueType && !sfnt.IsCFF || fontEmbeddingFlags(sfnt)&0x0100 != 0 {
+	fontTables, err := FileTables(data, 0)
+	if err != nil {
 		return nil
 	}
-	for tag := range sfnt.Tables {
+	for tag := range fontTables {
 		switch tag {
 		case "cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "CFF ", "cvt ", "fpgm", "prep", "gasp", "kern", "vhea", "vmtx", "VORG", "hdmx", "LTSH", "VDMX", "GDEF", "GPOS", "GSUB", "meta", "DSIG", "FFTM", "PCLT":
 		default:
 			return nil
 		}
+	}
+	sfnt, err := ParseSFNTTables(fontTables)
+	if err != nil || !sfnt.IsTrueType && !sfnt.IsCFF || fontEmbeddingFlags(sfnt)&0x0100 != 0 {
+		return nil
 	}
 	var unicodeTables []sfntCmap
 	for _, record := range sfnt.cmaps {

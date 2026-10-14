@@ -62,11 +62,17 @@ type PageAnalysis interface {
 
 // WalkPage 按模板、图层、注解和印章顺序访问页面，不依赖任何绘图库
 // 页面背景由调用方处理，文字裁剪可通过几何后端加载字体，图片由访问器按需加载
+// 已读取文档结构时，先完成延迟的注解与签名加载
 // 入参: page 页面内容, visitor 页面访问器
 // 返回: error 遍历或访问器错误
 func (r *Renderer) WalkPage(page *PageContent, visitor PageVisitor) error {
 	if r.pageContext != nil {
 		if err := r.pageContext.Err(); err != nil {
+			return err
+		}
+	}
+	if r.Reader.relatedPending {
+		if _, err := r.Reader.DocContext(r.outputContext()); err != nil {
 			return err
 		}
 	}

@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"image/color"
@@ -226,6 +227,20 @@ func (e *Editor) SetObjectDrawParam(page int, ids []string, id string) error {
 // 入参: draw 绘制参数，ID由编辑器分配
 // 返回: string 资源标识, error 错误信息
 func (e *Editor) AddDrawParam(draw DrawParam) (string, error) {
+	ctx := context.Background()
+	if e.output != nil && e.output.ctx != nil {
+		ctx = e.output.ctx
+	}
+	return e.addDrawParam(ctx, draw)
+}
+
+// addDrawParam 校验并注册绘制参数，资源操作可传递取消上下文
+// 入参: ctx 取消上下文, draw 绘制参数
+// 返回: string 资源标识, error 校验、编码或取消错误
+func (e *Editor) addDrawParam(ctx context.Context, draw DrawParam) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if draw.ResourceID != "" || draw.BaseLoc != "" || draw.Link != "" {
 		return "", fmt.Errorf("external draw parameter references cannot be registered directly")
 	}
@@ -246,11 +261,14 @@ func (e *Editor) AddDrawParam(draw DrawParam) (string, error) {
 		}
 	}
 	for _, paint := range []*FillColor{draw.FillColor, (*FillColor)(draw.StrokeColor)} {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if err := e.editorColor(paint); err != nil {
 			return "", err
 		}
 	}
-	return e.addEditorDrawParam(cloneEditorData(draw))
+	return e.addEditorDrawParamContext(ctx, cloneEditorData(draw))
 }
 
 // StyleObjects 原子更新对象透明度及文字、路径的填充和描边样式

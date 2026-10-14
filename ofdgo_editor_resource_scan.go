@@ -108,7 +108,7 @@ func scanEditorResources(ctx context.Context, reader *Reader, parts map[string][
 					return nil, nil, nil, false, err
 				}
 			}
-			resource, safe = local.scan(imageInput{ReadCloser: input, context: ctx}, name)
+			resource, safe = local.scanContext(ctx, input, name)
 			input.Close()
 		}
 		if err := ctx.Err(); err != nil {

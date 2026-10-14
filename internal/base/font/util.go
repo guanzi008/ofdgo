@@ -22,16 +22,6 @@ import (
 	"sort"
 )
 
-// otfTableRecord OTF表记录结构
-// 字段: tag 标签, checksum 校验和, offset 偏移, length 长度, data 数据
-type otfTableRecord struct {
-	tag      string
-	checksum uint32
-	offset   int
-	length   int
-	data     []byte
-}
-
 // finite 判断数值是否有限
 // 入参: value 数值
 // 返回: bool 是否有限
@@ -50,8 +40,6 @@ func ExtractCollectionFont(data []byte, index int) ([]byte, error) {
 	if len(tables["head"]) < 12 {
 		return nil, fmt.Errorf("invalid head font table")
 	}
-	tables["head"] = bytes.Clone(tables["head"])
-	clear(tables["head"][8:12])
 	return SerializeOTF(tables)
 }
 
@@ -288,68 +276,70 @@ func buildHmtxTable(widths []uint16) []byte {
 	return buf.Bytes()
 }
 
-// SerializeOTF 序列化OpenType字体结构
+// SerializeOTF 序列化OpenType字体结构，一次分配输出，不修改输入表数据
+// 复用各表校验和计算整份字体的调整值，不重复扫描表数据
 // 入参: tables 表数据映射
 // 返回: []byte 完整字体数据, error 错误信息
 func SerializeOTF(tables map[string][]byte) ([]byte, error) {
-	numTables := uint16(len(tables))
+	if len(tables) > math.MaxUint16/16 {
+		return nil, fmt.Errorf("too many font tables")
+	}
+	headerSize := 12 + 16*len(tables)
+	size := uint64(headerSize)
+	tags := make([]string, 0, len(tables))
+	for tag, data := range tables {
+		if len(tag) != 4 {
+			return nil, fmt.Errorf("invalid font table tag %q", tag)
+		}
+		if tag == "head" && len(data) < 12 {
+			return nil, fmt.Errorf("invalid head font table")
+		}
+		size += (uint64(len(data)) + 3) &^ 3
+		if size > math.MaxUint32 || size > uint64(math.MaxInt) {
+			return nil, fmt.Errorf("font table data too large")
+		}
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	data := make([]byte, int(size))
+	numTables := len(tables)
 	entrySelector := 0
-	for 1<<(entrySelector+1) <= int(numTables) {
+	for 1<<(entrySelector+1) <= numTables {
 		entrySelector++
 	}
 	searchRange := 1 << (entrySelector + 4)
-	rangeShift := int(numTables)*16 - searchRange
-	buf := new(bytes.Buffer)
+	rangeShift := numTables*16 - searchRange
 	if tables["CFF "] != nil || tables["CFF2"] != nil {
-		buf.WriteString("OTTO")
+		copy(data, "OTTO")
 	} else {
-		binary.Write(buf, binary.BigEndian, uint32(0x00010000))
+		binary.BigEndian.PutUint32(data, 0x00010000)
 	}
-	binary.Write(buf, binary.BigEndian, numTables)
-	binary.Write(buf, binary.BigEndian, uint16(searchRange))
-	binary.Write(buf, binary.BigEndian, uint16(entrySelector))
-	binary.Write(buf, binary.BigEndian, uint16(rangeShift))
-	var tags []string
-	for t := range tables {
-		tags = append(tags, t)
-	}
-	sort.Strings(tags)
-	headerSize := 12 + 16*int(numTables)
-	offset := headerSize
-	var records []otfTableRecord
-	for _, tag := range tags {
-		data := tables[tag]
-		pad := (4 - (len(data) % 4)) % 4
-		padded := make([]byte, len(data)+pad)
-		copy(padded, data)
-		if tag == "head" && len(data) >= 12 {
+	binary.BigEndian.PutUint16(data[4:], uint16(numTables))
+	binary.BigEndian.PutUint16(data[6:], uint16(searchRange))
+	binary.BigEndian.PutUint16(data[8:], uint16(entrySelector))
+	binary.BigEndian.PutUint16(data[10:], uint16(rangeShift))
+	offset, adjustment := headerSize, 0
+	var checksum uint32
+	for i, tag := range tags {
+		table := tables[tag]
+		length := (len(table) + 3) &^ 3
+		padded := data[offset : offset+length]
+		copy(padded, table)
+		if tag == "head" {
 			clear(padded[8:12])
+			adjustment = offset + 8
 		}
-		cs := calcTableChecksum(padded)
-		records = append(records, otfTableRecord{tag, cs, offset, len(data), padded})
-		offset += len(padded)
+		record := data[12+i*16 : 28+i*16]
+		copy(record, tag)
+		tableChecksum := calcTableChecksum(padded)
+		checksum += tableChecksum
+		binary.BigEndian.PutUint32(record[4:], tableChecksum)
+		binary.BigEndian.PutUint32(record[8:], uint32(offset))
+		binary.BigEndian.PutUint32(record[12:], uint32(len(table)))
+		offset += length
 	}
-	for _, r := range records {
-		buf.WriteString(r.tag)
-		binary.Write(buf, binary.BigEndian, r.checksum)
-		binary.Write(buf, binary.BigEndian, uint32(r.offset))
-		binary.Write(buf, binary.BigEndian, uint32(r.length))
+	if adjustment != 0 {
+		binary.BigEndian.PutUint32(data[adjustment:], 0xB1B0AFBA-checksum-calcTableChecksum(data[:headerSize]))
 	}
-	for _, r := range records {
-		buf.Write(r.data)
-	}
-	fullData := buf.Bytes()
-	for _, r := range records {
-		if r.tag == "head" {
-			adjOffset := r.offset + 8
-			if adjOffset+4 <= len(fullData) {
-				binary.BigEndian.PutUint32(fullData[adjOffset:], 0)
-				cs := calcTableChecksum(fullData)
-				checksumAdj := 0xB1B0AFBA - cs
-				binary.BigEndian.PutUint32(fullData[adjOffset:], checksumAdj)
-			}
-			break
-		}
-	}
-	return fullData, nil
+	return data, nil
 }

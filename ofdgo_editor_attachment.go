@@ -29,36 +29,59 @@ import (
 // Attachments 获取当前编辑状态的附件列表，返回值与编辑器相互独立
 // 返回: []Attachment 附件信息, error 结构错误
 func (e *Editor) Attachments() ([]Attachment, error) {
+	return e.AttachmentsContext(context.Background())
+}
+
+// AttachmentsContext 获取独立的附件列表，读取及解析期间响应取消
+// 入参: ctx 取消上下文
+// 返回: []Attachment 附件信息, error 结构或取消错误
+func (e *Editor) AttachmentsContext(ctx context.Context) ([]Attachment, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if e.source == nil {
 		return nil, nil
 	}
-	return e.source.reader.Attachments()
+	return e.source.reader.AttachmentsContext(ctx)
 }
 
 // AddAttachment 添加文档附件，保留原始数据，一次操作计入一条撤销记录
 // 入参: name 显示文件名, data 文件数据
 // 返回: string 附件标识, error 文件名或文档结构错误
 func (e *Editor) AddAttachment(name string, data []byte) (string, error) {
+	return e.AddAttachmentContext(context.Background(), name, data)
+}
+
+// AddAttachmentContext 添加附件并响应取消，失败时不修改文档和撤销记录
+// 入参: ctx 取消上下文, name 显示文件名, data 文件数据
+// 返回: string 附件标识, error 文件名、结构或取消错误
+func (e *Editor) AddAttachmentContext(ctx context.Context, name string, data []byte) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if err := validateAttachmentName(name); err != nil {
 		return "", err
 	}
-	maximum, err := e.sourceMaxID(nil)
+	maximum, err := e.sourceMaxID(editorProgress(nil).withContext(ctx))
 	if err != nil {
 		return "", err
 	}
 	base := e.source
 	if base == nil {
-		base, err = e.importBase()
+		base, err = e.importBaseContext(ctx)
 		if err != nil {
 			return "", err
 		}
 	}
-	attachments, err := base.reader.Attachments()
+	attachments, err := base.reader.attachmentsContext(ctx, true)
 	if err != nil {
 		return "", err
 	}
 	used := make(map[string]bool, len(attachments))
 	for _, attachment := range attachments {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		used[attachment.ID] = true
 	}
 	id, maximum := nextAttachmentID(used, maximum)
@@ -75,11 +98,11 @@ func (e *Editor) AddAttachment(name string, data []byte) (string, error) {
 	}
 	entry = bytes.TrimPrefix(entry, []byte(xml.Header))
 	docName := base.reader.documentRoot
-	docData, err := base.reader.readFile(docName)
+	docData, err := base.reader.readFileViewContext(ctx, docName)
 	if err != nil {
 		return "", err
 	}
-	doc, err := parseEditorXML(docData)
+	doc, err := parseEditorXMLContext(ctx, docData)
 	if err != nil {
 		return "", err
 	}
@@ -87,11 +110,11 @@ func (e *Editor) AddAttachment(name string, data []byte) (string, error) {
 	parts := map[string][]byte{file: bytes.Clone(data)}
 	if strings.TrimSpace(base.document.Attachments.Path) != "" {
 		name := base.reader.ResPath(base.document.Attachments.Path)
-		existing, err := base.reader.readFile(name)
+		existing, err := base.reader.readFileViewContext(ctx, name)
 		if err != nil {
 			return "", err
 		}
-		root, err := parseEditorXML(existing)
+		root, err := parseEditorXMLContext(ctx, existing)
 		if err != nil {
 			return "", err
 		}
@@ -127,7 +150,7 @@ func (e *Editor) AddAttachment(name string, data []byte) (string, error) {
 		}
 		parts[docName] = editorPatchXML(docData, []editorXMLPatch{{position, position, doc.textXML("Attachments", "/"+name)}})
 	}
-	if err := e.commitAnnotationParts(base, parts); err != nil {
+	if err := e.commitAnnotationPartsContext(ctx, base, parts); err != nil {
 		return "", err
 	}
 	e.maxID, e.source.idsReady = maximum, true
@@ -152,10 +175,20 @@ func nextAttachmentID(used map[string]bool, maximum int) (string, int) {
 // 入参: id 附件标识, name 显示名称
 // 返回: error 名称或附件结构错误
 func (e *Editor) RenameAttachment(id, name string) error {
+	return e.RenameAttachmentContext(context.Background(), id, name)
+}
+
+// RenameAttachmentContext 修改附件名称并响应取消，保留内容、格式及扩展字段
+// 入参: ctx 取消上下文, id 附件标识, name 显示名称
+// 返回: error 名称、结构或取消错误
+func (e *Editor) RenameAttachmentContext(ctx context.Context, id, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := validateAttachmentName(name); err != nil {
 		return err
 	}
-	return e.editAttachment(id, func(data []byte, node *editorXML, parts map[string][]byte) ([]byte, error) {
+	return e.editAttachment(ctx, id, func(data []byte, node *editorXML, parts map[string][]byte) ([]byte, error) {
 		if node.attr("Name") == name {
 			return data, nil
 		}
@@ -168,16 +201,17 @@ func (e *Editor) RenameAttachment(id, name string) error {
 // 入参: id 附件标识, data 文件数据，调用后可复用
 // 返回: error 附件结构或提交错误
 func (e *Editor) ReplaceAttachment(id string, data []byte) error {
-	return e.replaceAttachment(context.Background(), id, data)
+	return e.ReplaceAttachmentContext(context.Background(), id, data)
 }
 
-// replaceAttachment 比较附件内容并提交替换，传递内容读取过程中的取消状态
+// ReplaceAttachmentContext 替换附件内容，比较、标识扫描及快照提交期间响应取消
+// 内容相同不产生修改，失败或取消时保留原文档及撤销记录
 // 入参: ctx 取消上下文, id 附件标识, data 新文件数据
 // 返回: error 读取、取消或提交错误
-func (e *Editor) replaceAttachment(ctx context.Context, id string, data []byte) error {
+func (e *Editor) ReplaceAttachmentContext(ctx context.Context, id string, data []byte) error {
 	var maximum int
 	changed := false
-	err := e.editAttachment(id, func(fragment []byte, node *editorXML, parts map[string][]byte) ([]byte, error) {
+	err := e.editAttachment(ctx, id, func(fragment []byte, node *editorXML, parts map[string][]byte) ([]byte, error) {
 		if child := node.child("FileLoc"); child != nil {
 			location := strings.TrimSpace(editorImportText(fragment, child))
 			if location != "" {
@@ -192,7 +226,7 @@ func (e *Editor) replaceAttachment(ctx context.Context, id string, data []byte) 
 			}
 		}
 		var err error
-		maximum, err = e.sourceMaxID(nil)
+		maximum, err = e.sourceMaxID(editorProgress(nil).withContext(ctx))
 		if err != nil {
 			return nil, err
 		}
@@ -208,7 +242,7 @@ func (e *Editor) replaceAttachment(ctx context.Context, id string, data []byte) 
 		} else {
 			fragment = editorPatchXML(fragment, []editorXMLPatch{{node.open, node.open, node.textXML("FileLoc", "/"+file)}})
 		}
-		root, err := parseEditorXML(fragment)
+		root, err := parseEditorXMLContext(ctx, fragment)
 		if err != nil {
 			return nil, err
 		}
@@ -233,15 +267,25 @@ func (e *Editor) replaceAttachment(ctx context.Context, id string, data []byte) 
 // 入参: id 附件标识
 // 返回: error 附件结构或提交错误
 func (e *Editor) DeleteAttachment(id string) error {
-	return e.editAttachment(id, func([]byte, *editorXML, map[string][]byte) ([]byte, error) {
+	return e.DeleteAttachmentContext(context.Background(), id)
+}
+
+// DeleteAttachmentContext 删除附件声明并响应取消，成功后可撤销及重做
+// 入参: ctx 取消上下文, id 附件标识
+// 返回: error 结构或取消错误
+func (e *Editor) DeleteAttachmentContext(ctx context.Context, id string) error {
+	return e.editAttachment(ctx, id, func([]byte, *editorXML, map[string][]byte) ([]byte, error) {
 		return nil, nil
 	})
 }
 
 // editAttachment 对单个附件片段执行原子编辑，兼容独立附件文件及内联声明
-// 入参: id 附件标识, change 片段及资源修改函数
+// 入参: ctx 取消上下文, id 附件标识, change 片段及资源修改函数
 // 返回: error 结构、标识或提交错误
-func (e *Editor) editAttachment(id string, change func([]byte, *editorXML, map[string][]byte) ([]byte, error)) error {
+func (e *Editor) editAttachment(ctx context.Context, id string, change func([]byte, *editorXML, map[string][]byte) ([]byte, error)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	base := e.source
 	if base == nil {
 		return fmt.Errorf("attachment not found: %s", id)
@@ -251,11 +295,11 @@ func (e *Editor) editAttachment(id string, change func([]byte, *editorXML, map[s
 	if external {
 		name = base.reader.ResPath(base.document.Attachments.Path)
 	}
-	data, err := base.reader.readFile(name)
+	data, err := base.reader.readFileViewContext(ctx, name)
 	if err != nil {
 		return err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return err
 	}
@@ -265,6 +309,9 @@ func (e *Editor) editAttachment(id string, change func([]byte, *editorXML, map[s
 	var found *editorXML
 	if root != nil {
 		for _, child := range root.children {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if child.matchesOFD("Attachment") && child.attr("ID") == id {
 				if found != nil {
 					return fmt.Errorf("duplicate attachment ID: %s", id)
@@ -276,11 +323,11 @@ func (e *Editor) editAttachment(id string, change func([]byte, *editorXML, map[s
 	if found == nil {
 		return fmt.Errorf("attachment not found: %s", id)
 	}
-	fragment, err := editorXMLStandalone(data[found.start:found.end], found)
+	fragment, err := editorXMLStandaloneContext(ctx, data[found.start:found.end], found)
 	if err != nil {
 		return err
 	}
-	node, err := parseEditorXML(fragment)
+	node, err := parseEditorXMLContext(ctx, fragment)
 	if err != nil {
 		return err
 	}
@@ -290,10 +337,10 @@ func (e *Editor) editAttachment(id string, change func([]byte, *editorXML, map[s
 		return err
 	}
 	if bytes.Equal(updated, fragment) && len(parts) == 0 {
-		return nil
+		return ctx.Err()
 	}
 	parts[name] = editorPatchXML(data, []editorXMLPatch{{found.start, found.end, updated}})
-	if err := e.commitAnnotationParts(base, parts); err != nil {
+	if err := e.commitAnnotationPartsContext(ctx, base, parts); err != nil {
 		return err
 	}
 	if len(updated) == 0 {

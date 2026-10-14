@@ -35,9 +35,12 @@ type pageReferenceNode struct {
 // pruneDocumentReferences 在输出快照中清理已删除页面和附件的引用，不修改历史快照或其他文档
 // 沿当前文档、页面、模板、资源、注释和签名索引检查，不进入附件、私有扩展和签名原始凭据
 // 版本包保留原签名及其页面引用，避免改写其他版本共用的签名数据
-// 入参: parts 输出覆盖条目, generated 本次自产页面及引用，可为nil
+// 入参: ctx 取消上下文, parts 输出覆盖条目, generated 本次自产页面及引用，可为nil
 // 返回: error 读取、解析或取消错误
-func (e *Editor) pruneDocumentReferences(parts map[string][]byte, generated map[string]editorGeneratedReferences) error {
+func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][]byte, generated map[string]editorGeneratedReferences) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	removed := maps.Clone(e.removedPages)
 	if removed == nil {
 		removed = make(map[string]bool)
@@ -54,10 +57,6 @@ func (e *Editor) pruneDocumentReferences(parts map[string][]byte, generated map[
 	delete(removed, "")
 	if len(removed) == 0 && len(e.source.removedAttachments) == 0 {
 		return nil
-	}
-	ctx := context.Background()
-	if e.output != nil {
-		ctx = e.output.ctx
 	}
 	reader := e.source.reader
 	bookmarks := make(map[string]bool)

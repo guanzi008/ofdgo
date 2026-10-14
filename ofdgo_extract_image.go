@@ -78,7 +78,7 @@ func (w imageOutput) Write(data []byte) (int, error) {
 }
 
 // Images 列出文档、页面和模板声明的图片资源，不解码图片像素
-// 包含未使用及重复引用的资源声明，同一资源标识只返回一次
+// 包含未使用及重复引用的资源声明，同一资源标识只返回一次，不加载注解或签名
 // 入参: ctx 取消上下文
 // 返回: []ImageInfo 图片资源, error 读取或取消错误
 func (r *Reader) Images(ctx context.Context) ([]ImageInfo, error) {
@@ -88,7 +88,7 @@ func (r *Reader) Images(ctx context.Context) ([]ImageInfo, error) {
 	if r.imageCatalog != nil {
 		return slices.Clone(r.imageCatalog), nil
 	}
-	doc, err := r.DocContext(ctx)
+	doc, err := r.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +162,7 @@ func (r *Reader) Images(ctx context.Context) ([]ImageInfo, error) {
 	return slices.Clone(items), nil
 }
 
-// Image 查找指定图片，已加载资源直接读取所在资源文件，不扫描其他页面
+// Image 查找指定图片，复用媒体索引或图片清单，尚未建立索引时读取资源声明
 // 入参: ctx 取消上下文, id 图片资源标识
 // 返回: ImageInfo 图片资源, error 读取或取消错误
 func (r *Reader) Image(ctx context.Context, id string) (ImageInfo, error) {
@@ -171,6 +171,15 @@ func (r *Reader) Image(ctx context.Context, id string) (ImageInfo, error) {
 	}
 	name, _ := resourceValue(r.resourceFiles, id)
 	if name != "" {
+		if r.resourcesRead[name] {
+			if media, ok := resourceValue(r.mediaCache, id); ok && media.Type == "Image" && media.MediaFile != "" {
+				location := r.ResPath(media.MediaFile)
+				if err := ctx.Err(); err != nil {
+					return ImageInfo{}, err
+				}
+				return ImageInfo{ID: id, Name: path.Base(location), Format: media.Format, Location: location}, nil
+			}
+		}
 		data, err := r.readFileViewContext(ctx, name)
 		if err != nil {
 			return ImageInfo{}, err
@@ -191,15 +200,20 @@ func (r *Reader) Image(ctx context.Context, id string) (ImageInfo, error) {
 		}
 		return ImageInfo{}, fmt.Errorf("image resource %q not found", id)
 	}
-	items, err := r.Images(ctx)
-	if err != nil {
-		return ImageInfo{}, err
+	items := r.imageCatalog
+	if items == nil {
+		var err error
+		items, err = r.Images(ctx)
+		if err != nil {
+			return ImageInfo{}, err
+		}
 	}
+	key := imageResourceKey(id)
 	for _, item := range items {
 		if err := ctx.Err(); err != nil {
 			return ImageInfo{}, err
 		}
-		if imageResourceKey(item.ID) == imageResourceKey(id) {
+		if imageResourceKey(item.ID) == key {
 			return item, nil
 		}
 	}

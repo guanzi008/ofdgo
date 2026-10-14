@@ -15,10 +15,10 @@
 package ofdgo
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
-	"maps"
 	"path"
 	"slices"
 	"strings"
@@ -121,15 +121,12 @@ func (r *Reader) resourceList(ctx context.Context) ([]ResourceInfo, error) {
 	return r.resourceInfoCache, nil
 }
 
-// resourceCatalog 按标准内容路径收集资源声明及引用，不把任意数字属性作为资源引用
+// resourceCatalog 单次解析标准内容路径，复用字体扫描的XML树收集资源声明及引用
+// 结果按文件名及原节点顺序归集，不把任意数字属性作为资源引用
 // 入参: ctx 取消上下文
 // 返回: *resourceCatalog 资源索引, error 结构或读取错误
 func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) {
-	scan, err := scanEditorFonts(ctx, r, r.DocumentIndex())
-	if err != nil {
-		return nil, err
-	}
-	catalog := &resourceCatalog{scan: scan, nodes: make(map[string]editorFontText), items: []ResourceInfo{}}
+	catalog := &resourceCatalog{nodes: make(map[string]editorFontText), items: []ResourceInfo{}}
 	pages := make(map[string]int)
 	doc, err := r.DocContext(ctx)
 	if err != nil {
@@ -147,16 +144,12 @@ func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) 
 		pages[cleanPackagePath(r.ResPath(page.BaseLoc))] = -1
 	}
 	refs := make(map[string][]ResourceReference)
-	for _, name := range slices.Sorted(maps.Keys(scan.files)) {
-		file := scan.files[name]
-		root, err := parseEditorXMLContext(ctx, file.data)
-		if err != nil {
-			return nil, err
-		}
+	scan, err := scanEditorFontFiles(ctx, r, r.DocumentIndex(), func(file *editorFontXML, root *editorXML) error {
+		name := file.name
 		if root.matchesOFD("Res") {
 			for _, group := range root.children {
 				for _, node := range group.children {
-					item := ResourceInfo{ID: editorResourceID(node.attr("ID")), Complete: !scan.unsafe}
+					item := ResourceInfo{ID: editorResourceID(node.attr("ID"))}
 					field := ""
 					if group.matchesOFD("Fonts") && node.matchesOFD("Font") {
 						item.Kind, item.Name, field = "Font", node.attr("FontName"), "FontFile"
@@ -174,7 +167,7 @@ func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) 
 						continue
 					}
 					if item.ID == "" {
-						return nil, fmt.Errorf("invalid resource ID")
+						return fmt.Errorf("invalid resource ID")
 					}
 					if target := node.child(field); target != nil {
 						location := strings.TrimSpace(editorImportText(file.data, target))
@@ -186,7 +179,7 @@ func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) 
 						item.Name = path.Base(item.File)
 					}
 					if err := catalog.add(item, editorFontText{file: file, node: node}); err != nil {
-						return nil, err
+						return err
 					}
 				}
 			}
@@ -233,11 +226,19 @@ func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) 
 			}
 			return nil
 		}
-		if err := visit(root, ""); err != nil {
-			return nil, err
-		}
+		return visit(root, "")
+	})
+	if err != nil {
+		return nil, err
 	}
-	attachments, err := r.Attachments()
+	catalog.scan = scan
+	slices.SortStableFunc(catalog.items, func(a, b ResourceInfo) int {
+		return cmp.Compare(catalog.nodes[a.Kind+"/"+a.ID].file.name, catalog.nodes[b.Kind+"/"+b.ID].file.name)
+	})
+	slices.SortStableFunc(catalog.images, func(a, b editorFontText) int {
+		return cmp.Compare(a.file.name, b.file.name)
+	})
+	attachments, err := r.attachmentsContext(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -249,11 +250,15 @@ func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) 
 	}
 	for i := range catalog.items {
 		item := &catalog.items[i]
+		item.Complete = !scan.unsafe
 		key := item.ID
 		if item.Kind == "Attachment" {
 			key = "Attachment/" + item.ID
 		}
 		item.References = refs[key]
+		slices.SortStableFunc(item.References, func(a, b ResourceReference) int {
+			return cmp.Compare(a.File, b.File)
+		})
 		if item.File != "" {
 			if data, ok := r.files[cleanPackagePath(item.File)]; ok {
 				item.Size = uint64(len(data))

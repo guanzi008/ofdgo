@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -1085,13 +1086,25 @@ func (e *Editor) compositeResource(id string, data []byte) (editorResource, erro
 // 入参: data 资源XML
 // 返回: []string 引用标识, error 错误信息
 func editorResourceReferences(data []byte) ([]string, error) {
-	root, err := parseEditorXML(data)
+	return editorResourceReferencesContext(nil, data)
+}
+
+// editorResourceReferencesContext 收集标准资源引用，在解析及遍历期间响应取消
+// 入参: ctx 取消上下文，可为nil, data 资源XML
+// 返回: []string 引用标识, error 解析或取消错误
+func editorResourceReferencesContext(ctx context.Context, data []byte) ([]string, error) {
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return nil, err
 	}
 	refs := make(map[string]bool)
-	var collect func(*editorXML)
-	collect = func(node *editorXML) {
+	var collect func(*editorXML) error
+	collect = func(node *editorXML) error {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
 		if classifyOFDNamespace(node.name.Space) != ofdXMLUnknown {
 			if node.name.Local == "Thumbnail" || node.name.Local == "Substitution" {
 				if id := editorResourceID(editorImportText(data, node)); id != "" {
@@ -1105,12 +1118,23 @@ func editorResourceReferences(data []byte) ([]string, error) {
 			}
 		}
 		for _, child := range node.children {
-			collect(child)
+			if err := collect(child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := collect(root); err != nil {
+		return nil, err
+	}
+	normalizeResourceReferences(refs)
+	result := slices.Sorted(maps.Keys(refs))
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 	}
-	collect(root)
-	normalizeResourceReferences(refs)
-	return slices.Sorted(maps.Keys(refs)), nil
+	return result, nil
 }
 
 // collectCompositeReferences 收集内联复合对象引用的新资源

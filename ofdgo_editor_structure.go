@@ -27,15 +27,14 @@ import (
 
 // pruneStructureReferences 迁移公文图元编号并清理已删除的引用，保留未知标引和原有悬空引用
 // 改动进入输出快照，由既有文档及版本隔离流程维护共享文件
-// 入参: parts 输出覆盖条目, generated 本次编码结果及扫描记录
+// 入参: ctx 取消上下文, parts 输出覆盖条目, generated 本次编码结果及扫描记录
 // 返回: error 读取、解析或取消错误
-func (e *Editor) pruneStructureReferences(parts map[string][]byte, generated map[string]editorGeneratedReferences) error {
+func (e *Editor) pruneStructureReferences(ctx context.Context, parts map[string][]byte, generated map[string]editorGeneratedReferences) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if e.source.document.CustomTags.Path == "" && len(e.source.document.CustomTags.CustomTag) == 0 {
 		return nil
-	}
-	ctx := context.Background()
-	if e.output != nil {
-		ctx = e.output.ctx
 	}
 	tags, err := e.source.reader.CustomTagsContext(ctx)
 	if err != nil {

@@ -16,9 +16,11 @@ package ofdgo
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
+	"io"
 	"math"
 	"reflect"
 	"slices"
@@ -85,6 +87,7 @@ func (s *pdfStencilImage) NRGBA64At(x, y int) color.NRGBA64 {
 }
 
 // image 转换图像样本，不将整页或其他对象栅格化
+// 有损编码复用已解码像素，候选容量超限时沿用原编码路径
 // 入参: mark PDF图像绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
@@ -206,6 +209,14 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		if len(data) == 0 {
 			data = jpegOriginal
 		}
+		optimized := false
+		if len(data) == 0 && decoded != nil && !source.ImageMask && p.compression.Mode == CompressionLossy {
+			data, err = pdfgo.EncodeImageResource(p.ctx, decoded, p.compression)
+			if err != nil && !errors.Is(err, io.ErrShortBuffer) {
+				return err
+			}
+			optimized = err == nil
+		}
 		if len(data) == 0 {
 			var encoded bytes.Buffer
 			if decoded != nil {
@@ -219,13 +230,15 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 			data = encoded.Bytes()
 		}
 		if !source.ImageMask && p.compression.Mode == CompressionLossy {
-			data, err = pdfgo.OptimizeImageResource(p.ctx, data, p.compression, key.size)
-			if err != nil {
-				return err
+			if !optimized {
+				data, err = pdfgo.OptimizeImageResource(p.ctx, data, p.compression, key.size)
+				if err != nil {
+					return err
+				}
 			}
 			decoded = nil
 		}
-		id, err = p.editor.addDecodedImage(data, decoded)
+		id, err = p.editor.addDecodedImageContext(p.ctx, data, decoded)
 		if err != nil {
 			return err
 		}

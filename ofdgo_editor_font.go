@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // editorFontUsage 汇总原文档字体的字符、显式字形及无法确定的引用
@@ -157,7 +158,7 @@ func (e *Editor) addFontResource(parsed *FontResource, checksum [32]byte) (strin
 	return id, nil
 }
 
-// AddExternalFont 注册不含字体文件的名称引用，由阅读环境匹配
+// AddExternalFont 注册不含字体文件的名称引用，重复注册复用标识，由阅读环境匹配
 // 入参: name 字体名称
 // 返回: string 字体资源标识, error 错误信息
 func (e *Editor) AddExternalFont(name string) (string, error) {
@@ -165,8 +166,13 @@ func (e *Editor) AddExternalFont(name string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("empty external font name")
 	}
+	key := editorResourceKey{checksum: sha256.Sum256([]byte(name)), kind: "Font/external"}
+	if id := e.resourceID[key]; id != "" {
+		return id, nil
+	}
 	for _, resource := range e.resources {
 		if resource.font != nil && resource.font.FontFile == "" && resource.font.FontName == name {
+			e.resourceID[key] = resource.font.ID
 			return resource.font.ID, nil
 		}
 	}
@@ -175,6 +181,7 @@ func (e *Editor) AddExternalFont(name string) (string, error) {
 	}
 	id := e.nextID()
 	e.resources = append(e.resources, editorResource{font: &Font{ID: id, FontName: name, FamilyName: name}})
+	e.resourceID[key] = id
 	e.fontRenderer = nil
 	return id, nil
 }
@@ -200,23 +207,49 @@ func (r *editorResourceRefs) fontUsage(id string) *editorFontUsage {
 }
 
 // text 收集TextCode字符和CGTransform显式字形，异常编号使该字体保持原样
-// 入参: key 元素名称, value 元素文本
-func (u *editorFontUsage) text(key, value string) {
+// 入参: ctx 取消上下文，可为nil, key 元素名称, value 元素文本
+// 返回: error 取消错误
+func (u *editorFontUsage) text(ctx context.Context, key, value string) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	switch key {
 	case "TextCode":
-		for _, char := range textCodeRunes(value) {
+		chars, err := textCodeRunesContext(ctx, value)
+		if err != nil {
+			return err
+		}
+		for index, char := range chars {
+			if ctx != nil && index&4095 == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
 			u.chars[char] = true
 		}
 	case "Glyphs":
-		for _, value := range strings.Fields(strings.ReplaceAll(value, ",", " ")) {
+		count := 0
+		for value := range strings.FieldsFuncSeq(value, func(char rune) bool { return char == ',' || unicode.IsSpace(char) }) {
+			if ctx != nil && count&4095 == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
 			id, err := strconv.ParseUint(value, 10, 16)
 			if err != nil {
 				u.unsafe = true
-				return
+				return nil
 			}
 			u.glyphs[uint16(id)] = true
+			count++
 		}
 	}
+	if ctx != nil {
+		return ctx.Err()
+	}
+	return nil
 }
 
 // merge 合并指向同一字体文件的全部资源用字
@@ -254,10 +287,15 @@ func editorObjectFontScan(object GraphicObject) bool {
 	return clips != nil || fill != nil && fill.Pattern != nil || stroke != nil && stroke.Pattern != nil
 }
 
-// subsetFonts 仅解析实际引用的新增字体，按用字裁剪保存结果，保留完整编辑字体
+// subsetFonts 仅解析实际引用的新增字体，合并用字后裁剪保存结果，保留完整编辑字体
 // 入参: progress 保存进度回调
 // 返回: map[string][]byte 包内字体子集, error 错误信息
 func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error) {
+	ctx := context.Background()
+	if e.output != nil {
+		ctx = e.output.ctx
+	}
+	progress = progress.withContext(ctx)
 	if e.backends.FontResources == nil {
 		return nil, nil
 	}
@@ -269,9 +307,12 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 	}) {
 		return nil, nil
 	}
-	fonts, _, _, files := e.usedResources()
+	fonts, _, _, files, err := e.usedResources(ctx)
+	if err != nil {
+		return nil, err
+	}
 	total := len(fonts) + len(e.pages) + 2*len(e.resources)
-	used := make(map[string]map[uint16]bool)
+	used := make(map[string]*editorFontUsage)
 	mapped := make(map[string]bool)
 	for i, resource := range fonts {
 		if err := progress.report("fonts", i, total); err != nil {
@@ -287,10 +328,13 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 			if err != nil {
 				return nil, err
 			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			e.fonts[resource.font.ID] = resourceFont
 		}
 		if resourceFont.CanSubset {
-			used[resource.font.ID] = make(map[uint16]bool)
+			used[resource.font.ID] = newEditorFontUsage()
 		}
 	}
 	if len(used) == 0 {
@@ -300,6 +344,10 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 		return nil, progress.report("fonts", total, total)
 	}
 	refs := editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool)}
+	scan := func(data []byte, name string) (bool, error) {
+		_, safe := refs.scanContext(ctx, bytes.NewReader(data), name)
+		return safe, ctx.Err()
+	}
 	nested := false
 	for _, resource := range e.resources {
 		if resource.draw != nil {
@@ -311,8 +359,8 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 		for _, name := range e.annotationFiles() {
 			if data, changed := e.source.reader.files[name]; changed {
 				nested = true
-				if _, safe := refs.scan(bytes.NewReader(data), name); !safe {
-					return nil, nil
+				if safe, err := scan(data, name); err != nil || !safe {
+					return nil, err
 				}
 			}
 		}
@@ -323,6 +371,9 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 		}
 		for _, layer := range page.Content.Layer {
 			for _, object := range layer.Objects {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
 				if editorObjectFontScan(object) {
 					nested = true
 					origin := e.objectOrigin(editorObjectID(object))
@@ -339,8 +390,8 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 					if err != nil {
 						return nil, err
 					}
-					if _, safe := refs.scan(bytes.NewReader(data), "Page.xml"); !safe {
-						return nil, nil
+					if safe, err := scan(data, "Page.xml"); err != nil || !safe {
+						return nil, err
 					}
 					continue
 				}
@@ -348,24 +399,31 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 					continue
 				}
 				obj := object.TextObject
-				glyphs := used[obj.Font]
-				if glyphs == nil {
+				usage := used[obj.Font]
+				if usage == nil {
 					continue
 				}
 				for _, code := range obj.TextCode {
-					for _, char := range textCodeRunes(code.Value) {
-						glyphs[e.fonts[obj.Font].GlyphIndex(char)] = true
+					if err := usage.text(ctx, "TextCode", code.Value); err != nil {
+						return nil, err
 					}
 				}
 				for _, transform := range obj.CGTransform {
 					mapped[obj.Font] = true
-					for _, value := range strings.Fields(transform.Glyphs) {
+					count := 0
+					for value := range strings.FieldsSeq(transform.Glyphs) {
+						if count&4095 == 0 {
+							if err := ctx.Err(); err != nil {
+								return nil, err
+							}
+						}
 						id, err := strconv.ParseUint(value, 10, 16)
 						if err != nil || id >= uint64(e.fonts[obj.Font].NumGlyphs()) {
 							delete(used, obj.Font)
 							break
 						}
-						glyphs[uint16(id)] = true
+						usage.glyphs[uint16(id)] = true
+						count++
 					}
 				}
 			}
@@ -381,18 +439,16 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 			}
 			if resource.usage.matches(resource.name, resource.data) {
 				refs.merge(resource.usage.refs)
-			} else if _, safe := refs.scan(bytes.NewReader(resource.data), resource.name); !safe {
-				return nil, nil
+			} else if safe, err := scan(resource.data, resource.name); err != nil || !safe {
+				return nil, err
 			}
 		}
 		for id, usage := range refs.fonts {
-			glyphs := used[id]
+			collected := used[id]
 			if usage.unsafe {
 				delete(used, id)
-			} else if glyphs != nil {
-				for char := range usage.chars {
-					glyphs[e.fonts[id].GlyphIndex(char)] = true
-				}
+			} else if collected != nil {
+				collected.merge(usage, false)
 				if len(usage.glyphs) != 0 {
 					mapped[id] = true
 					for glyph := range usage.glyphs {
@@ -400,7 +456,6 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 							delete(used, id)
 							break
 						}
-						glyphs[glyph] = true
 					}
 				}
 			}
@@ -415,10 +470,17 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 		if resource.font == nil {
 			continue
 		}
-		glyphs := used[resource.font.ID]
-		if len(glyphs) == 0 {
+		usage := used[resource.font.ID]
+		if usage == nil || len(usage.chars) == 0 && len(usage.glyphs) == 0 {
 			resource.subset = nil
 			continue
+		}
+		glyphs := usage.glyphs
+		for char := range usage.chars {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			glyphs[e.fonts[resource.font.ID].GlyphIndex(char)] = true
 		}
 		glyphs[0] = true
 		ids := make([]uint16, 0, len(glyphs))
@@ -426,10 +488,16 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 			ids = append(ids, id)
 		}
 		slices.Sort(ids)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if resource.subset == nil || resource.subset.mapped != mapped[resource.font.ID] || !slices.Equal(resource.subset.glyphs, ids) {
 			data, err := e.backends.FontResources.SubsetFont(resource.data, ids, mapped[resource.font.ID])
 			if err != nil {
 				return nil, fmt.Errorf("subset font %s: %w", resource.font.FontName, err)
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
 			if len(data) >= len(resource.data) {
 				data = nil

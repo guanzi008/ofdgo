@@ -60,6 +60,13 @@ type editorFontDeclaration struct {
 // 入参: ctx 取消上下文, reader 包快照, index 文档索引
 // 返回: *editorFontDocument 字体引用, error 读取或结构错误
 func scanEditorFonts(ctx context.Context, reader *Reader, index int) (*editorFontDocument, error) {
+	return scanEditorFontFiles(ctx, reader, index, nil)
+}
+
+// scanEditorFontFiles 扫描字体与内容引用，按需复用当前文件的XML树，不额外保留节点树
+// 入参: ctx 取消上下文, reader 包快照, index 文档索引, inspect 可选的文件节点访问器
+// 返回: *editorFontDocument 字体引用, error 读取、结构或访问错误
+func scanEditorFontFiles(ctx context.Context, reader *Reader, index int, inspect func(*editorFontXML, *editorXML) error) (*editorFontDocument, error) {
 	scan := &editorFontDocument{reader: reader, index: index, files: make(map[string]*editorFontXML), fonts: make(map[string]*editorFontDeclaration), texts: make(map[string][]editorFontText)}
 	entry, err := reader.documentEntryContext(ctx, index)
 	if err != nil {
@@ -163,6 +170,14 @@ func scanEditorFonts(ctx context.Context, reader *Reader, index int) (*editorFon
 		if err := visit(root); err != nil {
 			return nil, err
 		}
+		if inspect != nil {
+			if err := inspect(file, root); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return scan, nil
 }

@@ -435,6 +435,7 @@ func pdfCompositeInterpolate(target *pdfCompositePixel, source pdfCompositePixel
 }
 
 // drawGroup 按隔离标志保留初始背景，移除背景贡献后应用组透明度
+// 非隔离同空间的非挖空组借用父组背景，子组只写入独立结果缓冲
 // 入参: node 透明组, pixels 父组像素, parent 父混合空间
 // 返回: error 颜色或合成错误
 func (c *pdfCompositor) drawGroup(node pdfCompositeNode, pixels []pdfCompositePixel, parent *pdfgo.ColorSpace) error {
@@ -466,15 +467,25 @@ func (c *pdfCompositor) drawGroup(node pdfCompositeNode, pixels []pdfCompositePi
 	if space == nil {
 		space = parent
 	}
-	if !g.Isolated && !g.Knockout && g.Alpha == 1 && g.SoftMask == nil && pdfNormalBlend(g.BlendMode) && space.Equal(parent) {
+	sameSpace := space.Equal(parent)
+	sharedInitial := !g.Isolated && !g.Knockout && sameSpace
+	if sharedInitial && g.Alpha == 1 && g.SoftMask == nil && pdfNormalBlend(g.BlendMode) {
 		return c.draw(node.children, pixels, space)
 	}
-	initial := c.acquirePixels(len(pixels))
-	defer c.releasePixels(initial)
+	initial := pixels
+	if !sharedInitial {
+		initial = c.acquirePixels(len(pixels))
+		defer c.releasePixels(initial)
+	}
+	result := c.acquirePixels(len(initial))
+	defer c.releasePixels(result)
 	if g.Isolated {
 		clear(initial)
 	} else {
-		sameSpace := space.Equal(parent)
+		background := initial
+		if sharedInitial {
+			background = result
+		}
 		components := parent.Components()
 		for i := range pixels {
 			if i%pdfCompositeTileSize == 0 {
@@ -491,12 +502,12 @@ func (c *pdfCompositor) drawGroup(node pdfCompositeNode, pixels []pdfCompositePi
 					return err
 				}
 			}
-			initial[i] = pdfCompositePixel{values: values, alpha: pixel.alpha}
+			background[i] = pdfCompositePixel{values: values, alpha: pixel.alpha}
 		}
 	}
-	result := c.acquirePixels(len(initial))
-	defer c.releasePixels(result)
-	copy(result, initial)
+	if !sharedInitial {
+		copy(result, initial)
+	}
 	local := *c
 	if c.channels != nil {
 		local.channels = c.acquireChannels(len(c.channels))
@@ -657,6 +668,7 @@ func pdfCompositeGroupRegion(ctx context.Context, pixels, initial, result []pdfC
 		return nil
 	}
 	components, parentComponents := space.Components(), parent.Components()
+	var target pdfgo.ColorantPixel
 	for y := region.Min.Y; y < region.Max.Y; y++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -672,7 +684,10 @@ func pdfCompositeGroupRegion(ctx context.Context, pixels, initial, result []pdfC
 				alpha *= mask[i]
 			}
 			pixel := &result[i]
-			target := pdfgo.ColorantPixel{Values: pixels[i].values[:parentComponents], Alpha: pixels[i].alpha, Shape: pixels[i].shape, Effect: pixels[i].effect}
+			target.Values = pixels[i].values[:parentComponents]
+			target.Alpha = pixels[i].alpha
+			target.Shape = pixels[i].shape
+			target.Effect = pixels[i].effect
 			if err := compositor.Composite(&target,
 				pdfgo.ColorantPixel{Values: initial[i].values[:components], Alpha: initial[i].alpha, Shape: initial[i].shape, Effect: initial[i].effect},
 				pdfgo.ColorantPixel{Values: pixel.values[:components], Alpha: pixel.alpha, Shape: pixel.shape, Effect: pixel.effect},
@@ -808,11 +823,11 @@ func (c *pdfCompositor) imageColor(mark *pdfgo.ImageMark, point pdfgo.Point, spa
 		}
 		return source.ValuesAt(x, y)
 	}
-	values, alpha := sample(int(math.Floor(x+.5)), int(math.Floor(y+.5)))
+	var values [4]float64
+	var alpha float64
 	if mark.Image.Interpolate {
 		ix, iy := int(math.Floor(x)), int(math.Floor(y))
 		fx, fy := x-float64(ix), y-float64(iy)
-		values, alpha = [4]float64{}, 0
 		for j := 0; j < 2; j++ {
 			for i := 0; i < 2; i++ {
 				weight := (1 - fx) * (1 - fy)
@@ -837,6 +852,8 @@ func (c *pdfCompositor) imageColor(mark *pdfgo.ImageMark, point pdfgo.Point, spa
 				values[k] = math.Max(0, math.Min(1, values[k]/alpha))
 			}
 		}
+	} else {
+		values, alpha = sample(int(math.Floor(x+.5)), int(math.Floor(y+.5)))
 	}
 	if mark.Image.ImageMask {
 		if mark.Style.Fill.Tiling != nil || mark.Style.Fill.Shading != nil {

@@ -179,7 +179,11 @@ func (e *Editor) editBookmark(name string, next *Bookmark, add bool) error {
 		}
 		parts := make(map[string][]byte)
 		if rename || next == nil {
-			pending, err := e.sourcePartsReferences(nil, nil)
+			ctx := context.Background()
+			if e.output != nil {
+				ctx = e.output.ctx
+			}
+			pending, err := e.sourcePartsReferences(ctx, nil, nil)
 			if err != nil {
 				return err
 			}
@@ -242,29 +246,12 @@ func (e *Editor) editBookmark(name string, next *Bookmark, add bool) error {
 // 返回: error 快照重建或页面加载错误。
 func (e *Editor) commitBookmarkSnapshot(reader *Reader) error {
 	before := e.transactionSnapshot()
-	fonts, images, spaces, files := e.usedResources()
-	used := make(map[string]bool)
-	for _, resource := range fonts {
-		used[resource.font.ID] = true
-	}
-	for _, resource := range images {
-		used[resource.image.ID] = true
-	}
-	for _, space := range spaces {
-		used[space.ID] = true
-	}
 	if err := e.commitResourceSnapshot(context.Background(), reader); err != nil {
 		return err
 	}
 	e.maxID = max(e.maxID, before.maxID)
 	e.fonts, e.images, e.resourceID = before.fonts, before.images, before.resourceID
 	e.fontRegistration = before.fontRegistration
-	for _, resource := range before.resources {
-		if resource.font != nil && used[resource.font.ID] || resource.image != nil && used[resource.image.ID] || resource.space != nil && used[resource.space.ID] || files[resource.name] {
-			continue
-		}
-		e.resources = append(e.resources, resource)
-	}
 	for i, page := range before.pages {
 		states := make(map[string]GraphicObject)
 		for _, layer := range page.Content.Layer {

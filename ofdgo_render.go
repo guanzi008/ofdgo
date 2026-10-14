@@ -48,6 +48,11 @@ func (r *Renderer) GetPageBox(page *PageContent) (Box, error) {
 // 入参: page 页面内容
 // 返回: []PageLink 页面链接, error 错误信息
 func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
+	if r.RenderAnnotations && r.Reader.relatedPending {
+		if _, err := r.Reader.DocContext(r.outputContext()); err != nil {
+			return nil, err
+		}
+	}
 	sources := r.pageActionSources(page)
 	if r.RenderAnnotations {
 		sources = append(sources, r.annotationActionSources(r.Reader.Annots[page.ID])...)

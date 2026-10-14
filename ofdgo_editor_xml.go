@@ -839,12 +839,24 @@ func editorXMLContainer(name string, attrs ofdAttrs, content []byte) ([]byte, er
 // 入参: data 对象XML, source 原节点
 // 返回: []byte 独立XML片段, error 错误信息
 func editorXMLStandalone(data []byte, source *editorXML) ([]byte, error) {
-	root, err := parseEditorXML(data)
+	return editorXMLStandaloneContext(nil, data, source)
+}
+
+// editorXMLStandaloneContext 补齐继承的命名空间，解析及生成片段期间响应取消
+// 入参: ctx 取消上下文，可为nil, data 对象XML, source 原节点
+// 返回: []byte 独立XML片段, error 解析或取消错误
+func editorXMLStandaloneContext(ctx context.Context, data []byte, source *editorXML) ([]byte, error) {
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return nil, err
 	}
 	namespaces := make(map[string]string)
 	for node := source.parent; node != nil; node = node.parent {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		for _, attr := range node.attrs {
 			key := ""
 			if attr.Name.Space == "xmlns" {
@@ -886,5 +898,11 @@ func editorXMLStandalone(data []byte, source *editorXML) ([]byte, error) {
 	if data[position-1] == '/' {
 		position--
 	}
-	return editorPatchXML(data, []editorXMLPatch{{position, position, added.Bytes()}}), nil
+	result := editorPatchXML(data, []editorXMLPatch{{position, position, added.Bytes()}})
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }

@@ -72,10 +72,10 @@ type fontUsageReferences struct {
 	patterns   map[*Pattern]bool
 }
 
-// Fonts 获取OFD声明的字体列表
+// Fonts 获取OFD声明的字体列表，不加载注解或签名
 // 返回: []Font 字体列表, error 错误信息
 func (r *Reader) Fonts() ([]Font, error) {
-	doc, err := r.Doc()
+	doc, err := r.docStructure()
 	if err != nil {
 		return nil, err
 	}

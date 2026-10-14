@@ -20,10 +20,11 @@ import (
 )
 
 // Media 获取已加载的音视频资源，页面资源须先读取所属页面
+// 不加载注解或签名
 // 入参: id 资源标识
 // 返回: MultiMedia 资源信息, error 资源缺失或类型错误
 func (r *Reader) Media(id string) (MultiMedia, error) {
-	if _, err := r.Doc(); err != nil {
+	if _, err := r.docStructure(); err != nil {
 		return MultiMedia{}, err
 	}
 	media, ok := resourceValue(r.mediaCache, id)

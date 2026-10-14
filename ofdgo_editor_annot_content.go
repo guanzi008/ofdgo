@@ -453,7 +453,14 @@ func (e *Editor) annotationFiles() []string {
 // 入参: base 原包, parts 修改的文件
 // 返回: error 错误信息
 func (e *Editor) commitAnnotationParts(base *editorSource, parts map[string][]byte) error {
-	parts, err := base.reader.versionChanges(context.Background(), parts)
+	return e.commitAnnotationPartsContext(context.Background(), base, parts)
+}
+
+// commitAnnotationPartsContext 准备并提交独立包快照，取消时不更新编辑状态
+// 入参: ctx 取消上下文, base 原包, parts 修改的文件
+// 返回: error 结构、读取或取消错误
+func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorSource, parts map[string][]byte) error {
+	parts, err := base.reader.versionChanges(ctx, parts)
 	if err != nil {
 		return err
 	}
@@ -462,25 +469,36 @@ func (e *Editor) commitAnnotationParts(base *editorSource, parts map[string][]by
 		files = make(map[string][]byte)
 	}
 	for name, data := range parts {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if file, ok := base.reader.packageFile(name); ok {
 			name = cleanPackagePath(file.Name)
 		}
 		files[name] = data
 	}
 	reader := &Reader{Zip: base.reader.Zip, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex, selectedVersion: base.reader.selectedVersion}
-	if err := reader.initRoot(); err != nil {
+	if err := reader.initRootContext(ctx); err != nil {
 		return err
 	}
-	doc, err := reader.docStructure()
+	doc, err := reader.docStructureContext(ctx)
 	if err != nil {
 		return err
 	}
-	_, _ = reader.annotationIndex(doc)
+	_, _ = reader.annotationIndexContext(ctx, doc)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	before, after := e.source, *base
 	after.reader, after.document = reader, doc
+	resources := e.resources
 	if before == nil {
-		for i := range e.resources {
-			resource := &e.resources[i]
+		resources = slices.Clone(resources)
+		for i := range resources {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			resource := &resources[i]
 			if resource.font != nil {
 				resource.font = cloneEditorData(resource.font)
 				if resource.name != "" {
@@ -493,6 +511,10 @@ func (e *Editor) commitAnnotationParts(base *editorSource, parts map[string][]by
 			}
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	e.resources = resources
 	e.source = &after
 	if change := e.recordChange(); change != nil {
 		change.undo = func(e *Editor) { e.source = before }

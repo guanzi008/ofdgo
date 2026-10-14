@@ -324,6 +324,19 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 // 入参: input 文件流, name 包内路径
 // 返回: bool 是否资源索引, bool 是否可完整判断引用
 func (r *editorResourceRefs) scan(input io.Reader, name string) (bool, bool) {
+	return r.scanContext(nil, input, name)
+}
+
+// scanContext 流式收集资源引用，在读取和字体用字处理期间检查取消
+// 入参: ctx 取消上下文，可为nil, input 文件流, name 包内路径
+// 返回: bool 是否资源索引, bool 是否完整收集引用，取消时为false
+func (r *editorResourceRefs) scanContext(ctx context.Context, input io.Reader, name string) (bool, bool) {
+	if ctx != nil {
+		if ctx.Err() != nil {
+			return false, false
+		}
+		input = imageInput{ReadCloser: io.NopCloser(input), context: ctx}
+	}
 	buffer := bufio.NewReader(input)
 	found, err := editorXMLPrefix(buffer)
 	if err != nil {
@@ -333,8 +346,11 @@ func (r *editorResourceRefs) scan(input io.Reader, name string) (bool, bool) {
 		return false, !strings.EqualFold(path.Ext(name), ".xml")
 	}
 	decoder := xml.NewDecoder(buffer)
-	scan := editorReferenceScan{refs: r, name: name, safe: true}
+	scan := editorReferenceScan{ctx: ctx, refs: r, name: name, safe: true}
 	for {
+		if ctx != nil && ctx.Err() != nil {
+			return false, false
+		}
 		token, err := decoder.Token()
 		if err == io.EOF {
 			return scan.resource, scan.seen && len(scan.stack) == 0

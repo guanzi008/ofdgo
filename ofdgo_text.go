@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"context"
 	"math"
 	"strconv"
 	"strings"
@@ -295,15 +296,38 @@ func textCodeXMLValue(value string) string {
 // 入参: value 文本编码内容
 // 返回: []rune 文本字符
 func textCodeRunes(value string) []rune {
+	runes, _ := textCodeRunesContext(nil, value)
+	return runes
+}
+
+// textCodeRunesContext 解码文本字符及转义序列，长文本分段检查取消
+// 入参: ctx 取消上下文，可为nil, value 文本编码内容
+// 返回: []rune 文本字符, error 取消错误
+func textCodeRunesContext(ctx context.Context, value string) ([]rune, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	if strings.ContainsAny(value, "\r\n") {
 		value = strings.TrimSpace(value)
 	}
 	runes := []rune(value)
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	if !strings.Contains(value, "\\") {
-		return runes
+		return runes, nil
 	}
 	written := 0
 	for i := 0; i < len(runes); i++ {
+		if ctx != nil && written&4095 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		char := runes[i]
 		if char == '\\' && i+4 < len(runes) {
 			if code, err := strconv.ParseUint(string(runes[i+1:i+5]), 16, 16); err == nil {
@@ -322,5 +346,10 @@ func textCodeRunes(value string) []rune {
 		runes[written] = char
 		written++
 	}
-	return runes[:written]
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return runes[:written], nil
 }

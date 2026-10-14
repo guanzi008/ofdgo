@@ -393,12 +393,24 @@ func reduceRepeatedNonZeroPath(path *canvas.Path) *canvas.Path {
 // 入参: path 非零填充描边, clip 裁剪路径
 // 返回: *canvas.Path 绘制轮廓
 func applyFillClipPath(path, clip *canvas.Path) *canvas.Path {
-	if path != nil && clip != nil && len(path.Data()) >= 64 {
+	if path == nil || clip == nil {
+		return path
+	}
+	if rect, ok := rectangularPath(clip); ok {
+		bounds := path.Bounds()
+		if rect.Contains(bounds) {
+			return path
+		}
+		if !rect.Overlaps(bounds) {
+			return &canvas.Path{}
+		}
+	}
+	if len(path.Data()) >= 64 {
 		if result, ok := intersectLinearCanvasContours(path, clip); ok {
 			return result
 		}
 	}
-	if path != nil && clip != nil && path.HasSubpaths() && len(path.Split()) >= 8 {
+	if path.HasSubpaths() && len(path.Split()) >= 8 {
 		if result, ok := intersectCanvasContours(path, clip); ok {
 			return result
 		}

@@ -275,8 +275,21 @@ func cloneEditorMap[T any](values map[string]T) map[string]T {
 // prepareSourceIDs 首次新增内容前流式核对原包标识，不依赖可能缺失或过期的MaxUnitID
 // 返回: error 错误信息
 func (e *Editor) prepareSourceIDs() error {
-	maximum, err := e.sourceMaxID(nil)
+	return e.prepareSourceIDsContext(context.Background())
+}
+
+// prepareSourceIDsContext 在可取消的扫描成功后更新最大标识，不保留未完成结果
+// 入参: ctx 取消上下文
+// 返回: error 扫描或取消错误
+func (e *Editor) prepareSourceIDsContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	maximum, err := e.sourceMaxID(editorProgress(nil).withContext(ctx))
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	e.maxID = maximum
@@ -303,6 +316,9 @@ func (e *Editor) sourceMaxID(progress editorProgress) (int, error) {
 	}
 	maximum := e.maxID
 	for name := range names {
+		if err := progress.report("ids", 0, 0); err != nil {
+			return 0, err
+		}
 		input, err := reader.openFile(name)
 		if err != nil {
 			return 0, err

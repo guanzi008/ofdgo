@@ -18,10 +18,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"hash/crc32"
 	"image"
 	"io"
 	"math"
+	"math/big"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"github.com/xiaoqidun/pdfgo"
@@ -46,7 +48,7 @@ func outputImageFormat(data []byte) string {
 	return ""
 }
 
-// optimizeImageResource 将可完整保留的BMP及TIFF转为PNG，再复用图像压缩和降采样策略
+// optimizeImageResource 优化可完整保留的BMP及TIFF，复用图像压缩和降采样策略
 // 原始模式及无法保留的色彩配置不转换，仅采用小于原始编码的结果
 // 入参: ctx 取消上下文, data 图片编码, options 压缩选项, size 像素需求
 // 返回: []byte 图片编码，可能引用输入, error 解码、编码或取消错误
@@ -124,43 +126,51 @@ func optimizeBMPResource(ctx context.Context, data []byte, options CompressionOp
 }
 
 // optimizeRasterResource 编码已解码的资源图片，同步降采样后的像素密度，仅采用更小结果
-// 绝对密度图片先降采样再编码，密度按最终尺寸换算后量化为PNG整数
+// 先降采样再编码，绝对密度按最终尺寸量化，相对密度保留精确比例
+// 有密度时保留PNG，未知密度按最终像素选择编码格式
 // 入参: ctx 取消上下文, data 原编码, pixels 像素, options 压缩选项, size 像素需求, density 像素密度
 // 返回: []byte 图片编码, error 编码或取消错误
 func optimizeRasterResource(ctx context.Context, data []byte, pixels image.Image, options CompressionOptions, size image.Point, density rasterDensity) ([]byte, error) {
 	hasDensity := density.x != 0 || density.y != 0
-	if hasDensity && density.unit == 1 {
-		before := pixels.Bounds()
-		if options.Mode == CompressionLossy {
-			var err error
-			pixels, err = pdfgo.ResizeImage(ctx, pixels, size)
-			if err != nil {
-				return nil, err
-			}
-		}
-		density.x *= float64(pixels.Bounds().Dx()) / float64(before.Dx())
-		density.y *= float64(pixels.Bounds().Dy()) / float64(before.Dy())
-		size = image.Point{}
-	}
-	var encoded bytes.Buffer
-	limit := &outputCompressionBuffer{buffer: &encoded, limit: outputOptimizationBufferLimit}
-	if err := pdfgo.EncodePNG(ctx, limit, pixels); err != nil {
-		if limit.exceeded {
-			return data, ctx.Err()
-		}
-		return nil, err
-	}
-	input := encoded.Bytes()
-	if hasDensity && density.unit == 1 {
+	before := pixels.Bounds().Size()
+	if options.Mode == CompressionLossy {
 		var err error
-		input, err = pdfgo.OptimizeImageSize(ctx, input, options, size)
+		pixels, err = pdfgo.ResizeImage(ctx, pixels, size)
 		if err != nil {
 			return nil, err
 		}
 	}
+	if after := pixels.Bounds().Size(); hasDensity && before != after {
+		if density.unit == 0 {
+			ratio := new(big.Rat).SetFrac64(int64(density.x)*int64(after.X), int64(density.y)*int64(after.Y))
+			ratio.Mul(ratio, new(big.Rat).SetFrac64(int64(before.Y), int64(before.X)))
+			if ratio.Num().BitLen() > 31 || ratio.Denom().BitLen() > 31 {
+				return data, ctx.Err()
+			}
+			density.x, density.y = float64(ratio.Num().Int64()), float64(ratio.Denom().Int64())
+		} else {
+			density.x *= float64(after.X) / float64(before.X)
+			density.y *= float64(after.Y) / float64(before.Y)
+		}
+	}
+	var candidate []byte
+	var err error
+	if hasDensity {
+		var encoded bytes.Buffer
+		err = pdfgo.EncodePNGWithOptions(ctx, &encoded, pixels, options)
+		candidate = encoded.Bytes()
+	} else {
+		candidate, err = pdfgo.EncodeImageResource(ctx, pixels, options)
+	}
+	if err != nil {
+		if errors.Is(err, io.ErrShortBuffer) {
+			return data, ctx.Err()
+		}
+		return nil, err
+	}
 	if hasDensity {
 		x, y := math.Round(density.x), math.Round(density.y)
-		if x > math.MaxInt32 || y > math.MaxInt32 || density.x > 0 && x < 1 || density.y > 0 && y < 1 || len(input) > outputOptimizationBufferLimit-21 {
+		if x > math.MaxInt32 || y > math.MaxInt32 || density.x > 0 && x < 1 || density.y > 0 && y < 1 || len(candidate) > outputOptimizationBufferLimit-21 {
 			return data, ctx.Err()
 		}
 		chunk := make([]byte, 21)
@@ -172,18 +182,10 @@ func optimizeRasterResource(ctx context.Context, data []byte, pixels image.Image
 		binary.BigEndian.PutUint32(chunk[17:], crc32.ChecksumIEEE(chunk[4:17]))
 		var output bytes.Buffer
 		writer := imageMetadataWriter{writer: &output, skip: 33, data: chunk}
-		if _, err := writer.Write(input); err != nil {
+		if _, err := writer.Write(candidate); err != nil {
 			return nil, err
 		}
-		input = output.Bytes()
-	}
-	candidate := input
-	if !hasDensity || density.unit == 0 {
-		var err error
-		candidate, err = pdfgo.OptimizeImageResource(ctx, input, options, size)
-		if err != nil {
-			return nil, err
-		}
+		candidate = output.Bytes()
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

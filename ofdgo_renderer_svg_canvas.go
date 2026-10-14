@@ -17,12 +17,12 @@ package ofdgo
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"html"
 	"image"
-	"image/png"
 	"io"
 	"math"
 	"strings"
@@ -69,6 +69,16 @@ type svgObjectGroup struct {
 // RenderImage 按输出策略编码图片，分离资源时保持尺寸和变换
 // 入参: img 图片对象, m 变换矩阵
 func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
+	if s.err != nil {
+		return
+	}
+	ctx := context.Background()
+	if s.renderer != nil {
+		ctx = s.renderer.outputContext()
+	}
+	if s.err = ctx.Err(); s.err != nil {
+		return
+	}
 	var target image.Point
 	if s.renderer != nil && s.renderer.Compression.ImageDPI() > 0 {
 		bounds := img.Bounds()
@@ -78,29 +88,9 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 	name, ok := s.imageNames[key]
 	var resource SVGImage
 	if !ok {
-		resource = SVGImage{MIME: "image/png"}
-		if encoded, ok := img.(*canvasimage.Image); ok {
-			resource.MIME, resource.Data = encoded.Mimetype, encoded.Bytes
-		} else {
-			var buffer bytes.Buffer
-			if err := png.Encode(&buffer, img); err != nil {
-				s.err = err
-				return
-			}
-			resource.Data = buffer.Bytes()
-		}
-		if s.renderer != nil && s.renderer.Compression.Mode != CompressionUnchanged {
-			data, err := pdfgo.OptimizeImageResource(s.renderer.outputContext(), resource.Data, s.renderer.Compression, target)
-			if err != nil {
-				if s.err = s.renderer.outputContext().Err(); s.err != nil {
-					return
-				}
-			} else {
-				resource.Data = data
-				if bytes.HasPrefix(data, []byte{255, 216}) {
-					resource.MIME = "image/jpeg"
-				}
-			}
+		resource, s.err = s.imageResource(ctx, img, target)
+		if s.err != nil {
+			return
 		}
 		if s.imageNames != nil {
 			name = fmt.Sprintf("ofdgo-image-%x", sha256.Sum256(resource.Data))
@@ -116,12 +106,19 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 	size := img.Bounds().Size()
 	m = m.Translate(0, float64(size.Y))
 	matrix := Matrix{a: m[0][0], b: -m[1][0], c: -m[0][1], d: m[1][1], e: m[0][2], f: height - m[1][2]}
-	fmt.Fprintf(s.writer, `<image transform="matrix(%s)" width="%d" height="%d" xlink:href="`, matrix.String(), size.X, size.Y)
+	writer := imageOutput{context: ctx, writer: s.writer}
+	if _, s.err = fmt.Fprintf(writer, `<image transform="matrix(%s)" width="%d" height="%d" xlink:href="`, matrix.String(), size.X, size.Y); s.err != nil {
+		return
+	}
 	if s.imageNames != nil {
-		io.WriteString(s.writer, name)
+		if _, s.err = io.WriteString(writer, name); s.err != nil {
+			return
+		}
 	} else {
-		fmt.Fprintf(s.writer, "data:%s;base64,", resource.MIME)
-		encoder := base64.NewEncoder(base64.StdEncoding, s.writer)
+		if _, s.err = fmt.Fprintf(writer, "data:%s;base64,", resource.MIME); s.err != nil {
+			return
+		}
+		encoder := base64.NewEncoder(base64.StdEncoding, writer)
 		if _, err := encoder.Write(resource.Data); err != nil {
 			s.err = err
 			return
@@ -131,7 +128,66 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 			return
 		}
 	}
-	io.WriteString(s.writer, `"/>`)
+	_, s.err = io.WriteString(writer, `"/>`)
+	if s.err == nil {
+		s.err = ctx.Err()
+	}
+}
+
+// imageResource 保留原编码或压缩已解码像素，先降采样再编码并响应取消
+// 优化失败时回退原图PNG，取消时终止，不改变SVG中的图片尺寸和变换
+// 入参: ctx 取消上下文, img 原图, target 压缩像素需求
+// 返回: SVGImage 图片资源, error 编码或取消错误
+func (s *svgResourceRenderer) imageResource(ctx context.Context, img image.Image, target image.Point) (SVGImage, error) {
+	options := CompressionOptions{}
+	if s.renderer != nil {
+		options = s.renderer.Compression
+	}
+	resource := SVGImage{MIME: "image/png"}
+	if encoded, ok := img.(*canvasimage.Image); ok {
+		resource.MIME, resource.Data = encoded.Mimetype, encoded.Bytes
+		if options.Mode != CompressionUnchanged {
+			data, err := pdfgo.OptimizeImageResource(ctx, resource.Data, options, target)
+			if ctx.Err() != nil {
+				return SVGImage{}, ctx.Err()
+			}
+			if err == nil {
+				resource.Data = data
+			}
+		}
+	} else {
+		if options.Mode != CompressionUnchanged {
+			pixels := img
+			var err error
+			if options.Mode == CompressionLossy {
+				pixels, err = pdfgo.ResizeImage(ctx, img, target)
+				if err != nil {
+					return SVGImage{}, err
+				}
+			}
+			resource.Data, err = pdfgo.EncodeImageResource(ctx, pixels, options)
+			if err != nil {
+				if ctx.Err() != nil {
+					return SVGImage{}, ctx.Err()
+				}
+				resource.Data = nil
+			}
+		}
+		if resource.Data == nil {
+			var buffer bytes.Buffer
+			if err := pdfgo.EncodePNG(ctx, &buffer, img); err != nil {
+				return SVGImage{}, err
+			}
+			resource.Data = buffer.Bytes()
+		}
+	}
+	if bytes.HasPrefix(resource.Data, []byte{255, 216}) {
+		resource.MIME = "image/jpeg"
+	}
+	if err := ctx.Err(); err != nil {
+		return SVGImage{}, err
+	}
+	return resource, nil
 }
 
 // RenderText 绘制文字并记录实际使用的字体资源

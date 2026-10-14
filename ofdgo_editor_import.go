@@ -727,29 +727,39 @@ func (e *Editor) appendImportedOutlines(ctx context.Context, imported []byte) ([
 // importBase 为新建文档提供空的保真包基底，不重复保存已创建的页面和资源
 // 返回: *editorSource 包基底, error 错误信息
 func (e *Editor) importBase() (*editorSource, error) {
+	return e.importBaseContext(context.Background())
+}
+
+// importBaseContext 生成新建文档的独立包基底，初始化期间响应取消
+// 入参: ctx 取消上下文
+// 返回: *editorSource 包基底, error 编码、解析或取消错误
+func (e *Editor) importBaseContext(ctx context.Context) (*editorSource, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	seed := NewEditor()
 	seed.Info = e.Info
 	seed.pages = []PageContent{{Area: PageArea{PhysicalBox: "0 0 210 297"}}}
 	files := make(map[string][]byte)
-	if err := seed.writeParts(func(name string, data []byte, _ bool) error {
+	if err := seed.writeParts(ctx, func(name string, data []byte, _ bool) error {
 		if name == "OFD.xml" || name == "Doc_0/Document.xml" {
 			files[name] = data
 		}
 		return nil
-	}, nil); err != nil {
+	}, editorProgress(nil).withContext(ctx)); err != nil {
 		return nil, err
 	}
 	data := files["Doc_0/Document.xml"]
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return nil, err
 	}
 	files["Doc_0/Document.xml"] = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, root.child("Pages"), nil)})
 	reader := &Reader{files: files}
-	if err := reader.initRoot(); err != nil {
+	if err := reader.initRootContext(ctx); err != nil {
 		return nil, err
 	}
-	editor, err := reader.Editor()
+	editor, err := reader.EditorContext(ctx)
 	if err != nil {
 		return nil, err
 	}

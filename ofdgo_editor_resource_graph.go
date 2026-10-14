@@ -49,7 +49,7 @@ func editorResourceDefinitions(ctx context.Context, data []byte, name string, so
 	result.ids, result.fonts = make(map[string]bool), nil
 	result.definitions = make(map[string]*editorResourceRefs)
 	outer := &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
-	scan := editorReferenceScan{refs: outer, name: name, safe: true}
+	scan := editorReferenceScan{ctx: ctx, refs: outer, name: name, safe: true}
 	input := bufio.NewReader(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
 	if found, err := editorXMLPrefix(input); err != nil || !found {
 		return nil, err

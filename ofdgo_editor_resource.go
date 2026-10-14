@@ -43,6 +43,12 @@ type editorResourcePreview struct {
 	patches  []editorXMLPatch
 }
 
+// resourceImageMaskKey 区分包内共享图片文件及尚未提交的替换像素
+type resourceImageMaskKey struct {
+	file        string
+	replacement bool
+}
+
 // Resources 获取当前编辑快照的资源，覆盖正文、模板、注解、图案和复合图元
 // 入参: ctx 取消上下文
 // 返回: []ResourceInfo 资源及引用位置, error 快照或结构错误
@@ -106,8 +112,11 @@ func (e *Editor) ImportMedia(ctx context.Context, kind, format string, data []by
 	if err != nil {
 		return "", err
 	}
-	working, err := reader.Editor()
+	working, err := reader.EditorContext(ctx)
 	if err != nil {
+		return "", err
+	}
+	if err := working.prepareSourceIDsContext(ctx); err != nil {
 		return "", err
 	}
 	id, err := working.AddMedia(kind, format, data)
@@ -115,7 +124,7 @@ func (e *Editor) ImportMedia(ctx context.Context, kind, format string, data []by
 		return "", err
 	}
 	resource := working.resources[len(working.resources)-1]
-	encoded, err := working.encodeXML(func(x *ofdXML) { x.resources(nil, []editorResource{resource}, nil) })
+	encoded, err := encodeOFDXMLContext(ctx, func(x *ofdXML) { x.resources(nil, []editorResource{resource}, nil) })
 	if err != nil {
 		return "", err
 	}
@@ -194,11 +203,11 @@ func (e *Editor) ReplaceResource(ctx context.Context, kind, id, format string, d
 		}
 		name := packageAvailableName(reader, changes, path.Join(e.packageDirectory(), "Res", "Media", "Media_"+item.ID))
 		changes[name] = bytes.Clone(data)
-		fragment, err := editorXMLStandalone(target.file.data[target.node.start:target.node.end], target.node)
+		fragment, err := editorXMLStandaloneContext(ctx, target.file.data[target.node.start:target.node.end], target.node)
 		if err != nil {
 			return err
 		}
-		root, err := parseEditorXML(fragment)
+		root, err := parseEditorXMLContext(ctx, fragment)
 		if err != nil {
 			return err
 		}
@@ -247,15 +256,15 @@ func (e *Editor) changeResource(ctx context.Context, kind, id string, replace fu
 		return fmt.Errorf("resource is still referenced")
 	}
 	if kind == "Attachment" {
-		working, err := reader.Editor()
+		working, err := reader.EditorContext(ctx)
 		if err != nil {
 			return err
 		}
 		revision := working.Revision()
 		if replace == nil {
-			err = working.DeleteAttachment(item.ID)
+			err = working.DeleteAttachmentContext(ctx, item.ID)
 		} else {
-			err = working.replaceAttachment(ctx, item.ID, data)
+			err = working.ReplaceAttachmentContext(ctx, item.ID, data)
 		}
 		if err != nil {
 			return err
@@ -265,6 +274,9 @@ func (e *Editor) changeResource(ctx context.Context, kind, id string, replace fu
 		}
 		reader, err = working.ReaderContext(ctx)
 		if err != nil {
+			return err
+		}
+		if err := pruneUnreferencedFiles(ctx, reader, item.File); err != nil {
 			return err
 		}
 		return e.commitResourceSnapshot(ctx, reader)
@@ -297,18 +309,26 @@ func (e *Editor) changeResource(ctx context.Context, kind, id string, replace fu
 	return e.commitResourceSnapshot(ctx, reader)
 }
 
-// validateResourceImageMask 校验图片替换涉及的全部蒙版引用，复用尺寸和二值像素校验结果
+// validateResourceImageMask 校验图片替换涉及的全部蒙版引用，按文件复用尺寸和二值像素校验结果
+// 待替换资源单独校验，不影响仍使用同一原文件的其他资源声明
 // 入参: ctx 取消上下文, catalog 当前文档资源, id 替换图片标识, replacement 新图片
 // 返回: error 资源、尺寸、像素或取消错误
 func validateResourceImageMask(ctx context.Context, catalog *resourceCatalog, id string, replacement image.Image) error {
-	sizes := map[string]image.Point{id: replacement.Bounds().Size()}
-	validated := make(map[string]image.Point)
-	read := func(id string) ([]byte, error) {
+	updated := resourceImageMaskKey{replacement: true}
+	keys := map[string]resourceImageMaskKey{id: updated}
+	sizes := map[resourceImageMaskKey]image.Point{updated: replacement.Bounds().Size()}
+	validated := make(map[resourceImageMaskKey]image.Point)
+	locate := func(id string) (resourceImageMaskKey, error) {
+		if key, ok := keys[id]; ok {
+			return key, nil
+		}
 		item, err := findResource(catalog.items, "Image", id)
 		if err != nil {
-			return nil, err
+			return resourceImageMaskKey{}, err
 		}
-		return catalog.scan.reader.readFileViewContext(ctx, item.File)
+		key := resourceImageMaskKey{file: item.File}
+		keys[id] = key
+		return key, nil
 	}
 	for _, entry := range catalog.images {
 		if err := ctx.Err(); err != nil {
@@ -318,9 +338,13 @@ func validateResourceImageMask(ctx context.Context, catalog *resourceCatalog, id
 		if mask == "" || source != id && mask != id {
 			continue
 		}
-		size, ok := sizes[source]
+		sourceKey, err := locate(source)
+		if err != nil {
+			return err
+		}
+		size, ok := sizes[sourceKey]
 		if !ok {
-			data, err := read(source)
+			data, err := catalog.scan.reader.readFileViewContext(ctx, sourceKey.file)
 			if err != nil {
 				return err
 			}
@@ -329,17 +353,21 @@ func validateResourceImageMask(ctx context.Context, catalog *resourceCatalog, id
 				return err
 			}
 			size = image.Pt(config.Width, config.Height)
-			sizes[source] = size
+			sizes[sourceKey] = size
 		}
-		if previous, ok := validated[mask]; ok {
+		maskKey, err := locate(mask)
+		if err != nil {
+			return err
+		}
+		if previous, ok := validated[maskKey]; ok {
 			if previous != size {
 				return fmt.Errorf("image mask %s dimensions differ from source %s", mask, source)
 			}
 			continue
 		}
 		img := replacement
-		if mask != id {
-			data, err := read(mask)
+		if !maskKey.replacement {
+			data, err := catalog.scan.reader.readFileViewContext(ctx, maskKey.file)
 			if err != nil {
 				return err
 			}
@@ -351,7 +379,8 @@ func validateResourceImageMask(ctx context.Context, catalog *resourceCatalog, id
 		if err := validateImageMask(ctx, img, size); err != nil {
 			return fmt.Errorf("image object %s in %s: %w", entry.node.attr("ID"), entry.file.name, err)
 		}
-		validated[mask] = size
+		sizes[maskKey] = size
+		validated[maskKey] = size
 	}
 	return ctx.Err()
 }
@@ -533,7 +562,7 @@ func (e *Editor) BindAttachment(ctx context.Context, id string, page int, object
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	attachments, err := e.Attachments()
+	attachments, err := e.AttachmentsContext(ctx)
 	if err != nil {
 		return err
 	}

@@ -125,6 +125,7 @@ func compressionImageSize(width, height float64, dpi int) image.Point {
 }
 
 // compressionImageSizes 按正文、模板、注解及底纹的实际变换汇总图片尺寸，包括隐藏内容
+// 模板使用独立页面坐标，统一分析一次，避免随引用页数重复展开
 // 入参: ctx 取消上下文, images 图片资源, dpi 分辨率上限
 // 返回: map[string]image.Point 资源像素需求, error 取消错误
 func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, dpi int) (map[string]image.Point, error) {
@@ -152,7 +153,9 @@ func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, 
 				return nil, ctx.Err()
 			}
 		}
-		if err := renderer.WalkPage(page, visitor); err != nil {
+		content := *page
+		content.Template = nil
+		if err := renderer.WalkPage(&content, visitor); err != nil {
 			return nil, ctx.Err()
 		}
 	}

@@ -190,6 +190,10 @@ func (progress editorProgress) withContext(ctx context.Context) editorProgress {
 // 入参: writer 输出流
 // 返回: int64 写入字节数, error 错误信息
 func (e *Editor) writePlaintext(writer io.Writer) (int64, error) {
+	ctx := context.Background()
+	if e.output != nil {
+		ctx = e.output.ctx
+	}
 	if err := e.validate(); err != nil {
 		return 0, err
 	}
@@ -208,7 +212,7 @@ func (e *Editor) writePlaintext(writer io.Writer) (int64, error) {
 	archive := zip.NewWriter(output)
 	if e.output != nil && e.output.options.Mode != CompressionUnchanged {
 		parts := make(map[string][]byte)
-		err := e.writeParts(func(name string, data []byte, _ bool) error {
+		err := e.writeParts(ctx, func(name string, data []byte, _ bool) error {
 			if subset, ok := fonts[name]; ok {
 				data = subset
 			}
@@ -233,7 +237,7 @@ func (e *Editor) writePlaintext(writer io.Writer) (int64, error) {
 		err = archive.Close()
 		return output.count, err
 	}
-	err = e.writeParts(func(name string, data []byte, compressed bool) error {
+	err = e.writeParts(ctx, func(name string, data []byte, compressed bool) error {
 		if subset, ok := fonts[name]; ok {
 			data = subset
 		}
@@ -275,7 +279,7 @@ func (e *Editor) readerContext(ctx context.Context, progress editorProgress) (*R
 		return e.sourceReader(ctx, progress)
 	}
 	r := &Reader{files: make(map[string][]byte), encryption: e.encryption}
-	if err := e.writeParts(func(name string, data []byte, _ bool) error {
+	if err := e.writeParts(ctx, func(name string, data []byte, _ bool) error {
 		r.files[name] = data
 		return nil
 	}, progress); err != nil {
@@ -296,6 +300,10 @@ func (e *Editor) readerContext(ctx context.Context, progress editorProgress) (*R
 // resourceReader 为临时图元编译准备资源索引，不序列化页面或作为公共快照
 // 返回: *Reader 资源阅读器, error 资源错误
 func (e *Editor) resourceReader() (*Reader, error) {
+	ctx := context.Background()
+	if e.output != nil {
+		ctx = e.output.ctx
+	}
 	if e.source != nil || len(e.origins) != 0 {
 		return nil, fmt.Errorf("resource reader requires created objects")
 	}
@@ -303,7 +311,7 @@ func (e *Editor) resourceReader() (*Reader, error) {
 		return nil, err
 	}
 	r := &Reader{files: make(map[string][]byte)}
-	if err := e.writePartsWithPages(func(name string, data []byte, _ bool) error {
+	if err := e.writePartsWithPages(ctx, func(name string, data []byte, _ bool) error {
 		r.files[name] = data
 		return nil
 	}, nil, false); err != nil {
@@ -343,21 +351,18 @@ func (e *Editor) validate() error {
 }
 
 // writeParts 生成根节点、文档、资源索引、页面及二进制资源
-// 入参: write 条目写入方法, progress 保存进度回调，预览时为nil
+// 入参: ctx 取消上下文, write 条目写入方法, progress 保存进度回调，预览时为nil
 // 返回: error 错误信息
-func (e *Editor) writeParts(write func(string, []byte, bool) error, progress editorProgress) error {
-	return e.writePartsWithPages(write, progress, true)
+func (e *Editor) writeParts(ctx context.Context, write func(string, []byte, bool) error, progress editorProgress) error {
+	return e.writePartsWithPages(ctx, write, progress, true)
 }
 
 // writePartsWithPages 统一生成包条目，临时编译可省去页面XML
-// 入参: write 条目写入方法, progress 保存进度回调, includePages 是否写出页面
+// 入参: ctx 取消上下文, write 条目写入方法, progress 保存进度回调, includePages 是否写出页面
 // 返回: error 写入错误
-func (e *Editor) writePartsWithPages(write func(string, []byte, bool) error, progress editorProgress, includePages bool) error {
+func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []byte, bool) error, progress editorProgress, includePages bool) error {
+	progress = progress.withContext(ctx)
 	if len(e.removedPages) != 0 {
-		ctx := context.Background()
-		if e.output != nil {
-			ctx = e.output.ctx
-		}
 		output := write
 		write = func(name string, data []byte, binary bool) error {
 			if !binary && strings.EqualFold(path.Ext(name), ".xml") {
@@ -370,9 +375,12 @@ func (e *Editor) writePartsWithPages(write func(string, []byte, bool) error, pro
 			return output(name, data, binary)
 		}
 	}
-	fonts, images, spaces, definitions := e.usedResources()
+	fonts, images, spaces, definitions, err := e.usedResources(ctx)
+	if err != nil {
+		return err
+	}
 	writeXML := func(name string, encode func(*ofdXML)) error {
-		data, err := e.encodeXML(encode)
+		data, err := encodeOFDXMLContext(ctx, encode)
 		if err != nil {
 			return err
 		}
@@ -492,30 +500,40 @@ func (e *Editor) writePartsWithPages(write func(string, []byte, bool) error, pro
 }
 
 // usedResources 沿图层、对象及资源依赖筛选新增资源和共享文件，不修改资源池
-// 返回: []editorResource 新增字体, []editorResource 新增图片, []ColorSpace 新增颜色空间, map[string]bool 独立资源文件集合
-func (e *Editor) usedResources() (fonts, images []editorResource, spaces []ColorSpace, sourceFiles map[string]bool) {
+// 入参: ctx 取消上下文
+// 返回: []editorResource 新增字体, []editorResource 新增图片, []ColorSpace 新增颜色空间, map[string]bool 独立资源文件集合, error 取消错误
+func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResource, spaces []ColorSpace, sourceFiles map[string]bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, nil, err
+	}
 	used := make(map[string]bool)
 	promoted := make(map[string]bool)
 	files := make(map[string]bool)
 	retainAll := false
 	if len(e.outlines) != 0 {
 		refs := editorResourceRefs{ids: used, files: make(map[string]bool)}
-		if _, safe := refs.scan(bytes.NewReader(e.outlines), e.packageName("Document.xml")); !safe {
+		if _, safe := refs.scanContext(ctx, bytes.NewReader(e.outlines), e.packageName("Document.xml")); !safe {
 			retainAll = true
 		}
 	}
 	if e.source != nil {
 		collectActionReferences(e.source.document.Actions, used)
 		for _, name := range e.annotationFiles() {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, nil, nil, err
+			}
 			data, changed := e.source.reader.files[name]
 			if !changed {
 				continue
 			}
 			refs := editorResourceRefs{ids: used, files: make(map[string]bool)}
-			if _, safe := refs.scan(bytes.NewReader(data), name); !safe {
+			if _, safe := refs.scanContext(ctx, bytes.NewReader(data), name); !safe {
 				retainAll = true
 			}
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, nil, err
 	}
 	if retainAll {
 		for _, resource := range e.resources {
@@ -535,6 +553,9 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 		maps.Copy(promoted, used)
 	}
 	for _, page := range e.pages {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, nil, err
+		}
 		collectActionReferences(page.Actions, used)
 		var original map[string]GraphicObject
 		var originalLayers map[string]string
@@ -558,6 +579,9 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 				}
 			}
 			for _, object := range layer.Objects {
+				if err := ctx.Err(); err != nil {
+					return nil, nil, nil, nil, err
+				}
 				before, exists := original[editorObjectID(object)]
 				collectObjectReferences(object, used)
 				if e.source != nil && (!exists || !reflect.DeepEqual(before, object)) {
@@ -584,6 +608,9 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 		}
 	}
 	for len(pending) != 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, nil, err
+		}
 		id := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
 		index, ok := definitions[id]
@@ -623,7 +650,10 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 			files[name] = true
 		}
 	}
-	return fonts, images, spaces, files
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, nil, err
+	}
+	return fonts, images, spaces, files, nil
 }
 
 // page 按标准顺序写出页面定义、图层、对象及动作

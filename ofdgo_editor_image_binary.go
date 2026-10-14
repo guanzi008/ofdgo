@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"encoding/binary"
 	"image"
 	"io"
@@ -29,43 +30,53 @@ const pngBinaryProbeLimit = 4 << 20
 
 // pngBinaryProbe 按需读取连续的IDAT块，不复制压缩数据
 type pngBinaryProbe struct {
+	ctx       context.Context
 	data      []byte
 	payload   []byte
 	remaining int
 }
 
 // editorBinaryImage 尝试纯黑白无损编码，不改变透明度，带附加信息或无体积收益时保留原图
-// 入参: data PNG图片数据, img 已解码像素，为nil时读取原图
-// 返回: []byte 更小的JBIG2数据，不适用时为nil
-func editorBinaryImage(data []byte, img image.Image) []byte {
-	if !pngBinarySource(data) {
-		return nil
+// 入参: ctx 取消上下文, data PNG图片数据, img 已解码像素，为nil时读取原图
+// 返回: []byte 更小的JBIG2数据，不适用时为nil, error 取消错误
+func editorBinaryImage(ctx context.Context, data []byte, img image.Image) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !pngBinarySource(ctx, data) {
+		return nil, ctx.Err()
 	}
 	if img == nil {
-		if pngNonBinaryImage(data) {
-			return nil
+		if pngNonBinaryImage(ctx, data) {
+			return nil, ctx.Err()
 		}
 		var err error
-		img, _, err = image.Decode(bytes.NewReader(data))
+		img, _, err = image.Decode(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
 		if err != nil {
-			return nil
+			return nil, ctx.Err()
 		}
 	}
 	var output bytes.Buffer
-	if err := jbig2.Encode(&output, img, &jbig2.Options{MaxPageBytes: uint64(len(data))}); err != nil || output.Len() >= len(data) {
-		return nil
+	if err := jbig2.EncodeContext(ctx, &output, img, &jbig2.Options{MaxPageBytes: uint64(len(data))}); err != nil || output.Len() >= len(data) {
+		return nil, ctx.Err()
 	}
-	return output.Bytes()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
 }
 
 // pngBinarySource 检查PNG是否仅含图像与透明度数据，避免转为JBIG2时丢失附加信息
-// 入参: data PNG编码数据
+// 入参: ctx 取消上下文, data PNG编码数据
 // 返回: bool 是否无需保留附加信息
-func pngBinarySource(data []byte) bool {
+func pngBinarySource(ctx context.Context, data []byte) bool {
 	if len(data) < 33 || string(data[:8]) != "\x89PNG\r\n\x1a\n" {
 		return false
 	}
 	for pos := 8; pos < len(data); {
+		if ctx.Err() != nil {
+			return false
+		}
 		if len(data)-pos < 12 {
 			return false
 		}
@@ -86,9 +97,9 @@ func pngBinarySource(data []byte) bool {
 }
 
 // pngNonBinaryImage 检查PNG前部像素是否包含灰阶、彩色或透明度，仅用于排除黑白压缩
-// 入参: data PNG图片数据
+// 入参: ctx 取消上下文, data PNG图片数据
 // 返回: bool 已发现非不透明黑白像素，无法判定时为false
-func pngNonBinaryImage(data []byte) bool {
+func pngNonBinaryImage(ctx context.Context, data []byte) bool {
 	if len(data) < 33 || string(data[:8]) != "\x89PNG\r\n\x1a\n" || binary.BigEndian.Uint32(data[8:]) != 13 || string(data[12:16]) != "IHDR" {
 		return false
 	}
@@ -117,8 +128,11 @@ func pngNonBinaryImage(data []byte) bool {
 	if size > 256<<10 {
 		return false
 	}
-	probe := pngBinaryProbe{data: data[33:], remaining: pngBinaryProbeLimit}
+	probe := pngBinaryProbe{ctx: ctx, data: data[33:], remaining: pngBinaryProbeLimit}
 	for len(probe.data) >= 12 && string(probe.data[4:8]) != "IDAT" {
+		if ctx.Err() != nil {
+			return false
+		}
 		length := uint64(binary.BigEndian.Uint32(probe.data)) + 12
 		if length > uint64(len(probe.data)) || length > uint64(probe.remaining) {
 			return false
@@ -135,6 +149,9 @@ func pngNonBinaryImage(data []byte) bool {
 	previous := make([]byte, int(size))
 	rows := min(int64(height), 64, (1<<20)/int64(len(row)))
 	for index := int64(0); index < rows; index++ {
+		if ctx.Err() != nil {
+			return false
+		}
 		if _, err := io.ReadFull(stream, row); err != nil || !pngBinaryProbeFilter(row[1:], previous, channels, row[0]) {
 			return false
 		}
@@ -166,7 +183,13 @@ func (p *pngBinaryProbe) Read(output []byte) (int, error) {
 	if len(output) == 0 {
 		return 0, nil
 	}
+	if err := p.ctx.Err(); err != nil {
+		return 0, err
+	}
 	for len(p.payload) == 0 {
+		if err := p.ctx.Err(); err != nil {
+			return 0, err
+		}
 		if len(p.data) < 12 || p.remaining < 12 || string(p.data[4:8]) != "IDAT" {
 			return 0, io.EOF
 		}

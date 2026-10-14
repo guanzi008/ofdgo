@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 )
@@ -23,6 +24,16 @@ import (
 // 入参: id 绘制参数标识
 // 返回: []byte 独立参数片段, error 错误信息
 func (e *Editor) drawParamXML(id string) ([]byte, error) {
+	return e.drawParamXMLContext(context.Background(), id)
+}
+
+// drawParamXMLContext 读取并提取绘制参数原文，保留扩展信息并响应取消
+// 入参: ctx 取消上下文, id 绘制参数标识
+// 返回: []byte 独立参数片段, error 读取、解析或取消错误
+func (e *Editor) drawParamXMLContext(ctx context.Context, id string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var data []byte
 	for _, resource := range e.resources {
 		if resource.draw != nil && sameResourceID(resource.draw.ID, id) {
@@ -33,17 +44,24 @@ func (e *Editor) drawParamXML(id string) ([]byte, error) {
 	if data == nil && e.source != nil {
 		var err error
 		name, _ := resourceValue(e.source.reader.resourceFiles, id)
-		data, err = e.source.reader.readFile(name)
+		data, err = e.source.reader.readFileViewContext(ctx, name)
 		if err != nil {
 			return nil, err
 		}
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return nil, err
 	}
 	if node := editorResourceNode(root, "DrawParams", "DrawParam", id); node != nil {
-		return editorXMLStandalone(data[node.start:node.end], node)
+		fragment, err := editorXMLStandaloneContext(ctx, data[node.start:node.end], node)
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return fragment, nil
 	}
 	return nil, fmt.Errorf("draw parameter %q not found", id)
 }

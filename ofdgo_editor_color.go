@@ -82,6 +82,12 @@ func (e *Editor) AddColorSpace(space ColorSpace, profile []byte) (string, error)
 					break
 				}
 			}
+			if space.Profile == "" {
+				resource := e.registeredResource(id)
+				if resource.space != nil && resource.space.Type == space.Type {
+					space.Profile = "/" + resource.name
+				}
+			}
 		}
 		if space.profile == nil {
 			var err error

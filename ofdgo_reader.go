@@ -339,10 +339,10 @@ func (r *Reader) PageContentContext(ctx context.Context, page Page) (*PageConten
 	return r.readPageContent(ctx, page, false, false)
 }
 
-// PageCount 获取当前文档总页数
+// PageCount 获取当前文档总页数，不加载注解或签名
 // 返回: int 页数, error 错误信息
 func (r *Reader) PageCount() (int, error) {
-	doc, err := r.Doc()
+	doc, err := r.docStructure()
 	if err != nil {
 		return 0, err
 	}
@@ -443,40 +443,40 @@ func (r *Reader) DocInfo() (*DocInfo, error) {
 	return &r.OFD.DocBody[r.documentIndex].DocInfo, nil
 }
 
-// Permissions 获取文档权限信息
+// Permissions 获取文档权限信息，不加载注解或签名
 // 返回: *Permissions 权限信息, error 错误信息
 func (r *Reader) Permissions() (*Permissions, error) {
-	doc, err := r.Doc()
+	doc, err := r.docStructure()
 	if err != nil {
 		return nil, err
 	}
 	return &doc.Permissions, nil
 }
 
-// Outlines 获取文档大纲
+// Outlines 获取文档大纲，不加载注解或签名
 // 返回: []OutlineElem 大纲列表, error 错误信息
 func (r *Reader) Outlines() ([]OutlineElem, error) {
-	doc, err := r.Doc()
+	doc, err := r.docStructure()
 	if err != nil {
 		return nil, err
 	}
 	return doc.Outlines.OutlineElem, nil
 }
 
-// Actions 获取文档动作
+// Actions 获取文档动作，不加载注解或签名
 // 返回: []Action 动作列表, error 错误信息
 func (r *Reader) Actions() ([]Action, error) {
-	doc, err := r.Doc()
+	doc, err := r.docStructure()
 	if err != nil {
 		return nil, err
 	}
 	return doc.Actions, nil
 }
 
-// Bookmarks 获取文档书签
+// Bookmarks 获取文档书签，不加载注解或签名
 // 返回: []Bookmark 书签列表, error 错误信息
 func (r *Reader) Bookmarks() ([]Bookmark, error) {
-	doc, err := r.Doc()
+	doc, err := r.docStructure()
 	if err != nil {
 		return nil, err
 	}
@@ -486,17 +486,37 @@ func (r *Reader) Bookmarks() ([]Bookmark, error) {
 // Attachments 获取独立的附件列表，修改返回值不影响阅读器缓存
 // 返回: []Attachment 附件列表, error 错误信息
 func (r *Reader) Attachments() ([]Attachment, error) {
-	doc, err := r.Doc()
+	return r.AttachmentsContext(context.Background())
+}
+
+// AttachmentsContext 获取独立的附件列表，不加载无关注解或签名
+// 取消或失败时不缓存未完成的附件清单，修改返回值不影响缓存
+// 入参: ctx 取消上下文
+// 返回: []Attachment 附件列表, error 读取、解析或取消错误
+func (r *Reader) AttachmentsContext(ctx context.Context) ([]Attachment, error) {
+	return r.attachmentsContext(ctx, false)
+}
+
+// attachmentsContext 按调用方所有权读取附件清单，库内只读访问不复制完整清单
+// 入参: ctx 取消上下文, readonly 是否允许借用只读清单
+// 返回: []Attachment 附件列表, error 读取、解析或取消错误
+func (r *Reader) attachmentsContext(ctx context.Context, readonly bool) ([]Attachment, error) {
+	doc, err := r.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(doc.Attachments.Path) != "" && doc.Attachments.Attachment == nil {
+	items := doc.Attachments.Attachment
+	pending := strings.TrimSpace(doc.Attachments.Path) != "" && items == nil
+	if pending {
 		var attachments Attachments
-		partPath, err := r.readDocumentPart(doc.Attachments.Path, &attachments)
+		partPath, err := r.readDocumentPartContext(ctx, doc.Attachments.Path, &attachments)
 		if err != nil {
 			return nil, err
 		}
 		for i := range attachments.Attachment {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			attachment := &attachments.Attachment[i]
 			if fileLoc := resolveResourcePath(partPath, "", attachment.FileLoc); fileLoc != "" {
 				attachment.FileLoc = "/" + fileLoc
@@ -505,14 +525,29 @@ func (r *Reader) Attachments() ([]Attachment, error) {
 		if attachments.Attachment == nil {
 			attachments.Attachment = []Attachment{}
 		}
-		doc.Attachments.Attachment = attachments.Attachment
+		items = attachments.Attachment
 	}
-	attachments := slices.Clone(doc.Attachments.Attachment)
-	for i := range attachments {
-		if attachments[i].Size != nil {
-			size := *attachments[i].Size
-			attachments[i].Size = &size
+	attachments := items
+	if !readonly {
+		if items != nil {
+			attachments = make([]Attachment, len(items))
 		}
+		for i := range items {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			attachments[i] = items[i]
+			if attachments[i].Size != nil {
+				size := *attachments[i].Size
+				attachments[i].Size = &size
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if pending {
+		doc.Attachments.Attachment = items
 	}
 	return attachments, nil
 }
@@ -521,14 +556,36 @@ func (r *Reader) Attachments() ([]Attachment, error) {
 // 入参: id 附件标识
 // 返回: io.ReadCloser 附件文件流, error 错误信息
 func (r *Reader) OpenAttachment(id string) (io.ReadCloser, error) {
-	attachments, err := r.Attachments()
+	return r.OpenAttachmentContext(context.Background(), id)
+}
+
+// OpenAttachmentContext 打开可取消读取的附件文件流，调用方负责关闭
+// 完整读取后校验ZIP数据，不加载无关注解或签名
+// 入参: ctx 取消上下文, id 附件标识
+// 返回: io.ReadCloser 附件文件流, error 读取或取消错误
+func (r *Reader) OpenAttachmentContext(ctx context.Context, id string) (io.ReadCloser, error) {
+	attachments, err := r.attachmentsContext(ctx, true)
 	if err != nil {
 		return nil, err
 	}
 	for _, attachment := range attachments {
-		if attachment.ID == id {
-			return r.openFile(r.ResPath(attachment.FileLoc))
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
+		if attachment.ID == id {
+			stream, err := r.openFile(r.ResPath(attachment.FileLoc))
+			if err != nil {
+				return nil, err
+			}
+			if err := ctx.Err(); err != nil {
+				stream.Close()
+				return nil, err
+			}
+			return imageInput{ReadCloser: stream, context: ctx}, nil
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return nil, fmt.Errorf("attachment not found: %s", id)
 }
@@ -537,12 +594,26 @@ func (r *Reader) OpenAttachment(id string) (io.ReadCloser, error) {
 // 入参: id 附件标识
 // 返回: []byte 附件数据, error 错误信息
 func (r *Reader) AttachmentData(id string) ([]byte, error) {
-	stream, err := r.OpenAttachment(id)
+	return r.AttachmentDataContext(context.Background(), id)
+}
+
+// AttachmentDataContext 获取独立的附件数据，读取失败或取消时不返回部分内容
+// 入参: ctx 取消上下文, id 附件标识
+// 返回: []byte 附件数据, error 读取或取消错误
+func (r *Reader) AttachmentDataContext(ctx context.Context, id string) ([]byte, error) {
+	stream, err := r.OpenAttachmentContext(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	defer stream.Close()
-	return io.ReadAll(stream)
+	data, err := io.ReadAll(stream)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 // CustomTags 获取自定义标引
@@ -599,11 +670,11 @@ func (r *Reader) CustomDatas() ([]CustomData, error) {
 	return info.CustomDatas.CustomData, nil
 }
 
-// Extensions 获取扩展项
+// Extensions 获取扩展项，不加载注解或签名
 // 返回的文件路径可直接传入ResData读取
 // 返回: []Extension 扩展项列表, error 错误信息
 func (r *Reader) Extensions() ([]Extension, error) {
-	doc, err := r.Doc()
+	doc, err := r.docStructure()
 	if err != nil {
 		return nil, err
 	}

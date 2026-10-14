@@ -19,10 +19,17 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"path"
 	"slices"
 	"strconv"
 )
+
+// resourceStyleReference 保存资源依赖及可选的类型要求，不持有XML节点
+type resourceStyleReference struct {
+	key  string
+	kind string
+}
 
 // ColorSpace 获取当前文档及版本的颜色空间定义，不读取或解析ICC文件
 // 入参: ctx 取消上下文, id 资源标识
@@ -98,11 +105,15 @@ func (c *resourceCatalog) styleDefinition(ctx context.Context, item ResourceInfo
 		return err
 	}
 	entry := c.nodes[item.Kind+"/"+item.ID]
-	data, err := editorXMLStandalone(entry.file.data[entry.node.start:entry.node.end], entry.node)
+	data, err := editorXMLStandaloneContext(ctx, entry.file.data[entry.node.start:entry.node.end], entry.node)
 	if err != nil {
 		return err
 	}
-	return xml.Unmarshal(data, target)
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 // ColorSpace 读取编辑器中的颜色空间，包括尚未绑定图元的新注册定义
@@ -132,7 +143,7 @@ func (e *Editor) ImportColorSpace(ctx context.Context, space ColorSpace, profile
 			return "", nil, nil, err
 		}
 		resource := working.resources[len(working.resources)-1]
-		data, err := working.encodeXML(func(x *ofdXML) { x.resources(nil, nil, []ColorSpace{*resource.space}) })
+		data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) { x.resources(nil, nil, []ColorSpace{*resource.space}) })
 		parts := make(map[string][]byte)
 		if resource.name != "" {
 			parts[resource.name] = bytes.Clone(resource.data)
@@ -146,7 +157,7 @@ func (e *Editor) ImportColorSpace(ctx context.Context, space ColorSpace, profile
 // 返回: string 新资源标识, error 定义校验或隔离提交错误
 func (e *Editor) ImportDrawParam(ctx context.Context, draw DrawParam) (string, error) {
 	return e.importResourceStyle(ctx, func(working *Editor) (string, []byte, map[string][]byte, error) {
-		id, err := working.AddDrawParam(draw)
+		id, err := working.addDrawParam(ctx, draw)
 		if err != nil {
 			return "", nil, nil, err
 		}
@@ -163,8 +174,11 @@ func (e *Editor) importResourceStyle(ctx context.Context, create func(*Editor) (
 	if err != nil {
 		return "", err
 	}
-	working, err := reader.Editor()
+	working, err := reader.EditorContext(ctx)
 	if err != nil {
+		return "", err
+	}
+	if err := working.prepareSourceIDsContext(ctx); err != nil {
 		return "", err
 	}
 	id, data, parts, err := create(working)
@@ -185,6 +199,7 @@ func (e *Editor) importResourceStyle(ctx context.Context, create func(*Editor) (
 }
 
 // resourceStyleReader 为样式资源操作补齐待注册声明及附属文件，不改变公开快照的按引用导出语义
+// 复用内容扫描收集已有标识，不重复解析结构文件或构建未使用的资源目录
 // 入参: ctx 取消上下文
 // 返回: *Reader 包含待注册字体、颜色空间及参数依赖的独立快照, error 读取或隔离错误
 func (e *Editor) resourceStyleReader(ctx context.Context) (*Reader, error) {
@@ -192,26 +207,25 @@ func (e *Editor) resourceStyleReader(ctx context.Context) (*Reader, error) {
 	if err != nil || len(e.resources) == 0 {
 		return reader, err
 	}
-	catalog, err := reader.resourceCatalog(ctx)
-	if err != nil {
-		return nil, err
-	}
 	known := make(map[string]bool)
-	for _, file := range catalog.scan.files {
-		root, err := parseEditorXMLContext(ctx, file.data)
-		if err != nil {
-			return nil, err
-		}
+	_, err = scanEditorFontFiles(ctx, reader, reader.DocumentIndex(), func(_ *editorFontXML, root *editorXML) error {
 		if !root.matchesOFD("Res") {
-			continue
+			return nil
 		}
 		for _, group := range root.children {
 			for _, node := range group.children {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				if node.matchesOFD(editorResourceElement(group.name.Local)) {
 					known[editorResourceID(node.attr("ID"))] = true
 				}
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	var fonts, images []editorResource
 	var spaces []ColorSpace
@@ -252,7 +266,7 @@ func (e *Editor) resourceStyleReader(ctx context.Context) (*Reader, error) {
 	}
 	var data []byte
 	if len(fonts)+len(images)+len(spaces) != 0 {
-		data, err = e.encodeXML(func(x *ofdXML) { x.resources(fonts, images, spaces) })
+		data, err = encodeOFDXMLContext(ctx, func(x *ofdXML) { x.resources(fonts, images, spaces) })
 		if err != nil {
 			return nil, err
 		}
@@ -341,7 +355,7 @@ func (e *Editor) ReplaceColorSpace(ctx context.Context, id string, space ColorSp
 			space.Profile = "/" + name
 			changes[name] = bytes.Clone(profile)
 		}
-		data, err := working.encodeXML(func(x *ofdXML) { x.resources(nil, nil, []ColorSpace{space}) })
+		data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) { x.resources(nil, nil, []ColorSpace{space}) })
 		if err != nil {
 			return err
 		}
@@ -350,7 +364,7 @@ func (e *Editor) ReplaceColorSpace(ctx context.Context, id string, space ColorSp
 			return err
 		}
 		node := root.child("ColorSpaces").child("ColorSpace")
-		fragment, err := editorXMLStandalone(data[node.start:node.end], node)
+		fragment, err := editorXMLStandaloneContext(ctx, data[node.start:node.end], node)
 		if err != nil {
 			return err
 		}
@@ -363,15 +377,18 @@ func (e *Editor) ReplaceColorSpace(ctx context.Context, id string, space ColorSp
 // 返回: error 参数、依赖或循环错误，失败不改变文档，成功隔离其他文档及历史版本并支持撤销
 func (e *Editor) ReplaceDrawParam(ctx context.Context, id string, draw DrawParam) error {
 	return e.changeResourceStyle(ctx, "DrawParam", id, func(catalog *resourceCatalog, item ResourceInfo, changes map[string][]byte) error {
-		working, err := catalog.scan.reader.Editor()
+		working, err := catalog.scan.reader.EditorContext(ctx)
 		if err != nil {
 			return err
 		}
-		added, err := working.AddDrawParam(draw)
+		if err := working.prepareSourceIDsContext(ctx); err != nil {
+			return err
+		}
+		added, err := working.addDrawParam(ctx, draw)
 		if err != nil {
 			return err
 		}
-		fragment, err := working.drawParamXML(added)
+		fragment, err := working.drawParamXMLContext(ctx, added)
 		if err != nil {
 			return err
 		}
@@ -471,7 +488,8 @@ func validateResourceColors(ctx context.Context, catalog *resourceCatalog, space
 			}
 			if resourceColorNode(node) && sameResourceID(id, space.ID) {
 				var paint FillColor
-				if err := xml.Unmarshal(file.data[node.start:node.end], &paint); err != nil {
+				decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(file.data[node.start:node.end])), context: ctx})
+				if err := decoder.Decode(&paint); err != nil {
 					return err
 				}
 				if _, err := working.Color(&FillColor{Value: paint.Value, Index: paint.Index, Alpha: paint.Alpha, ColorSpace: space.ID}); err != nil {
@@ -493,13 +511,12 @@ func validateResourceColors(ctx context.Context, catalog *resourceCatalog, space
 }
 
 // validateResourceStyleGraph 检查替换定义的传递依赖，拒绝缺失资源、错误类型及跨底纹复合资源的循环
+// 逐文件收集依赖后统一校验，不同时保留所有结构文件的XML树
 // 入参: ctx 取消上下文, catalog 当前目录, id 替换标识, changes 待提交修改
 // 返回: error 资源引用或循环错误
 func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, id string, changes map[string][]byte) error {
 	types := make(map[string]string)
-	graph := make(map[string][]string)
-	roots := make(map[string]*editorXML)
-	contents := make(map[string][]byte)
+	graph := make(map[string][]resourceStyleReference)
 	for name, file := range catalog.scan.files {
 		data, ok := changes[name]
 		if !ok {
@@ -509,36 +526,30 @@ func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, i
 		if err != nil {
 			return err
 		}
-		roots[name], contents[name] = root, data
-		if !root.matchesOFD("Res") {
-			continue
-		}
-		for _, group := range root.children {
-			for _, node := range group.children {
-				if node.matchesOFD(editorResourceElement(group.name.Local)) {
-					key := editorResourceID(node.attr("ID"))
-					if key == "" || types[key] != "" {
-						return fmt.Errorf("invalid or duplicate resource ID %q", key)
-					}
-					types[key] = node.name.Local
-					location := ""
-					if node.matchesOFD("CompositeGraphicUnit") {
-						location = node.attr("BaseLoc")
-					} else if node.matchesOFD("DrawParam") {
-						location = node.attr("Link")
-					}
-					if location != "" {
-						file := "file/" + resolveResourcePath(name, root.attr("BaseLoc"), location)
-						graph[key] = append(graph[key], file)
+		types["file/"+name] = "File"
+		if root.matchesOFD("Res") {
+			for _, group := range root.children {
+				for _, node := range group.children {
+					if node.matchesOFD(editorResourceElement(group.name.Local)) {
+						key := editorResourceID(node.attr("ID"))
+						if key == "" || types[key] != "" {
+							return fmt.Errorf("invalid or duplicate resource ID %q", key)
+						}
+						types[key] = node.name.Local
+						location := ""
+						if node.matchesOFD("CompositeGraphicUnit") {
+							location = node.attr("BaseLoc")
+						} else if node.matchesOFD("DrawParam") {
+							location = node.attr("Link")
+						}
+						if location != "" {
+							file := "file/" + resolveResourcePath(name, root.attr("BaseLoc"), location)
+							graph[key] = append(graph[key], resourceStyleReference{key: file})
+						}
 					}
 				}
 			}
 		}
-	}
-	for name := range roots {
-		types["file/"+name] = "File"
-	}
-	for name, root := range roots {
 		var visit func(*editorXML) error
 		visit = func(node *editorXML) error {
 			if err := ctx.Err(); err != nil {
@@ -552,12 +563,11 @@ func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, i
 				owner = "file/" + name
 			}
 			if slices.Contains([]string{"Thumbnail", "Substitution"}, node.name.Local) {
-				graph[owner] = append(graph[owner], editorResourceID(editorImportText(contents[name], node)))
+				graph[owner] = append(graph[owner], resourceStyleReference{key: editorResourceID(editorImportText(data, node))})
 			}
 			for _, attr := range node.attrs {
 				if attr.Name.Space == "" && attr.Value != "" && slices.Contains([]string{"Relative", "DrawParam", "ColorSpace", "Font", "ResourceID", "ImageMask", "Substitution", "Thumbnail"}, attr.Name.Local) {
 					key := editorResourceID(attr.Value)
-					graph[owner] = append(graph[owner], key)
 					kind := ""
 					switch attr.Name.Local {
 					case "Relative", "DrawParam":
@@ -565,9 +575,7 @@ func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, i
 					case "ColorSpace", "Font":
 						kind = attr.Name.Local
 					}
-					if kind != "" && types[key] != kind {
-						graph[owner] = append(graph[owner], "")
-					}
+					graph[owner] = append(graph[owner], resourceStyleReference{key: key, kind: kind})
 				}
 			}
 			for _, child := range node.children {
@@ -582,12 +590,13 @@ func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, i
 		}
 	}
 	state := make(map[string]int)
-	var visit func(string) error
-	visit = func(key string) error {
+	var visit func(resourceStyleReference) error
+	visit = func(reference resourceStyleReference) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if types[key] == "" || state[key] == 1 {
+		key := reference.key
+		if types[key] == "" || reference.kind != "" && types[key] != reference.kind || state[key] == 1 {
 			return fmt.Errorf("missing, mistyped or cyclic style resource %q", key)
 		}
 		if state[key] == 2 {
@@ -602,5 +611,5 @@ func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, i
 		state[key] = 2
 		return nil
 	}
-	return visit(id)
+	return visit(resourceStyleReference{key: id})
 }

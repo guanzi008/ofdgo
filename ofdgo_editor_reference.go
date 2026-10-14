@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/xml"
 	"maps"
@@ -43,6 +44,7 @@ type editorVectorUsage struct {
 
 // editorReferenceScan 按XML事件收集资源、字体用字和图元编号，未知内容保持完整扫描
 type editorReferenceScan struct {
+	ctx        context.Context
 	refs       *editorResourceRefs
 	objects    map[string]bool
 	graphicIDs map[string]bool
@@ -130,6 +132,9 @@ func (s *editorReferenceScan) vectorUsage(data []byte) *editorVectorUsage {
 // 入参: token 已解析或已编码的XML事件
 // 返回: bool 是否仍可完整判断引用
 func (s *editorReferenceScan) accept(token xml.Token) bool {
+	if s.ctx != nil && s.ctx.Err() != nil {
+		s.safe = false
+	}
 	if !s.safe {
 		return false
 	}
@@ -253,7 +258,10 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			s.refs.fontUsage(s.text.String()).unsafe = true
 		}
 		if usage := s.fonts[len(s.fonts)-1]; usage != nil {
-			usage.text(token.Name.Local, s.text.String())
+			if err := usage.text(s.ctx, token.Name.Local, s.text.String()); err != nil {
+				s.safe = false
+				return false
+			}
 		}
 		s.stack = s.stack[:len(s.stack)-1]
 		s.fonts = s.fonts[:len(s.fonts)-1]
@@ -322,6 +330,7 @@ func (x *ofdXML) referenceToken(token xml.Token) {
 		return
 	}
 	s := x.references
+	s.ctx = x.ctx
 	switch value := token.(type) {
 	case xml.StartElement:
 		value.Name = xml.Name{Space: ofdNamespace2016, Local: strings.TrimPrefix(value.Name.Local, "ofd:")}
@@ -341,6 +350,7 @@ func (x *ofdXML) referenceToken(token xml.Token) {
 	}
 	if !s.accept(token) {
 		x.references = nil
+		x.checkContext()
 	}
 }
 

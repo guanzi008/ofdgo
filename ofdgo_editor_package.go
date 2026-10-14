@@ -32,7 +32,7 @@ import (
 // 入参: ctx 取消上下文, progress 保存进度回调，预览时为nil
 // 返回: map[string][]byte 替换及新增条目, error 错误信息
 func (e *Editor) sourceParts(ctx context.Context, progress editorProgress) (map[string][]byte, error) {
-	parts, err := e.sourcePartsReferences(progress, nil)
+	parts, err := e.sourcePartsReferences(ctx, progress, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -40,16 +40,20 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress) (map[
 }
 
 // sourcePartsReferences 生成保存快照，同步收集完全自产页面的实际编码引用
-// 入参: progress 保存进度回调, generated 本次自产页面引用，可为nil
+// 入参: ctx 取消上下文, progress 保存进度回调, generated 本次自产页面引用，可为nil
 // 返回: map[string][]byte 输出条目, error 编码错误
-func (e *Editor) sourcePartsReferences(progress editorProgress, generated map[string]editorGeneratedReferences) (map[string][]byte, error) {
-	return e.sourcePartsPrepared(progress, generated, false)
+func (e *Editor) sourcePartsReferences(ctx context.Context, progress editorProgress, generated map[string]editorGeneratedReferences) (map[string][]byte, error) {
+	return e.sourcePartsPrepared(ctx, progress, generated, false)
 }
 
 // sourcePartsPrepared 准备保存条目，按需压缩暂存自产页面
-// 入参: progress 保存进度回调, generated 本次页面及引用, stage 是否压缩暂存
+// 入参: ctx 取消上下文, progress 保存进度回调, generated 本次页面及引用, stage 是否压缩暂存
 // 返回: map[string][]byte 输出条目, error 编码错误
-func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[string]editorGeneratedReferences, stage bool) (map[string][]byte, error) {
+func (e *Editor) sourcePartsPrepared(ctx context.Context, progress editorProgress, generated map[string]editorGeneratedReferences, stage bool) (map[string][]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	progress = progress.withContext(ctx)
 	parts := make(map[string][]byte)
 	var stager editorPageStager
 	source := e.source
@@ -97,10 +101,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 				}
 				generated[name] = known
 				if (reader.DocumentCount() > 1 || reader.OFD.DocBody[reader.documentIndex].versioned) && !known.stagedLeaf(nil) || bound && known.objects == nil {
-					input := data.open()
-					if e.output != nil {
-						input = imageInput{ReadCloser: input, context: e.output.ctx}
-					}
+					input := imageInput{ReadCloser: data.open(), context: ctx}
 					parts[name], err = io.ReadAll(input)
 					input.Close()
 					if err != nil {
@@ -124,8 +125,14 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 	if err := progress.report("pages", len(e.pages), len(e.pages)); err != nil {
 		return nil, err
 	}
-	fonts, images, spaces, usedFiles := e.usedResources()
+	fonts, images, spaces, usedFiles, err := e.usedResources(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for _, resource := range e.resources {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if resource.definition() != "" && usedFiles[resource.name] || resource.colorProfileUsed(spaces) {
 			parts[resource.name] = resource.data
 		}
@@ -136,13 +143,9 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 	}
 	resourceFiles := slices.Sorted(maps.Keys(usedFiles))
 	if len(fonts)+len(images)+len(spaces) != 0 {
-		data, err := e.encodeXML(func(x *ofdXML) { x.resources(fonts, images, spaces) })
+		data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) { x.resources(fonts, images, spaces) })
 		if err != nil {
 			return nil, err
-		}
-		ctx := context.Background()
-		if e.output != nil {
-			ctx = e.output.ctx
 		}
 		resourcePath, added, err := mergePackageResources(ctx, reader, parts, source.document, source.directory, data)
 		if err != nil {
@@ -160,11 +163,11 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 	pagesChanged := !slices.Equal(pageRefs, source.document.Pages.Page)
 	if pagesChanged || len(resourceFiles) != 0 || len(parts) != 0 && e.maxID != source.document.CommonData.MaxUnitID {
 		name := reader.documentRoot
-		data, err := reader.readFile(name)
+		data, err := reader.readFileViewContext(ctx, name)
 		if err != nil {
 			return nil, err
 		}
-		root, err := parseEditorXML(data)
+		root, err := parseEditorXMLContext(ctx, data)
 		if err != nil {
 			return nil, err
 		}
@@ -261,7 +264,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 		data, ok := parts[name]
 		if !ok {
 			var err error
-			data, err = reader.readFile(name)
+			data, err = reader.readFileViewContext(ctx, name)
 			if err != nil {
 				return nil, err
 			}
@@ -273,14 +276,17 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 		parts[name] = updated
 	}
 	if originalCount != len(source.pages) || len(source.annotationPages) != 0 || len(e.removedPages) != 0 || len(source.removedAttachments) != 0 {
-		if err := e.pruneDocumentReferences(parts, generated); err != nil {
+		if err := e.pruneDocumentReferences(ctx, parts, generated); err != nil {
 			return nil, err
 		}
 	}
-	if err := e.pruneStructureReferences(parts, generated); err != nil {
+	if err := e.pruneStructureReferences(ctx, parts, generated); err != nil {
 		return nil, err
 	}
 	for name, data := range maps.Clone(parts) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if file, ok := reader.packageFile(name); ok {
 			actual := cleanPackagePath(file.Name)
 			if actual != name {
@@ -292,6 +298,9 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 				}
 			}
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return parts, nil
 }
@@ -609,17 +618,17 @@ func (e *Editor) sourcePagePreserved(page PageContent) bool {
 // 入参: writer 输出流, fonts 新增字体子集, progress 保存进度回调
 // 返回: int64 写入字节数, error 错误信息
 func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress editorProgress) (int64, error) {
+	ctx := context.Background()
+	if e.output != nil {
+		ctx = e.output.ctx
+	}
 	generated := make(map[string]editorGeneratedReferences)
-	parts, err := e.sourcePartsPrepared(progress, generated, true)
+	parts, err := e.sourcePartsPrepared(ctx, progress, generated, true)
 	if err != nil {
 		return 0, err
 	}
 	maps.Copy(parts, fonts)
 	reader := e.source.reader
-	ctx := context.Background()
-	if e.output != nil {
-		ctx = e.output.ctx
-	}
 	versioned := reader.OFD.DocBody[reader.documentIndex].versioned
 	if !versioned && reader.DocumentCount() > 1 {
 		parts, err = reader.versionOutputChanges(ctx, parts, nil, generated)

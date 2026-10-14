@@ -471,7 +471,15 @@ func (e *Editor) ResizePages(indexes []int, width, height float64) error {
 // 入参: data 图片数据
 // 返回: string 图片资源标识, error 错误信息
 func (e *Editor) AddImage(data []byte) (string, error) {
-	return e.addDecodedImage(data, nil)
+	return e.AddImageContext(context.Background(), data)
+}
+
+// AddImageContext 注册图片资源，解析、标识扫描及黑白压缩期间响应取消
+// 图片格式及编码保留规则与AddImage相同，取消时不注册新资源
+// 入参: ctx 取消上下文, data 图片数据
+// 返回: string 图片资源标识, error 注册或取消错误
+func (e *Editor) AddImageContext(ctx context.Context, data []byte) (string, error) {
+	return e.addDecodedImageContext(ctx, data, nil)
 }
 
 // ImageSize 获取图片资源的像素尺寸，优先复用注册结果，不解码像素
@@ -485,31 +493,58 @@ func (e *Editor) ImageSize(id string) (image.Point, error) {
 // 入参: data 图片数据, decoded 已解码像素，为nil时按需解码
 // 返回: string 资源标识, error 注册错误
 func (e *Editor) addDecodedImage(data []byte, decoded image.Image) (string, error) {
-	config, format, err := baseimage.DecodeConfigData(data)
+	return e.addDecodedImageContext(context.Background(), data, decoded)
+}
+
+// addDecodedImageContext 注册图片并复用原编码摘要及像素，重复资源不再解析
+// 入参: ctx 取消上下文, data 图片数据, decoded 已解码像素，为nil时按需解码
+// 返回: string 资源标识, error 注册或取消错误
+func (e *Editor) addDecodedImageContext(ctx context.Context, data []byte, decoded image.Image) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	checksum := sha256.Sum256(data)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if id := e.resourceID[editorResourceKey{checksum: checksum, index: -1}]; id != "" {
+		return id, nil
+	}
+	config, format, err := baseimage.DecodeConfigDataContext(ctx, data)
 	if err != nil {
 		return "", err
 	}
-	return e.addImage(data, config, format, decoded)
+	return e.addImage(ctx, data, image.Pt(config.Width, config.Height), format, decoded, checksum)
 }
 
 // addImage 注册图片资源，复用调用方已完成解码的像素数据
-// 入参: data 图片编码数据, config 图片配置, format 图片格式, decoded 已解码图像，可为nil
+// 入参: ctx 取消上下文, data 图片编码数据, size 像素尺寸, format 图片格式, decoded 已解码图像，可为nil, checksum 原编码摘要
 // 返回: string 资源标识, error 格式或资源错误
-func (e *Editor) addImage(data []byte, config image.Config, format string, decoded image.Image) (string, error) {
-	if (format != "png" && format != "jpeg" && format != "bmp" && format != "tiff" && format != "jbig2") || config.Width <= 0 || config.Height <= 0 {
+func (e *Editor) addImage(ctx context.Context, data []byte, size image.Point, format string, decoded image.Image, checksum [32]byte) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if (format != "png" && format != "jpeg" && format != "bmp" && format != "tiff" && format != "jbig2") || size.X <= 0 || size.Y <= 0 {
 		return "", fmt.Errorf("only PNG, JPEG, BMP, single-page TIFF and JBIG2 images are supported")
 	}
-	key := editorResourceKey{checksum: sha256.Sum256(data), index: -1}
+	key := editorResourceKey{checksum: checksum, index: -1}
 	if id, ok := e.resourceID[key]; ok {
 		return id, nil
 	}
-	if err := e.prepareSourceIDs(); err != nil {
+	if err := e.prepareSourceIDsContext(ctx); err != nil {
 		return "", err
 	}
-	if format == "png" && uint64(config.Width)*uint64(config.Height) <= 64<<20 {
-		if compact := editorBinaryImage(data, decoded); compact != nil {
+	if format == "png" && uint64(size.X)*uint64(size.Y) <= 64<<20 {
+		compact, err := editorBinaryImage(ctx, data, decoded)
+		if err != nil {
+			return "", err
+		}
+		if compact != nil {
 			data, format = compact, "jbig2"
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	id := e.nextID()
 	extension := format
@@ -524,7 +559,7 @@ func (e *Editor) addImage(data []byte, config image.Config, format string, decod
 		data:  bytes.Clone(data),
 		image: &MultiMedia{ID: id, Type: "Image", Format: strings.ToUpper(format), MediaFile: "/" + name},
 	})
-	e.images[id] = image.Pt(config.Width, config.Height)
+	e.images[id] = size
 	e.resourceID[key] = id
 	return id, nil
 }

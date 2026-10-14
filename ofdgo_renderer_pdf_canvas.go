@@ -231,6 +231,11 @@ func (n *pdfNavigation) addPage(renderer *Renderer, index int, page *PageContent
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if renderer.RenderAnnotations && renderer.Reader.relatedPending {
+		if _, err := renderer.Reader.DocContext(ctx); err != nil {
+			return err
+		}
+	}
 	for _, source := range renderer.pageOpenActionSources(page) {
 		if err := n.addLifecycleActions(ctx, source, index, n.bookmarks, n.pageIndex, pages); err != nil {
 			return err

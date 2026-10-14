@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"image/png"
 	"math"
 	"reflect"
 
@@ -487,13 +486,13 @@ func (p *pdfImporter) renderGroupSceneInto(source *RasterPage, box Box, target *
 // 返回: error 保存错误
 func (p *pdfImporter) appendRasterGroup(img image.Image, box Box, opacity float64) error {
 	var data bytes.Buffer
-	if err := png.Encode(&data, img); err != nil {
+	if err := pdfgo.EncodePNG(p.ctx, &data, img); err != nil {
 		return err
 	}
 	if err := p.ctx.Err(); err != nil {
 		return err
 	}
-	id, err := p.editor.addDecodedImage(data.Bytes(), img)
+	id, err := p.editor.addDecodedImageContext(p.ctx, data.Bytes(), img)
 	if err != nil {
 		return err
 	}
