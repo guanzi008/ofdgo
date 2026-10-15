@@ -134,7 +134,8 @@ func SubsetSFNT(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if subset := SubsetSourceSFNT(fixed, usage); subset != nil {
+		sfnt.Tables = tables
+		if subset := subsetSourceSFNT(sfnt, usage, len(fixed)); subset != nil {
 			return subset, nil
 		}
 		return fixed, nil
@@ -147,7 +148,7 @@ func SubsetSFNT(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 // 入参: data 字体数据, usage 全包用字记录
 // 返回: []byte 更小的字体子集，无确定收益时为空
 func SubsetSourceSFNT(data []byte, usage *Usage) []byte {
-	if usage.Unsafe || len(usage.Characters)+len(usage.Glyphs) == 0 || bytes.HasPrefix(data, []byte("ttcf")) {
+	if usage == nil || usage.Unsafe || len(usage.Characters)+len(usage.Glyphs) == 0 || bytes.HasPrefix(data, []byte("ttcf")) {
 		return nil
 	}
 	fontTables, err := FileTables(data, 0)
@@ -162,7 +163,17 @@ func SubsetSourceSFNT(data []byte, usage *Usage) []byte {
 		}
 	}
 	sfnt, err := ParseSFNTTables(fontTables)
-	if err != nil || !sfnt.IsTrueType && !sfnt.IsCFF || fontEmbeddingFlags(sfnt)&0x0100 != 0 {
+	if err != nil {
+		return nil
+	}
+	return subsetSourceSFNT(sfnt, usage, len(data))
+}
+
+// subsetSourceSFNT 复用已校验的字体表裁剪字形，仅返回小于原编码的结果
+// 入参: sfnt 已解析字体, usage 用字记录, size 原编码长度
+// 返回: []byte 更小的字体子集，无确定收益时为空
+func subsetSourceSFNT(sfnt *SFNT, usage *Usage, size int) []byte {
+	if usage == nil || usage.Unsafe || len(usage.Characters)+len(usage.Glyphs) == 0 || !sfnt.IsTrueType && !sfnt.IsCFF || fontEmbeddingFlags(sfnt)&0x0100 != 0 {
 		return nil
 	}
 	var unicodeTables []sfntCmap
@@ -178,6 +189,9 @@ func SubsetSourceSFNT(data []byte, usage *Usage) []byte {
 		return nil
 	}
 	glyphs := maps.Clone(usage.Glyphs)
+	if glyphs == nil {
+		glyphs = make(map[uint16]bool)
+	}
 	glyphs[0] = true
 	mapping := make(map[rune]uint16, len(usage.Characters))
 	for char := range usage.Characters {
@@ -210,7 +224,7 @@ func SubsetSourceSFNT(data []byte, usage *Usage) []byte {
 		tables["cmap"] = buildCmapWithVariations(sfnt.NumGlyphs(), mapping, variations)
 		delete(tables, "DSIG")
 		result, err := SerializeOTF(tables)
-		if err != nil || len(result) >= len(data) {
+		if err != nil || len(result) >= size {
 			return nil
 		}
 		return result
@@ -258,7 +272,7 @@ func SubsetSourceSFNT(data []byte, usage *Usage) []byte {
 	clear(tables["head"][8:12])
 	delete(tables, "DSIG")
 	result, err := SerializeOTF(tables)
-	if err != nil || len(result) >= len(data) {
+	if err != nil || len(result) >= size {
 		return nil
 	}
 	return result

@@ -15,12 +15,21 @@
 package ofdgo
 
 import (
+	"fmt"
+	"slices"
+
 	"github.com/tdewolff/canvas"
 	canvastext "github.com/tdewolff/canvas/text"
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
+
+// pdfFontSubset 保存独立CFF输出字体及实际用字，包含缺省字形
+type pdfFontSubset struct {
+	font   *canvas.Font
+	glyphs map[uint16]bool
+}
 
 // RenderText 记录后端文字区段，写出时校验数量并关联原文
 // 入参: text 画布文字, matrix 文字变换
@@ -68,18 +77,89 @@ func (r *pdfRenderer) glyphText(face *canvas.FontFace, glyph textGlyph) (*canvas
 	outputFace := *face
 	outputFace.Font = font
 	face = &outputFace
+	var text *canvas.Text
 	if glyph.GlyphID < 0 || glyph.GlyphID > 0xffff {
-		return canvas.NewTextLine(face, glyph.Text, canvas.Left), nil
+		text = canvas.NewTextLine(face, glyph.Text, canvas.Left)
+	} else {
+		id := uint16(glyph.GlyphID)
+		text = canvas.NewTextLine(face, " ", canvas.Left)
+		text.WalkLines(func(_ float64, spans []canvas.TextSpan) {
+			for i := range spans {
+				spans[i].Text = glyph.Text
+				spans[i].Glyphs = []canvastext.Glyph{{SFNT: face.Font.SFNT, Size: face.Size, ID: id, XAdvance: int32(face.Font.GlyphAdvance(id)), Text: glyph.Text}}
+			}
+		})
 	}
-	id := uint16(glyph.GlyphID)
-	text := canvas.NewTextLine(face, " ", canvas.Left)
-	text.WalkLines(func(_ float64, spans []canvas.TextSpan) {
-		for i := range spans {
-			spans[i].Text = glyph.Text
-			spans[i].Glyphs = []canvastext.Glyph{{SFNT: face.Font.SFNT, Size: face.Size, ID: id, XAdvance: int32(face.Font.GlyphAdvance(id)), Text: glyph.Text}}
+	if font.IsCFF {
+		if err := r.cffTextFont(font, text); err != nil {
+			return nil, err
+		}
+	}
+	return text, nil
+}
+
+// cffTextFont 按实际用字隔离CFF子集，避免后端清除字形名后超出ISOAdobe字符集容量
+// 入参: font 独立输出字体, text 已定位文字
+// 返回: error 字形数量或字体解析错误
+func (r *pdfRenderer) cffTextFont(font *canvas.Font, text *canvas.Text) error {
+	const limit = 229
+	ids := []uint16{0}
+	text.WalkSpans(func(_, _ float64, span canvas.TextSpan) {
+		for _, glyph := range span.Glyphs {
+			if !slices.Contains(ids, glyph.ID) {
+				ids = append(ids, glyph.ID)
+			}
 		}
 	})
-	return text, nil
+	if len(ids) > limit {
+		return fmt.Errorf("CFF text glyph count exceeds output subset capacity")
+	}
+	var selected *pdfFontSubset
+	for _, subset := range r.cffFonts[font] {
+		count := len(subset.glyphs)
+		for _, id := range ids {
+			if !subset.glyphs[id] {
+				count++
+			}
+		}
+		if count <= limit {
+			selected = subset
+			break
+		}
+	}
+	if selected == nil {
+		output := font
+		if len(r.cffFonts[font]) != 0 {
+			loaded, err := loadCanvasFont(basefont.SFNTData(font.Tables), 0, font.Style())
+			if err != nil {
+				return err
+			}
+			copy := *font
+			copy.SFNT = loaded.SFNT
+			output = &copy
+		}
+		selected = &pdfFontSubset{font: output, glyphs: make(map[uint16]bool)}
+		if r.cffFonts == nil {
+			r.cffFonts = make(map[*canvas.Font][]*pdfFontSubset)
+		}
+		r.cffFonts[font] = append(r.cffFonts[font], selected)
+	}
+	for _, id := range ids {
+		selected.glyphs[id] = true
+	}
+	if selected.font != font {
+		text.WalkLines(func(_ float64, spans []canvas.TextSpan) {
+			for i := range spans {
+				face := *spans[i].Face
+				face.Font = selected.font
+				spans[i].Face = &face
+				for j := range spans[i].Glyphs {
+					spans[i].Glyphs[j].SFNT = selected.font.SFNT
+				}
+			}
+		})
+	}
+	return nil
 }
 
 // pdfTextSupported 核对原生文字的字形和未裁剪范围，复用实际绘制的字形缓存

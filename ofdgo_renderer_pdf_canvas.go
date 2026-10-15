@@ -34,6 +34,7 @@ type pdfRenderer struct {
 	*pdf.PDF
 	glyphPaths  renderCache[*canvas.Path, *canvas.Path]
 	fonts       map[*canvas.Font]*canvas.Font
+	cffFonts    map[*canvas.Font][]*pdfFontSubset
 	images      [][]image.Image
 	exactImages bool
 	imageError  error

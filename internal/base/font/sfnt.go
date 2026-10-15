@@ -18,7 +18,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"maps"
-	"sort"
+	"slices"
 	"sync"
 
 	"github.com/go-text/typesetting/font/opentype/tables"
@@ -34,10 +34,11 @@ type SFNT struct {
 	reverse                            map[uint16][]rune
 }
 
-// sfntCmap 保存编码记录及对应字符映射
+// sfntCmap 保存编码记录及对应字符映射，标记已解析的共享子表
 type sfntCmap struct {
 	platform, encoding, format uint16
 	mapping                    map[rune]uint16
+	duplicate                  bool
 }
 
 // ParseSFNT 校验独立字体的必需表、度量范围及字符映射
@@ -86,6 +87,9 @@ func ParseSFNTTables(table map[string][]byte) (*SFNT, error) {
 	}
 	f.cmaps = cmaps
 	for _, cmap := range f.cmaps {
+		if cmap.duplicate {
+			continue
+		}
 		for _, glyph := range cmap.mapping {
 			if glyph >= f.count {
 				return nil, fmt.Errorf("cmap glyph index out of range")
@@ -150,7 +154,7 @@ func readSFNTCmaps(data []byte) ([]sfntCmap, error) {
 			}
 			parsed[offset] = mapping
 		}
-		result = append(result, sfntCmap{binary.BigEndian.Uint16(record), binary.BigEndian.Uint16(record[2:]), format, mapping})
+		result = append(result, sfntCmap{platform: binary.BigEndian.Uint16(record), encoding: binary.BigEndian.Uint16(record[2:]), format: format, mapping: mapping, duplicate: found})
 	}
 	return result, nil
 }
@@ -164,11 +168,11 @@ func (f *SFNT) UnitsPerEm() uint16 { return f.units }
 func (f *SFNT) NumGlyphs() uint16 { return f.count }
 
 // CmapEntries 返回各编码记录的映射项总数，共享子表按记录分别计数
-// 返回: int 用于缓存预算的映射项数量
-func (f *SFNT) CmapEntries() int {
-	count := 0
+// 返回: uint64 用于缓存预算的映射项数量
+func (f *SFNT) CmapEntries() uint64 {
+	var count uint64
 	for _, cmap := range f.cmaps {
-		count += len(cmap.mapping)
+		count += uint64(len(cmap.mapping))
 	}
 	return count
 }
@@ -178,6 +182,9 @@ func (f *SFNT) CmapEntries() int {
 // 返回: uint16 字形编号
 func (f *SFNT) GlyphIndex(char rune) uint16 {
 	for _, cmap := range f.cmaps {
+		if cmap.duplicate {
+			continue
+		}
 		if gid := cmap.mapping[char]; gid != 0 {
 			return gid
 		}
@@ -193,6 +200,9 @@ func (f *SFNT) glyphCharacters(gid uint16) []rune {
 		f.reverse = make(map[uint16][]rune)
 		seen := make(map[rune]bool)
 		for _, cmap := range f.cmaps {
+			if cmap.duplicate {
+				continue
+			}
 			for char, glyph := range cmap.mapping {
 				if glyph != 0 && !seen[char] {
 					f.reverse[glyph] = append(f.reverse[glyph], char)
@@ -201,7 +211,7 @@ func (f *SFNT) glyphCharacters(gid uint16) []rune {
 			}
 		}
 		for _, chars := range f.reverse {
-			sort.Slice(chars, func(i, j int) bool { return chars[i] < chars[j] })
+			slices.Sort(chars)
 		}
 	})
 	return f.reverse[gid]

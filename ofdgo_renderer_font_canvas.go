@@ -214,7 +214,7 @@ func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (
 			for _, data := range metrics.Tables {
 				cost += uint64(len(data)) * 8
 			}
-			cost += uint64(metrics.CmapEntries()) * 48
+			cost += metrics.CmapEntries() * 48
 			cache.put(face.Font, outlines, int(min(cost, uint64(cache.limit)+1)))
 		}
 		r.canvasState().fontOutlines[face.Font] = outlines

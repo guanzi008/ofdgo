@@ -147,6 +147,7 @@ func rasterImageAxis(first, end, source, limit int, scale, offset float64) []ras
 	result := make([]rasterAxisSample, 0, end-first)
 	argument := math.Min(1, math.Abs(scale))
 	support := draw.CatmullRom.Support / argument
+	count := 0
 	for pixel := first; pixel < end; pixel++ {
 		center := (float64(pixel) + .5 - offset) / scale
 		if center < float64(source) || center >= float64(limit) {
@@ -155,7 +156,18 @@ func rasterImageAxis(first, end, source, limit int, scale, offset float64) []ras
 		center -= .5
 		start := int(max(float64(source), math.Floor(center-support)))
 		stop := int(min(float64(limit), math.Ceil(center+support)))
-		weights := make([]float64, stop-start)
+		count += stop - start
+		result = append(result, rasterAxisSample{pixel: pixel, first: start})
+	}
+	buffer := make([]float64, count)
+	for index := range result {
+		sample := &result[index]
+		center := (float64(sample.pixel)+.5-offset)/scale - .5
+		start := sample.first
+		stop := int(min(float64(limit), math.Ceil(center+support)))
+		n := stop - start
+		weights := buffer[:n:n]
+		buffer = buffer[n:]
 		total := 0.0
 		for i := range weights {
 			distance := math.Abs((float64(start+i) - center) * argument)
@@ -167,7 +179,7 @@ func rasterImageAxis(first, end, source, limit int, scale, offset float64) []ras
 		for i := range weights {
 			weights[i] /= total
 		}
-		result = append(result, rasterAxisSample{pixel: pixel, first: start, weights: weights})
+		sample.weights = weights
 	}
 	return result
 }

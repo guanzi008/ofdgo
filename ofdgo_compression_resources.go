@@ -194,6 +194,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 	formats := make(map[string]string)
 	seen := make(map[resourceScope]map[[32]byte]string)
 	imageResults := make(map[outputImageKey][]byte)
+	imageDigests := make(map[outputImageKey][32]byte)
 	imageSources := make(map[string]outputImageSource)
 	ordered := slices.Sorted(maps.Keys(actual))
 	sizes := make(map[string]uint64, len(files))
@@ -307,7 +308,12 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 				if candidate != nil {
 					data = candidate
 					parts[actual[key]] = data
-					source.key.hash = sha256.Sum256(data)
+					digest, ok := imageDigests[cacheKey]
+					if !ok {
+						digest = sha256.Sum256(data)
+						imageDigests[cacheKey] = digest
+					}
+					source.key.hash = digest
 				}
 				if data != nil {
 					source.format = outputImageFormat(data)
