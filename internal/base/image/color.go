@@ -260,9 +260,6 @@ func jpegDisplayImage(ctx context.Context, source image.Image, profile *pdfgo.Co
 		}
 		return source, nil
 	}
-	if profile == nil {
-		profile = &pdfgo.ColorSpace{Model: "DeviceCMYK"}
-	}
 	bounds := cmyk.Bounds()
 	if bounds.Dx() <= 0 || bounds.Dy() <= 0 || bounds.Dx() > math.MaxInt/8/bounds.Dy() {
 		return nil, fmt.Errorf("JPEG color image dimensions exceed capacity")
@@ -276,6 +273,16 @@ func jpegDisplayImage(ctx context.Context, source image.Image, profile *pdfgo.Co
 				}
 			}
 			ink := cmyk.CMYKAt(x, y)
+			if profile == nil {
+				white := 255 - int(ink.K)
+				pixels.SetNRGBA64(x, y, color.NRGBA64{
+					R: uint16(max(0, white-int(ink.C))) * 257,
+					G: uint16(max(0, white-int(ink.M))) * 257,
+					B: uint16(max(0, white-int(ink.Y))) * 257,
+					A: 65535,
+				})
+				continue
+			}
 			values := [4]float64{float64(ink.C) / 255, float64(ink.M) / 255, float64(ink.Y) / 255, float64(ink.K) / 255}
 			rgb, err := profile.SRGB(values[:], profile.DefaultIntent())
 			if err != nil {
