@@ -42,10 +42,14 @@ func StorageCost(img image.Image, limit int) int {
 		}
 		cost += cap(encoded.profile)
 		if encoded.profile != nil || encoded.pngColor != nil || encoded.config.ColorModel == color.CMYKModel {
-			if w > (limit-cost)/12/h {
+			pixelSize := 12
+			if encoded.config.ColorModel == color.RGBA64Model || encoded.config.ColorModel == color.NRGBA64Model {
+				pixelSize = 16
+			}
+			if w > (limit-cost)/pixelSize/h {
 				return limit + 1
 			}
-			pixels = w * h * 12
+			pixels = w * h * pixelSize
 		}
 		if result := encoded.result.Load(); result != nil && result.image != nil {
 			pixels = max(pixels, StorageCost(result.image, limit-cost))
