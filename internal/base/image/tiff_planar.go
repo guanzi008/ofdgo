@@ -23,6 +23,8 @@ import (
 	"image/color"
 	"io"
 	"math"
+
+	"github.com/xiaoqidun/pdfgo"
 )
 
 // tiffPlaneInput 将单分量目录附加到只读视图，像素仍从原始编码读取
@@ -60,14 +62,18 @@ func (layout TIFFLayout) needsSampleView() bool {
 // 返回: uint64 每像素预算字节数
 func (layout TIFFLayout) DecodedPixelBytes() uint64 {
 	samples := uint64(layout.Samples)
+	profile := uint64(0)
+	if layout.profileSize != 0 {
+		profile = 8
+	}
 	if layout.Planar {
 		if layout.photometric == 5 && samples > 4 {
-			return 20
+			return 20 + profile
 		}
-		return 16
+		return 16 + profile
 	}
 	if !layout.needsSampleView() {
-		return 8
+		return 8 + profile
 	}
 	bytes := uint64(1)
 	if layout.depth == 2 || layout.depth == 4 {
@@ -75,7 +81,7 @@ func (layout TIFFLayout) DecodedPixelBytes() uint64 {
 	} else if layout.depth > 8 {
 		bytes = 2
 	}
-	return max(uint64(8), samples*bytes)
+	return max(uint64(8), samples*bytes) + profile
 }
 
 // decodeTIFFPixels 按存储方式解码指定目录并统一颜色和显示方向
@@ -647,12 +653,12 @@ func (p *planarTIFFImage) ColorModel() color.Model {
 		return color.GrayModel
 	}
 	if p.alpha == 1 {
-		if p.depth > 8 {
+		if p.depth > 8 || p.cmyk {
 			return color.RGBA64Model
 		}
 		return color.RGBAModel
 	}
-	if p.depth > 8 {
+	if p.depth > 8 || p.cmyk {
 		return color.NRGBA64Model
 	}
 	return color.NRGBAModel
@@ -674,10 +680,14 @@ func (p *planarTIFFImage) components(x, y int) [4]uint16 {
 				return [4]uint16{}
 			}
 		}
-		black := maximum - min(uint32(ink[3]), maximum)
+		var components [4]float64
+		for i := range components {
+			components[i] = float64(min(uint32(ink[i]), maximum)) / float64(maximum)
+		}
+		rgb, _ := (&pdfgo.ColorSpace{Model: "DeviceCMYK"}).SRGB(components[:], "")
 		var values [4]uint16
 		for i := range 3 {
-			values[i] = uint16((maximum - min(uint32(ink[i]), maximum)) * black / maximum)
+			values[i] = uint16(math.Round(rgb[i] * float64(maximum)))
 		}
 		values[3] = ink[4]
 		return values

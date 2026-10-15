@@ -76,11 +76,7 @@ func (c *TransferCache) Resolve(reader *pdfgo.Reader, style pdfgo.Style, model p
 // 入参: space 合成空间, values 非预乘分量
 // 返回: [3]float64 显示颜色, error 校准颜色转换错误
 func OutputColor(space *pdfgo.ColorSpace, values [4]float64) ([3]float64, error) {
-	if space.Model == "DeviceCMYK" && !space.Calibrated() {
-		black := 1 - values[3]
-		return [3]float64{(1 - values[0]) * black, (1 - values[1]) * black, (1 - values[2]) * black}, nil
-	}
-	return space.RGB(values[:space.Components()], "RelativeColorimetric")
+	return space.SRGB(values[:space.Components()], "RelativeColorimetric")
 }
 
 // NormalBlend 判断混合模式是否为普通覆盖

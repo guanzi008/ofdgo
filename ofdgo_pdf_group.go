@@ -32,8 +32,9 @@ var errPDFGroupRaster = errors.New("PDF transparency group requires local compos
 
 // pdfPaintRegion 保存透明组内的单色填充区域
 type pdfPaintRegion struct {
-	paint pdfgo.Paint
-	path  GeometryPath
+	paint  pdfgo.Paint
+	path   GeometryPath
+	intent pdfgo.Name
 }
 
 // group 将单色图元的透明组转换为互不重叠的填充区域，保留矢量与组不透明度
@@ -138,6 +139,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 	var regions []pdfPaintRegion
 	var combined GeometryPath
 	var paint *pdfgo.Paint
+	var intent pdfgo.Name
 	var clips []pdfgo.Path
 	opaque := true
 	scale := math.Hypot(p.matrix[0], p.matrix[1])
@@ -182,12 +184,14 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 			opaque = opaque && color.Alpha == 1
 			if paint == nil {
 				paint, clips = &color, path.Style.Clips
+				intent = path.Style.RenderingIntent
 			} else if !reflect.DeepEqual(clips, path.Style.Clips) {
 				return fmt.Errorf("%w: independently clipped group content", errPDFGroupRaster)
-			} else if color.Alpha != 1 || !reflect.DeepEqual(*paint, color) {
-				regions = append(regions, pdfPaintRegion{*paint, combined})
+			} else if color.Alpha != 1 || !reflect.DeepEqual(*paint, color) || intent != path.Style.RenderingIntent {
+				regions = append(regions, pdfPaintRegion{*paint, combined, intent})
 				combined = nil
 				paint = &color
+				intent = path.Style.RenderingIntent
 			}
 			outline := shape
 			evenOdd := path.Path.EvenOdd
@@ -251,7 +255,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 	if len(combined) == 0 {
 		return nil
 	}
-	regions = append(regions, pdfPaintRegion{*paint, combined})
+	regions = append(regions, pdfPaintRegion{*paint, combined, intent})
 	if !opaque {
 		regions, err = pdfCompositeRegions(geometry, regions)
 		if err != nil {
@@ -301,7 +305,11 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 		if err != nil {
 			return err
 		}
-		object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: data, Fill: &fill, Stroke: &stroke, FillColor: p.color(region.paint), Clips: objectClips}
+		color, err := p.color(region.paint, region.intent)
+		if err != nil {
+			return err
+		}
+		object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: data, Fill: &fill, Stroke: &stroke, FillColor: color, Clips: objectClips}
 		p.appendObject(GraphicObject{Type: "PathObject", PathObject: object})
 		p.report.PathObjects++
 	}
@@ -523,7 +531,7 @@ func pdfCompositeRegions(geometry GeometryBackend, regions []pdfPaintRegion) ([]
 				return nil, err
 			}
 			if len(outside) != 0 {
-				next = append(next, pdfPaintRegion{backdrop.paint, outside})
+				next = append(next, pdfPaintRegion{backdrop.paint, outside, backdrop.intent})
 			}
 			overlap, err := geometry.Combine(backdrop.path, source.path, GeometryIntersect)
 			if err != nil {
@@ -534,7 +542,7 @@ func pdfCompositeRegions(geometry GeometryBackend, regions []pdfPaintRegion) ([]
 				for i := range paint.RGB {
 					paint.RGB[i] = (source.paint.RGB[i]*source.paint.Alpha + backdrop.paint.RGB[i]*backdrop.paint.Alpha*(1-source.paint.Alpha)) / paint.Alpha
 				}
-				next = append(next, pdfPaintRegion{paint, overlap})
+				next = append(next, pdfPaintRegion{paint, overlap, ""})
 			}
 			remaining, err = geometry.Combine(remaining, backdrop.path, GeometrySubtract)
 			if err != nil {
@@ -542,7 +550,7 @@ func pdfCompositeRegions(geometry GeometryBackend, regions []pdfPaintRegion) ([]
 			}
 		}
 		if len(remaining) != 0 {
-			next = append(next, pdfPaintRegion{source.paint, remaining})
+			next = append(next, pdfPaintRegion{source.paint, remaining, source.intent})
 		}
 		result = next
 	}

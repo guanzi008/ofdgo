@@ -10,7 +10,7 @@ require (
 	github.com/tdewolff/font v0.0.0-20261010204837-88a7f6b56918
 	github.com/xiaoqidun/j2kgo v1.0.1
 	github.com/xiaoqidun/jbig2 v1.1.7
-	github.com/xiaoqidun/pdfgo v0.0.0-20261015084227-8b2c590c8095
+	github.com/xiaoqidun/pdfgo v0.0.0-20261015160218-fa5114475eb5
 	golang.org/x/crypto v0.58.0
 	golang.org/x/image v0.47.0
 	golang.org/x/text v0.43.0

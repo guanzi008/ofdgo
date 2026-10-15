@@ -441,6 +441,46 @@ func PixelDataContext(ctx context.Context, img image.Image) (image.Image, error)
 // 入参: img 图片对象, x X坐标, y Y坐标
 // 返回: color.Gray 灰度像素
 func GrayAt(img image.Image, x, y int) color.Gray {
+	switch src := img.(type) {
+	case *EncodedImage:
+		pixels, err := src.Image()
+		if err != nil {
+			return color.Gray{}
+		}
+		return GrayAt(pixels, x, y)
+	case *colorImage:
+		return GrayAt(src.source, x, y)
+	case *maskedTIFFImage:
+		if src.NRGBA64At(x, y).A == 0 {
+			return color.Gray{}
+		}
+		bounds, size := src.source.Bounds(), src.bounds.Size()
+		sx := bounds.Min.X + int((uint64(x-src.bounds.Min.X)*uint64(bounds.Dx())+uint64(bounds.Dx()/2))/uint64(size.X))
+		sy := bounds.Min.Y + int((uint64(y-src.bounds.Min.Y)*uint64(bounds.Dy())+uint64(bounds.Dy()/2))/uint64(size.Y))
+		return GrayAt(src.source, sx, sy)
+	case *transparentEdgeImage:
+		if x <= src.rect.Min.X || y <= src.rect.Min.Y || x >= src.rect.Max.X-1 || y >= src.rect.Max.Y-1 {
+			return color.Gray{}
+		}
+		bounds := src.source.Bounds()
+		return GrayAt(src.source, bounds.Min.X+x-1, bounds.Min.Y+y-1)
+	case *transparentEdgeImage64:
+		if x <= src.rect.Min.X || y <= src.rect.Min.Y || x >= src.rect.Max.X-1 || y >= src.rect.Max.Y-1 {
+			return color.Gray{}
+		}
+		bounds := src.source.Bounds()
+		return GrayAt(src.source, bounds.Min.X+x-1, bounds.Min.Y+y-1)
+	case *orientedTIFFImage:
+		point, ok := src.sourcePoint(x, y)
+		if !ok {
+			return color.Gray{}
+		}
+		return GrayAt(src.source, point.X, point.Y)
+	case *planarTIFFImage:
+		if src.cmyk {
+			return src.cmykGrayAt(x, y)
+		}
+	}
 	if src, ok := img.(*image.Gray); ok {
 		return src.GrayAt(x, y)
 	}
@@ -662,11 +702,18 @@ func WithTransparentEdge(ctx context.Context, img image.Image) (image.Image, int
 		return img, 0, nil
 	}
 	if src, ok := img.(*EncodedImage); ok && src.MIME() == "image/jpeg" {
+		if src.profile != nil || src.config.ColorModel == color.CMYKModel {
+			pixels, err := src.ImageContext(ctx)
+			return pixels, 0, err
+		}
 		return img, 0, nil
 	}
 	source, err := PixelDataContext(ctx, img)
 	if err != nil {
 		return nil, 0, err
+	}
+	if encoded, ok := img.(*EncodedImage); ok && (encoded.profile != nil || encoded.pngColor != nil) {
+		img = source
 	}
 	switch source.(type) {
 	case *image.Gray, *image.Gray16, *image.YCbCr, *image.CMYK:

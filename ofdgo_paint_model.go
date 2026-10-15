@@ -93,6 +93,9 @@ func (r *Renderer) ResolvePaint(fill *FillColor) (Paint, error) {
 	if node := fill.AxialShd; node != nil {
 		start, end := parseFloats(node.StartPoint), parseFloats(node.EndPoint)
 		stops := r.renderGradientStops(node.Segment, fill.Alpha)
+		if r.renderError != nil {
+			return Paint{}, r.renderError
+		}
 		sample, err := r.profileGradient(node.Segment, fill.Alpha)
 		if err != nil {
 			return Paint{}, err
@@ -107,6 +110,9 @@ func (r *Renderer) ResolvePaint(fill *FillColor) (Paint, error) {
 	if node := fill.RadialShd; node != nil && node.EndRadius > 0 {
 		start, end := parseFloats(node.StartPoint), parseFloats(node.EndPoint)
 		stops := r.renderGradientStops(node.Segment, fill.Alpha)
+		if r.renderError != nil {
+			return Paint{}, r.renderError
+		}
 		sample, err := r.profileGradient(node.Segment, fill.Alpha)
 		if err != nil {
 			return Paint{}, err

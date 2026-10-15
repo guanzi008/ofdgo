@@ -948,7 +948,7 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 						rgb, err = codecpdf.OutputColor(space, values)
 					}
 				} else if c.transfers != nil {
-					rgb, err = space.RGB(pixel.Values[:space.Components()], "RelativeColorimetric")
+					rgb, err = space.SRGB(pixel.Values[:space.Components()], "RelativeColorimetric")
 				} else {
 					if colorReady && pixel.Values == colorValues {
 						rgb = colorRGB

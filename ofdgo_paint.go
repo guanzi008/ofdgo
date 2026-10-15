@@ -15,8 +15,10 @@
 package ofdgo
 
 import (
+	"fmt"
 	"image/color"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -30,100 +32,109 @@ type PatternPaint struct {
 
 // ResolveColor 按文档颜色空间和调色板解析颜色，返回预乘透明度的RGBA
 // 入参: value 颜色分量, index 调色板索引, space 颜色空间标识, alpha 透明度
-// 返回: color.RGBA 标准颜色
-func (r *Renderer) ResolveColor(value string, index *int, space string, alpha *int) color.RGBA {
-	return colorToRGBA(r.parseColorWithAlpha(value, index, space, alpha))
+// 返回: color.RGBA 标准颜色, error 颜色定义或配置错误
+func (r *Renderer) ResolveColor(value string, index *int, space string, alpha *int) (color.RGBA, error) {
+	kind, values, err := r.colorComponents(value, index, space)
+	if err != nil {
+		return color.RGBA{}, err
+	}
+	if alpha != nil && (*alpha < 0 || *alpha > 255) {
+		return color.RGBA{}, fmt.Errorf("color alpha must be between 0 and 255")
+	}
+	profile, err := r.Reader.colorProfile(r.colorDefinition(space))
+	if err != nil {
+		return color.RGBA{}, err
+	}
+	rgb, err := displayColor(kind, values, profile)
+	if err != nil {
+		return color.RGBA{}, err
+	}
+	a := 1.0
+	if alpha != nil {
+		a = float64(*alpha) / 255
+	}
+	return profileColor(rgb, a), nil
 }
 
 // GradientStops 解析OFD渐变分段的位置与透明度，返回独立数据并保留原分段顺序
 // 入参: segments 渐变分段, alpha 透明度
-// 返回: []ColorStop 后端无关的渐变色标
-func (r *Renderer) GradientStops(segments []ShdSegment, alpha *int) []ColorStop {
+// 返回: []ColorStop 后端无关的渐变色标, error 颜色定义或配置错误
+func (r *Renderer) GradientStops(segments []ShdSegment, alpha *int) ([]ColorStop, error) {
 	var gradient []ColorStop
 	positions := gradientPositions(segments)
 	for i, segment := range segments {
 		segmentAlpha := mergeAlpha(segment.Color.Alpha, alpha)
-		gradient = append(gradient, ColorStop{Offset: positions[i], Color: r.ResolveColor(segment.Color.Value, segment.Color.Index, segment.Color.ColorSpace, segmentAlpha)})
+		value, err := r.ResolveColor(segment.Color.Value, segment.Color.Index, segment.Color.ColorSpace, segmentAlpha)
+		if err != nil {
+			return nil, err
+		}
+		gradient = append(gradient, ColorStop{Offset: positions[i], Color: value})
 	}
-	return gradient
+	return gradient, nil
 }
 
 // parseColorWithAlpha 解析带透明度的颜色
 // 入参: value 色值, index 调色板索引, space 颜色空间标识, alpha 透明度
 // 返回: color.Color 颜色对象
 func (r *Renderer) parseColorWithAlpha(value string, index *int, space string, alpha *int) color.Color {
-	kind, values := r.colorComponents(value, index, space)
-	profile, err := r.Reader.colorProfile(r.colorDefinition(space))
+	result, err := r.ResolveColor(value, index, space, alpha)
 	if err != nil {
 		r.renderError = err
-		return color.RGBA{}
 	}
-	if profile != nil {
-		rgb, err := profile.rgb(values)
-		if err != nil {
-			r.renderError = err
-			return color.RGBA{}
-		}
-		a := 1.0
-		if alpha != nil {
-			a = float64(clampColor(*alpha)) / 255
-		}
-		return profileColor(rgb, a)
-	}
-	var components [4]uint8
-	for i, value := range values {
-		components[i] = uint8(math.Round(value * 255))
-	}
-	red, green, blue := components[0], components[1], components[2]
-	switch kind {
-	case "GRAY":
-		green, blue = red, red
-	case "CMYK":
-		red, green, blue = color.CMYKToRGB(components[0], components[1], components[2], components[3])
-	}
-	a := 255
-	if alpha != nil {
-		a = clampColor(*alpha)
-	}
-	return color.RGBA{R: uint8(int(red) * a / 255), G: uint8(int(green) * a / 255), B: uint8(int(blue) * a / 255), A: uint8(a)}
+	return result
 }
 
 // colorComponents 读取颜色空间及归一化分量，保留源位深供渐变插值
 // 入参: value 色值, index 调色板索引, space 颜色空间标识
-// 返回: string 颜色模型, [4]float64 单位分量
-func (r *Renderer) colorComponents(value string, index *int, space string) (string, [4]float64) {
+// 返回: string 颜色模型, [4]float64 单位分量, error 颜色定义错误
+func (r *Renderer) colorComponents(value string, index *int, space string) (string, [4]float64, error) {
 	cs := r.colorDefinition(space)
+	if cs == nil && (space != "" || r.Reader != nil && r.Reader.doc != nil && r.Reader.doc.CommonData.DefaultCS != 0) {
+		if space == "" {
+			space = strconv.Itoa(r.Reader.doc.CommonData.DefaultCS)
+		}
+		return "", [4]float64{}, fmt.Errorf("color space %q not found", space)
+	}
 	kind, bits, count := "RGB", 8, 3
 	if cs != nil {
 		kind = strings.ToUpper(cs.Type)
 		switch cs.BitsPerComponent {
+		case 0:
 		case 1, 2, 4, 8, 16:
 			bits = cs.BitsPerComponent
-		}
-		if strings.TrimSpace(value) == "" && index != nil && 0 <= *index && *index < len(cs.Palette) {
-			value = cs.Palette[*index]
+		default:
+			return "", [4]float64{}, fmt.Errorf("unsupported color depth %d", cs.BitsPerComponent)
 		}
 	}
+	if strings.TrimSpace(value) == "" && index != nil {
+		if cs == nil || *index < 0 || *index >= len(cs.Palette) {
+			return "", [4]float64{}, fmt.Errorf("color palette index out of range")
+		}
+		value = cs.Palette[*index]
+	}
 	switch kind {
+	case "RGB":
 	case "GRAY":
 		count = 1
 	case "CMYK":
 		count = 4
+	default:
+		return "", [4]float64{}, fmt.Errorf("unsupported color space %q", kind)
 	}
 	parts := strings.Fields(value)
 	var components [4]float64
 	limit := 1<<bits - 1
-	if len(parts) >= count {
-		for i, part := range parts[:count] {
-			v, err := parseColorComponent(part)
-			if err != nil || v < 0 || limit < v {
-				components = [4]float64{}
-				break
-			}
-			components[i] = float64(v) / float64(limit)
-		}
+	if len(parts) != 0 && len(parts) != count {
+		return "", components, fmt.Errorf("expected %d color components", count)
 	}
-	return kind, components
+	for i, part := range parts {
+		v, err := parseColorComponent(part)
+		if err != nil || v < 0 || limit < v {
+			return "", [4]float64{}, fmt.Errorf("invalid color component %q", part)
+		}
+		components[i] = float64(v) / float64(limit)
+	}
+	return kind, components, nil
 }
 
 // parseColorComponent 解析颜色分量
@@ -157,6 +168,12 @@ func mergeAlpha(colorAlpha, objectAlpha *int) *int {
 	if colorAlpha == nil && objectAlpha == nil {
 		return nil
 	}
+	for _, value := range []*int{colorAlpha, objectAlpha} {
+		if value != nil && (*value < 0 || *value > 255) {
+			alpha := *value
+			return &alpha
+		}
+	}
 	alpha := 255
 	if colorAlpha != nil {
 		alpha = *colorAlpha
@@ -164,7 +181,6 @@ func mergeAlpha(colorAlpha, objectAlpha *int) *int {
 	if objectAlpha != nil {
 		alpha = alpha * *objectAlpha / 255
 	}
-	alpha = clampColor(alpha)
 	return &alpha
 }
 
@@ -259,11 +275,15 @@ func (r *Renderer) parseShdColor(segments []ShdSegment, alpha *int) color.Color 
 	return r.parseColorWithAlpha(c.Value, c.Index, c.ColorSpace, mergeAlpha(c.Alpha, alpha))
 }
 
-// renderGradientStops 在CMYK分量空间插值，将RGB分段误差控制在半个8位灰阶内
+// renderGradientStops 在源CMYK空间插值，保留截断边界及透明度变化
 // 入参: segments 原始颜色分段, alpha 对象透明度
 // 返回: []ColorStop 仅供绘制的颜色节点，不改变原始分段
 func (r *Renderer) renderGradientStops(segments []ShdSegment, alpha *int) []ColorStop {
-	stops := r.GradientStops(segments, alpha)
+	stops, err := r.GradientStops(segments, alpha)
+	if err != nil {
+		r.renderError = err
+		return nil
+	}
 	if len(stops) < 2 {
 		return stops
 	}
@@ -271,31 +291,14 @@ func (r *Renderer) renderGradientStops(segments []ShdSegment, alpha *int) []Colo
 	for i, stop := range stops {
 		if i > 0 && stops[i-1].Offset < stop.Offset {
 			a, b := segments[i-1].Color, segments[i].Color
-			leftKind, left := r.colorComponents(a.Value, a.Index, a.ColorSpace)
-			rightKind, right := r.colorComponents(b.Value, b.Index, b.ColorSpace)
-			if leftKind == "CMYK" && rightKind == "CMYK" {
-				a0, a1 := float64(stops[i-1].Color.A)/255, float64(stop.Color.A)/255
-				dk, da := right[3]-left[3], a1-a0
-				bound := 0.0
-				for c := 0; c < 3; c++ {
-					dc := right[c] - left[c]
-					bound = math.Max(bound, 2*math.Abs(dc*dk)+2*math.Abs(da)*(math.Abs(dc)+math.Abs(dk)))
+			leftKind, left, _ := r.colorComponents(a.Value, a.Index, a.ColorSpace)
+			rightKind, right, _ := r.colorComponents(b.Value, b.Index, b.ColorSpace)
+			leftSpace, rightSpace := r.colorDefinition(a.ColorSpace), r.colorDefinition(b.ColorSpace)
+			if leftKind == "CMYK" && rightKind == "CMYK" && (leftSpace == nil || leftSpace.Profile == "") && (rightSpace == nil || rightSpace.Profile == "") {
+				if result == nil {
+					result = append([]ColorStop(nil), stops[:i]...)
 				}
-				steps := int(math.Ceil(math.Sqrt(bound * 255 / 4)))
-				if steps > 1 && result == nil {
-					result = append(make([]ColorStop, 0, len(stops)+steps-1), stops[:i]...)
-				}
-				for j := 1; j < steps; j++ {
-					t := float64(j) / float64(steps)
-					var values [4]float64
-					for c := range values {
-						values[c] = left[c]*(1-t) + right[c]*t
-					}
-					opacity := a0*(1-t) + a1*t
-					black := (1 - values[3]) * opacity * 255
-					color := color.RGBA{R: uint8(math.Round((1 - values[0]) * black)), G: uint8(math.Round((1 - values[1]) * black)), B: uint8(math.Round((1 - values[2]) * black)), A: uint8(math.Round(opacity * 255))}
-					result = append(result, ColorStop{Offset: stops[i-1].Offset*(1-t) + stop.Offset*t, Color: color})
-				}
+				result = append(result, cmykGradientStops(left, right, stops[i-1], stop)...)
 			}
 		}
 		if result != nil {
@@ -304,6 +307,49 @@ func (r *Renderer) renderGradientStops(segments []ShdSegment, alpha *int) []Colo
 	}
 	if result == nil {
 		return stops
+	}
+	return result
+}
+
+// cmykGradientStops 在加黑截断点分段，将预乘插值误差控制在四分之一灰阶内
+// 入参: left 左端分量, right 右端分量, start 左端色标, end 右端色标
+// 返回: []ColorStop 不含端点的显示色标
+func cmykGradientStops(left, right [4]float64, start, end ColorStop) []ColorStop {
+	positions := []float64{0, 1}
+	a0, a1 := float64(start.Color.A)/255, float64(end.Color.A)/255
+	bound := 0.0
+	for channel := 0; channel < 3; channel++ {
+		first, last := left[channel]+left[3], right[channel]+right[3]
+		delta := last - first
+		bound = math.Max(bound, 2*math.Abs((a1-a0)*delta))
+		if delta != 0 {
+			position := (1 - first) / delta
+			if 0 < position && position < 1 {
+				positions = append(positions, position)
+			}
+		}
+	}
+	slices.Sort(positions)
+	positions = slices.Compact(positions)
+	var result []ColorStop
+	for i := 1; i < len(positions); i++ {
+		first, last := positions[i-1], positions[i]
+		steps := max(1, int(math.Ceil((last-first)*math.Sqrt(bound*255/2))))
+		for step := 1; step <= steps; step++ {
+			t := first + (last-first)*float64(step)/float64(steps)
+			if t >= 1 {
+				continue
+			}
+			var values [4]float64
+			for channel := range values {
+				values[channel] = left[channel]*(1-t) + right[channel]*t
+			}
+			r, g, b := meshRGB("CMYK", values)
+			result = append(result, ColorStop{
+				Offset: start.Offset*(1-t) + end.Offset*t,
+				Color:  profileColor([3]float64{r, g, b}, a0*(1-t)+a1*t),
+			})
+		}
 	}
 	return result
 }

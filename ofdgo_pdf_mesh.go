@@ -166,7 +166,7 @@ func (p *pdfImporter) meshColor(paint pdfgo.Paint, box Box) (*FillColor, error) 
 					shading.Point = append(shading.Point, ShdPoint{X: point.X - box.X, Y: point.Y - box.Y, EdgeFlag: flag, Color: ShdColor{Value: value, ColorSpace: icc}})
 					continue
 				}
-				rgb, err := mesh.Space.RGB(values[:mesh.Space.Components()], mesh.Intent)
+				rgb, err := mesh.Space.SRGB(values[:mesh.Space.Components()], mesh.Intent)
 				if err != nil {
 					return nil, err
 				}
@@ -174,7 +174,10 @@ func (p *pdfImporter) meshColor(paint pdfgo.Paint, box Box) (*FillColor, error) 
 				if mesh.Space.Model == "DeviceCMYK" && !mesh.Space.Calibrated() {
 					color.CMYK = (*[4]float64)(values)
 				}
-				converted := p.color(color)
+				converted, err := p.color(color, mesh.Intent)
+				if err != nil {
+					return nil, err
+				}
 				shading.Point = append(shading.Point, ShdPoint{X: point.X - box.X, Y: point.Y - box.Y, EdgeFlag: flag, Color: ShdColor{Value: converted.Value, ColorSpace: converted.ColorSpace}})
 			}
 			previous.Points = triangle.Points
@@ -190,8 +193,8 @@ func (p *pdfImporter) meshColor(paint pdfgo.Paint, box Box) (*FillColor, error) 
 		}
 		shading.Extend, shading.BackColor = 1, &background
 	}
-	color := p.color(paint)
-	color.Value = ""
+	alpha := int(math.Round(paint.Alpha * 255))
+	color := &FillColor{Alpha: &alpha}
 	color.GouraudShd = shading
 	return color, nil
 }

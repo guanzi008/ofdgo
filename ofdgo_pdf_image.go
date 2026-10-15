@@ -106,12 +106,14 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	}
 	if source.ImageMask {
 		fill := mark.Style.Fill.RGB
-		if values := mark.Style.Fill.CMYK; values != nil {
+		if space := mark.Style.Fill.Space; space != nil {
+			fill, err = space.SRGB(mark.Style.Fill.Values[:space.Components()], mark.Style.RenderingIntent)
+		} else if values := mark.Style.Fill.CMYK; values != nil {
 			space := &pdfgo.ColorSpace{Model: "DeviceCMYK"}
-			fill, err = space.RGB(values[:], mark.Style.RenderingIntent)
-			if err != nil {
-				return err
-			}
+			fill, err = space.SRGB(values[:], mark.Style.RenderingIntent)
+		}
+		if err != nil {
+			return err
 		}
 		key.tint = color.NRGBA64{
 			R: uint16(math.Round(fill[0] * 65535)),
@@ -145,41 +147,50 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		}
 	}
 	if id == "" {
+		var data []byte
+		if !source.ImageMask && key.process == "" && p.compression.Mode != CompressionLossy {
+			data, err = codecpdf.EncodeCMYKTIFF(p.ctx, source)
+			if err != nil {
+				return err
+			}
+		}
 		var jbig2Original, jpegOriginal []byte
 		var decoded image.Image
-		if key.process != "" {
-			decoded, err = p.imageProcess(source, key.process)
-			if err != nil {
-				return err
-			}
-			if key.size != (image.Point{}) {
-				decoded, err = pdfgo.ResizeImage(p.ctx, decoded, key.size)
-				if err != nil {
-					return err
-				}
-			}
-		} else {
-			jbig2Original, err = source.JBIG2FileContext(p.ctx)
-			if err != nil {
-				return err
-			}
-			jpegOriginal, err = source.JPEGFileContext(p.ctx)
-			if err != nil {
-				return err
-			}
-			if len(jbig2Original) == 0 && len(jpegOriginal) == 0 && (source.ImageMask || key.size != (image.Point{})) {
-				decoded, err = source.DecodeImageSizeContext(p.ctx, key.size)
-				if err != nil {
-					return err
-				}
-			}
-		}
-		if source.ImageMask {
-			decoded = &codecpdf.StencilImage{Source: decoded, Fill: key.tint}
-		}
-		data := jbig2Original
 		if len(data) == 0 {
-			data = jpegOriginal
+			if key.process != "" {
+				decoded, err = p.imageProcess(source, key.process)
+				if err != nil {
+					return err
+				}
+				if key.size != (image.Point{}) {
+					decoded, err = pdfgo.ResizeImage(p.ctx, decoded, key.size)
+					if err != nil {
+						return err
+					}
+				}
+			} else {
+				jbig2Original, err = source.JBIG2FileContext(p.ctx)
+				if err != nil {
+					return err
+				}
+				jpegOriginal, err = source.JPEGFileContext(p.ctx)
+				if err != nil {
+					return err
+				}
+				if len(jbig2Original) == 0 && len(jpegOriginal) == 0 && (source.ImageMask || key.size != (image.Point{})) {
+					decoded, err = source.DecodeImageSizeContext(p.ctx, key.size)
+					if err != nil {
+						return err
+					}
+				}
+			}
+			if source.ImageMask {
+				decoded = &codecpdf.StencilImage{Source: decoded, Fill: key.tint}
+			}
+			data = jbig2Original
+			if len(data) == 0 {
+				data = jpegOriginal
+			}
 		}
 		optimized := false
 		if len(data) == 0 && decoded != nil && !source.ImageMask && p.compression.Mode == CompressionLossy {

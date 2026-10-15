@@ -230,7 +230,10 @@ func (r *Renderer) resolveMesh(fill *FillColor) (*MeshShading, error) {
 	vertices := make([]MeshVertex, len(points))
 	for i, point := range points {
 		space := point.Color.ColorSpace
-		kind, values := r.colorComponents(point.Color.Value, point.Color.Index, space)
+		kind, values, err := r.colorComponents(point.Color.Value, point.Color.Index, space)
+		if err != nil {
+			return nil, err
+		}
 		profile, err := r.Reader.colorProfile(r.colorDefinition(space))
 		if err != nil {
 			return nil, err
@@ -244,7 +247,11 @@ func (r *Renderer) resolveMesh(fill *FillColor) (*MeshShading, error) {
 	mesh := &MeshShading{}
 	if extend == 1 && back != nil {
 		space := back.ColorSpace
-		mesh.Background = r.ResolveColor(back.Value, back.Index, space, mergeAlpha(back.Alpha, fill.Alpha))
+		var err error
+		mesh.Background, err = r.ResolveColor(back.Value, back.Index, space, mergeAlpha(back.Alpha, fill.Alpha))
+		if err != nil {
+			return nil, err
+		}
 	}
 	for _, triangle := range indices {
 		mesh.Triangles = append(mesh.Triangles, [3]MeshVertex{vertices[triangle[0]], vertices[triangle[1]], vertices[triangle[2]]})
@@ -279,17 +286,14 @@ func (v MeshVertex) sameSpace(other MeshVertex) bool {
 // 入参: values 插值分量
 // 返回: float64 红、绿、蓝分量
 func (v MeshVertex) rgb(values [4]float64) (float64, float64, float64) {
-	if v.profile != nil {
-		for i := range values {
-			values[i] = math.Max(0, math.Min(1, values[i]))
-		}
-		rgb, err := v.profile.rgb(values)
-		if err != nil {
-			return 0, 0, 0
-		}
-		return rgb[0], rgb[1], rgb[2]
+	for i := range values {
+		values[i] = math.Max(0, math.Min(1, values[i]))
 	}
-	return meshRGB(v.Space, values)
+	rgb, err := displayColor(v.Space, values, v.profile)
+	if err != nil {
+		return 0, 0, 0
+	}
+	return rgb[0], rgb[1], rgb[2]
 }
 
 // meshTriangleIndices 校验控制点并生成共享边或格构三角形编号
@@ -344,14 +348,7 @@ func meshTriangleIndices(points []ShdPoint, columns, extend int) ([][3]int, erro
 // 入参: space 颜色模型, values 分量
 // 返回: float64 红、绿、蓝分量
 func meshRGB(space string, values [4]float64) (float64, float64, float64) {
-	switch space {
-	case "GRAY":
-		return values[0], values[0], values[0]
-	case "CMYK":
-		return (1 - values[0]) * (1 - values[3]), (1 - values[1]) * (1 - values[3]), (1 - values[2]) * (1 - values[3])
-	default:
-		return values[0], values[1], values[2]
-	}
+	return (MeshVertex{Space: space}).rgb(values)
 }
 
 // meshByte 将归一化颜色分量量化为八位整数

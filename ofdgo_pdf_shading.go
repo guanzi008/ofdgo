@@ -158,7 +158,10 @@ func (p *pdfImporter) gradientSegments(stops []pdfgo.GradientStop, space *pdfgo.
 		if cmyk {
 			paint.CMYK = &stop.Values
 		}
-		color := p.color(paint)
+		color, err := p.color(paint, intent)
+		if err != nil {
+			return nil, err
+		}
 		segments[i] = ShdSegment{Position: stop.Position, Color: ShdColor{Value: color.Value, ColorSpace: color.ColorSpace}}
 	}
 	return segments, nil
@@ -283,7 +286,7 @@ func (p *pdfImporter) gradientPattern(paint pdfgo.Paint, box Box) (*FillColor, e
 	if _, ok := matrix.Inverse(); !ok {
 		return nil, fmt.Errorf("invalid PDF gradient bounds matrix")
 	}
-	fill, err := p.paintColor(plain, box)
+	fill, err := p.paintColor(plain, box, intent)
 	if err != nil {
 		return nil, err
 	}
@@ -337,7 +340,8 @@ func (p *pdfImporter) gradientPattern(paint pdfgo.Paint, box Box) (*FillColor, e
 			objects = append(objects, object)
 		}
 	}
-	color := p.color(paint)
+	alpha := int(math.Round(paint.Alpha * 255))
+	color := &FillColor{Alpha: &alpha}
 	color.Pattern = &Pattern{Width: box.W, Height: box.H, RelativeTo: "Page", CTM: pdfNumbers(1, 0, 0, 1, box.X, box.Y), CellContent: PatternContent{PathObject: objects}}
 	return color, nil
 }
@@ -352,7 +356,7 @@ func (p *pdfImporter) gradientBackgroundColor(values [4]float64, space *pdfgo.Co
 	stop := pdfgo.GradientStop{Values: values}
 	if !pdfICCTransfer(space) && (space.Model != "DeviceCMYK" || space.Calibrated()) {
 		var err error
-		stop.RGB, err = space.RGB(values[:space.Components()], intent)
+		stop.RGB, err = space.SRGB(values[:space.Components()], intent)
 		if err != nil {
 			return ShdColor{}, err
 		}
@@ -726,26 +730,55 @@ func pdfShadingClippedNode(node pdfCompositeNode, box pdfgo.Rectangle, matrix pd
 	return node
 }
 
-// color 保留设备色彩分量并复用文档颜色空间
-// 入参: paint PDF颜色与不透明度
-// 返回: *FillColor OFD颜色
-func (p *pdfImporter) color(paint pdfgo.Paint) *FillColor {
+// color 保留设备及ICC源分量，其他校准色以16位显示颜色输出
+// 入参: paint PDF颜色与不透明度, intent 实际渲染意图
+// 返回: *FillColor OFD颜色, error 配置或颜色转换错误
+func (p *pdfImporter) color(paint pdfgo.Paint, intent pdfgo.Name) (*FillColor, error) {
 	alpha := int(math.Round(paint.Alpha * 255))
-	if paint.CMYK != nil && (paint.Space == nil || !paint.Space.Calibrated()) {
+	if pdfICCTransfer(paint.Space) {
+		id, err := p.iccColorSpace(paint.Space, intent)
+		if err != nil {
+			return nil, err
+		}
+		value, err := pdfICCValues(paint.Values[:], paint.Space.Components())
+		if err != nil {
+			return nil, err
+		}
+		return &FillColor{ColorSpace: id, Value: value, Alpha: &alpha}, nil
+	}
+	cmyk := paint.CMYK
+	if cmyk == nil && paint.Space != nil && paint.Space.Model == "DeviceCMYK" && !paint.Space.Calibrated() {
+		cmyk = &paint.Values
+	}
+	if cmyk != nil && (paint.Space == nil || !paint.Space.Calibrated()) {
 		if p.cmykSpace == "" {
 			p.cmykSpace = p.editor.nextID()
 			p.editor.resources = append(p.editor.resources, editorResource{space: &ColorSpace{ID: p.cmykSpace, Type: "CMYK", BitsPerComponent: 16}})
 		}
-		v := paint.CMYK
-		return &FillColor{ColorSpace: p.cmykSpace, Value: pdfNumbers(math.Round(v[0]*65535), math.Round(v[1]*65535), math.Round(v[2]*65535), math.Round(v[3]*65535)), Alpha: &alpha}
+		v := cmyk
+		return &FillColor{ColorSpace: p.cmykSpace, Value: pdfNumbers(math.Round(v[0]*65535), math.Round(v[1]*65535), math.Round(v[2]*65535), math.Round(v[3]*65535)), Alpha: &alpha}, nil
 	}
-	return &FillColor{Value: pdfNumbers(math.Round(paint.RGB[0]*255), math.Round(paint.RGB[1]*255), math.Round(paint.RGB[2]*255)), Alpha: &alpha}
+	if paint.Space.Calibrated() {
+		if p.rgbSpace == "" {
+			id, err := p.editor.AddColorSpace(ColorSpace{Type: "RGB", BitsPerComponent: 16}, nil)
+			if err != nil {
+				return nil, err
+			}
+			p.rgbSpace = id
+		}
+		value, err := pdfICCValues(paint.RGB[:], 3)
+		if err != nil {
+			return nil, err
+		}
+		return &FillColor{ColorSpace: p.rgbSpace, Value: value, Alpha: &alpha}, nil
+	}
+	return &FillColor{Value: pdfNumbers(math.Round(paint.RGB[0]*255), math.Round(paint.RGB[1]*255), math.Round(paint.RGB[2]*255)), Alpha: &alpha}, nil
 }
 
 // paintColor 将页面渐变转换为对象局部坐标
-// 入参: paint PDF画刷, box 对象边界
+// 入参: paint PDF画刷, box 对象边界, intent 实际渲染意图
 // 返回: *FillColor OFD颜色或渐变, error 图案转换错误
-func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error) {
+func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box, intent pdfgo.Name) (*FillColor, error) {
 	if err := p.gradientError(paint); err != nil {
 		return nil, err
 	}
@@ -755,7 +788,8 @@ func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error)
 	if paint.Mesh != nil {
 		return p.meshColor(paint, box)
 	}
-	color := p.color(paint)
+	alpha := int(math.Round(paint.Alpha * 255))
+	color := &FillColor{Alpha: &alpha}
 	if paint.Tiling != nil {
 		pattern, err := p.tilingPattern(paint.Tiling, paint)
 		if err != nil {
@@ -798,7 +832,7 @@ func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error)
 		return color, nil
 	}
 	if paint.Axial == nil {
-		return color, nil
+		return p.color(paint, intent)
 	}
 	gradient := paint.Axial
 	start := p.matrix.Apply(gradient.Start)

@@ -97,11 +97,33 @@ func (r *Renderer) colorDefinition(id string) *ColorSpace {
 	return space
 }
 
-// rgb 转换归一化源分量，不在ICC变换前量化为8位
+// srgb 转换归一化源分量，不在ICC变换前量化为8位
 // 入参: values 源分量
 // 返回: [3]float64 sRGB分量, error 变换错误
-func (p *colorProfile) rgb(values [4]float64) ([3]float64, error) {
-	return p.space.RGB(values[:p.space.Components()], p.space.DefaultIntent())
+func (p *colorProfile) srgb(values [4]float64) ([3]float64, error) {
+	return p.space.SRGB(values[:p.space.Components()], p.space.DefaultIntent())
+}
+
+// displayColor 按源模型及配置转换显示颜色，保持源分量精度
+// 入参: kind 源模型, values 归一化分量, profile 可选ICC配置
+// 返回: [3]float64 sRGB分量, error 模型或转换错误
+func displayColor(kind string, values [4]float64, profile *colorProfile) ([3]float64, error) {
+	if profile != nil {
+		return profile.srgb(values)
+	}
+	var model pdfgo.Name
+	switch kind {
+	case "GRAY":
+		model = "DeviceGray"
+	case "RGB":
+		model = "DeviceRGB"
+	case "CMYK":
+		model = "DeviceCMYK"
+	default:
+		return [3]float64{}, fmt.Errorf("unsupported color space %q", kind)
+	}
+	space := pdfgo.ColorSpace{Model: model}
+	return space.SRGB(values[:space.Components()], "RelativeColorimetric")
 }
 
 // profileColor 将显示分量一次量化并按透明度预乘

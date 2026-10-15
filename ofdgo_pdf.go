@@ -81,6 +81,7 @@ type pdfImporter struct {
 	clipTexts        map[*pdfgo.TextClip][]TextObject
 	clipPaths        *renderCache[[32]byte, pdfClipPath]
 	cmykSpace        string
+	rgbSpace         string
 	iccSpaces        map[pdfICCKey]string
 	objects          *pdfObjectBuffer
 	formResources    *pdfFormCache
@@ -173,7 +174,17 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	}
 	defer reader.Close()
 	importer.reader = reader
+	outputIntents, err := reader.OutputIntents()
+	if err != nil {
+		return nil, PDFImportReport{}, fmt.Errorf("import PDF output intents: %w", err)
+	}
 	importer.report.Warnings = diagnostics
+	if len(outputIntents) != 0 {
+		if options.Strict {
+			return nil, PDFImportReport{}, &pdfgo.UnsupportedError{Feature: "PDF output intent conversion"}
+		}
+		importer.report.Warnings = append(importer.report.Warnings, pdfgo.Diagnostic{Message: "PDF output intents not transferred to OFD"})
+	}
 	importer.pageIndexes = make(map[pdfgo.Reference]int)
 	importer.resolveFile = options.ResolveFile
 	importer.resolveReference = options.ResolveReference

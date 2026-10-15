@@ -278,7 +278,6 @@ func (e *Editor) Color(value *FillColor) (color.NRGBA, error) {
 	if len(fields) != 0 && len(fields) != count {
 		return color.NRGBA{}, fmt.Errorf("expected %d color components", count)
 	}
-	var components [4]uint8
 	var normalized [4]float64
 	limit := 1<<bits - 1
 	for i, field := range fields {
@@ -286,14 +285,7 @@ func (e *Editor) Color(value *FillColor) (color.NRGBA, error) {
 		if err != nil || v < 0 || v > limit {
 			return color.NRGBA{}, fmt.Errorf("invalid color component %q", field)
 		}
-		components[i] = uint8((v*255 + limit/2) / limit)
 		normalized[i] = float64(v) / float64(limit)
-	}
-	r, g, b := components[0], components[1], components[2]
-	if kind == "GRAY" {
-		g, b = r, r
-	} else if kind == "CMYK" {
-		r, g, b = color.CMYKToRGB(components[0], components[1], components[2], components[3])
 	}
 	var reader *Reader
 	if e.source != nil {
@@ -303,12 +295,9 @@ func (e *Editor) Color(value *FillColor) (color.NRGBA, error) {
 	if err != nil {
 		return color.NRGBA{}, err
 	}
-	if profile != nil {
-		rgb, err := profile.rgb(normalized)
-		if err != nil {
-			return color.NRGBA{}, err
-		}
-		r, g, b = meshByte(rgb[0]), meshByte(rgb[1]), meshByte(rgb[2])
+	rgb, err := displayColor(kind, normalized, profile)
+	if err != nil {
+		return color.NRGBA{}, err
 	}
 	a := 255
 	if value.Alpha != nil {
@@ -317,7 +306,7 @@ func (e *Editor) Color(value *FillColor) (color.NRGBA, error) {
 			return color.NRGBA{}, fmt.Errorf("color alpha must be between 0 and 255")
 		}
 	}
-	return color.NRGBA{R: r, G: g, B: b, A: uint8(a)}, nil
+	return color.NRGBA{R: meshByte(rgb[0]), G: meshByte(rgb[1]), B: meshByte(rgb[2]), A: uint8(a)}, nil
 }
 
 // RGBColor 创建浏览器等调用方使用的RGB纯色，非RGB文档按需注册独立颜色空间

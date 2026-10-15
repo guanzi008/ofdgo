@@ -41,7 +41,10 @@ func (r *Renderer) profileGradient(segments []ShdSegment, alpha *int) (func(floa
 	}
 	gradient := &profileGradient{positions: gradientPositions(segments), colors: make([]MeshVertex, len(segments))}
 	for i, segment := range segments {
-		kind, values := r.colorComponents(segment.Color.Value, segment.Color.Index, segment.Color.ColorSpace)
+		kind, values, err := r.colorComponents(segment.Color.Value, segment.Color.Index, segment.Color.ColorSpace)
+		if err != nil {
+			return nil, err
+		}
 		profile, err := r.Reader.colorProfile(r.colorDefinition(segment.Color.ColorSpace))
 		if err != nil {
 			return nil, err
@@ -63,7 +66,7 @@ func (g *profileGradient) At(t float64) color.RGBA {
 		return color.RGBA{}
 	}
 	first := g.colors[0]
-	if t <= g.positions[0] {
+	if t < g.positions[0] {
 		r, green, b := first.rgb(first.Values)
 		return profileColor([3]float64{r, green, b}, first.Alpha)
 	}

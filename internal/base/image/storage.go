@@ -14,7 +14,10 @@
 
 package image
 
-import "image"
+import (
+	"image"
+	"image/color"
+)
 
 // StorageCost 预留十六位像素空间，并计入编码、调色板与底层像素缓冲容量
 // 包装图像可实现BackingImage() image.Image，使底层共享缓冲计入预算
@@ -28,6 +31,25 @@ func StorageCost(img image.Image, limit int) int {
 	}
 	pixels := w * h * 8
 	if encoded, ok := img.(*EncodedImage); ok {
+		if encoded.pngColor != nil {
+			if limit-cost < 512 {
+				return limit + 1
+			}
+			cost += 512
+		}
+		if cap(encoded.profile) > limit-cost {
+			return limit + 1
+		}
+		cost += cap(encoded.profile)
+		if encoded.profile != nil || encoded.pngColor != nil || encoded.config.ColorModel == color.CMYKModel {
+			if w > (limit-cost)/12/h {
+				return limit + 1
+			}
+			pixels = w * h * 12
+		}
+		if result := encoded.result.Load(); result != nil && result.image != nil {
+			pixels = max(pixels, StorageCost(result.image, limit-cost))
+		}
 		if cap(encoded.data) > limit-cost-pixels {
 			return limit + 1
 		}
@@ -35,6 +57,9 @@ func StorageCost(img image.Image, limit int) int {
 	}
 	var buffers [5]int
 	switch source := img.(type) {
+	case *colorImage:
+		buffers[0] = cap(source.Pix)
+		buffers[1] = StorageCost(source.source, limit-cost)
 	case *image.RGBA:
 		buffers[0] = cap(source.Pix)
 	case *image.RGBA64:

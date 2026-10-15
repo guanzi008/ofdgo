@@ -445,12 +445,22 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 		ctm = pdfNumbers(m[:]...)
 	}
 	paint := func(value pdfgo.Paint) (*FillColor, error) {
-		if value.Tiling != nil || pdfGradientPattern(value) {
-			return p.paintColor(value, box)
+		if value.Tiling == nil && value.Axial == nil && value.Radial == nil && value.Mesh == nil && value.Function == nil && value.Shading == nil {
+			return p.color(value, mark.Style.RenderingIntent)
 		}
-		return drawing.paintColor(value, origin)
+		if value.Tiling != nil || pdfGradientPattern(value) {
+			return p.paintColor(value, box, mark.Style.RenderingIntent)
+		}
+		return drawing.paintColor(value, origin, mark.Style.RenderingIntent)
 	}
-	fillColor, strokePaint := p.color(mark.Style.Fill), p.color(mark.Style.Stroke)
+	fillColor, err := p.color(mark.Style.Fill, mark.Style.RenderingIntent)
+	if err != nil {
+		return err
+	}
+	strokePaint, err := p.color(mark.Style.Stroke, mark.Style.RenderingIntent)
+	if err != nil {
+		return err
+	}
 	if mark.Fill {
 		fillColor, err = paint(mark.Style.Fill)
 		if err != nil {

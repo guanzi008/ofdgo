@@ -31,7 +31,7 @@ import (
 func parseTIFFColorProfile(kind string, data []byte) (*pdfgo.ColorSpace, error) {
 	model := map[string]string{"GRAY": "GRAY", "RGB": "RGB ", "CMYK": "CMYK"}[strings.ToUpper(kind)]
 	if len(data) < 132 || model == "" || string(data[16:20]) != model {
-		return nil, fmt.Errorf("ICC source model does not match OFD color space %q", kind)
+		return nil, fmt.Errorf("ICC source model does not match image color space %q", kind)
 	}
 	return pdfgo.NewICCColorSpace(data)
 }
@@ -75,6 +75,13 @@ func readTIFFColorProfile(ctx context.Context, data []byte, layout TIFFLayout) (
 // 入参: ctx 取消上下文，可为nil, source 解码图像, profile 已校验的颜色配置
 // 返回: image.Image 独立透明度图像, error 颜色变换或取消错误
 func applyTIFFColorProfile(ctx context.Context, source image.Image, profile *pdfgo.ColorSpace) (image.Image, error) {
+	return applyImageColorProfile(ctx, source, profile, false)
+}
+
+// applyImageColorProfile 按源配置转换显示像素，缺省传递函数在浮点域解码
+// 入参: ctx 取消上下文, source 源像素, profile 颜色空间, linearSRGB 是否先解码sRGB传递函数
+// 返回: image.Image 十六位显示图像, error 变换或取消错误
+func applyImageColorProfile(ctx context.Context, source image.Image, profile *pdfgo.ColorSpace, linearSRGB bool) (image.Image, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -144,7 +151,16 @@ func applyTIFFColorProfile(ctx context.Context, source image.Image, profile *pdf
 				alpha = pixel.A
 				values = [4]float64{float64(pixel.R) / 65535, float64(pixel.G) / 65535, float64(pixel.B) / 65535}
 			}
-			rgb, err := profile.RGB(values[:profile.Components()], profile.DefaultIntent())
+			if linearSRGB {
+				for i := range 3 {
+					if values[i] <= 0.04045 {
+						values[i] /= 12.92
+					} else {
+						values[i] = math.Pow((values[i]+0.055)/1.055, 2.4)
+					}
+				}
+			}
+			rgb, err := profile.SRGB(values[:profile.Components()], profile.DefaultIntent())
 			if err != nil {
 				return nil, err
 			}
@@ -161,7 +177,7 @@ func applyTIFFColorProfile(ctx context.Context, source image.Image, profile *pdf
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return result, nil
+	return &colorImage{NRGBA64: result, source: source}, nil
 }
 
 // newTIFFProfileTable 为离散颜色分配查找表，预乘颜色及小图保持逐像素变换

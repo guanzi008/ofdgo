@@ -26,17 +26,21 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+
+	"github.com/xiaoqidun/pdfgo"
 )
 
 // EncodedImage 保留PNG或JPEG原始编码，首次读取像素时解码
 // Bytes返回只读数据，Image返回共享只读像素，解码错误由Image返回
 type EncodedImage struct {
-	data    []byte
-	format  string
-	config  image.Config
-	result  atomic.Pointer[encodedImageResult]
-	mu      sync.Mutex
-	pending chan struct{}
+	data     []byte
+	format   string
+	config   image.Config
+	profile  []byte
+	pngColor *pngColor
+	result   atomic.Pointer[encodedImageResult]
+	mu       sync.Mutex
+	pending  chan struct{}
 }
 
 // encodedImageResult 保存已完成的像素解码结果，不保存取消或超时错误
@@ -65,9 +69,14 @@ func (img *EncodedImage) Bytes() []byte { return img.data }
 // 返回: string 媒体类型
 func (img *EncodedImage) MIME() string { return "image/" + img.format }
 
-// ColorModel 返回头信息中的颜色模型，不解码像素
+// ColorModel 返回显示像素的颜色模型，不解码像素
 // 返回: color.Model 颜色模型
-func (img *EncodedImage) ColorModel() color.Model { return img.config.ColorModel }
+func (img *EncodedImage) ColorModel() color.Model {
+	if img.profile != nil || img.pngColor != nil || img.config.ColorModel == color.CMYKModel {
+		return color.NRGBA64Model
+	}
+	return img.config.ColorModel
+}
 
 // Bounds 返回图片范围，不解码像素
 // 返回: image.Rectangle 图片范围
@@ -131,6 +140,18 @@ func (img *EncodedImage) decodeContext(ctx context.Context, pending chan struct{
 		img.mu.Unlock()
 	}()
 	pixels, _, err := image.Decode(contextInput{ReadCloser: io.NopCloser(bytes.NewReader(img.data)), context: ctx})
+	if err == nil && (img.format == "jpeg" || img.profile != nil) {
+		var profile *pdfgo.ColorSpace
+		if img.profile != nil {
+			profile, err = pdfgo.NewICCColorSpace(img.profile)
+		}
+		if err == nil {
+			pixels, err = jpegDisplayImage(ctx, pixels, profile)
+		}
+	}
+	if err == nil && img.pngColor != nil {
+		pixels, err = applyImageColorProfile(ctx, pixels, img.pngColor.space, img.pngColor.linearSRGB)
+	}
 	if cancelErr := ctx.Err(); cancelErr != nil {
 		return nil, cancelErr
 	}
@@ -173,5 +194,18 @@ func newEncodedImageContext(ctx context.Context, data []byte) (*EncodedImage, er
 	if format != "jpeg" && format != "png" {
 		return nil, fmt.Errorf("unsupported encoded image %q", format)
 	}
-	return &EncodedImage{data: data, format: format, config: config}, nil
+	img := &EncodedImage{data: data, format: format, config: config}
+	if format == "jpeg" {
+		img.profile, err = jpegColorProfile(ctx, data, config.ColorModel)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if format == "png" {
+		img.profile, img.pngColor, err = pngColorProfile(ctx, data)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return img, nil
 }

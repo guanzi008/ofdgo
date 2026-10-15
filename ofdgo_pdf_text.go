@@ -325,7 +325,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	}
 	object.Boundary = pdfBoundary(box)
 	if stroke && !outlineStroke {
-		strokePaint, err := p.paintColor(mark.Style.Stroke, box)
+		strokePaint, err := p.paintColor(mark.Style.Stroke, box, mark.Style.RenderingIntent)
 		if err != nil {
 			return err
 		}
@@ -339,9 +339,12 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	object.Fill = &fill
 	object.Stroke = &stroke
 	object.Visible = &visible
-	object.FillColor = p.color(mark.Style.Fill)
+	object.FillColor, err = p.color(mark.Style.Fill, mark.Style.RenderingIntent)
+	if err != nil {
+		return err
+	}
 	if fill && !outlineStroke {
-		object.FillColor, err = p.paintColor(mark.Style.Fill, box)
+		object.FillColor, err = p.paintColor(mark.Style.Fill, box, mark.Style.RenderingIntent)
 		if err != nil {
 			return err
 		}
