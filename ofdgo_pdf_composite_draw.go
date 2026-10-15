@@ -230,6 +230,7 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 		}
 	}
 	var uniformValues [4]float64
+	var uniformPoint pdfgo.Point
 	uniformReady := false
 	var sampler *pdfCompositeColorSampler
 	if g := paint.Axial; (node.image == nil || node.image.Image.ImageMask) && shading == nil && g != nil && g.Bounds == nil && g.Background == nil {
@@ -243,6 +244,17 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 		return err
 	}
 	region := c.pixelBounds(bounds)
+	if sampler != nil && node.image == nil && !region.Empty() && c.inverse[1] == 0 && c.inverse[2] == 0 {
+		first := c.inverse.Apply(pdfgo.Point{X: c.box.X + (float64(region.Min.X)+.5)*step, Y: c.box.Y + (float64(region.Min.Y)+.5)*step})
+		last := c.inverse.Apply(pdfgo.Point{X: c.box.X + (float64(region.Max.X)-.5)*step, Y: c.box.Y + (float64(region.Max.Y)-.5)*step})
+		if sampler.constant(first, last) {
+			uniform, uniformPoint = true, first
+		}
+	}
+	var previous, composed pdfCompositePixel
+	var previousValues [4]float64
+	var previousAlpha float64
+	composedReady := false
 	for y := region.Min.Y; y < region.Max.Y; y++ {
 		if err := c.importer.ctx.Err(); err != nil {
 			return err
@@ -306,7 +318,9 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 				}
 			} else if uniform {
 				if !uniformReady {
-					if nativePaint != nil {
+					if sampler != nil {
+						uniformValues, _, err = sampler.color(uniformPoint)
+					} else if nativePaint != nil {
 						uniformValues = nativePaint.Values
 					} else {
 						uniformValues, _, err = codecpdf.CompositeColor(paint, pdfgo.Point{}, space, style.RenderingIntent, style.ColorConversion)
@@ -364,8 +378,15 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 					return err
 				}
 			} else {
-				if err := codecpdf.CompositePaintOver(&pixels[index], values, shape*opacity, space, mode, compatible, marked); err != nil {
-					return err
+				alpha := shape * opacity
+				if composedReady && pixels[index] == previous && values == previousValues && alpha == previousAlpha {
+					pixels[index] = composed
+				} else {
+					previous, previousValues, previousAlpha = pixels[index], values, alpha
+					if err := codecpdf.CompositePaintOver(&pixels[index], values, alpha, space, mode, compatible, marked); err != nil {
+						return err
+					}
+					composed, composedReady = pixels[index], true
 				}
 			}
 			pixels[index].Shape += shape * (1 - pixels[index].Shape)
@@ -794,7 +815,27 @@ func (c *pdfCompositor) imageColor(mark *pdfgo.ImageMark, point pdfgo.Point, spa
 	return values, alpha, err
 }
 
-// color 复用精确参数对应的颜色，区域、背景及其他画刷保持原求值路径
+// constant 判断轴向延伸是否覆盖整个采样区间，不近似渐变内部颜色
+// 入参: first 首个采样点, last 末个采样点
+// 返回: bool 是否恒定
+func (s *pdfCompositeColorSampler) constant(first, last pdfgo.Point) bool {
+	g := s.paint.Axial
+	if g == nil || g.Start.X != g.End.X && g.Start.Y != g.End.Y || g.Bounds != nil || g.Background != nil || s.paint.Function != nil || s.paint.Tiling != nil {
+		return false
+	}
+	if len(g.Stops) != 0 && (g.Stops[0].Position < 0 || g.Stops[len(g.Stops)-1].Position > 1) {
+		return false
+	}
+	position, err := g.PreparePosition()
+	if err != nil {
+		return false
+	}
+	a, visibleA := position.PositionAt(first)
+	b, visibleB := position.PositionAt(last)
+	return visibleA && visibleB && (a < 0 && b < 0 || a > 1 && b > 1)
+}
+
+// color 复用精确参数及端点延伸颜色，区域、背景及其他画刷保持原求值路径
 // 入参: point 页面坐标
 // 返回: [4]float64 混合分量, bool 是否着色, error 颜色错误
 func (s *pdfCompositeColorSampler) color(point pdfgo.Point) ([4]float64, bool, error) {
@@ -819,7 +860,21 @@ func (s *pdfCompositeColorSampler) color(point pdfgo.Point) ([4]float64, bool, e
 	if !visible {
 		return [4]float64{}, false, nil
 	}
-	if values, ok := s.values[position]; ok {
+	key := position
+	var colors []pdfgo.GradientStop
+	if g != nil {
+		colors = g.Stops
+	} else {
+		colors = r.Stops
+	}
+	if len(colors) == 0 || colors[0].Position >= 0 && colors[len(colors)-1].Position <= 1 {
+		if position < 0 {
+			key = math.Inf(-1)
+		} else if position > 1 {
+			key = math.Inf(1)
+		}
+	}
+	if values, ok := s.values[key]; ok {
 		return values, true, nil
 	}
 	var values [4]float64
@@ -844,11 +899,11 @@ func (s *pdfCompositeColorSampler) color(point pdfgo.Point) ([4]float64, bool, e
 			values, err = s.converter.Convert(values[:source.Components()])
 		}
 	}
-	if err == nil && g != nil && len(s.values) < 2*pdfCompositeTileSize {
+	if err == nil && (g != nil || key != position) && len(s.values) < 2*pdfCompositeTileSize {
 		if s.values == nil {
 			s.values = make(map[float64][4]float64)
 		}
-		s.values[position] = values
+		s.values[key] = values
 	}
 	return values, visible, err
 }

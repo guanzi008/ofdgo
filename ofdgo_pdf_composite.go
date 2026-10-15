@@ -883,6 +883,9 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 		transfers = make([]*pdfgo.TransferFunction, len(buffer))
 		previousTransfers = make([]*pdfgo.TransferFunction, len(buffer))
 	}
+	var colorValues [4]float64
+	var colorRGB [3]float64
+	colorReady := false
 	for y := 0; y < h; y += pdfCompositeTileSize {
 		for x := 0; x < w; x += pdfCompositeTileSize {
 			if err := p.ctx.Err(); err != nil {
@@ -933,7 +936,14 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 				} else if c.transfers != nil {
 					rgb, err = space.RGB(pixel.Values[:space.Components()], "RelativeColorimetric")
 				} else {
-					rgb, err = codecpdf.OutputColor(space, pixel.Values)
+					if colorReady && pixel.Values == colorValues {
+						rgb = colorRGB
+					} else {
+						rgb, err = codecpdf.OutputColor(space, pixel.Values)
+						if err == nil {
+							colorValues, colorRGB, colorReady = pixel.Values, rgb, true
+						}
+					}
 				}
 				if err != nil {
 					return err
