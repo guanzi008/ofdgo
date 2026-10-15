@@ -42,22 +42,40 @@ type editorXMLPatch struct {
 
 // editorXMLReader 在内存XML上直接读取字节，按块检查长词元的取消信号
 type editorXMLReader struct {
-	*bytes.Reader
-	ctx       context.Context
-	remaining uint16
+	data   []byte
+	offset int
+	ctx    context.Context
 }
 
 // ReadByte 读取XML词元字节，每4096字节检查取消状态
 // 返回: byte 当前字节, error 取消或读取错误
 func (r *editorXMLReader) ReadByte() (byte, error) {
-	if r.remaining == 0 {
+	if r.offset&4095 == 0 {
 		if err := r.ctx.Err(); err != nil {
 			return 0, err
 		}
-		r.remaining = 4096
 	}
-	r.remaining--
-	return r.Reader.ReadByte()
+	if r.offset >= len(r.data) {
+		return 0, io.EOF
+	}
+	b := r.data[r.offset]
+	r.offset++
+	return b, nil
+}
+
+// Read 读取XML原文字节并检查取消状态
+// 入参: p 接收缓冲区
+// 返回: int 已读字节数, error 取消或读取错误
+func (r *editorXMLReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if r.offset >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.offset:])
+	r.offset += n
+	return n, nil
 }
 
 // editorXMLPrefix 跳过UTF-8字节序标记和XML空白，探测后保留首个内容字节
@@ -106,7 +124,7 @@ func parseEditorXML(data []byte) (*editorXML, error) {
 func parseEditorXMLContext(ctx context.Context, data []byte) (*editorXML, error) {
 	var input io.Reader = bytes.NewReader(data)
 	if ctx != nil {
-		input = &editorXMLReader{Reader: bytes.NewReader(data), ctx: ctx}
+		input = &editorXMLReader{data: data, ctx: ctx}
 	}
 	d := xml.NewDecoder(input)
 	var root *editorXML

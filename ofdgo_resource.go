@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"cmp"
 	"context"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"path"
@@ -62,6 +63,15 @@ type resourceCatalog struct {
 	items  []ResourceInfo
 	nodes  map[string]editorFontText
 	images []editorFontText
+}
+
+// resourcePageFrame 保存流式页面扫描的图元归属及直接文本位置
+type resourcePageFrame struct {
+	name   string
+	object string
+	start  int
+	role   string
+	link   bool
 }
 
 // Resources 列出当前文档及所选版本的资源，标记缺失文件，不读取二进制内容或执行媒体动作
@@ -280,7 +290,9 @@ func (r *Reader) resourceCatalogMode(ctx context.Context, retain bool) (*resourc
 			return nil
 		}
 		return visit(root, "")
-	}, retain)
+	}, retain, func(file *editorFontXML) (bool, bool, []string, error) {
+		return scanResourcePage(ctx, file, pages, refs)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -325,6 +337,121 @@ func (r *Reader) resourceCatalogMode(ctx context.Context, retain bool) (*resourc
 		}
 	}
 	return catalog, ctx.Err()
+}
+
+// scanResourcePage 流式收集常规页面引用，特殊结构回退到完整节点扫描
+// 入参: ctx 取消上下文, file 页面原文, pages 文件页码, refs 已收集引用
+// 返回: bool 是否已处理, bool 引用是否不安全, []string 依赖路径, error 解析或取消错误
+func scanResourcePage(ctx context.Context, file *editorFontXML, pages map[string]int, refs map[string][]ResourceReference) (bool, bool, []string, error) {
+	d := xml.NewDecoder(&editorXMLReader{data: file.data, ctx: ctx})
+	var stack []resourcePageFrame
+	var links []string
+	local := make(map[string][]ResourceReference)
+	page, exists := pages[file.name]
+	if !exists {
+		page = -1
+	}
+	seen, unsafe := false, false
+	add := func(role, id, object string) {
+		key := editorResourceID(id)
+		if role == "AttachID" {
+			key = "Attachment/" + id
+		}
+		if key != "" {
+			local[key] = append(local[key], ResourceReference{File: file.name, Page: page, Object: object, Role: role})
+		}
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return true, false, nil, err
+		}
+		start := int(d.InputOffset())
+		token, err := d.Token()
+		if err == io.EOF {
+			if !seen {
+				return false, false, nil, nil
+			}
+			for key, values := range local {
+				refs[key] = append(refs[key], values...)
+			}
+			return true, unsafe, links, nil
+		}
+		if err != nil {
+			return true, false, nil, err
+		}
+		switch token := token.(type) {
+		case xml.StartElement:
+			if len(stack) == 0 {
+				if seen {
+					return true, false, nil, fmt.Errorf("multiple XML roots")
+				}
+				if token.Name.Local != "Page" {
+					return false, false, nil, nil
+				}
+				seen = true
+			}
+			if classifyOFDNamespace(token.Name.Space) == ofdXMLUnknown || slices.Contains([]string{"Attachments", "Signatures", "CustomTags", "Extensions", "ExtendData", "Data"}, token.Name.Local) {
+				return false, false, nil, nil
+			}
+			for _, attr := range token.Attr {
+				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != "http://www.w3.org/XML/1998/namespace" {
+					return false, false, nil, nil
+				}
+			}
+			frame := resourcePageFrame{name: token.Name.Local, start: start}
+			parent := ""
+			if len(stack) != 0 {
+				outer := stack[len(stack)-1]
+				if outer.role != "" || outer.link {
+					return false, false, nil, nil
+				}
+				frame.object, parent = outer.object, outer.name
+			}
+			node := editorXML{name: token.Name, attrs: token.Attr}
+			if slices.Contains([]string{"TextObject", "PathObject", "ImageObject", "CompositeObject"}, frame.name) {
+				frame.object = node.attr("ID")
+			}
+			if frame.name == "TextObject" || frame.name == "Text" && parent == "Area" {
+				unsafe = unsafe || editorResourceID(node.attr("Font")) == ""
+			}
+			for _, attr := range token.Attr {
+				if attr.Name.Space == "" && (editorResourceReferenceKind(attr.Name.Local, false) == editorReferenceID || attr.Name.Local == "AttachID") {
+					add(attr.Name.Local, attr.Value, frame.object)
+				}
+			}
+			if slices.Contains([]string{"Thumbnail", "Substitution", "DefaultCS"}, frame.name) {
+				frame.role = frame.name
+			}
+			value := ""
+			switch frame.name {
+			case "PublicRes", "DocumentRes", "PageRes", "Annotations":
+				frame.link = true
+			case "Page", "TemplatePage", "CompositeGraphicUnit":
+				value = node.attr("BaseLoc")
+			case "PageAnnot":
+				value = node.attr("FileLoc")
+			case "DrawParam":
+				value = node.attr("Link")
+			}
+			if value != "" {
+				links = append(links, resolveResourcePath(file.name, "", value))
+			}
+			stack = append(stack, frame)
+		case xml.EndElement:
+			frame := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if frame.role != "" || frame.link {
+				node := editorXML{start: frame.start, end: int(d.InputOffset())}
+				value := strings.TrimSpace(editorImportText(file.data, &node))
+				if frame.role != "" {
+					add(frame.role, value, frame.object)
+				}
+				if frame.link && value != "" {
+					links = append(links, resolveResourcePath(file.name, "", value))
+				}
+			}
+		}
+	}
 }
 
 // add 加入资源声明，拒绝同一类型内的重复标识

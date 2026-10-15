@@ -67,13 +67,14 @@ func scanEditorFonts(ctx context.Context, reader *Reader, index int) (*editorFon
 // 入参: ctx 取消上下文, reader 包快照, index 文档索引, inspect 可选的文件节点访问器
 // 返回: *editorFontDocument 字体引用, error 读取、结构或访问错误
 func scanEditorFontFiles(ctx context.Context, reader *Reader, index int, inspect func(*editorFontXML, *editorXML) error) (*editorFontDocument, error) {
-	return scanEditorFontFilesMode(ctx, reader, index, inspect, true)
+	return scanEditorFontFilesMode(ctx, reader, index, inspect, true, nil)
 }
 
 // scanEditorFontFilesMode 按需保留文字节点及原文，只读访问在扫描后释放非资源文件原文
 // 入参: ctx 取消上下文, reader 包快照, index 文档索引, inspect 可选的文件节点访问器, retain 是否保留编辑数据
+// stream 为可选的只读访问器，依次返回是否已处理、是否不安全、依赖路径及错误
 // 返回: *editorFontDocument 扫描结果, error 读取、结构或访问错误
-func scanEditorFontFilesMode(ctx context.Context, reader *Reader, index int, inspect func(*editorFontXML, *editorXML) error, retain bool) (*editorFontDocument, error) {
+func scanEditorFontFilesMode(ctx context.Context, reader *Reader, index int, inspect func(*editorFontXML, *editorXML) error, retain bool, stream func(*editorFontXML) (bool, bool, []string, error)) (*editorFontDocument, error) {
 	scan := &editorFontDocument{reader: reader, index: index, files: make(map[string]*editorFontXML), fonts: make(map[string]*editorFontDeclaration), texts: make(map[string][]editorFontText)}
 	entry, err := reader.documentEntryContext(ctx, index)
 	if err != nil {
@@ -93,11 +94,24 @@ func scanEditorFontFilesMode(ctx context.Context, reader *Reader, index int, ins
 		if err != nil {
 			return nil, err
 		}
+		file := &editorFontXML{name: name, data: data}
+		if !retain && stream != nil {
+			handled, unsafe, links, err := stream(file)
+			if err != nil {
+				return nil, err
+			}
+			if handled {
+				scan.files[name] = file
+				scan.unsafe = scan.unsafe || unsafe
+				queue = append(queue, links...)
+				file.data = nil
+				continue
+			}
+		}
 		root, err := parseEditorXMLContext(ctx, data)
 		if err != nil {
 			return nil, err
 		}
-		file := &editorFontXML{name: name, data: data}
 		scan.files[name] = file
 		base := ""
 		if root.matchesOFD("Res") {
