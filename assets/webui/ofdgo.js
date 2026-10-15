@@ -10593,7 +10593,8 @@ function fitWidthScale(page) {
 	page = pageViewSize(page);
 	const space = pageSpace();
 	const width = Math.max(1, page.width * MM_TO_PX);
-	let available = Math.max(1, el.viewerPanel.clientWidth - space * 2);
+	const frameWidth = Number.parseFloat(getComputedStyle(el.pageFrame).width) || el.viewerPanel.clientWidth;
+	let available = Math.max(1, frameWidth - space * 2);
 	if (!viewerHasVerticalScrollbar()) {
 		const limit = Math.max(1, el.viewerPanel.clientHeight - space * 2);
 		let height = Math.max(1, page.height * MM_TO_PX) * (available / width);
@@ -10740,14 +10741,16 @@ function viewerHasVerticalScrollbar() {
 
 function scrollbarWidth() {
 	const probe = document.createElement("div");
+	const content = document.createElement("div");
 	probe.style.position = "absolute";
 	probe.style.width = "100px";
 	probe.style.height = "100px";
 	probe.style.overflow = "scroll";
 	probe.style.scrollbarWidth = getComputedStyle(el.viewerPanel).scrollbarWidth;
 	probe.style.left = "-9999px";
+	probe.append(content);
 	document.body.append(probe);
-	const width = probe.offsetWidth - probe.clientWidth;
+	const width = 100 - Number.parseFloat(getComputedStyle(content).width);
 	probe.remove();
 	return width;
 }
