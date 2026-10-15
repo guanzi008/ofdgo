@@ -45,11 +45,16 @@ type encodedImageResult struct {
 	err   error
 }
 
-// NewEncodedImage 读取PNG或JPEG头信息，不解码像素，复制输入数据
+// NewEncodedImage 校验PNG或JPEG头信息后复制输入，不解码像素
 // 入参: data 原始编码
 // 返回: *EncodedImage 惰性图片, error 头信息或格式错误
 func NewEncodedImage(data []byte) (*EncodedImage, error) {
-	return newEncodedImage(bytes.Clone(data))
+	img, err := newEncodedImage(data)
+	if err != nil {
+		return nil, err
+	}
+	img.data = bytes.Clone(data)
+	return img, nil
 }
 
 // Bytes 返回只读原始编码，调用方不得修改
