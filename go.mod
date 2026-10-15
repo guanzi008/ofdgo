@@ -7,7 +7,7 @@ require (
 	github.com/emmansun/gmsm v0.45.0
 	github.com/go-text/typesetting v0.3.5
 	github.com/tdewolff/canvas v0.0.0-20260923214215-09804640d00c
-	github.com/tdewolff/font v0.0.0-20260822205238-d0d2f004b117
+	github.com/tdewolff/font v0.0.0-20261010204837-88a7f6b56918
 	github.com/xiaoqidun/j2kgo v1.0.1
 	github.com/xiaoqidun/jbig2 v1.1.7
 	github.com/xiaoqidun/pdfgo v0.0.0-20261014151159-d4a0b52ce73b
