@@ -10664,7 +10664,6 @@ function applyFit(updateStatus = true) {
 
 function setScale(nextScale, updateStatus = true, fitMode = "free") {
 	const anchor = updateStatus && fitMode === "free" ? scaleAnchor() : null;
-	// 适配缩放不受手动下限限制，避免大页面撑出视区。
 	const scale = Math.min(4, fitMode === "free" ? Math.max(0.2, nextScale) : nextScale);
 	const layoutChanged = scale !== state.scale || fitMode !== state.fitMode;
 	state.fitMode = fitMode;

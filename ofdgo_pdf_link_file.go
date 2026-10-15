@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -242,7 +243,7 @@ func (p *pdfImporter) embeddedLinkAction(object pdfgo.Object, strict bool) (*Act
 	return &Action{Event: "CLICK", GotoA: &GotoA{AttachID: id, NewWindow: action.NewWindow}}, nil, nil
 }
 
-// attachmentFile 添加或复用PDF附件，缺少显示名时使用固定名称，不改原始文件内容
+// attachmentFile 按原名及数据复用附件，兼容末尾NUL，缺名使用固定名称
 // 入参: name 附件显示名, data 原始文件数据
 // 返回: string 附件标识, error 附件写入错误
 func (p *pdfImporter) attachmentFile(name string, data []byte) (string, error) {
@@ -253,6 +254,12 @@ func (p *pdfImporter) attachmentFile(name string, data []byte) (string, error) {
 	if id, ok := p.attachmentIDs[key]; ok {
 		return id, nil
 	}
+	if p.warning != nil {
+		name = strings.TrimRight(name, "\x00")
+		if name == "" {
+			name = "Attachment"
+		}
+	}
 	id, err := p.editor.AddAttachment(name, data)
 	if err != nil {
 		return "", err
@@ -261,5 +268,8 @@ func (p *pdfImporter) attachmentFile(name string, data []byte) (string, error) {
 		p.attachmentIDs = make(map[pdfAttachmentKey]string)
 	}
 	p.attachmentIDs[key] = id
+	if name != key.name {
+		p.warning(pdfgo.Diagnostic{Message: "PDF attachment name trailing NUL removed; file data retained"})
+	}
 	return id, nil
 }
