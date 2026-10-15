@@ -234,7 +234,8 @@ func RunWASM() {
 	registerAsyncCallback("ofdgoExportDocument", exportDocument)
 	registerAsyncCallback("ofdgoExportAttachment", exportAttachment)
 	registerAsyncCallback("ofdgoExportMedia", exportMedia)
-	registerCallback("ofdgoResources", documentResources)
+	registerAsyncCallback("ofdgoResources", documentResources)
+	registerCallback("ofdgoResourceReferences", documentResourceReferences)
 	registerCallback("ofdgoResourceTargets", resourceTargets)
 	registerCallback("ofdgoResourceLocations", resourceLocations)
 	registerCallback("ofdgoFontPreview", fontPreview)
@@ -816,14 +817,28 @@ func exportMedia(args []js.Value) (any, error) {
 	return successResult(map[string]any{"format": media.Format, "kind": media.Type}), nil
 }
 
-// documentResources 读取当前文档和版本的资源及引用，不执行媒体动作
-// 入参: args 无参数
-// 返回: any 资源列表, error 读取错误
+// documentResources 读取当前文档和版本的资源摘要及引用总数，不执行媒体动作
+// 入参: args 可选的取消检查回调
+// 返回: any 资源摘要, error 读取错误
 func documentResources(args []js.Value) (any, error) {
 	if currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	return currentSession.Reader.Resources(context.Background())
+	ctx := context.Background()
+	if len(args) == 1 {
+		ctx = newOutputContext(args[0])
+	}
+	return currentSession.Reader.ResourceSummaries(ctx)
+}
+
+// documentResourceReferences 分页读取选中资源的引用位置
+// 入参: args 资源类型、标识、零基起始位置和最大数量
+// 返回: any 引用列表, error 参数或读取错误
+func documentResourceReferences(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) != 4 {
+		return nil, fmt.Errorf("invalid resource reference request")
+	}
+	return currentSession.Reader.ResourceReferences(context.Background(), args[0].String(), args[1].String(), args[2].Int(), args[3].Int())
 }
 
 // resourceTargets 列出当前页可绑定指定资源的图元及已有绑定状态

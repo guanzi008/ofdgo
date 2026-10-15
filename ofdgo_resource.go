@@ -41,6 +41,12 @@ type ResourceInfo struct {
 	References []ResourceReference `json:"references"`
 }
 
+// ResourceSummary 保存资源摘要及引用总数，内嵌ResourceInfo的References为空
+type ResourceSummary struct {
+	ResourceInfo
+	ReferenceCount int `json:"referenceCount"`
+}
+
 // ResourceReference 记录资源引用所在的XML及字段，Page为零基页码，非页面或多实例文件为-1
 // Object为最近的图元标识，模板、注解、图案和复合资源通过File区分，不推断其页面实例数
 type ResourceReference struct {
@@ -80,6 +86,46 @@ func (r *Reader) Resources(ctx context.Context) ([]ResourceInfo, error) {
 	return result, nil
 }
 
+// ResourceSummaries 列出资源摘要及引用总数，不复制引用明细
+// 入参: ctx 取消上下文
+// 返回: []ResourceSummary 资源摘要, error 查询错误
+func (r *Reader) ResourceSummaries(ctx context.Context) ([]ResourceSummary, error) {
+	items, err := r.resourceList(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]ResourceSummary, len(items))
+	for i, item := range items {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		result[i] = ResourceSummary{ResourceInfo: item, ReferenceCount: len(item.References)}
+		result[i].References = nil
+	}
+	return result, ctx.Err()
+}
+
+// ResourceReferences 分页读取当前文档及版本的资源引用，顺序与Resources一致
+// 入参: ctx 取消上下文, kind 类型, id 标识, offset 起始位置, limit 最大数量
+// 返回: []ResourceReference 独立引用副本, error 查询或分页参数错误
+func (r *Reader) ResourceReferences(ctx context.Context, kind, id string, offset, limit int) ([]ResourceReference, error) {
+	if offset < 0 || limit < 1 {
+		return nil, fmt.Errorf("invalid resource reference range")
+	}
+	items, err := r.resourceList(ctx)
+	if err != nil {
+		return nil, err
+	}
+	item, err := findResource(items, kind, id)
+	if err != nil {
+		return nil, err
+	}
+	if offset >= len(item.References) {
+		return []ResourceReference{}, ctx.Err()
+	}
+	return slices.Clone(item.References[offset : offset+min(limit, len(item.References)-offset)]), ctx.Err()
+}
+
 // OpenResource 打开当前资源的原始文件，ColorSpace导出ICC，无ICC或内联DrawParam不提供文件流
 // 外部字体同样无可导出的内嵌文件，定义读取使用ColorSpace或DrawParam
 // 入参: ctx 取消上下文, kind 资源类型, id 资源标识
@@ -113,7 +159,7 @@ func (r *Reader) resourceList(ctx context.Context) ([]ResourceInfo, error) {
 	if r.resourceInfoCache != nil {
 		return r.resourceInfoCache, nil
 	}
-	catalog, err := r.resourceCatalog(ctx)
+	catalog, err := r.resourceCatalogMode(ctx, false)
 	if err != nil {
 		return nil, err
 	}
@@ -126,6 +172,13 @@ func (r *Reader) resourceList(ctx context.Context) ([]ResourceInfo, error) {
 // 入参: ctx 取消上下文
 // 返回: *resourceCatalog 资源索引, error 结构或读取错误
 func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) {
+	return r.resourceCatalogMode(ctx, true)
+}
+
+// resourceCatalogMode 只读查询不保留图元节点及页面原文，编辑查询保留原节点
+// 入参: ctx 取消上下文, retain 是否保留编辑节点及原文
+// 返回: *resourceCatalog 资源索引, error 结构或读取错误
+func (r *Reader) resourceCatalogMode(ctx context.Context, retain bool) (*resourceCatalog, error) {
 	catalog := &resourceCatalog{nodes: make(map[string]editorFontText), items: []ResourceInfo{}}
 	pages := make(map[string]int)
 	doc, err := r.DocContext(ctx)
@@ -144,7 +197,7 @@ func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) 
 		pages[cleanPackagePath(r.ResPath(page.BaseLoc))] = -1
 	}
 	refs := make(map[string][]ResourceReference)
-	scan, err := scanEditorFontFiles(ctx, r, r.DocumentIndex(), func(file *editorFontXML, root *editorXML) error {
+	scan, err := scanEditorFontFilesMode(ctx, r, r.DocumentIndex(), func(file *editorFontXML, root *editorXML) error {
 		name := file.name
 		if root.matchesOFD("Res") {
 			for _, group := range root.children {
@@ -199,7 +252,7 @@ func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) 
 			if slices.Contains([]string{"TextObject", "PathObject", "ImageObject", "CompositeObject"}, node.name.Local) {
 				object = node.attr("ID")
 			}
-			if node.matchesOFD("ImageObject") {
+			if retain && node.matchesOFD("ImageObject") {
 				catalog.images = append(catalog.images, editorFontText{file: file, node: node})
 			}
 			add := func(role, id string) {
@@ -227,7 +280,7 @@ func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) 
 			return nil
 		}
 		return visit(root, "")
-	})
+	}, retain)
 	if err != nil {
 		return nil, err
 	}

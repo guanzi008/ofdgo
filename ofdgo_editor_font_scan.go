@@ -67,6 +67,13 @@ func scanEditorFonts(ctx context.Context, reader *Reader, index int) (*editorFon
 // 入参: ctx 取消上下文, reader 包快照, index 文档索引, inspect 可选的文件节点访问器
 // 返回: *editorFontDocument 字体引用, error 读取、结构或访问错误
 func scanEditorFontFiles(ctx context.Context, reader *Reader, index int, inspect func(*editorFontXML, *editorXML) error) (*editorFontDocument, error) {
+	return scanEditorFontFilesMode(ctx, reader, index, inspect, true)
+}
+
+// scanEditorFontFilesMode 按需保留文字节点及原文，只读访问在扫描后释放非资源文件原文
+// 入参: ctx 取消上下文, reader 包快照, index 文档索引, inspect 可选的文件节点访问器, retain 是否保留编辑数据
+// 返回: *editorFontDocument 扫描结果, error 读取、结构或访问错误
+func scanEditorFontFilesMode(ctx context.Context, reader *Reader, index int, inspect func(*editorFontXML, *editorXML) error, retain bool) (*editorFontDocument, error) {
 	scan := &editorFontDocument{reader: reader, index: index, files: make(map[string]*editorFontXML), fonts: make(map[string]*editorFontDeclaration), texts: make(map[string][]editorFontText)}
 	entry, err := reader.documentEntryContext(ctx, index)
 	if err != nil {
@@ -146,7 +153,9 @@ func scanEditorFontFiles(ctx context.Context, reader *Reader, index int, inspect
 			}
 			if node.matchesOFD("TextObject") || node.matchesOFD("Text") && node.parent != nil && node.parent.matchesOFD("Area") {
 				id := editorResourceID(node.attr("Font"))
-				scan.texts[id] = append(scan.texts[id], editorFontText{file: file, node: node})
+				if retain {
+					scan.texts[id] = append(scan.texts[id], editorFontText{file: file, node: node})
+				}
 				if id == "" {
 					scan.unsafe = true
 				}
@@ -183,6 +192,9 @@ func scanEditorFontFiles(ctx context.Context, reader *Reader, index int, inspect
 			if err := inspect(file, root); err != nil {
 				return nil, err
 			}
+		}
+		if !retain && !root.matchesOFD("Res") {
+			file.data = nil
 		}
 	}
 	if err := ctx.Err(); err != nil {
