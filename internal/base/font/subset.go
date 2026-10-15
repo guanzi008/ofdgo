@@ -227,9 +227,18 @@ func SubsetSourceSFNT(data []byte, usage *Usage) []byte {
 	for _, dependency := range dependencies {
 		glyphs[dependency] = true
 	}
-	var glyf, loca []byte
+	glyfSize := 0
+	for id, retained := range glyphs {
+		if retained {
+			data, _ := trueTypeGlyphData(sfnt.Tables, id)
+			glyfSize += len(data) + len(data)%2
+		}
+	}
+	locaFormat := binary.BigEndian.Uint16(sfnt.Tables["head"][50:])
+	glyf := make([]byte, 0, glyfSize)
+	loca := make([]byte, 0, (int(sfnt.NumGlyphs())+1)*(2+2*int(locaFormat)))
 	for id := 0; id <= int(sfnt.NumGlyphs()); id++ {
-		if binary.BigEndian.Uint16(sfnt.Tables["head"][50:]) == 0 {
+		if locaFormat == 0 {
 			loca = binary.BigEndian.AppendUint16(loca, uint16(len(glyf)/2))
 		} else {
 			loca = binary.BigEndian.AppendUint32(loca, uint32(len(glyf)))
