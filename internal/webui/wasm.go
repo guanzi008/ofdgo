@@ -132,6 +132,7 @@ type outputContext struct {
 	cancel     context.CancelFunc
 	checkpoint func() error
 	checked    time.Time
+	pending    uint8
 }
 
 // Write 将数据块交给浏览器保存
@@ -5490,6 +5491,11 @@ func (c *outputContext) Err() error {
 	if err := c.Context.Err(); err != nil {
 		return err
 	}
+	if c.pending != 0 {
+		c.pending--
+		return nil
+	}
+	c.pending = 15
 	if time.Since(c.checked) >= 50*time.Millisecond {
 		c.checked = time.Now()
 		if err := c.checkpoint(); err != nil {

@@ -250,6 +250,9 @@ func CompositeGroupRegion(ctx context.Context, pixels, initial, result []Composi
 	}
 	components, parentComponents := space.Components(), parent.Components()
 	var target pdfgo.ColorantPixel
+	var previous, previousInitial, previousResult, composed CompositePixel
+	var previousAlpha float64
+	ready := false
 	for y := region.Min.Y; y < region.Max.Y; y++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -265,6 +268,11 @@ func CompositeGroupRegion(ctx context.Context, pixels, initial, result []Composi
 				alpha *= mask[i]
 			}
 			pixel := &result[i]
+			if ready && pixels[i] == previous && initial[i] == previousInitial && *pixel == previousResult && alpha == previousAlpha {
+				pixels[i] = composed
+				continue
+			}
+			previous, previousInitial, previousResult, previousAlpha = pixels[i], initial[i], *pixel, alpha
 			target.Values = pixels[i].Values[:parentComponents]
 			target.Alpha = pixels[i].Alpha
 			target.Shape = pixels[i].Shape
@@ -277,6 +285,7 @@ func CompositeGroupRegion(ctx context.Context, pixels, initial, result []Composi
 				return err
 			}
 			pixels[i].Alpha, pixels[i].Effect, pixels[i].Shape = target.Alpha, target.Effect, target.Shape
+			composed, ready = pixels[i], true
 		}
 	}
 	return nil
