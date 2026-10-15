@@ -826,10 +826,8 @@ func encodeNumberCFF(buf *bytes.Buffer, val float64) {
 // 返回: []byte 编码后的索引数据
 func encodeCFFIndex(items []([]byte)) []byte {
 	count := len(items)
-	buf := new(bytes.Buffer)
-	binary.Write(buf, binary.BigEndian, uint16(count))
 	if count == 0 {
-		return buf.Bytes()
+		return []byte{0, 0}
 	}
 	totalSize := 0
 	for _, item := range items {
@@ -845,25 +843,21 @@ func encodeCFFIndex(items []([]byte)) []byte {
 	if totalSize+1 > 16777215 {
 		offSize = 4
 	}
-	buf.WriteByte(byte(offSize))
+	base := 3 + (count+1)*offSize
+	data := make([]byte, base+totalSize)
+	binary.BigEndian.PutUint16(data, uint16(count))
+	data[2] = byte(offSize)
 	offset := 1
-	putOffset(buf, offset, offSize)
-	for _, item := range items {
-		offset += len(item)
-		putOffset(buf, offset, offSize)
+	for i := 0; i <= count; i++ {
+		for j := 0; j < offSize; j++ {
+			data[3+i*offSize+offSize-1-j] = byte(offset >> (8 * j))
+		}
+		if i < count {
+			copy(data[base+offset-1:], items[i])
+			offset += len(items[i])
+		}
 	}
-	for _, item := range items {
-		buf.Write(item)
-	}
-	return buf.Bytes()
-}
-
-// putOffset 写入指定大小的偏移量
-// 入参: buf 缓冲区, val 偏移值, size 字节大小
-func putOffset(buf *bytes.Buffer, val int, size int) {
-	tmp := make([]byte, 4)
-	binary.BigEndian.PutUint32(tmp, uint32(val))
-	buf.Write(tmp[4-size:])
+	return data
 }
 
 // getCFFIndexCount 读取CFF索引的计数和大小
