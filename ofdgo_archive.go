@@ -55,6 +55,7 @@ func WriteArchive(ctx context.Context, writer io.Writer, files []ArchiveFile, op
 	var count int64
 	archive := zip.NewWriter(convertWriter{context: ctx, writer: writer, count: &count})
 	configureArchive(archive, options.Compression)
+	var buffer []byte
 	for i, file := range files {
 		if err := ctx.Err(); err != nil {
 			return count, err
@@ -77,7 +78,10 @@ func WriteArchive(ctx context.Context, writer io.Writer, files []ArchiveFile, op
 			return count, err
 		}
 		input := convertReader{context: ctx, source: file.Source}
-		written, err := io.Copy(entry, io.NewSectionReader(input, 0, file.Size))
+		if buffer == nil {
+			buffer = make([]byte, 32<<10)
+		}
+		written, err := io.CopyBuffer(entry, io.NewSectionReader(input, 0, file.Size), buffer)
 		if err != nil {
 			return count, err
 		}
@@ -99,10 +103,19 @@ func WriteArchive(ctx context.Context, writer io.Writer, files []ArchiveFile, op
 	return count, ctx.Err()
 }
 
-// configureArchive 统一逐页导出与批量归档的压缩等级
+// configureArchive 统一归档压缩等级，在单个归档内复用压缩器
 // 入参: archive 归档写入器, options 压缩配置
 func configureArchive(archive *zip.Writer, options CompressionOptions) {
 	if options.Mode != CompressionUnchanged {
-		archive.RegisterCompressor(zip.Deflate, func(writer io.Writer) (io.WriteCloser, error) { return flate.NewWriter(writer, flate.BestCompression) })
+		var compressor *flate.Writer
+		archive.RegisterCompressor(zip.Deflate, func(writer io.Writer) (io.WriteCloser, error) {
+			if compressor == nil {
+				var err error
+				compressor, err = flate.NewWriter(writer, flate.BestCompression)
+				return compressor, err
+			}
+			compressor.Reset(writer)
+			return compressor, nil
+		})
 	}
 }
