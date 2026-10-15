@@ -459,6 +459,11 @@ func GrayAt(img image.Image, x, y int) color.Gray {
 // 返回: color.NRGBA NRGBA像素
 func NRGBAAt(img image.Image, x, y int) color.NRGBA {
 	switch src := img.(type) {
+	case *image.NRGBA:
+		return src.NRGBAAt(x, y)
+	case *image.NRGBA64:
+		c := src.NRGBA64At(x, y)
+		return color.NRGBA{R: uint8(c.R >> 8), G: uint8(c.G >> 8), B: uint8(c.B >> 8), A: uint8(c.A >> 8)}
 	case interface{ NRGBAAt(int, int) color.NRGBA }:
 		return src.NRGBAAt(x, y)
 	case interface{ NRGBA64At(int, int) color.NRGBA64 }:
@@ -488,6 +493,27 @@ func NRGBAAt(img image.Image, x, y int) color.NRGBA {
 // 入参: img 图像, x 横坐标, y 纵坐标
 // 返回: uint32 十六位透明度
 func AlphaAt(img image.Image, x, y int) uint32 {
+	switch source := img.(type) {
+	case *image.RGBA:
+		if !(image.Point{X: x, Y: y}).In(source.Rect) {
+			return 0
+		}
+		return uint32(source.Pix[source.PixOffset(x, y)+3]) * 257
+	case *image.RGBA64:
+		if !(image.Point{X: x, Y: y}).In(source.Rect) {
+			return 0
+		}
+		i := source.PixOffset(x, y) + 6
+		return uint32(source.Pix[i])<<8 | uint32(source.Pix[i+1])
+	case *image.NRGBA:
+		return uint32(source.NRGBAAt(x, y).A) * 257
+	case *image.NRGBA64:
+		return uint32(source.NRGBA64At(x, y).A)
+	case *image.Alpha:
+		return uint32(source.AlphaAt(x, y).A) * 257
+	case *image.Alpha16:
+		return uint32(source.Alpha16At(x, y).A)
+	}
 	if source, ok := img.(image.RGBA64Image); ok {
 		return uint32(source.RGBA64At(x, y).A)
 	}

@@ -221,14 +221,34 @@ func rasterImageHorizontal(row []rasterImagePixel, src image.RGBA64Image, sample
 // 入参: dst 目标图像, output 行像素缓冲, values 累积颜色, x 横向起点, y 目标行坐标, op 合成操作
 func rasterImageWriteRow(dst draw.Image, output *image.RGBA64, values []rasterImagePixel, x, y int, op draw.Op) {
 	for i, value := range values {
-		output.SetRGBA64(i, 0, color.RGBA64{
-			R: uint16(min(max(min(value.r, value.a)+.5, 0), 65535)),
-			G: uint16(min(max(min(value.g, value.a)+.5, 0), 65535)),
-			B: uint16(min(max(min(value.b, value.a)+.5, 0), 65535)),
-			A: uint16(min(max(value.a+.5, 0), 65535)),
-		})
+		r := rasterImageComponent(value.r, value.a)
+		g := rasterImageComponent(value.g, value.a)
+		b := rasterImageComponent(value.b, value.a)
+		a := rasterImageComponent(value.a, value.a)
+		pixel := output.Pix[i*8 : i*8+8 : i*8+8]
+		pixel[0], pixel[1] = uint8(r>>8), uint8(r)
+		pixel[2], pixel[3] = uint8(g>>8), uint8(g)
+		pixel[4], pixel[5] = uint8(b>>8), uint8(b)
+		pixel[6], pixel[7] = uint8(a>>8), uint8(a)
 	}
 	draw.Draw(dst, image.Rect(x, y, x+len(values), y+1), output, image.Point{}, op)
+}
+
+// rasterImageComponent 按预乘透明度裁切并取整十六位分量
+// 入参: value 采样分量, alpha 采样透明度
+// 返回: uint16 输出分量
+func rasterImageComponent(value, alpha float64) uint16 {
+	if value > alpha || math.IsNaN(alpha) {
+		value = alpha
+	}
+	value += .5
+	if value <= 0 {
+		return 0
+	}
+	if value >= 65535 {
+		return 65535
+	}
+	return uint16(value)
 }
 
 // DrawPixels 对轴向缩放使用可分离采样，其余变换保留通用路径

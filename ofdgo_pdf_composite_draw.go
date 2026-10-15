@@ -811,8 +811,22 @@ func (c *pdfCompositor) imageColor(mark *pdfgo.ImageMark, point pdfgo.Point, spa
 	if process != nil || space.Equal(source.Space) {
 		return values, alpha, nil
 	}
-	values, err = space.ConvertWith(values[:source.Space.Components()], source.Space, mark.Style.RenderingIntent, mark.Style.ColorConversion)
-	return values, alpha, err
+	color := &c.cache.imageColor
+	if color.mark != mark || color.space != space || color.source != source.Space || color.intent != mark.Style.RenderingIntent || color.conversion != mark.Style.ColorConversion {
+		converter, err := space.PrepareConversion(source.Space, mark.Style.RenderingIntent, mark.Style.ColorConversion)
+		if err != nil {
+			return [4]float64{}, alpha, err
+		}
+		*color = pdfCompositeImageColor{mark: mark, space: space, source: source.Space, intent: mark.Style.RenderingIntent, conversion: mark.Style.ColorConversion, converter: converter}
+	}
+	if color.ready && color.input == values {
+		return color.output, alpha, nil
+	}
+	converted, err := color.converter.Convert(values[:source.Space.Components()])
+	if err == nil {
+		color.input, color.output, color.ready = values, converted, true
+	}
+	return converted, alpha, err
 }
 
 // constant 判断轴向延伸是否覆盖整个采样区间，不近似渐变内部颜色

@@ -101,6 +101,19 @@ type pdfImageProcessKey struct {
 	softMask bool
 }
 
+// pdfCompositeImageColor 复用图像颜色变换及相邻相同分量的精确结果
+type pdfCompositeImageColor struct {
+	mark       *pdfgo.ImageMark
+	space      *pdfgo.ColorSpace
+	source     *pdfgo.ColorSpace
+	intent     pdfgo.Name
+	conversion pdfgo.ColorConversion
+	converter  pdfgo.ColorConverter
+	input      [4]float64
+	output     [4]float64
+	ready      bool
+}
+
 // pdfCompositeCache 在单页内复用几何、图像分量及蒙版内容
 type pdfCompositeCache struct {
 	geometry        *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry]
@@ -109,6 +122,7 @@ type pdfCompositeCache struct {
 	images          map[*pdfgo.Image]*pdfgo.ImageComponents
 	imageMatrix     map[*pdfgo.ImageMark]pdfgo.Matrix
 	imageProcesses  map[pdfImageProcessKey]*pdfgo.ImageProcess
+	imageColor      pdfCompositeImageColor
 	masks           map[*pdfgo.SoftMask][]pdfCompositeNode
 	meshes          map[*pdfgo.MeshGradient][]pdfMeshTriangle
 	linearMeshes    *renderCache[pdfLinearMeshKey, []pdfgo.MeshTriangle]
