@@ -722,6 +722,7 @@ func WithTransparentEdge(ctx context.Context, img image.Image) (image.Image, int
 	hasZero, hasVisible := false, false
 	var pixels []byte
 	var stride, step int
+	wideAlpha := false
 	switch src := source.(type) {
 	case *image.NRGBA:
 		pixels, stride, step = src.Pix, src.Stride, 4
@@ -729,9 +730,17 @@ func WithTransparentEdge(ctx context.Context, img image.Image) (image.Image, int
 		pixels, stride, step = src.Pix, src.Stride, 4
 	case *image.Alpha:
 		pixels, stride, step = src.Pix, src.Stride, 1
+	case *image.NRGBA64:
+		pixels, stride, step, wideAlpha = src.Pix, src.Stride, 8, true
+	case *image.RGBA64:
+		pixels, stride, step, wideAlpha = src.Pix, src.Stride, 8, true
+	case *image.Alpha16:
+		pixels, stride, step, wideAlpha = src.Pix, src.Stride, 2, true
+	case *colorImage:
+		pixels, stride, step, wideAlpha = src.Pix, src.Stride, 8, true
 	}
 	if pixels != nil {
-		hasZero = pixels[step-1] == 0
+		hasZero = pixels[step-1] == 0 && (!wideAlpha || pixels[step-2] == 0)
 		hasVisible = !hasZero
 	scan:
 		for y := 0; y < h; y++ {
@@ -745,7 +754,7 @@ func WithTransparentEdge(ctx context.Context, img image.Image) (image.Image, int
 						return nil, 0, err
 					}
 				}
-				if (pixels[offset] == 0) != hasZero {
+				if (pixels[offset] == 0 && (!wideAlpha || pixels[offset-1] == 0)) != hasZero {
 					hasZero, hasVisible = true, true
 					break scan
 				}
