@@ -265,7 +265,25 @@ func DrawPixels(dst draw.Image, src image.Image, m [6]float64, op draw.Op) {
 	if drawRasterAxisImage(dst, src, m, op) {
 		return
 	}
+	src = rasterTransformSource(src, TransformBounds(b, m, dst.Bounds()))
 	draw.CatmullRom.Transform(dst, f64.Aff3{m[0], m[2], m[4], m[1], m[3], m[5]}, src, b, op, nil)
+}
+
+// rasterTransformSource 为放大的通用图像缓存十六位预乘像素，限制临时缓冲大小
+// 入参: src 源图像, affected 目标采样区域
+// 返回: image.Image 等值采样图像
+func rasterTransformSource(src image.Image, affected image.Rectangle) image.Image {
+	switch src.(type) {
+	case *image.RGBA, *image.RGBA64:
+		return src
+	}
+	b := src.Bounds()
+	if b.Empty() || affected.Empty() || b.Dx() > rasterScaleBufferLimit/8/b.Dy() || float64(affected.Dx())*float64(affected.Dy()) < float64(b.Dx())*float64(b.Dy()) {
+		return src
+	}
+	pixels := image.NewRGBA64(b)
+	draw.Draw(pixels, b, src, b.Min, draw.Src)
+	return pixels
 }
 
 // rasterScaleBounds 检查变换是否可无几何取整地使用缩放器，并限制其中间缓冲
