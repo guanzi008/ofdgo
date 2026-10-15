@@ -91,19 +91,21 @@ func FileTables(data []byte, index int) (map[string][]byte, error) {
 // 入参: data 表数据
 // 返回: uint32 校验和
 func calcTableChecksum(data []byte) uint32 {
-	var sum uint32
-	length := len(data)
-	for i := 0; i < length; i += 4 {
-		if i+4 <= length {
-			sum += binary.BigEndian.Uint32(data[i : i+4])
-		} else {
-			var val uint32
-			rem := data[i:]
-			for j, b := range rem {
-				val |= uint32(b) << (24 - 8*j)
-			}
-			sum += val
-		}
+	var a, b, c, d uint32
+	for len(data) >= 16 {
+		a += binary.BigEndian.Uint32(data[:4])
+		b += binary.BigEndian.Uint32(data[4:8])
+		c += binary.BigEndian.Uint32(data[8:12])
+		d += binary.BigEndian.Uint32(data[12:16])
+		data = data[16:]
+	}
+	sum := a + b + c + d
+	for len(data) >= 4 {
+		sum += binary.BigEndian.Uint32(data[:4])
+		data = data[4:]
+	}
+	for i, value := range data {
+		sum += uint32(value) << (24 - 8*i)
 	}
 	return sum
 }
