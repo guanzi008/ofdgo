@@ -40,6 +40,26 @@ type editorXMLPatch struct {
 	data       []byte
 }
 
+// editorXMLReader 在内存XML上直接读取字节，按块检查长词元的取消信号
+type editorXMLReader struct {
+	*bytes.Reader
+	ctx       context.Context
+	remaining uint16
+}
+
+// ReadByte 读取XML词元字节，每4096字节检查取消状态
+// 返回: byte 当前字节, error 取消或读取错误
+func (r *editorXMLReader) ReadByte() (byte, error) {
+	if r.remaining == 0 {
+		if err := r.ctx.Err(); err != nil {
+			return 0, err
+		}
+		r.remaining = 4096
+	}
+	r.remaining--
+	return r.Reader.ReadByte()
+}
+
 // editorXMLPrefix 跳过UTF-8字节序标记和XML空白，探测后保留首个内容字节
 // 入参: input 带缓冲的输入流，读取错误及取消信号由底层传递
 // 返回: bool 是否以XML标记起始, error 读取错误
@@ -86,7 +106,7 @@ func parseEditorXML(data []byte) (*editorXML, error) {
 func parseEditorXMLContext(ctx context.Context, data []byte) (*editorXML, error) {
 	var input io.Reader = bytes.NewReader(data)
 	if ctx != nil {
-		input = imageInput{ReadCloser: io.NopCloser(input), context: ctx}
+		input = &editorXMLReader{Reader: bytes.NewReader(data), ctx: ctx}
 	}
 	d := xml.NewDecoder(input)
 	var root *editorXML

@@ -133,6 +133,7 @@ type outputContext struct {
 	checkpoint func() error
 	checked    time.Time
 	pending    uint8
+	interval   uint8
 }
 
 // Write 将数据块交给浏览器保存
@@ -826,7 +827,9 @@ func documentResources(args []js.Value) (any, error) {
 	}
 	ctx := context.Background()
 	if len(args) == 1 {
-		ctx = newOutputContext(args[0])
+		operation := newOutputContext(args[0])
+		operation.interval = 255
+		ctx = operation
 	}
 	return currentSession.Reader.ResourceSummaries(ctx)
 }
@@ -5478,10 +5481,10 @@ func compressionFromJS(value js.Value, options *ofdgo.CompressionOptions) error 
 	return options.Validate()
 }
 
-// newOutputContext 创建单次串行导出的取消上下文
+// newOutputContext 创建单次串行操作的取消上下文
 // 入参: checkpoint 浏览器取消检查回调
-// 返回: context.Context 导出上下文
-func newOutputContext(checkpoint js.Value) context.Context {
+// 返回: *outputContext 操作上下文
+func newOutputContext(checkpoint js.Value) *outputContext {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &outputContext{Context: ctx, cancel: cancel, checkpoint: func() error { return awaitExport(checkpoint) }}
 }
@@ -5500,7 +5503,7 @@ func newEditorOperationContext(callback js.Value) (context.Context, func(string,
 	}
 }
 
-// Err 在取消检查间隙处理浏览器消息，不为每个像素触发跨语言回调
+// Err 按操作间隔检查时间并处理浏览器消息，每次调用均检查已有取消状态
 // 返回: error 取消错误
 func (c *outputContext) Err() error {
 	if err := c.Context.Err(); err != nil {
@@ -5511,6 +5514,9 @@ func (c *outputContext) Err() error {
 		return nil
 	}
 	c.pending = 15
+	if c.interval != 0 {
+		c.pending = c.interval
+	}
 	if time.Since(c.checked) >= 50*time.Millisecond {
 		c.checked = time.Now()
 		if err := c.checkpoint(); err != nil {
