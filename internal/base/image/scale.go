@@ -56,12 +56,12 @@ func (s rasterImageSource) RGBA64At(x, y int) color.RGBA64 {
 	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
 }
 
-// drawRasterAxisImage 按像素中心进行轴向缩小，逐行复用横向采样并保留镜像与小数坐标
+// drawRasterAxisImage 按像素中心进行轴向缩放，逐行复用横向采样并保留镜像与小数坐标
 // 入参: dst 目标图像, src 源图像, m 像素变换, op 合成操作
 // 返回: bool 是否使用轴向采样
 func drawRasterAxisImage(dst draw.Image, src image.Image, m [6]float64, op draw.Op) bool {
 	sx, sy := math.Abs(m[0]), math.Abs(m[3])
-	if m[1] != 0 || m[2] != 0 || sx == 0 || sy == 0 || sx > 1 || sy > 1 || sx == 1 && sy == 1 {
+	if m[1] != 0 || m[2] != 0 || sx == 0 || sy == 0 {
 		return false
 	}
 	for _, v := range m {
@@ -76,6 +76,9 @@ func drawRasterAxisImage(dst draw.Image, src image.Image, m [6]float64, op draw.
 	r := TransformBounds(b, m, dst.Bounds())
 	if r.Empty() {
 		return true
+	}
+	if float64(r.Dx())*math.Min(float64(r.Dy()), math.Ceil(4*math.Max(1, sy))+2) > rasterScaleBufferLimit/32 {
+		return false
 	}
 	xs := rasterImageAxis(r.Min.X, r.Max.X, b.Min.X, b.Max.X, m[0], m[4])
 	ys := rasterImageAxis(r.Min.Y, r.Max.Y, b.Min.Y, b.Max.Y, m[3], m[5])
@@ -142,7 +145,7 @@ func drawRasterAxisImage(dst draw.Image, src image.Image, m [6]float64, op draw.
 // 返回: []rasterAxisSample 轴向采样表
 func rasterImageAxis(first, end, source, limit int, scale, offset float64) []rasterAxisSample {
 	result := make([]rasterAxisSample, 0, end-first)
-	argument := math.Abs(scale)
+	argument := math.Min(1, math.Abs(scale))
 	support := draw.CatmullRom.Support / argument
 	for pixel := first; pixel < end; pixel++ {
 		center := (float64(pixel) + .5 - offset) / scale
@@ -228,7 +231,7 @@ func rasterImageWriteRow(dst draw.Image, output *image.RGBA64, values []rasterIm
 	draw.Draw(dst, image.Rect(x, y, x+len(values), y+1), output, image.Point{}, op)
 }
 
-// DrawPixels 对轴向缩小使用可分离采样，其余变换保留通用路径
+// DrawPixels 对轴向缩放使用可分离采样，其余变换保留通用路径
 // 入参: dst 目标图像, src 源图像, m 按a、b、c、d、e、f排列的像素变换, op 合成操作
 func DrawPixels(dst draw.Image, src image.Image, m [6]float64, op draw.Op) {
 	b := src.Bounds()

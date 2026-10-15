@@ -658,11 +658,26 @@ func (c *pdfCompositor) mask(mask *pdfgo.SoftMask, inherited *pdfgo.ColorSpace) 
 			c.scratch.masks.release(result)
 		}
 	}()
+	values := make(map[[4]float64]float64)
+	var previous [4]float64
+	var opacity float64
 	for i, pixel := range pixels {
 		if i%pdfCompositeTileSize == 0 {
 			if err := c.importer.ctx.Err(); err != nil {
 				return nil, err
 			}
+		}
+		key := [4]float64{pixel.Alpha}
+		if mask.Subtype == "Luminosity" {
+			key = pixel.Values
+		}
+		if i != 0 && key == previous {
+			result[i] = opacity
+			continue
+		}
+		if cached, ok := values[key]; ok {
+			previous, opacity, result[i] = key, cached, cached
+			continue
 		}
 		v := pixel.Alpha
 		if mask.Subtype == "Luminosity" {
@@ -674,6 +689,10 @@ func (c *pdfCompositor) mask(mask *pdfgo.SoftMask, inherited *pdfgo.ColorSpace) 
 		result[i], err = mask.Transfer(v)
 		if err != nil {
 			return nil, err
+		}
+		previous, opacity = key, result[i]
+		if len(values) < 2*pdfCompositeTileSize {
+			values[key] = opacity
 		}
 	}
 	complete = true
