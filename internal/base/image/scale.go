@@ -94,7 +94,6 @@ func drawRasterAxisImage(dst draw.Image, src image.Image, m [6]float64, op draw.
 	}
 	width := len(xs)
 	horizontal := make([]rasterImagePixel, width)
-	columns := make([]int, width)
 	output := image.NewRGBA64(image.Rect(0, 0, width, 1))
 	var active []rasterImageRow
 	var free [][]rasterImagePixel
@@ -114,7 +113,7 @@ func drawRasterAxisImage(dst draw.Image, src image.Image, m [6]float64, op draw.
 			active = append(active, rasterImageRow{sample: ys[next], values: row})
 			next++
 		}
-		rasterImageHorizontal(horizontal, pixels, xs, y, columns)
+		rasterImageHorizontal(horizontal, pixels, xs, y)
 		n := 0
 		for _, row := range active {
 			weight := row.sample.weights[y-row.sample.first]
@@ -185,16 +184,17 @@ func rasterImageAxis(first, end, source, limit int, scale, offset float64) []ras
 }
 
 // rasterImageHorizontal 按源列复用像素，保留各目标像素的权重累加顺序与中间精度
-// 入参: row 横向缓冲, src 源像素, samples 采样表, y 源行坐标, columns 活动列缓冲
-func rasterImageHorizontal(row []rasterImagePixel, src image.RGBA64Image, samples []rasterAxisSample, y int, columns []int) {
+// 入参: row 横向缓冲, src 源像素, samples 采样表, y 源行坐标
+func rasterImageHorizontal(row []rasterImagePixel, src image.RGBA64Image, samples []rasterAxisSample, y int) {
 	clear(row)
-	reversed := samples[0].first > samples[len(samples)-1].first
+	first, last := samples[0], samples[len(samples)-1]
+	reversed := first.first > last.first || first.first == last.first && len(first.weights) > len(last.weights)
 	start, end := samples[0].first, samples[0].first+len(samples[0].weights)
 	for _, sample := range samples[1:] {
 		start = min(start, sample.first)
 		end = max(end, sample.first+len(sample.weights))
 	}
-	next, count := 0, 0
+	active, next := 0, 0
 	for x := start; x < end; x++ {
 		for next < len(samples) {
 			index := next
@@ -204,13 +204,24 @@ func rasterImageHorizontal(row []rasterImagePixel, src image.RGBA64Image, sample
 			if samples[index].first > x {
 				break
 			}
-			columns[count] = index
-			count++
 			next++
 		}
+		for active < next {
+			index := active
+			if reversed {
+				index = len(samples) - active - 1
+			}
+			if x < samples[index].first+len(samples[index].weights) {
+				break
+			}
+			active++
+		}
 		p := src.RGBA64At(x, y)
-		n := 0
-		for _, index := range columns[:count] {
+		for column := active; column < next; column++ {
+			index := column
+			if reversed {
+				index = len(samples) - column - 1
+			}
 			sample := samples[index]
 			weight := sample.weights[x-sample.first]
 			if weight != 0 {
@@ -220,12 +231,7 @@ func rasterImageHorizontal(row []rasterImagePixel, src image.RGBA64Image, sample
 				value.b += float64(p.B) * weight
 				value.a += float64(p.A) * weight
 			}
-			if x+1 < sample.first+len(sample.weights) {
-				columns[n] = index
-				n++
-			}
 		}
-		count = n
 	}
 }
 
