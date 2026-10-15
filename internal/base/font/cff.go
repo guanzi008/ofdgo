@@ -1355,16 +1355,17 @@ func adobeGB1CIDToUnicode(cid int) (rune, bool) {
 	if row < 16 || row > 87 || cell < 1 || cell > 94 {
 		return 0, false
 	}
-	gbk := []byte{byte(row + 0xA0), byte(cell + 0xA0)}
-	decoded, err := simplifiedchinese.GBK.NewDecoder().Bytes(gbk)
-	if err != nil || len(decoded) == 0 {
+	gbk := [2]byte{byte(row + 0xA0), byte(cell + 0xA0)}
+	var decoded [2 * utf8.UTFMax]byte
+	nDst, nSrc, err := simplifiedchinese.GBK.NewDecoder().Transform(decoded[:], gbk[:], true)
+	if err != nil || nDst == 0 || nSrc != len(gbk) {
 		return 0, false
 	}
-	rs := []rune(string(decoded))
-	if len(rs) != 1 {
+	r, size := utf8.DecodeRune(decoded[:nDst])
+	if size != nDst {
 		return 0, false
 	}
-	return rs[0], true
+	return r, true
 }
 
 // getUnicodeFromName 根据字形名称获取对应的Unicode字符
