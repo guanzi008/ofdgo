@@ -89,7 +89,8 @@ func (r *Renderer) parseColorWithAlpha(value string, index *int, space string, a
 // 返回: string 颜色模型, [4]float64 单位分量, error 颜色定义错误
 func (r *Renderer) colorComponents(value string, index *int, space string) (string, [4]float64, error) {
 	cs := r.colorDefinition(space)
-	if cs == nil && (space != "" || r.Reader != nil && r.Reader.doc != nil && r.Reader.doc.CommonData.DefaultCS != 0) {
+	defaultSpace := r.Reader != nil && r.Reader.doc != nil && r.Reader.doc.CommonData.DefaultCS != 0
+	if cs == nil && (defaultSpace || space != "" && (index != nil || len(strings.Fields(value)) != 3)) {
 		if space == "" {
 			space = strconv.Itoa(r.Reader.doc.CommonData.DefaultCS)
 		}
