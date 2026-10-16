@@ -1815,6 +1815,10 @@ body[data-hide-meta] .meta-panel {
 	max-width: calc(100vw - 26px);
 }
 
+.invoice-dialog .settings-body {
+	padding-top: 12px;
+}
+
 .invoice-tabs {
 	display: flex;
 	gap: 16px;
@@ -1910,10 +1914,11 @@ body[data-hide-meta] .meta-panel {
 }
 
 .invoice-dialog .settings-footer {
-	flex-wrap: nowrap;
+	flex-wrap: wrap;
 }
 
 .invoice-dialog #settingsStatus {
+	order: 1;
 	min-width: 0;
 	max-height: 6em;
 	overflow: auto;
@@ -1922,12 +1927,17 @@ body[data-hide-meta] .meta-panel {
 }
 
 .invoice-dialog #settingsActions {
-	flex: 1 0 auto;
+	display: contents;
+}
+
+.invoice-dialog #settingsActions .settings-close {
+	order: 2;
 }
 
 @media (max-width: 600px) {
-	.invoice-dialog #settingsActions {
-		flex: 1 1 auto;
+	.invoice-dialog #settingsStatus {
+		order: 3;
+		flex-basis: 100%;
 	}
 }
 
