@@ -26,8 +26,9 @@ const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name"
 const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Kind", "List", "Empty", "Reference", "ReferenceGroup", "Actions", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "BindingActions", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
 const resourceManager = { items: [], selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
 const settingsElements = Object.fromEntries(["Button", "Panel", "Form", "Title", "Kind", "Context", "Content", "Actions", "Status"].map(name => [name, document.querySelector(`#settings${name}`)]));
-const settings = { sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false };
+const settings = { sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false, invoice: false };
 const invoicePanel = { tab: "basic", entries: [], formats: [], drafts: new Map(), key: "", result: null };
+const invoiceDocuments = new WeakMap();
 
 let wasmPromise = null;
 let remoteDownload = null;
@@ -253,6 +254,7 @@ const el = {
 	documentSelect: document.querySelector("#documentSelect"),
 	documentActions: document.querySelector("#documentActions"),
 	documentManageButton: document.querySelector("#documentManageButton"),
+	invoiceButton: document.querySelector("#invoiceButton"),
 	documentPanel: document.querySelector("#documentPanel"),
 	documentForm: document.querySelector("#documentForm"),
 	documentList: document.querySelector("#documentList"),
@@ -1528,7 +1530,8 @@ el.annotationsTab.addEventListener("click", () => showNavigation(el.annotationsT
 el.annotationsFilter.addEventListener("input", renderAnnotationSummary);
 el.annotationsKind.addEventListener("change", renderAnnotationSummary);
 el.versionExport.addEventListener("click", exportManagedVersion);
-editorClick(settingsElements.Button, openDocumentSettings);
+editorClick(settingsElements.Button, () => openDocumentSettings());
+editorClick(el.invoiceButton, () => openDocumentSettings(true));
 settingsElements.Kind.addEventListener("change", () => { rememberSettingsDraft(); settings.selected = -1; loadDocumentSettings(); });
 settingsElements.Form.addEventListener("submit", event => event.preventDefault());
 settingsElements.Panel.addEventListener("cancel", event => { event.preventDefault(); closeDocumentSettings(); });
@@ -4624,7 +4627,7 @@ async function openSelectedFonts(event) {
 		if (changed) {
 			await applyFontChange();
 			if (resourceElements.Panel.open) await resourceTask(loadManagedResources);
-			if (settingsElements.Panel.open && settingsElements.Kind.value === "invoices") { await loadEditorFonts(); renderDocumentSettings(); }
+			if (settingsElements.Panel.open && settings.invoice) { await loadEditorFonts(); renderDocumentSettings(); }
 		}
 		setStatus(saved ? "字体已保存" : "字体未保存，仅本次可用");
 	} catch (err) {
@@ -5479,7 +5482,7 @@ function restoreSettingsDraft() {
 function closeDocumentSettings() {
 	if (settings.busy) return;
 	rememberSettingsDraft();
-	if ((settings.drafts.size || [...invoicePanel.drafts.values()].some(draft => draft.dirty.size)) && !window.confirm("配置尚未应用，放弃更改？")) return;
+	if ((settings.drafts.size || [...invoicePanel.drafts.values()].some(draft => draft.dirty.size)) && !window.confirm(settings.invoice ? "发票尚未应用，放弃更改？" : "配置尚未应用，放弃更改？")) return;
 	settingsElements.Panel.close();
 }
 
@@ -5502,11 +5505,18 @@ function settingsValue(id) {
 	return field?.type === "checkbox" ? field.checked : field?.value ?? "";
 }
 
-async function openDocumentSettings() {
-	invoicePanel.drafts.clear();
-	invoicePanel.key = "";
+async function openDocumentSettings(invoice = false) {
 	if (!state.doc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy")) return;
 	if (resourceManager.pick?.settings) { finishResourcePick(); return; }
+	invoicePanel.drafts.clear();
+	invoicePanel.key = "";
+	settings.invoice = invoice;
+	settingsElements.Kind.closest("label").hidden = invoice;
+	settingsElements.Title.textContent = invoice ? "电子发票" : "文档配置";
+	settingsElements.Panel.classList.toggle("invoice-dialog", invoice);
+	settingsElements.Context.replaceChildren();
+	settingsElements.Content.replaceChildren();
+	settingsElements.Actions.replaceChildren();
 	settings.page = state.pageIndex;
 	settings.object = canvasEditor.selected?.index === settings.page && !canvasEditor.selected.scoped ? canvasEditor.selected.id : "";
 	settings.path = state.outlineSelection || [];
@@ -5523,6 +5533,8 @@ async function openDocumentSettings() {
 
 async function openResourceSettings(kind, id) {
 	if (!state.doc || !state.ready || document.body.hasAttribute("aria-busy")) return;
+	settings.invoice = false;
+	settingsElements.Kind.closest("label").hidden = false;
 	settings.resource = {kind, id};
 	settings.selected = -1;
 	settings.drafts.clear();
@@ -5539,7 +5551,7 @@ async function openResourceSettings(kind, id) {
 
 async function loadDocumentSettings() {
 	const sequence = ++settings.sequence, openSeq = state.openSeq;
-	const kind = settingsElements.Kind.value;
+	const kind = settings.invoice ? "invoices" : settingsElements.Kind.value;
 	settings.busy = true;
 	settingsElements.Form.inert = true;
 	settingsElements.Status.textContent = "正在读取信息";
@@ -5594,7 +5606,7 @@ function renderDocumentSettings() {
 	settingsElements.Context.replaceChildren();
 	settingsElements.Content.replaceChildren();
 	settingsElements.Actions.replaceChildren();
-	const kind = settingsElements.Kind.value;
+	const kind = settings.invoice ? "invoices" : settingsElements.Kind.value;
 	settings.renderedKind = kind;
 	const location = document.querySelector("#settingsLocation"), doc = state.doc;
 	if (location) {
@@ -5602,7 +5614,7 @@ function renderDocumentSettings() {
 		location.textContent = `${current?.title || current?.name || `文档${(doc?.documentIndex || 0) + 1}`}${doc?.documentVersion ? ` · 版本${doc.documentVersion}` : ""}`;
 		location.hidden = !(doc?.documents?.length > 1 || doc?.documentVersion);
 	}
-	settingsElements.Title.textContent = {ColorSpace: "色彩设置", DrawParam: "样式设置"}[kind] || "文档配置";
+	settingsElements.Title.textContent = {ColorSpace: "色彩设置", DrawParam: "样式设置", invoices: "电子发票"}[kind] || "文档配置";
 	settingsElements.Panel.classList.toggle("invoice-dialog", kind === "invoices");
 	if (kind === "invoices") {
 		renderInvoiceSettings();
@@ -5652,11 +5664,12 @@ function invoiceCandidates(invoices) {
 }
 
 async function loadInvoiceSettings(sequence, openSeq) {
-	const data = await callWASM("ofdgoInvoices");
+	const cached = !state.editing && invoiceDocuments.get(state.doc);
+	const data = cached?.openSeq === openSeq && cached.data ? cached.data : await callWASM("ofdgoInvoices");
 	if (sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
 	invoicePanel.entries = invoiceCandidates(data.report?.invoices);
 	invoicePanel.formats = data.formats || [];
-	invoicePanel.issues = data.report?.issues || [];
+	invoicePanel.issues = (data.report?.issues || []).filter(issue => issue.code !== "missing-data");
 	if (!invoicePanel.drafts.has(invoicePanel.key) && !invoicePanel.entries.some(entry => entry.key === invoicePanel.key)) invoicePanel.key = invoicePanel.entries[0]?.key || "";
 	const entry = invoicePanel.entries.find(entry => entry.key === invoicePanel.key);
 	if (entry && !invoicePanel.drafts.has(entry.key)) {
@@ -6194,7 +6207,7 @@ function renderInvoiceAppearance(container, draft) {
 						value.scope.revision = next.revision;
 					}
 				}
-				if (settingsElements.Panel.open && settingsElements.Kind.value === "invoices") renderDocumentSettings();
+				if (settingsElements.Panel.open && settings.invoice) renderDocumentSettings();
 			};
 			await openFontBinding(font);
 			if (fontBindingElements.Panel.open) fontBindingElements.Panel.addEventListener("close", refresh, { once: true });
@@ -6215,7 +6228,7 @@ function renderInvoiceAppearance(container, draft) {
 				if (!font) throw new Error("所选字体不可用");
 				fontData = invoiceBase64(await readTextFont(font));
 			}
-			if (openSeq !== state.openSeq || sequence !== settings.sequence || invoiceCurrent() !== draft || !settingsElements.Panel.open || settingsElements.Kind.value !== "invoices") return;
+			if (openSeq !== state.openSeq || sequence !== settings.sequence || invoiceCurrent() !== draft || !settingsElements.Panel.open || !settings.invoice) return;
 			if (draft.dirty.size || draft.fontChoice !== fontChoice || JSON.stringify(draft.layout) !== JSON.stringify(layout)) throw new Error("内容已变更，请重新生成");
 			await commitInvoice(draft, { operation: "generate", layout, fontData });
 		}, !capabilities.generate, "InvoiceGenerate", details, capabilities.reasons?.generate || (draft.bindings.length ? "请先解除绑定" : ""));
@@ -6353,9 +6366,9 @@ function invoiceBase64(bytes) {
 
 async function commitInvoice(draft, request) {
 	if (!state.editing || settings.busy || document.body.hasAttribute("aria-busy")) return;
-	if (!settingsElements.Panel.open || settingsElements.Kind.value !== "invoices" || invoiceCurrent() !== draft) return;
+	if (!settingsElements.Panel.open || !settings.invoice || invoiceCurrent() !== draft) return;
 	const scope = invoiceScope();
-	if (draft.scope.documentIndex !== scope.documentIndex || draft.scope.version !== scope.version || draft.scope.revision !== scope.revision) throw new Error("文档已变更，请重新打开配置");
+	if (draft.scope.documentIndex !== scope.documentIndex || draft.scope.version !== scope.version || draft.scope.revision !== scope.revision) throw new Error("文档已变更，请重新打开发票");
 	const key = invoicePanel.key;
 	settings.busy = true;
 	settingsElements.Form.inert = true;
@@ -6384,7 +6397,7 @@ async function commitInvoice(draft, request) {
 				}
 			}
 		}
-		if (!settingsElements.Panel.open || settingsElements.Kind.value !== "invoices" || invoicePanel.key !== key) return;
+		if (!settingsElements.Panel.open || !settings.invoice || invoicePanel.key !== key) return;
 		if (result?.source?.kind) invoicePanel.key = JSON.stringify([invoiceSourceKey(result.source), draft.entry?.index || 0]);
 		await loadDocumentSettings();
 		const warning = invoiceIssues(result?.issues);
@@ -11615,6 +11628,26 @@ function updateFitSpace() {
 	el.pageFrame.style.setProperty("--fit-gap", `${gap}px`);
 }
 
+function updateInvoiceControl(disabled) {
+	const doc = state.doc, openSeq = state.openSeq;
+	el.invoiceButton.disabled = disabled;
+	el.invoiceButton.hidden = !doc || !state.editing;
+	if (!doc || state.editing) return;
+	let cached = invoiceDocuments.get(doc);
+	if (cached?.openSeq !== openSeq) cached = null;
+	if (!cached && !disabled) {
+		cached = {openSeq, available: false, data: null};
+		invoiceDocuments.set(doc, cached);
+		callWASM("ofdgoInvoices").then(data => {
+			cached.data = data;
+			cached.available = !!(data.report?.invoices?.length || data.report?.issues?.some(issue => issue.code !== "missing-data"));
+		}).catch(() => { cached.available = true; }).finally(() => {
+			if (state.doc === doc && state.openSeq === openSeq) updateDocumentControls();
+		});
+	}
+	el.invoiceButton.hidden = !cached?.available;
+}
+
 function updateDocumentControls() {
 	const count = state.doc?.documents?.length || 0, index = managedDocumentIndex(), manager = state.documentManagement;
 	const busy = document.body.hasAttribute("aria-busy");
@@ -11623,6 +11656,7 @@ function updateDocumentControls() {
 	el.documentManageButton.disabled = disabled;
 	resourceElements.ManageButton.disabled = disabled;
 	settingsElements.Button.disabled = disabled;
+	updateInvoiceControl(disabled);
 	updateResourceControls();
 	el.documentRow.hidden = !count || !state.editing && count < 2;
 	el.documentSelect.disabled = disabled;
