@@ -41,6 +41,20 @@ type InvoiceFormat struct {
 	Items    bool   `json:"items"`
 }
 
+// InvoiceFieldDescriptor 发票字段描述
+// Item为从0开始的明细索引，非明细字段为-1
+// Type为text、decimal、date或datetime，Editable表示字段支持编辑，提交时仍需校验
+type InvoiceFieldDescriptor struct {
+	Field    string `json:"field"`
+	Label    string `json:"label"`
+	Group    string `json:"group"`
+	Type     string `json:"type"`
+	Item     int    `json:"item"`
+	Value    string `json:"value"`
+	Editable bool   `json:"editable"`
+	Bindable bool   `json:"bindable"`
+}
+
 // InvoiceFieldChange 修改已有叶节点，Revision为源XML的SHA256十六进制摘要
 // 未提供Revision时必须提供ExpectedValue，ExpectedNil缺省表示原节点非空值
 type InvoiceFieldChange struct {
@@ -95,6 +109,100 @@ type invoiceXMLSpan struct {
 type invoiceXMLPatch struct {
 	begin, end int
 	data       []byte
+}
+
+// InvoiceFields 获取发票字段描述，原始事实通过来源补丁修改
+// 入参: value 发票数据
+// 返回: []InvoiceFieldDescriptor 字段描述列表
+func InvoiceFields(value Invoice) []InvoiceFieldDescriptor {
+	format, supported := invoiceWriteFormat(value)
+	probe := Invoice{Items: []InvoiceItem{{}}}
+	if value.Standard == "EInvoice" {
+		probe.Number, probe.Date = "editable", "editable"
+		for _, group := range invoicePlainGroups() {
+			for _, name := range strings.Fields(group.value) {
+				if p, _ := invoicePlainField(&probe, nil, "/EInvoice/EInvoiceData/"+group.name+"/"+name); p != nil {
+					*p = "editable"
+				}
+			}
+		}
+		for _, name := range strings.Fields("ItemName SpecMod MeaUnits Quantity UnPrice Amount TaxRate ComTaxAm") {
+			if p, _ := invoicePlainField(&probe, &probe.Items[0], "/EInvoice/EInvoiceData/IssuItemInformation/"+name); p != nil {
+				*p = "editable"
+			}
+		}
+	} else {
+		for _, name := range invoiceWriteHeader(value) {
+			if p := invoiceXMLField(&probe, value.Kind, name); p != nil {
+				*p = "editable"
+			}
+		}
+		for _, name := range invoiceWriteItemNames(value.Kind) {
+			if p := invoiceItemField(&probe.Items[0], value.Kind, name); p != nil {
+				*p = "editable"
+			}
+		}
+	}
+	var result []InvoiceFieldDescriptor
+	for _, field := range invoiceLayoutFields(value) {
+		if strings.HasPrefix(field.field, "facts.") || strings.HasPrefix(field.field, "items.fields.") {
+			continue
+		}
+		d := InvoiceFieldDescriptor{Field: field.field, Label: field.label, Group: "basic", Type: "text", Item: field.item, Value: field.value, Bindable: true}
+		binding := InvoiceBinding{Field: field.field, Item: field.item}
+		if field.item >= 0 {
+			binding.Item = 0
+			d.Group = "items"
+		}
+		if strings.HasPrefix(field.field, "buyer.") {
+			d.Group = "buyer"
+		}
+		if strings.HasPrefix(field.field, "seller.") {
+			d.Group = "seller"
+		}
+		mapped, _ := invoiceBindingValue(probe, binding)
+		d.Editable = supported && format.Edit && mapped == "editable"
+		switch field.field {
+		case "date":
+			d.Type = "date"
+			if value.Kind == "einv" {
+				d.Type = "datetime"
+			}
+		case "amount", "taxAmount", "totalAmount", "items.quantity", "items.unitPrice", "items.amount", "items.taxAmount":
+			d.Type = "decimal"
+		case "items.taxRate":
+			if value.Standard == "EInvoice" {
+				d.Type = "decimal"
+			}
+		}
+		result = append(result, d)
+	}
+	appendFact := func(fact InvoiceFact, field string, item int) {
+		d := InvoiceFieldDescriptor{Field: field, Label: fact.Name, Group: "facts", Type: "text", Item: item, Value: fact.Value, Bindable: true}
+		if item >= 0 {
+			d.Group = "items"
+		}
+		d.Editable = supported && format.Edit && fact.Source.NodePath != "" && fact.Namespace != invoiceXBRL
+		if invoiceNumeric(value.Kind, fact.Name) {
+			d.Type = "decimal"
+		}
+		if invoiceWriteDateFact(value.Kind, fact.Name) {
+			d.Type = "date"
+		}
+		if value.Kind == "einv" && (fact.Name == "RequestTime" || fact.Name == "IssueTime") {
+			d.Type = "datetime"
+		}
+		result = append(result, d)
+	}
+	for i, fact := range value.Facts {
+		appendFact(fact, fmt.Sprintf("facts.%d", i), -1)
+	}
+	for i, item := range value.Items {
+		for j, fact := range item.Fields {
+			appendFact(fact, fmt.Sprintf("items.fields.%d", j), i)
+		}
+	}
+	return result
 }
 
 // InvoiceFormats 返回独立格式能力副本，历史航空格式仅允许读取和原位修改

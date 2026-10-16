@@ -1810,6 +1810,127 @@ body[data-hide-meta] .meta-panel {
 	overflow: hidden;
 }
 
+.settings-dialog.invoice-dialog {
+	width: 820px;
+	max-width: calc(100vw - 26px);
+}
+
+.invoice-tabs {
+	display: flex;
+	gap: 16px;
+	margin-block: 12px;
+	border-bottom: 1px solid var(--line);
+}
+
+.invoice-tabs > .button {
+	flex: none;
+	min-width: 2em;
+	padding: 8px 0;
+	border: 0;
+	border-bottom: 2px solid transparent;
+	background: transparent;
+}
+
+.invoice-tabs > .button[aria-selected="true"] {
+	border-bottom-color: currentColor;
+	color: var(--accent);
+}
+
+.invoice-actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	margin-block: 8px;
+}
+
+.invoice-group-title {
+	margin: 12px 0 8px;
+	font-size: 1em;
+	font-weight: 600;
+}
+
+.invoice-advanced {
+	margin-block: 12px 0;
+	border-top: 1px solid var(--line);
+	padding-top: 10px;
+}
+
+.invoice-advanced > summary {
+	cursor: pointer;
+	margin-bottom: 12px;
+}
+
+.invoice-advanced > .button {
+	margin: 0 8px 8px 0;
+}
+
+.invoice-unit {
+	padding-block: 8px;
+	border-bottom: 1px solid var(--line);
+}
+
+.invoice-table-scroll {
+	max-width: 100%;
+	overflow: auto;
+}
+
+.invoice-table {
+	width: 100%;
+	min-width: 720px;
+	border-collapse: collapse;
+	table-layout: fixed;
+}
+
+.invoice-table th,
+.invoice-table td {
+	padding: 4px;
+	border-bottom: 1px solid var(--line);
+	text-align: left;
+	font-weight: normal;
+}
+
+.invoice-table th:first-child {
+	width: 3em;
+}
+
+.invoice-table th:nth-child(2) {
+	width: 8em;
+}
+
+.invoice-table input:not([type="radio"]) {
+	width: 100%;
+	min-width: 0;
+	box-sizing: border-box;
+}
+
+.invoice-dialog #settingsInvoiceXML {
+	font-family: monospace;
+	white-space: pre;
+}
+
+.invoice-dialog .settings-footer {
+	flex-wrap: nowrap;
+}
+
+.invoice-dialog #settingsStatus {
+	min-width: 0;
+	max-height: 6em;
+	overflow: auto;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.invoice-dialog #settingsActions {
+	flex: 1 0 auto;
+}
+
+@media (max-width: 600px) {
+	.invoice-dialog #settingsActions {
+		flex: 1 1 auto;
+	}
+}
+
 .settings-dialog :focus-visible {
 	outline-offset: -2px;
 }

@@ -45,6 +45,19 @@ type InvoiceUpdateResult struct {
 	Issues       []InvoiceIssue `json:"issues,omitempty"`
 }
 
+// InvoiceCapabilities 发票操作能力
+// Create表示同格式创建能力，Delete表示整源删除，Reasons按操作小写名称索引
+type InvoiceCapabilities struct {
+	Create   bool              `json:"create"`
+	Edit     bool              `json:"edit"`
+	Items    bool              `json:"items"`
+	Bind     bool              `json:"bind"`
+	Generate bool              `json:"generate"`
+	Sync     bool              `json:"sync"`
+	Delete   bool              `json:"delete"`
+	Reasons  map[string]string `json:"reasons"`
+}
+
 // invoiceBindingRecord 保存当前文档内的来源选择器，资源路径变化时仍以入口和摘要核对载荷
 type invoiceBindingRecord struct {
 	Kind     string             `json:"kind"`
@@ -67,6 +80,138 @@ type invoiceBindingEntry struct {
 	index    int
 	record   invoiceBindingRecord
 	bindings []InvoiceBinding
+}
+
+// InvoiceCapabilities 获取当前文档版本的发票操作能力
+// 入参: ctx 取消上下文, source 精确来源, index 来源内从0开始的发票索引
+// 返回: InvoiceCapabilities 操作能力, error 来源、索引或读取错误
+func (r *Reader) InvoiceCapabilities(ctx context.Context, source InvoiceSource, index int) (InvoiceCapabilities, error) {
+	ctx = invoiceWriteContext(ctx)
+	result := InvoiceCapabilities{Reasons: make(map[string]string)}
+	data, err := r.ExportInvoice(ctx, source)
+	if err != nil {
+		return result, err
+	}
+	report, err := parseInvoiceXML(ctx, data, source)
+	if err != nil {
+		return result, err
+	}
+	if index < 0 || index >= len(report.Invoices) {
+		return result, fmt.Errorf("invoice index out of range")
+	}
+	format, known := invoiceWriteFormat(report.Invoices[index])
+	result.Create = known && format.Create
+	result.Edit = known && format.Edit
+	result.Items = known && format.Items
+	result.Bind = known
+	result.Generate = known
+	result.Delete = true
+	if !result.Create {
+		result.Reasons["create"] = "当前格式不支持创建"
+	}
+	if !result.Edit {
+		result.Reasons["edit"] = "当前格式不支持编辑"
+	}
+	if !result.Items {
+		result.Reasons["items"] = "当前格式不支持明细增删"
+	}
+	if !known {
+		result.Reasons["bind"] = "当前格式未适配"
+		result.Reasons["generate"] = "当前格式未适配"
+	}
+	entries, err := r.invoiceBindings(ctx, source, InvoiceDigest(data), true)
+	if err != nil {
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		result.Sync = false
+		result.Generate = false
+		result.Bind = false
+		for _, operation := range []string{"sync", "generate", "bind"} {
+			result.Reasons[operation] = "票面关联损坏，请先修复关联"
+		}
+		return result, nil
+	}
+	for _, entry := range entries {
+		if entry.record.Invoice != index {
+			continue
+		}
+		result.Generate = false
+		result.Reasons["generate"] = "请先解除已有票面关联"
+		result.Sync = result.Edit && len(entry.bindings) > 0
+		if result.Sync {
+			editor, err := r.EditorContext(ctx)
+			if err != nil {
+				return result, err
+			}
+			for _, binding := range entry.bindings {
+				if err := ctx.Err(); err != nil {
+					return result, err
+				}
+				_, fieldErr := invoiceBindingValue(report.Invoices[index], binding)
+				object, objectErr := editor.Object(binding.Page, binding.ObjectID)
+				if fieldErr != nil || objectErr != nil || object.Type != "TextObject" {
+					result.Sync = false
+					result.Reasons["sync"] = "票面关联字段或图元已失效"
+				}
+			}
+			if entry.record.Layout != nil {
+				ids := make([]string, len(entry.record.Pages))
+				for i, page := range entry.record.Pages {
+					ids[i] = page.ID
+				}
+				current, err := editor.invoiceOwnedPages(ctx, ids)
+				if err != nil || len(ids) == 0 || !slices.Equal(current, entry.record.Pages) || editor.source.document.Signatures != "" {
+					result.Sync = false
+					result.Reasons["sync"] = "生成票面已修改或签名，请重新绑定"
+				}
+			}
+		}
+	}
+	if !result.Sync && result.Reasons["sync"] == "" {
+		result.Reasons["sync"] = "当前发票没有可同步的票面关联"
+	}
+	return result, ctx.Err()
+}
+
+// GenerateInvoicePages 为已有发票生成信息页并保存字段关联，失败时整体回滚
+// 入参: ctx 取消上下文, source 精确来源, index 来源内发票索引, layout 排版选项
+// 返回: error 来源、关联、排版或提交错误
+func (e *Editor) GenerateInvoicePages(ctx context.Context, source InvoiceSource, index int, layout InvoiceLayout) error {
+	ctx = invoiceWriteContext(ctx)
+	return e.Transaction(func(next *Editor) error {
+		r, err := next.ReaderContext(ctx)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		capabilities, err := r.InvoiceCapabilities(ctx, source, index)
+		if err != nil {
+			return err
+		}
+		if !capabilities.Generate {
+			return fmt.Errorf("invoice appearance cannot be generated: %s", capabilities.Reasons["generate"])
+		}
+		data, err := r.ExportInvoice(ctx, source)
+		if err != nil {
+			return err
+		}
+		report, err := parseInvoiceXML(ctx, data, source)
+		if err != nil {
+			return err
+		}
+		bindings, err := next.AppendInvoicePages(ctx, report.Invoices[index], layout)
+		if err != nil {
+			return err
+		}
+		if err := next.SetInvoiceBindings(ctx, source, index, bindings); err != nil {
+			return err
+		}
+		if err := next.markInvoicePages(ctx, source, index, layout); err != nil {
+			return err
+		}
+		return ctx.Err()
+	})
 }
 
 // Invoices 获取编辑状态的发票提取结果，不修改文档
@@ -159,7 +304,7 @@ func (e *Editor) ImportInvoice(ctx context.Context, data []byte, options Invoice
 			if err := next.SetInvoiceBindings(ctx, source, 0, bindings); err != nil {
 				return err
 			}
-			if err := next.markInvoicePages(ctx, source, *options.Layout); err != nil {
+			if err := next.markInvoicePages(ctx, source, 0, *options.Layout); err != nil {
 				return err
 			}
 		}
@@ -894,9 +1039,9 @@ func (e *Editor) invoiceOwnedPages(ctx context.Context, ids []string) ([]invoice
 }
 
 // markInvoicePages 保存新建票面的排版选项和页面摘要，供明细增删后安全重排
-// 入参: ctx 取消上下文, source 新增来源, layout 排版选项
+// 入参: ctx 取消上下文, source 来源, index 来源内发票索引, layout 排版选项
 // 返回: error 关联或提交错误
-func (e *Editor) markInvoicePages(ctx context.Context, source InvoiceSource, layout InvoiceLayout) error {
+func (e *Editor) markInvoicePages(ctx context.Context, source InvoiceSource, index int, layout InvoiceLayout) error {
 	r, err := e.ReaderContext(ctx)
 	if err != nil {
 		return err
@@ -911,10 +1056,11 @@ func (e *Editor) markInvoicePages(ctx context.Context, source InvoiceSource, lay
 	if err != nil {
 		return err
 	}
-	if len(entries) != 1 {
-		return fmt.Errorf("generated invoice requires one binding record")
+	position := slices.IndexFunc(entries, func(entry invoiceBindingEntry) bool { return entry.record.Invoice == index })
+	if position < 0 {
+		return fmt.Errorf("generated invoice binding record not found")
 	}
-	entry := entries[0]
+	entry := entries[position]
 	var ids []string
 	for _, binding := range entry.bindings {
 		page, err := e.Page(binding.Page)

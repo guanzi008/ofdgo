@@ -114,6 +114,33 @@ type editorOutlineInfo struct {
 	OutlinePath []int `json:"outlinePath"`
 }
 
+// invoiceRequest 发票操作参数
+type invoiceRequest struct {
+	Operation     string                     `json:"operation"`
+	Operations    []invoiceRequest           `json:"operations"`
+	Source        ofdgo.InvoiceSource        `json:"source"`
+	Index         int                        `json:"index"`
+	Digest        string                     `json:"digest"`
+	Invoice       ofdgo.Invoice              `json:"invoice"`
+	Changes       []ofdgo.InvoiceFieldChange `json:"changes"`
+	Bindings      []ofdgo.InvoiceBinding     `json:"bindings"`
+	XML           string                     `json:"xml"`
+	Options       ofdgo.InvoiceCreateOptions `json:"options"`
+	Layout        ofdgo.InvoiceLayout        `json:"layout"`
+	FontData      []byte                     `json:"fontData"`
+	Synchronize   bool                       `json:"synchronize"`
+	DocumentIndex *int                       `json:"documentIndex"`
+	Version       *string                    `json:"version"`
+	Revision      *uint64                    `json:"revision"`
+	indexProvided bool
+}
+
+// invoiceEditorInfo 发票操作结果与编辑状态
+type invoiceEditorInfo struct {
+	editorInfo
+	InvoiceResult ofdgo.InvoiceUpdateResult `json:"invoiceResult"`
+}
+
 // annotationOptions 保存注解面板的输入，资源字节单独传输
 type annotationOptions struct {
 	Kind, ID, Text, Old, Creator, Pages, URI, Color string
@@ -199,6 +226,11 @@ func RunWASM() {
 	registerAsyncCallback("ofdgoExportVersion", exportVersion)
 	registerCallback("ofdgoAnnotationInfos", annotationInfos)
 	registerCallback("ofdgoDocumentNavigation", documentNavigation)
+	registerCallback("ofdgoInvoices", documentInvoices)
+	registerCallback("ofdgoInvoice", documentInvoice)
+	registerCallback("ofdgoExportInvoice", exportDocumentInvoice)
+	registerCallback("ofdgoValidateInvoice", validateDocumentInvoice)
+	registerCallback("ofdgoChangeInvoice", changeDocumentInvoice)
 	registerCallback("ofdgoChangeBookmark", changeBookmark)
 	registerCallback("ofdgoActionList", actionList)
 	registerCallback("ofdgoChangeActions", changeActions)
@@ -852,6 +884,516 @@ func resourceTargets(args []js.Value) (any, error) {
 		return nil, fmt.Errorf("no document is being edited")
 	}
 	return currentEditor.ResourceTargets(context.Background(), args[1].String(), args[2].String(), args[0].Int())
+}
+
+// documentInvoices 获取发票列表与格式能力
+// 入参: args 空参数
+// 返回: any 发票提取结果与格式列表, error 读取错误
+func documentInvoices(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) != 0 {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	r, close, err := currentInvoiceReader()
+	if err != nil {
+		return nil, err
+	}
+	defer close()
+	report, err := r.Invoices()
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"report": report, "formats": ofdgo.InvoiceFormats()}, nil
+}
+
+// currentInvoiceReader 获取当前发票读取器
+// 返回: *ofdgo.Reader 当前读取器, func() 快照释放函数, error 快照错误
+func currentInvoiceReader() (*ofdgo.Reader, func(), error) {
+	if currentEditor != nil {
+		r, err := currentEditor.Reader()
+		if err != nil {
+			return nil, nil, err
+		}
+		return r, func() { _ = r.Close() }, nil
+	}
+	if currentSession == nil {
+		return nil, nil, fmt.Errorf("ofd document is not opened")
+	}
+	return currentSession.Reader, func() {}, nil
+}
+
+// decodeInvoiceRequest 解析发票参数并校验文档状态
+// 入参: args 单个JSON操作对象
+// 返回: invoiceRequest 操作参数, error 参数或过期状态错误
+func decodeInvoiceRequest(args []js.Value) (invoiceRequest, error) {
+	var request invoiceRequest
+	if currentSession == nil || len(args) != 1 || args[0].Type() != js.TypeString {
+		return request, fmt.Errorf("invalid invoice arguments")
+	}
+	data := args[0].String()
+	if len(data) > 64<<20 {
+		return request, fmt.Errorf("invoice request exceeds size limit")
+	}
+	if err := json.Unmarshal([]byte(data), &request); err != nil {
+		return request, err
+	}
+	var presence struct {
+		Operations []struct {
+			Index *int `json:"index"`
+		} `json:"operations"`
+	}
+	if err := json.Unmarshal([]byte(data), &presence); err != nil {
+		return request, err
+	}
+	for i := range presence.Operations {
+		request.Operations[i].indexProvided = presence.Operations[i].Index != nil
+	}
+	index := currentSession.Reader.DocumentIndex()
+	if currentEditor != nil {
+		index = currentEditor.DocumentIndex()
+	}
+	if request.DocumentIndex != nil && *request.DocumentIndex != index {
+		return request, fmt.Errorf("invoice document has changed")
+	}
+	if request.Version != nil {
+		version, err := currentSession.Reader.DocumentVersionID()
+		if currentEditor != nil {
+			version, err = currentEditor.DocumentVersionID()
+		}
+		if err != nil {
+			return request, err
+		}
+		if *request.Version != version {
+			return request, fmt.Errorf("invoice document version has changed")
+		}
+	}
+	if request.Revision != nil && (currentEditor == nil || *request.Revision != currentEditor.Revision()) {
+		return request, fmt.Errorf("invoice editing revision has changed")
+	}
+	return request, nil
+}
+
+// documentInvoice 获取发票详情与票面关联
+// 入参: args 来源及来源内发票索引，新建时提供发票模型
+// 返回: any 发票详情, error 来源、索引或读取错误
+func documentInvoice(args []js.Value) (any, error) {
+	request, err := decodeInvoiceRequest(args)
+	if err != nil {
+		return nil, err
+	}
+	ctx := context.Background()
+	if request.Source.Kind == "" {
+		return map[string]any{"invoice": request.Invoice, "fields": ofdgo.InvoiceFields(request.Invoice)}, nil
+	}
+	r, close, err := currentInvoiceReader()
+	if err != nil {
+		return nil, err
+	}
+	defer close()
+	data, err := r.ExportInvoice(ctx, request.Source)
+	if err != nil {
+		return nil, err
+	}
+	report, err := ofdgo.DecodeInvoices(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	if request.Index < 0 || request.Index >= len(report.Invoices) {
+		return nil, fmt.Errorf("invoice index out of range")
+	}
+	value := report.Invoices[request.Index]
+	capabilities, err := r.InvoiceCapabilities(ctx, request.Source, request.Index)
+	if err != nil {
+		return nil, err
+	}
+	bindings, bindingErr := r.InvoiceBindings(ctx, request.Source, request.Index)
+	if bindingErr != nil {
+		report.Issues = append(report.Issues, ofdgo.InvoiceIssue{Code: "binding-error", Message: bindingErr.Error(), Source: request.Source})
+	}
+	return map[string]any{"invoice": value, "fields": ofdgo.InvoiceFields(value), "capabilities": capabilities, "bindings": bindings, "digest": ofdgo.InvoiceDigest(data), "xml": string(data), "issues": report.Issues}, nil
+}
+
+// exportDocumentInvoice 导出发票原文
+// 入参: args 发票来源
+// 返回: any 原始字节, error 来源或读取错误
+func exportDocumentInvoice(args []js.Value) (any, error) {
+	request, err := decodeInvoiceRequest(args)
+	if err != nil {
+		return nil, err
+	}
+	r, close, err := currentInvoiceReader()
+	if err != nil {
+		return nil, err
+	}
+	defer close()
+	data, err := r.ExportInvoice(context.Background(), request.Source)
+	if err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{"bytes": bytesToJS(data)}), nil
+}
+
+// validateDocumentInvoice 校验发票草稿
+// 入参: args 发票模型或来源、草稿操作与原始摘要
+// 返回: any 字段与票面诊断, error 校验或读取错误
+func validateDocumentInvoice(args []js.Value) (any, error) {
+	request, err := decodeInvoiceRequest(args)
+	if err != nil {
+		return nil, err
+	}
+	ctx := context.Background()
+	if request.Operation == "" {
+		switch {
+		case len(request.Operations) != 0:
+			request.Operation = "batch"
+		case len(request.Changes) != 0:
+			request.Operation = "patch"
+		case request.XML != "":
+			request.Operation = "replace"
+			if request.Source.Kind == "" {
+				request.Operation = "import"
+			}
+		}
+	}
+	if request.Operation != "" {
+		return validateInvoiceDraft(ctx, request)
+	}
+	issues, err := ofdgo.ValidateInvoice(ctx, request.Invoice)
+	if err != nil {
+		return nil, err
+	}
+	var appearance []ofdgo.InvoiceIssue
+	if request.Source.Kind != "" {
+		r, close, err := currentInvoiceReader()
+		if err != nil {
+			return nil, err
+		}
+		defer close()
+		appearance, err = r.CheckInvoiceAppearance(ctx, request.Source, request.Index)
+		if err != nil {
+			appearance = append(appearance, ofdgo.InvoiceIssue{Code: "appearance-error", Message: err.Error(), Source: request.Source})
+		}
+	}
+	return map[string]any{"issues": issues, "appearance": appearance}, nil
+}
+
+// validateInvoiceDraft 在独立快照中校验发票修改
+// 入参: ctx 取消上下文, request 已核对当前文档状态的操作
+// 返回: any 草稿发票及诊断, error 演练或读取错误
+func validateInvoiceDraft(ctx context.Context, request invoiceRequest) (any, error) {
+	r, close, err := currentInvoiceReader()
+	if err != nil {
+		return nil, err
+	}
+	defer close()
+	editor, err := r.EditorContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	request.Operations = append([]invoiceRequest(nil), request.Operations...)
+	for i := range request.Operations {
+		operation := &request.Operations[i]
+		if operation.Revision != nil && (currentEditor == nil || *operation.Revision != currentEditor.Revision()) {
+			return nil, fmt.Errorf("invoice editing revision has changed")
+		}
+		operation.Revision = nil
+	}
+	var result ofdgo.InvoiceUpdateResult
+	if err := editor.Transaction(func(next *ofdgo.Editor) error {
+		var err error
+		result, err = applyInvoiceRequest(ctx, next, request)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	issues := append([]ofdgo.InvoiceIssue(nil), result.Issues...)
+	var appearance []ofdgo.InvoiceIssue
+	if request.Operation == "delete" {
+		return map[string]any{"issues": issues, "appearance": appearance}, nil
+	}
+	source := result.Source
+	if source.Kind == "" {
+		source = request.Source
+	}
+	data, err := editor.ExportInvoice(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	report, err := ofdgo.DecodeInvoices(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	issues = append(issues, report.Issues...)
+	view, err := editor.ReaderContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer view.Close()
+	for index, invoice := range report.Invoices {
+		validation, err := ofdgo.ValidateInvoice(ctx, invoice)
+		if err != nil {
+			return nil, err
+		}
+		for i := range validation {
+			validation[i].Source = source
+		}
+		issues = append(issues, validation...)
+		checks, err := view.CheckInvoiceAppearance(ctx, source, index)
+		if err != nil {
+			appearance = append(appearance, ofdgo.InvoiceIssue{Code: "appearance-error", Message: err.Error(), Source: source})
+		} else {
+			appearance = append(appearance, checks...)
+		}
+	}
+	return map[string]any{"issues": issues, "appearance": appearance, "invoices": report.Invoices}, nil
+}
+
+// changeDocumentInvoice 提交发票修改
+// 入参: args 操作及业务参数
+// 返回: any 编辑状态与签名诊断, error 校验或提交错误
+func changeDocumentInvoice(args []js.Value) (any, error) {
+	request, err := decodeInvoiceRequest(args)
+	if err != nil {
+		return nil, err
+	}
+	ctx := context.Background()
+	var result ofdgo.InvoiceUpdateResult
+	info, err := changeAtomicObjects(func() error {
+		return currentEditor.Transaction(func(editor *ofdgo.Editor) error {
+			var err error
+			result, err = applyInvoiceRequest(ctx, editor, request)
+			return err
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return invoiceEditorInfo{editorInfo: info.(editorInfo), InvoiceResult: result}, nil
+}
+
+// applyInvoiceRequest 校验来源摘要并执行发票操作
+// 入参: ctx 取消上下文, editor 事务编辑器, request 操作参数
+// 返回: ofdgo.InvoiceUpdateResult 提交结果, error 校验或写入错误
+func applyInvoiceRequest(ctx context.Context, editor *ofdgo.Editor, request invoiceRequest) (ofdgo.InvoiceUpdateResult, error) {
+	var result ofdgo.InvoiceUpdateResult
+	if request.Operation == "batch" {
+		return applyInvoiceBatch(ctx, editor, request)
+	}
+	if len(request.Operations) != 0 {
+		return result, fmt.Errorf("invoice operations require batch action")
+	}
+	err := func() error {
+		if request.Operation != "create" && request.Operation != "import" {
+			data, err := editor.ExportInvoice(ctx, request.Source)
+			if err != nil {
+				return err
+			}
+			if request.Digest == "" || ofdgo.InvoiceDigest(data) != request.Digest {
+				return fmt.Errorf("invoice source has changed")
+			}
+		}
+		switch request.Operation {
+		case "create", "import":
+			var source ofdgo.InvoiceSource
+			var err error
+			if request.Operation == "create" {
+				source, err = editor.CreateInvoice(ctx, request.Invoice, request.Options)
+			} else {
+				source, err = editor.ImportInvoice(ctx, []byte(request.XML), request.Options)
+			}
+			result.Source = source
+			return err
+		case "set":
+			var err error
+			result, err = editor.SetInvoice(ctx, request.Source, request.Digest, request.Index, request.Invoice, request.Synchronize)
+			return err
+		case "patch":
+			for i := range request.Changes {
+				request.Changes[i].Source.Kind = request.Source.Kind
+				request.Changes[i].Source.ID = request.Source.ID
+				request.Changes[i].Source.FileLoc = request.Source.FileLoc
+				if request.Source.NodePath != "" {
+					request.Changes[i].Source.NodePath = request.Source.NodePath + request.Changes[i].Source.NodePath
+				}
+			}
+			var err error
+			result, err = editor.EditInvoice(ctx, request.Source, request.Digest, request.Changes, request.Synchronize)
+			return err
+		case "replace":
+			var err error
+			result, err = editor.UpdateInvoice(ctx, request.Source, request.Digest, []byte(request.XML), request.Synchronize)
+			return err
+		case "delete":
+			return editor.DeleteInvoice(ctx, request.Source, request.Digest)
+		case "bindings":
+			return editor.SetInvoiceBindings(ctx, request.Source, request.Index, request.Bindings)
+		case "generate":
+			if len(request.FontData) != 0 {
+				file := ofdgo.FontFile{Data: request.FontData}
+				if request.Layout.Font == "" {
+					id, err := editor.AddFont(file, 0)
+					if err != nil {
+						return err
+					}
+					request.Layout.Font = id
+				} else if err := editor.EmbedFont(ctx, request.Layout.Font, file, 0); err != nil {
+					return err
+				}
+			}
+			return editor.GenerateInvoicePages(ctx, request.Source, request.Index, request.Layout)
+		case "sync":
+			data, err := editor.ExportInvoice(ctx, request.Source)
+			if err != nil {
+				return err
+			}
+			result, err = editor.UpdateInvoice(ctx, request.Source, request.Digest, data, true)
+			return err
+		default:
+			return fmt.Errorf("unsupported invoice action")
+		}
+	}()
+	if err != nil {
+		return ofdgo.InvoiceUpdateResult{}, err
+	}
+	return result, nil
+}
+
+// applyInvoiceBatch 合并发票修改并同步票面
+// 入参: ctx 取消上下文, editor 事务编辑器, request 批次及原始来源
+// 返回: ofdgo.InvoiceUpdateResult 提交结果, error 冲突或写入错误
+func applyInvoiceBatch(ctx context.Context, editor *ofdgo.Editor, request invoiceRequest) (ofdgo.InvoiceUpdateResult, error) {
+	var result ofdgo.InvoiceUpdateResult
+	data, err := editor.ExportInvoice(ctx, request.Source)
+	if err != nil {
+		return result, err
+	}
+	if request.Digest == "" || ofdgo.InvoiceDigest(data) != request.Digest {
+		return result, fmt.Errorf("invoice source has changed")
+	}
+	if len(request.Operations) == 0 || len(request.Operations) > 256 {
+		return result, fmt.Errorf("invalid invoice batch size")
+	}
+	report, err := ofdgo.DecodeInvoices(ctx, data)
+	if err != nil {
+		return result, err
+	}
+	if request.Index < 0 || request.Index >= len(report.Invoices) {
+		return result, fmt.Errorf("invoice index out of range")
+	}
+	paths := make(map[string]bool)
+	for _, fact := range report.Invoices[request.Index].Facts {
+		paths[fact.Source.NodePath] = true
+	}
+	for _, item := range report.Invoices[request.Index].Items {
+		for _, fact := range item.Fields {
+			paths[fact.Source.NodePath] = true
+		}
+	}
+	request.Operations = append([]invoiceRequest(nil), request.Operations...)
+	for i := range request.Operations {
+		operation := &request.Operations[i]
+		if (operation.indexProvided || operation.Index != 0) && operation.Index != request.Index {
+			return result, fmt.Errorf("invoice batch cannot span candidates")
+		}
+		operation.Index = request.Index
+	}
+	document := editor.DocumentIndex()
+	version, err := editor.DocumentVersionID()
+	if err != nil {
+		return result, err
+	}
+	revision := editor.Revision()
+	models, bindings := make(map[int]bool), make(map[int]bool)
+	patched := make(map[string]bool)
+	hasSet, hasPatch := false, false
+	for _, operation := range request.Operations {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if len(operation.Operations) != 0 || operation.Operation == "batch" || operation.Synchronize {
+			return result, fmt.Errorf("nested invoice batch or synchronization is not supported")
+		}
+		if operation.Source != (ofdgo.InvoiceSource{}) && operation.Source != request.Source {
+			return result, fmt.Errorf("invoice batch cannot span sources")
+		}
+		if operation.Digest != "" && operation.Digest != request.Digest {
+			return result, fmt.Errorf("invoice batch requires one original digest")
+		}
+		if operation.DocumentIndex != nil && *operation.DocumentIndex != document || operation.Version != nil && *operation.Version != version || operation.Revision != nil && *operation.Revision != revision {
+			return result, fmt.Errorf("invoice batch scope has changed")
+		}
+		switch operation.Operation {
+		case "set":
+			if models[operation.Index] {
+				return result, fmt.Errorf("duplicate invoice model update")
+			}
+			models[operation.Index], hasSet = true, true
+		case "patch":
+			if len(operation.Changes) == 0 {
+				return result, fmt.Errorf("empty invoice field update")
+			}
+			hasPatch = true
+			for _, change := range operation.Changes {
+				if change.Source.Kind != "" && change.Source.Kind != request.Source.Kind || change.Source.ID != "" && change.Source.ID != request.Source.ID || change.Source.FileLoc != "" && change.Source.FileLoc != request.Source.FileLoc {
+					return result, fmt.Errorf("invoice patch cannot span sources")
+				}
+				if change.Source.NodePath == "" || patched[change.Source.NodePath] {
+					return result, fmt.Errorf("duplicate or missing invoice field path")
+				}
+				if !paths[change.Source.NodePath] {
+					return result, fmt.Errorf("invoice patch cannot span candidates")
+				}
+				if change.Revision != "" && change.Revision != request.Digest {
+					return result, fmt.Errorf("invoice field revision has changed")
+				}
+				patched[change.Source.NodePath] = true
+			}
+		case "bindings":
+			if bindings[operation.Index] {
+				return result, fmt.Errorf("duplicate invoice binding update")
+			}
+			bindings[operation.Index] = true
+		default:
+			return result, fmt.Errorf("unsupported invoice batch action")
+		}
+	}
+	if hasSet && hasPatch {
+		return result, fmt.Errorf("invoice batch cannot mix model and raw field updates")
+	}
+	var changes []ofdgo.InvoiceFieldChange
+	for _, operation := range request.Operations {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		switch operation.Operation {
+		case "set":
+			data, err = ofdgo.UpdateInvoiceXML(ctx, data, operation.Index, operation.Invoice)
+		case "patch":
+			changes = append(changes, operation.Changes...)
+		}
+		if err != nil {
+			return result, err
+		}
+	}
+	if len(changes) != 0 {
+		for i := range changes {
+			changes[i].Revision = request.Digest
+			changes[i].Source.Kind = ""
+			changes[i].Source.ID = ""
+			changes[i].Source.FileLoc = ""
+		}
+		data, err = ofdgo.PatchInvoice(ctx, data, changes)
+		if err != nil {
+			return result, err
+		}
+	}
+	for _, operation := range request.Operations {
+		if operation.Operation == "bindings" {
+			if err := editor.SetInvoiceBindings(ctx, request.Source, operation.Index, operation.Bindings); err != nil {
+				return result, err
+			}
+		}
+	}
+	return editor.UpdateInvoice(ctx, request.Source, request.Digest, data, request.Synchronize)
 }
 
 // resourceLocations 定位当前文档与版本中的资源引用实例

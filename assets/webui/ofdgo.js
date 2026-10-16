@@ -27,6 +27,7 @@ const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "K
 const resourceManager = { items: [], selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
 const settingsElements = Object.fromEntries(["Button", "Panel", "Form", "Title", "Kind", "Context", "Content", "Actions", "Status"].map(name => [name, document.querySelector(`#settings${name}`)]));
 const settings = { sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false };
+const invoicePanel = { tab: "basic", entries: [], formats: [], drafts: new Map(), key: "", result: null };
 
 let wasmPromise = null;
 let remoteDownload = null;
@@ -1531,7 +1532,7 @@ editorClick(settingsElements.Button, openDocumentSettings);
 settingsElements.Kind.addEventListener("change", () => { rememberSettingsDraft(); settings.selected = -1; loadDocumentSettings(); });
 settingsElements.Form.addEventListener("submit", event => event.preventDefault());
 settingsElements.Panel.addEventListener("cancel", event => { event.preventDefault(); closeDocumentSettings(); });
-settingsElements.Panel.addEventListener("close", () => { if (!settings.suspended) { settings.sequence++; settings.drafts.clear(); settings.view = ""; } });
+settingsElements.Panel.addEventListener("close", () => { if (!settings.suspended) { settings.sequence++; settings.drafts.clear(); settings.view = ""; invoicePanel.drafts.clear(); invoicePanel.key = ""; } });
 document.querySelector("#objectActionsButton").addEventListener("click", async () => {
 	const item = canvasEditor.selected;
 	if (!item || item.scoped || item.items) return;
@@ -3640,6 +3641,7 @@ async function changeDocument(name, item, ...args) {
 			? await callWASM("ofdgoChangeCompositeObjects", item.index, scope.key, Array.isArray(item.id) ? item.id : members.map(member => member.id), operation, ...args)
 			: annotated && operation ? await callWASM("ofdgoChangeSelection", item.index, ids, operation, ...args)
 			: await callWASM(name, ...(item ? [item.index, item.id] : []), ...args);
+		if (name === "ofdgoChangeInvoice") invoicePanel.result = doc.invoiceResult;
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -4622,6 +4624,7 @@ async function openSelectedFonts(event) {
 		if (changed) {
 			await applyFontChange();
 			if (resourceElements.Panel.open) await resourceTask(loadManagedResources);
+			if (settingsElements.Panel.open && settingsElements.Kind.value === "invoices") { await loadEditorFonts(); renderDocumentSettings(); }
 		}
 		setStatus(saved ? "字体已保存" : "字体未保存，仅本次可用");
 	} catch (err) {
@@ -5427,6 +5430,7 @@ function settingsSnapshot() {
 }
 
 function rememberSettingsDraft() {
+	if (settings.renderedKind === "invoices") return;
 	if (!state.editing || !settings.view || settings.busy) return;
 	const values = settingsSnapshot();
 	const changed = Object.keys(values).some(id => {
@@ -5475,7 +5479,7 @@ function restoreSettingsDraft() {
 function closeDocumentSettings() {
 	if (settings.busy) return;
 	rememberSettingsDraft();
-	if (settings.drafts.size && !window.confirm("配置尚未应用，放弃更改？")) return;
+	if ((settings.drafts.size || [...invoicePanel.drafts.values()].some(draft => draft.dirty.size)) && !window.confirm("配置尚未应用，放弃更改？")) return;
 	settingsElements.Panel.close();
 }
 
@@ -5499,6 +5503,8 @@ function settingsValue(id) {
 }
 
 async function openDocumentSettings() {
+	invoicePanel.drafts.clear();
+	invoicePanel.key = "";
 	if (!state.doc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy")) return;
 	if (resourceManager.pick?.settings) { finishResourcePick(); return; }
 	settings.page = state.pageIndex;
@@ -5538,6 +5544,7 @@ async function loadDocumentSettings() {
 	settingsElements.Form.inert = true;
 	settingsElements.Status.textContent = "正在读取信息";
 	try {
+		if (kind === "invoices") { await loadInvoiceSettings(sequence, openSeq); return; }
 		const data = ["bookmarks", "actions", "extensions"].includes(kind) ? await callWASM("ofdgoDocumentNavigation", kind) : {};
 		if (sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
 		data.resources = ["bookmarks", "extensions"].includes(kind) ? [] : await callWASM("ofdgoResources") || [];
@@ -5588,6 +5595,7 @@ function renderDocumentSettings() {
 	settingsElements.Content.replaceChildren();
 	settingsElements.Actions.replaceChildren();
 	const kind = settingsElements.Kind.value;
+	settings.renderedKind = kind;
 	const location = document.querySelector("#settingsLocation"), doc = state.doc;
 	if (location) {
 		const current = doc?.documents?.find(entry => entry.index === doc.documentIndex) || doc?.documents?.[doc?.documentIndex || 0];
@@ -5595,6 +5603,12 @@ function renderDocumentSettings() {
 		location.hidden = !(doc?.documents?.length > 1 || doc?.documentVersion);
 	}
 	settingsElements.Title.textContent = {ColorSpace: "色彩设置", DrawParam: "样式设置"}[kind] || "文档配置";
+	settingsElements.Panel.classList.toggle("invoice-dialog", kind === "invoices");
+	if (kind === "invoices") {
+		renderInvoiceSettings();
+		settingsButton("关闭", closeDocumentSettings, false, "Close").classList.add("settings-close");
+		return;
+	}
 	if (kind === "actions") renderActionSettings();
 	else if (kind === "bookmarks") renderBookmarkSettings();
 	else if (kind === "extensions") renderExtensionSettings();
@@ -5610,6 +5624,758 @@ function renderDocumentSettings() {
 	const lastActions = settingsElements.Content.querySelector(".settings-section:last-child > .settings-section-actions");
 	if (lastActions) settingsElements.Actions.append(lastActions);
 	settingsButton("关闭", closeDocumentSettings, false, "Close").classList.add("settings-close");
+}
+
+function invoiceSourceKey(source = {}) {
+	return JSON.stringify([source.kind || "", source.id || "", source.fileLoc || "", source.nodePath || ""]);
+}
+
+function invoiceScope() {
+	return {
+		documentIndex: state.doc.documentIndex || 0,
+		version: state.doc.documentVersion || "",
+		...(state.editing ? { revision: state.editorInfo.revision } : {})
+	};
+}
+
+function invoiceCandidates(invoices) {
+	const counts = new Map(), result = [];
+	for (const invoice of invoices || []) {
+		for (const source of new Map((invoice.sources || []).map(value => [invoiceSourceKey(value), value])).values()) {
+			const sourceKey = invoiceSourceKey(source);
+			const index = counts.get(sourceKey) || 0;
+			counts.set(sourceKey, index + 1);
+			result.push({ invoice, source, index, key: JSON.stringify([sourceKey, index]) });
+		}
+	}
+	return result;
+}
+
+async function loadInvoiceSettings(sequence, openSeq) {
+	const data = await callWASM("ofdgoInvoices");
+	if (sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
+	invoicePanel.entries = invoiceCandidates(data.report?.invoices);
+	invoicePanel.formats = data.formats || [];
+	invoicePanel.issues = data.report?.issues || [];
+	if (!invoicePanel.drafts.has(invoicePanel.key) && !invoicePanel.entries.some(entry => entry.key === invoicePanel.key)) invoicePanel.key = invoicePanel.entries[0]?.key || "";
+	const entry = invoicePanel.entries.find(entry => entry.key === invoicePanel.key);
+	if (entry && !invoicePanel.drafts.has(entry.key)) {
+		const scope = invoiceScope();
+		const detail = await callWASM("ofdgoInvoice", JSON.stringify({ source: entry.source, index: entry.index, ...scope }));
+		if (sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
+		invoicePanel.drafts.set(entry.key, invoiceDraft(detail, entry, scope));
+	}
+	settingsElements.Status.textContent = "";
+	renderDocumentSettings();
+}
+
+function invoiceDraft(detail, entry, scope) {
+	return {
+		detail, invoice: structuredClone(detail.invoice), entry, scope,
+		dirty: new Set(), changes: new Map(),
+		addedItems: new Set(),
+		bindings: structuredClone(detail.bindings || []), xml: detail.xml || "", page: state.pageIndex, object: "", field: "",
+		layout: { font: "", fontSize: 4, pageWidth: 210, pageHeight: 297, margin: 15 }, synchronize: !!detail.bindings?.length && !!detail.capabilities?.sync,
+		options: { name: "", encoding: { schemaRef: "", context: {}, units: [] } },
+		fragments: {}, item: 0
+	};
+}
+
+function invoiceCurrent() {
+	return invoicePanel.drafts.get(invoicePanel.key);
+}
+
+function invoiceDirty(draft, section) {
+	draft.dirty.add(section);
+	const button = document.querySelector("#settingsInvoiceApply");
+	if (button) button.disabled = !state.editing;
+	const reset = document.querySelector("#settingsInvoiceReset");
+	if (reset) reset.disabled = !state.editing;
+}
+
+function invoiceInput(container, label, id, value, change, disabled = false, type = "text", unit = "") {
+	const field = settingsField(container, label, `Invoice${id}`, value, type, unit);
+	field.disabled = disabled;
+	field.addEventListener("input", () => change(type === "checkbox" ? field.checked : field.value));
+	if (!state.editing && type !== "textarea") {
+		const text = document.createElement("span");
+		text.className = "settings-readonly";
+		text.id = field.id;
+		text.textContent = type === "checkbox" ? value ? "是" : "否" : value || "-";
+		field.replaceWith(text);
+		return text;
+	}
+	if (!state.editing && type === "textarea") {
+		field.disabled = false;
+		field.readOnly = true;
+	}
+	return field;
+}
+
+function invoiceValue(invoice, field, item = -1) {
+	const keys = field.split(".");
+	let value = keys[0] === "items" ? invoice.items?.[item] : invoice;
+	if (keys[0] === "items") keys.shift();
+	for (const key of keys) value = value?.[key];
+	return value ?? "";
+}
+
+function invoiceSetValue(invoice, field, item, value) {
+	const keys = field.split(".");
+	let target = keys[0] === "items" ? invoice.items[item] : invoice;
+	if (keys[0] === "items") keys.shift();
+	for (const key of keys.slice(0, -1)) target = target[key] ||= {};
+	target[keys.at(-1)] = value;
+}
+
+function invoiceIssues(issues) {
+	return (issues || []).map(issue => typeof issue === "string" ? issue : [issue.field, issue.message || issue.code].filter(Boolean).join("：")).join("\n");
+}
+
+function renderInvoiceSettings() {
+	const context = settingsElements.Context, content = settingsElements.Content;
+	const draft = invoiceCurrent();
+	const sources = [...new Map(invoicePanel.entries.map(entry => [invoiceSourceKey(entry.source), entry.source])).entries()];
+	if (sources.length) settingsSelect(context, "来源", "InvoiceSource", sources.map(([key, source]) => [key, source.fileLoc || source.id || source.kind]), draft?.entry ? invoiceSourceKey(draft.entry.source) : null, value => {
+		invoicePanel.key = invoicePanel.entries.find(entry => invoiceSourceKey(entry.source) === value).key;
+		loadDocumentSettings();
+	});
+	const candidates = invoicePanel.entries.filter(entry => !draft?.entry || invoiceSourceKey(entry.source) === invoiceSourceKey(draft.entry.source));
+	const choices = candidates.map(entry => [entry.key, entry.invoice.number || entry.invoice.code || `${entry.invoice.kind} · ${entry.index + 1}`]);
+	if (invoicePanel.drafts.has("new")) choices.push(["new", "新建"]);
+	if (choices.length) settingsSelect(context, "发票", "InvoiceEntry", choices, invoicePanel.key, value => { invoicePanel.key = value; loadDocumentSettings(); });
+	const actions = document.createElement("div");
+	actions.className = "invoice-actions";
+	context.append(actions);
+	if (state.editing) {
+		settingsButton("新建", newInvoiceDraft, false, "InvoiceNew", actions);
+		settingsButton("导入", () => readInvoiceFile(async text => {
+			const value = await newInvoiceDraft();
+			if (!value) return;
+			value.xml = text;
+			value.importing = true;
+			value.dirty.add("xml");
+			invoicePanel.tab = "xml";
+			renderDocumentSettings();
+		}), false, "InvoiceImport", actions);
+	}
+	if (!draft) {
+		settingsElements.Status.textContent = invoiceIssues(invoicePanel.issues) || "暂无发票";
+		return;
+	}
+	const tabs = document.createElement("div");
+	tabs.className = "invoice-tabs";
+	tabs.setAttribute("role", "tablist");
+	tabs.setAttribute("aria-label", "发票信息");
+	for (const [key, label, id] of [["basic", "基本", "Basic"], ["items", "明细", "Items"], ["fields", "字段", "Fields"], ["appearance", "票面", "Appearance"], ["xml", "原文", "XML"]]) {
+		const button = settingsButton(label, () => { invoicePanel.tab = key; renderDocumentSettings(); }, false, `InvoiceTab${id}`, tabs);
+		button.setAttribute("role", "tab");
+		button.setAttribute("aria-selected", String(invoicePanel.tab === key));
+		button.setAttribute("aria-controls", "invoiceTabContent");
+		button.tabIndex = invoicePanel.tab === key ? 0 : -1;
+		button.addEventListener("keydown", event => {
+			const buttons = [...tabs.children];
+			const index = buttons.indexOf(button);
+			const next = event.key === "ArrowRight" ? (index + 1) % buttons.length : event.key === "ArrowLeft" ? (index + buttons.length - 1) % buttons.length : event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : -1;
+			if (next >= 0) {
+				event.preventDefault();
+				const target = buttons[next].id;
+				buttons[next].click();
+				document.getElementById(target)?.focus();
+			}
+		});
+	}
+	content.append(tabs);
+	const body = document.createElement("div");
+	body.id = "invoiceTabContent";
+	body.setAttribute("role", "tabpanel");
+	body.setAttribute("aria-labelledby", tabs.querySelector('[aria-selected="true"]').id);
+	content.append(body);
+	if (invoicePanel.tab === "basic") renderInvoiceBasic(body, draft);
+	else if (invoicePanel.tab === "items") renderInvoiceItems(body, draft);
+	else if (invoicePanel.tab === "fields") renderInvoiceFields(body, draft);
+	else if (invoicePanel.tab === "appearance") renderInvoiceAppearance(body, draft);
+	else renderInvoiceXML(body, draft);
+	settingsButton("校验", () => validateInvoiceDraft(draft), false, "InvoiceValidate");
+	settingsButton("导出", () => downloadBytes(new TextEncoder().encode(JSON.stringify(draft.invoice, null, 2)), "application/json", "invoice.json"), false, "InvoiceExportJSON").title = "导出JSON";
+	if (state.editing) {
+		settingsButton("应用", () => applyInvoiceDraft(draft), !draft.dirty.size, "InvoiceApply");
+		settingsButton("还原", () => resetInvoiceDraft(draft), !draft.dirty.size, "InvoiceReset");
+		if (draft.entry) settingsButton("删除", async () => {
+			if (draft.dirty.size) throw new Error("请先应用或还原草稿");
+			if (window.confirm("删除此来源中的发票数据？页面将保留" + invoiceOtherDraftWarning(draft))) await commitInvoice(draft, { operation: "delete" });
+		}, !draft.detail.capabilities?.delete, "InvoiceDelete");
+	}
+	settingsElements.Status.textContent = draft.status || invoiceIssues(draft.detail.issues) || "";
+}
+
+async function newInvoiceDraft() {
+	if (!state.editing) return;
+	if (invoicePanel.drafts.get("new")?.dirty.size && !window.confirm("放弃尚未应用的新建发票？")) return;
+	const format = invoicePanel.formats.find(value => value.create);
+	if (!format) throw new Error("暂无可新建票种");
+	const invoice = { kind: format.kind, standard: format.standard, version: format.version, buyer: {}, seller: {}, items: [], facts: [] };
+	const scope = invoiceScope();
+	const sequence = settings.sequence;
+	const detail = await callWASM("ofdgoInvoice", JSON.stringify({ invoice, ...scope }));
+	if (sequence !== settings.sequence || !settingsElements.Panel.open) return;
+	invoicePanel.drafts.set("new", invoiceDraft(detail, null, scope));
+	invoicePanel.key = "new";
+	invoicePanel.tab = "basic";
+	renderDocumentSettings();
+	return invoiceCurrent();
+}
+
+function renderInvoiceBasic(container, draft) {
+	const fields = (draft.detail.fields || []).filter(field => field.item < 0 && !field.field.startsWith("facts.") && !field.field.startsWith("items."));
+	const labels = {
+		kind: "票种", standard: "规范", version: "版本", number: "号码", code: "代码", date: "日期",
+		currency: "币种", status: "状态", amount: "金额", taxAmount: "税额", totalAmount: "合计", remarks: "备注",
+		name: "名称", taxId: "税号", address: "地址", phone: "电话", bank: "银行", account: "账号"
+	};
+	for (const [group, label] of [["basic", "票据"], ["buyer", "购方"], ["seller", "销方"]]) {
+		const title = document.createElement("h3"), grid = document.createElement("div");
+		title.className = "invoice-group-title";
+		title.textContent = label;
+		grid.className = "settings-grid";
+		container.append(title, grid);
+		for (const field of fields.filter(field => field.group === group)) {
+			invoiceInput(grid, labels[field.field.split(".").at(-1)] || field.label, `Field_${field.field.replaceAll(".", "_")}`, invoiceValue(draft.invoice, field.field), value => {
+				invoiceSetValue(draft.invoice, field.field, -1, value);
+				invoiceDirty(draft, "model");
+			}, !state.editing || !(field.editable || !draft.entry && field.field === "currency" && draft.invoice.standard !== "EInvoice") || !!draft.entry && !draft.detail.capabilities?.edit).title = field.label;
+		}
+	}
+	if (draft.entry && state.editing) invoiceInput(container, "同步", "Synchronize", draft.synchronize, value => { draft.synchronize = value; }, !draft.detail.capabilities?.sync, "checkbox").title = draft.detail.capabilities?.reasons?.sync || "同步票面";
+	if (!draft.entry) renderInvoiceAdvanced(container, draft);
+}
+
+function renderInvoiceAdvanced(container, draft) {
+	const details = document.createElement("details"), summary = document.createElement("summary");
+	summary.textContent = "高级";
+	details.className = "invoice-advanced";
+	details.open = draft.advanced || false;
+	details.addEventListener("toggle", () => { draft.advanced = details.open; });
+	details.append(summary);
+	container.append(details);
+	const formats = invoicePanel.formats.filter(value => value.create);
+	const selected = formats.findIndex(value => value.kind === draft.invoice.kind && value.standard === draft.invoice.standard && value.version === draft.invoice.version);
+	settingsSelect(details, "票种", "InvoiceFormat", formats.map((value, index) => [index, `${{ inv: "增值税", einv: "电子票", atr: "航空票", rai: "铁路票" }[value.kind] || value.kind} · ${value.version} · ${value.standard === "EInvoice" ? "XML" : "XBRL"}`]), selected, async value => {
+		try {
+			const format = formats[Number(value)];
+			Object.assign(draft.invoice, { kind: format.kind, standard: format.standard, version: format.version });
+			invoiceDirty(draft, "model");
+			await invoiceRefreshFields(draft);
+			if (invoiceCurrent() === draft) renderDocumentSettings();
+		} catch (error) {
+			settingsElements.Status.textContent = error.message;
+		}
+	});
+	invoiceInput(details, "名称", "Name", draft.options.name, value => { draft.options.name = value; invoiceDirty(draft, "model"); });
+	const encoding = draft.options.encoding;
+	if (draft.invoice.standard !== "EInvoice") {
+		invoiceInput(details, "模式", "SchemaRef", encoding.schemaRef, value => { encoding.schemaRef = value; invoiceDirty(draft, "model"); }).title = "schemaRef";
+		for (const [key, label] of [["id", "标识"], ["identifier", "主体"], ["scheme", "方案"], ["instant", "时点"], ["startDate", "起日"], ["endDate", "止日"]]) {
+			invoiceInput(details, label, `Context_${key}`, encoding.context[key], value => { encoding.context[key] = value; invoiceDirty(draft, "model"); }).title = `context.${key}`;
+		}
+		for (const [index, unit] of encoding.units.entries()) {
+			const row = document.createElement("div");
+			row.className = "invoice-unit";
+			details.append(row);
+			for (const [key, label] of [["id", "标识"], ["namespace", "空间"], ["name", "单位"]]) {
+				invoiceInput(row, label, `Unit_${index}_${key}`, unit[key], value => { unit[key] = value; invoiceDirty(draft, "model"); }).title = key === "namespace" ? "命名空间" : label;
+			}
+			settingsButton("删除", () => {
+				encoding.units.splice(index, 1);
+				invoiceDirty(draft, "model");
+				renderDocumentSettings();
+			}, false, `InvoiceUnitDelete${index}`, row);
+		}
+		settingsButton("添加", () => {
+			encoding.units.push({ id: "", namespace: "", name: "" });
+			invoiceDirty(draft, "model");
+			renderDocumentSettings();
+		}, false, "InvoiceUnitAdd", details).title = "添加单位";
+	}
+	for (const [key, label] of [["headerXML", "票头"], ["sellerAuthenticationXML", "认证"], ["taxSupervisionXML", "监制"], ["taxBureauSignatureXML", "签名"]]) {
+		invoiceInput(details, label, `Fragment_${key}`, draft.fragments[key], value => {
+			draft.fragments[key] = value;
+			invoiceDirty(draft, "model");
+		}, false, "textarea");
+		settingsButton("导入", () => readInvoiceFile(text => {
+			draft.fragments[key] = text;
+			invoiceDirty(draft, "model");
+			renderDocumentSettings();
+		}), false, `InvoiceFragmentImport_${key}`, details).title = `导入${label}XML`;
+	}
+}
+
+function renderInvoiceItems(container, draft) {
+	const items = draft.invoice.items ||= [];
+	const editable = state.editing && (!draft.entry ? invoicePanel.formats.find(value => value.kind === draft.invoice.kind && value.standard === draft.invoice.standard && value.version === draft.invoice.version)?.items : draft.detail.capabilities?.items);
+	draft.item = Math.max(0, Math.min(draft.item, items.length - 1));
+	const columns = [["name", "名称"], ["specification", "规格"], ["unit", "单位"], ["quantity", "数量"], ["unitPrice", "单价"], ["amount", "金额"], ["taxRate", "税率"], ["taxAmount", "税额"]];
+	const scroll = document.createElement("div"), table = document.createElement("table");
+	const head = table.createTHead().insertRow();
+	scroll.className = "invoice-table-scroll";
+	table.className = "invoice-table";
+	table.id = "settingsInvoiceItems";
+	for (const label of ["选择", ...columns.map(entry => entry[1])]) {
+		const cell = document.createElement("th");
+		cell.scope = "col";
+		cell.textContent = label;
+		head.append(cell);
+	}
+	const body = table.createTBody();
+	for (const [index, item] of items.entries()) {
+		const row = body.insertRow(), radio = document.createElement("input");
+		radio.type = "radio";
+		radio.name = "invoiceItem";
+		radio.checked = index === draft.item;
+		radio.setAttribute("aria-label", `明细${index + 1}`);
+		radio.addEventListener("change", () => {
+			draft.item = index;
+			renderDocumentSettings();
+		});
+		row.insertCell().append(radio);
+		for (const [key, label] of columns) {
+			const input = document.createElement("input");
+			input.type = "text";
+			input.value = item[key] || "";
+			input.id = `settingsInvoiceItem_${index}_${key}`;
+			input.setAttribute("aria-label", `${label}${index + 1}`);
+			const descriptor = draft.detail.fields?.find(field => field.field === `items.${key}` && field.item === index);
+			input.disabled = !editable || !descriptor?.editable;
+			input.addEventListener("input", () => {
+				item[key] = input.value;
+				invoiceDirty(draft, "model");
+			});
+			const cell = row.insertCell();
+			if (!state.editing) {
+				const text = document.createElement("span");
+				text.className = "settings-readonly";
+				text.textContent = item[key] || "-";
+				cell.append(text);
+			} else cell.append(input);
+		}
+	}
+	scroll.append(table);
+	container.append(scroll);
+	if (state.editing) {
+		const actions = document.createElement("div");
+		actions.className = "invoice-actions";
+		container.append(actions);
+		const reorder = async (direction) => {
+			if (draft.changes.size) throw new Error("请先应用原字段修改，再调整明细顺序");
+			const next = draft.item + direction;
+			[items[next], items[draft.item]] = [items[draft.item], items[next]];
+			draft.item = next;
+			invoiceDirty(draft, "model");
+			await invoiceRefreshFields(draft);
+			renderDocumentSettings();
+		};
+		settingsButton("添加", async () => {
+			const item = {};
+			items.push(item);
+			draft.addedItems.add(item);
+			draft.item = items.length - 1;
+			invoiceDirty(draft, "model");
+			await invoiceRefreshFields(draft);
+			renderDocumentSettings();
+		}, !editable, "InvoiceItemAdd", actions);
+		settingsButton("删除", async () => {
+			if (draft.changes.size) throw new Error("请先应用原字段修改，再删除明细");
+			items.splice(draft.item, 1);
+			invoiceDirty(draft, "model");
+			await invoiceRefreshFields(draft);
+			renderDocumentSettings();
+		}, !editable || !items.length, "InvoiceItemDelete", actions);
+		settingsButton("上移", () => reorder(-1), !editable || draft.item === 0 || !items.length, "InvoiceItemUp", actions);
+		settingsButton("下移", () => reorder(1), !editable || draft.item >= items.length - 1, "InvoiceItemDown", actions);
+	}
+}
+
+async function invoiceRefreshFields(draft) {
+	const invoice = structuredClone(draft.invoice);
+	const detail = await callWASM("ofdgoInvoice", JSON.stringify({ invoice, ...draft.scope }));
+	if (invoiceCurrent() === draft && JSON.stringify(draft.invoice) === JSON.stringify(invoice)) draft.detail.fields = detail.fields;
+}
+
+function renderInvoiceFields(container, draft) {
+	const facts = (draft.invoice.facts || []).map((fact, index) => ({ fact, field: `facts.${index}`, item: -1 }));
+	for (const [item, value] of (draft.invoice.items || []).entries()) {
+		for (const [index, fact] of (value.fields || []).entries()) {
+			facts.push({ fact, field: `items.fields.${index}`, item });
+		}
+	}
+	const options = facts.map(({ fact, item }, index) => [index, `${item >= 0 ? `明细${item + 1} · ` : ""}${fact.name || "未命名"}${fact.context ? ` · ${fact.context}` : ""} · ${index + 1}`]);
+	const owners = [...(!draft.entry ? [[-1, "基本"]] : []), ...(draft.invoice.items || []).flatMap((item, index) => !draft.entry || draft.addedItems.has(item) ? [[index, `明细${index + 1}`]] : [])];
+	if (state.editing && owners.length) {
+		if (!owners.some(([index]) => index === draft.factOwner)) draft.factOwner = owners[0][0];
+		settingsSelect(container, "归属", "InvoiceFactOwner", owners, draft.factOwner, value => { draft.factOwner = Number(value); });
+		settingsButton("添加", () => {
+			const owner = draft.factOwner;
+			const target = owner < 0 ? draft.invoice.facts ||= [] : draft.invoice.items[owner].fields ||= [];
+			target.push({ name: "", namespace: "", value: "", context: "", unit: "" });
+			draft.fact = owner < 0 ? target.length - 1 : (draft.invoice.facts || []).length + draft.invoice.items.slice(0, owner).reduce((sum, item) => sum + (item.fields || []).length, 0) + target.length - 1;
+			invoiceDirty(draft, "model");
+			renderDocumentSettings();
+		}, false, "InvoiceFactAdd", container);
+	}
+	if (!options.length) return;
+	draft.fact = Math.min(draft.fact || 0, facts.length - 1);
+	settingsSelect(container, "字段", "InvoiceFact", options, draft.fact, value => {
+		draft.fact = Number(value);
+		renderDocumentSettings();
+	});
+	const { fact, field, item } = facts[draft.fact];
+	const patchKey = invoiceSourceKey(fact.source);
+	const change = draft.changes.get(patchKey);
+	const descriptor = draft.detail.fields?.find(value => value.field === field && value.item === item);
+	const fresh = !draft.entry || item >= 0 && draft.addedItems.has(draft.invoice.items[item]);
+	const writable = state.editing && (fresh || descriptor?.editable && !!fact.source?.nodePath);
+	for (const [key, label] of [["name", "名称"], ["namespace", "空间"], ["context", "语境"], ["unit", "单位"], ["decimals", "小数"], ["precision", "精度"]]) {
+		invoiceInput(container, label, `FactMeta_${key}`, fact[key], value => {
+			fact[key] = value;
+			invoiceDirty(draft, "model");
+		}, !fresh || !state.editing).title = key === "namespace" ? "命名空间" : key === "context" ? "上下文标识" : label;
+	}
+	if (fact.source?.nodePath) invoiceInput(container, "路径", "FactPath", fact.source.nodePath, () => {}, true);
+	const update = (key, value) => {
+		if (fresh) {
+			fact[key] = value;
+			if (key === "nil" && value) {
+				fact.value = "";
+				document.querySelector("#settingsInvoiceFactValue").value = "";
+			}
+			if (key === "value") {
+				fact.nil = false;
+				document.querySelector("#settingsInvoiceFactNil").checked = false;
+			}
+			invoiceDirty(draft, "model");
+			return;
+		}
+		const patch = draft.changes.get(patchKey) || {
+			source: structuredClone(fact.source), value: fact.value || "", nil: !!fact.nil,
+			expectedValue: fact.value || "", expectedNil: !!fact.nil
+		};
+		patch[key] = value;
+		if ((key === "nil" || key === "delete") && value) {
+			patch.value = "";
+			document.querySelector("#settingsInvoiceFactValue").value = "";
+		}
+		if (key === "nil" && value) {
+			patch.delete = false;
+			document.querySelector("#settingsInvoiceFactDelete").checked = false;
+		}
+		if (key === "delete" && value) {
+			patch.nil = false;
+			document.querySelector("#settingsInvoiceFactNil").checked = false;
+		}
+		if (key === "value") {
+			patch.nil = false;
+			patch.delete = false;
+			document.querySelector("#settingsInvoiceFactNil").checked = false;
+			document.querySelector("#settingsInvoiceFactDelete").checked = false;
+		}
+		draft.changes.set(patchKey, patch);
+		invoiceDirty(draft, "fields");
+	};
+	invoiceInput(container, "数值", "FactValue", change?.value ?? fact.value, value => update("value", value), !writable, "textarea");
+	invoiceInput(container, "空值", "FactNil", change?.nil ?? fact.nil, value => update("nil", value), !writable, "checkbox");
+	if (!fresh) invoiceInput(container, "删除", "FactDelete", change?.delete || false, value => update("delete", value), !writable, "checkbox");
+	else if (state.editing) settingsButton("删除", () => {
+		const index = Number(field.split(".").at(-1));
+		(item < 0 ? draft.invoice.facts : draft.invoice.items[item].fields).splice(index, 1);
+		invoiceDirty(draft, "model");
+		renderDocumentSettings();
+	}, false, "InvoiceFactDelete", container);
+}
+
+function renderInvoiceAppearance(container, draft) {
+	const capabilities = draft.detail.capabilities || {};
+	const writable = state.editing && !!draft.entry;
+	const fields = (draft.detail.fields || []).filter(field => field.bindable);
+	const choices = fields.map(field => [JSON.stringify([field.field, field.item]), `${field.item >= 0 ? `明细${field.item + 1} · ` : ""}${field.label}`]);
+	if (!choices.some(([key]) => key === draft.field)) {
+		draft.field = choices[0]?.[0] || "";
+		const binding = draft.bindings.find(binding => JSON.stringify([binding.field, binding.item]) === draft.field);
+		draft.binding = 0;
+		draft.page = binding?.page ?? state.pageIndex;
+		draft.object = binding?.objectId || "";
+	}
+	settingsSelect(container, "字段", "InvoiceBindingField", choices, draft.field, value => {
+		draft.field = value;
+		draft.binding = 0;
+		const binding = draft.bindings.find(binding => JSON.stringify([binding.field, binding.item]) === value);
+		draft.page = binding?.page ?? state.pageIndex;
+		draft.object = binding?.objectId || "";
+		renderDocumentSettings();
+	});
+	const bound = draft.bindings.filter(binding => JSON.stringify([binding.field, binding.item]) === draft.field);
+	if (bound.length) {
+		draft.binding = Math.min(draft.binding || 0, bound.length - 1);
+		settingsSelect(container, "引用", "InvoiceBinding", bound.map((binding, index) => [index, `第${binding.page + 1}页 · ${binding.objectId}`]), draft.binding, value => {
+			draft.binding = Number(value);
+			draft.page = bound[draft.binding].page;
+			draft.object = bound[draft.binding].objectId;
+			renderDocumentSettings();
+		});
+	}
+	settingsPages(container, "InvoicePage", draft.page, value => {
+		draft.page = Number(value);
+		draft.object = "";
+		renderDocumentSettings();
+	});
+	const object = settingsSelect(container, "图元", "InvoiceObject", [[draft.object, draft.object || "选择图元"]], draft.object, value => {
+		draft.object = value;
+		renderDocumentSettings();
+	});
+	object.disabled = !writable || !capabilities.bind;
+	const actions = document.createElement("div");
+	actions.className = "invoice-actions";
+	container.append(actions);
+	settingsButton("定位", async () => {
+		if (!draft.object) return;
+		settings.page = draft.page;
+		await locateSettingsObjects([draft.object]);
+	}, !draft.object, "InvoiceLocate", actions);
+	if (state.editing) {
+		settingsButton("选取", async () => {
+			settings.page = draft.page;
+			await beginSettingsPick("invoice");
+		}, !writable || !capabilities.bind, "InvoicePick", actions, capabilities.reasons?.bind);
+		settingsButton("绑定", () => {
+			if (!draft.object || !draft.field) throw new Error("请选择字段和图元");
+			const [field, item] = JSON.parse(draft.field);
+			if (draft.bindings.some(binding => binding.page === draft.page && binding.objectId === draft.object && (binding.field !== field || binding.item !== item))) throw new Error("此图元已绑定其他字段");
+			draft.bindings = draft.bindings.filter(binding => binding.field !== field || binding.item !== item);
+			draft.bindings.push({ field, item, page: draft.page, objectId: draft.object });
+			invoiceDirty(draft, "bindings");
+			renderDocumentSettings();
+		}, !writable || !capabilities.bind || !draft.field, "InvoiceBind", actions, capabilities.reasons?.bind);
+		settingsButton("解绑", () => {
+			draft.bindings = draft.bindings.filter(binding => !(JSON.stringify([binding.field, binding.item]) === draft.field && binding.page === draft.page && binding.objectId === draft.object));
+			invoiceDirty(draft, "bindings");
+			renderDocumentSettings();
+		}, !writable || !bound.length, "InvoiceUnbind", actions);
+		settingsButton("清空", () => {
+			draft.bindings = [];
+			invoiceDirty(draft, "bindings");
+			renderDocumentSettings();
+		}, !writable || !draft.bindings.length, "InvoiceUnbindAll", actions).title = "解除全部绑定";
+	}
+	if (writable) {
+		const details = document.createElement("details"), summary = document.createElement("summary");
+		summary.textContent = "生成";
+		details.className = "invoice-advanced";
+		details.append(summary);
+		container.append(details);
+		details.open = draft.layoutOpen || false;
+		details.addEventListener("toggle", () => { draft.layoutOpen = details.open; });
+		const fonts = state.doc.fonts || [];
+		const libraryFonts = fontManager.editorFonts().filter(font => !font.disabled);
+		settingsSelect(details, "字体", "InvoiceFont", [["", "选择字体"], ...fonts.map(font => [font.id, font.fontName || font.familyName || font.id]), ...libraryFonts.map(font => [`file:${font.id}`, font.fullName || font.name])], draft.fontChoice || draft.layout.font, value => {
+			draft.fontChoice = value;
+			draft.layout.font = value.startsWith("file:") ? "" : value;
+			renderDocumentSettings();
+		});
+		settingsButton("添加", () => openFontFile(el.fontInput), false, "InvoiceAddFont", details).title = "添加字体";
+		settingsButton("嵌入", async () => {
+			const font = fonts.find(value => value.id === draft.layout.font);
+			if (!font) throw new Error("请选择字体");
+			const before = invoiceScope();
+			const refresh = () => {
+				const next = invoiceScope();
+				if (next.documentIndex !== before.documentIndex || next.version !== before.version) return;
+				for (const value of invoicePanel.drafts.values()) {
+					if (value.scope.documentIndex === before.documentIndex && value.scope.version === before.version && value.scope.revision === before.revision) {
+						value.scope.revision = next.revision;
+					}
+				}
+				if (settingsElements.Panel.open && settingsElements.Kind.value === "invoices") renderDocumentSettings();
+			};
+			await openFontBinding(font);
+			if (fontBindingElements.Panel.open) fontBindingElements.Panel.addEventListener("close", refresh, { once: true });
+			else refresh();
+		}, !draft.layout.font || !!fonts.find(font => font.id === draft.layout.font)?.embedded, "InvoiceEmbedFont", details);
+		for (const [key, label] of [["fontSize", "字号"], ["pageWidth", "页宽"], ["pageHeight", "页高"], ["margin", "边距"]]) {
+			const input = invoiceInput(details, label, `Layout_${key}`, draft.layout[key], value => { draft.layout[key] = Number(value); }, false, "number", "mm");
+			input.min = key === "margin" ? "0" : "0.01";
+		}
+		settingsButton("生成", async () => {
+			if (draft.dirty.size) throw new Error("请先应用草稿");
+			if (!draft.layout.font && !draft.fontChoice?.startsWith("file:")) throw new Error("请选择字体");
+			let fontData;
+			if (draft.fontChoice?.startsWith("file:")) {
+				const font = libraryFonts.find(value => `file:${value.id}` === draft.fontChoice);
+				if (!font) throw new Error("所选字体不可用");
+				fontData = invoiceBase64(await readTextFont(font));
+			}
+			await commitInvoice(draft, { operation: "generate", layout: draft.layout, fontData });
+		}, !capabilities.generate, "InvoiceGenerate", details, capabilities.reasons?.generate || (draft.bindings.length ? "请先解除绑定" : ""));
+		settingsButton("同步", async () => {
+			if (draft.dirty.size) throw new Error("请先应用草稿");
+			await commitInvoice(draft, { operation: "sync" });
+		}, !capabilities.sync, "InvoiceSync", actions, capabilities.reasons?.sync);
+	}
+	loadInvoiceObjects(draft).catch(error => { if (invoiceCurrent() === draft) settingsElements.Status.textContent = error.message; });
+}
+
+async function loadInvoiceObjects(draft) {
+	const page = draft.page, sequence = settings.sequence;
+	const field = document.querySelector("#settingsInvoiceObject");
+	if (!field || !state.doc.pages[page]) return;
+	const data = await loadPageData(page);
+	if (invoiceCurrent() !== draft || draft.page !== page || sequence !== settings.sequence || !field.isConnected) return;
+	const objects = (data.objects || []).filter(item => !item.scoped && item.type === "TextObject");
+	field.replaceChildren(new Option("选择图元", ""), ...objects.map(item => new Option(`${item.id} · ${(item.text || "文字").slice(0, 60)}`, item.id)));
+	field.value = draft.object;
+}
+
+function invoiceOtherDraftWarning(draft) {
+	return [...invoicePanel.drafts.values()].some(value => value !== draft && value.entry && value.dirty.size && invoiceSourceKey(value.entry.source) === invoiceSourceKey(draft.entry.source)) ? "\n该来源其他发票的未应用修改也将放弃" : "";
+}
+
+function resetInvoiceDraft(draft) {
+	const section = { xml: "xml", fields: draft.entry ? "fields" : "model", appearance: "bindings" }[invoicePanel.tab] || "model";
+	if (!draft.dirty.has(section) || !window.confirm("放弃当前编辑项的未应用修改？")) return;
+	if (section === "xml") draft.xml = draft.detail.xml || "";
+	else if (section === "fields") draft.changes.clear();
+	else if (section === "bindings") draft.bindings = structuredClone(draft.detail.bindings || []);
+	else {
+		draft.invoice = structuredClone(draft.detail.invoice);
+		draft.options = { name: "", encoding: { schemaRef: "", context: {}, units: [] } };
+		draft.fragments = {};
+	}
+	draft.dirty.delete(section);
+	draft.status = "";
+	renderDocumentSettings();
+}
+
+function renderInvoiceXML(container, draft) {
+	invoiceInput(container, "原文", "XML", draft.xml, value => {
+		draft.xml = value;
+		invoiceDirty(draft, "xml");
+	}, !state.editing, "textarea").rows = 14;
+	const actions = document.createElement("div");
+	actions.className = "invoice-actions";
+	container.append(actions);
+	if (state.editing) settingsButton("导入", () => readInvoiceFile(text => {
+		draft.xml = text;
+		if (!draft.entry) draft.importing = true;
+		invoiceDirty(draft, "xml");
+		renderDocumentSettings();
+	}), false, "InvoiceLoadXML", actions);
+	settingsButton("导出", async () => {
+		const result = await callWASM("ofdgoExportInvoice", JSON.stringify({ ...draft.scope, source: draft.entry.source, index: draft.entry.index }));
+		downloadBytes(result.bytes, "application/xml", (draft.entry.source.fileLoc?.split("/").at(-1) || "invoice.xml"));
+	}, !draft.entry, "InvoiceExportXML", actions).title = "导出来源原文";
+}
+
+function readInvoiceFile(accept) {
+	const sequence = settings.sequence, openSeq = state.openSeq;
+	const input = document.createElement("input");
+	input.type = "file";
+	input.accept = ".xml,.xbrl,application/xml,text/xml";
+	input.addEventListener("change", async () => {
+		const file = input.files[0];
+		if (!file) return;
+		try {
+			const text = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
+			if (sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
+			await accept(text);
+		} catch (error) {
+			settingsElements.Status.textContent = error.message;
+		}
+	});
+	input.click();
+}
+
+async function validateInvoiceDraft(draft) {
+	const request = draft.dirty.size ? buildInvoiceRequest(draft) : { invoice: draft.invoice };
+	const result = await callWASM("ofdgoValidateInvoice", JSON.stringify({ ...draft.scope, source: draft.entry?.source, index: draft.entry?.index, digest: draft.detail.digest, ...request }));
+	if (invoiceCurrent() !== draft) return;
+	draft.status = invoiceIssues([...(result.issues || []), ...(result.appearance || [])]);
+	settingsElements.Status.textContent = draft.status;
+}
+
+async function applyInvoiceDraft(draft) {
+	if (!state.editing || !draft.dirty.size) return;
+	const request = buildInvoiceRequest(draft);
+	if (request.operation === "replace" && !window.confirm("替换此来源中的全部发票原文？" + invoiceOtherDraftWarning(draft))) return;
+	await commitInvoice(draft, request);
+}
+
+function buildInvoiceRequest(draft) {
+	if (draft.dirty.has("xml") && draft.dirty.size > 1) throw new Error("原文替换与其他修改冲突，草稿已保留，请先还原其中一项");
+	const section = draft.dirty.has("xml") ? "xml" : "model";
+	const request = { synchronize: draft.synchronize };
+	if (section === "xml") {
+		Object.assign(request, { operation: draft.entry ? "replace" : "import", xml: draft.xml, options: { name: draft.options.name } });
+	} else {
+		const options = structuredClone(draft.options);
+		for (const [key, text] of Object.entries(draft.fragments)) {
+			options.encoding[key] = invoiceBase64(new TextEncoder().encode(text));
+		}
+		if (!draft.entry) Object.assign(request, { operation: "create", invoice: draft.invoice, options });
+		else {
+			const operations = [];
+			if (draft.dirty.has("model")) operations.push({ operation: "set", index: draft.entry.index, invoice: draft.invoice });
+			if (draft.dirty.has("fields")) operations.push({ operation: "patch", index: draft.entry.index, changes: [...draft.changes.values()] });
+			if (draft.dirty.has("bindings")) operations.push({ operation: "bindings", index: draft.entry.index, bindings: draft.bindings });
+			Object.assign(request, operations.length === 1 ? operations[0] : { operation: "batch", operations });
+		}
+	}
+	return request;
+}
+
+function invoiceBase64(bytes) {
+	let value = "";
+	for (let offset = 0; offset < bytes.length; offset += 8192) value += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+	return btoa(value);
+}
+
+async function commitInvoice(draft, request) {
+	if (!state.editing || settings.busy || document.body.hasAttribute("aria-busy")) return;
+	settings.busy = true;
+	settingsElements.Form.inert = true;
+	settingsElements.Status.textContent = "正在保存修改";
+	try {
+		invoicePanel.result = null;
+		if (!await changeDocument("ofdgoChangeInvoice", null, JSON.stringify({ ...draft.scope, source: draft.entry?.source, index: draft.entry?.index || 0, digest: draft.detail.digest, ...request }))) {
+			if (settingsElements.Status.textContent === "正在保存修改") settingsElements.Status.textContent = el.statusText.textContent;
+			return;
+		}
+		const result = invoicePanel.result;
+		invoicePanel.drafts.delete(invoicePanel.key);
+		const currentScope = invoiceScope();
+		for (const [key, value] of invoicePanel.drafts) {
+			if (value.scope.documentIndex !== currentScope.documentIndex || value.scope.version !== currentScope.version) continue;
+			value.scope.revision = currentScope.revision;
+			if (value.entry && draft.entry && invoiceSourceKey(value.entry.source) === invoiceSourceKey(draft.entry.source)) {
+				if (!value.dirty.size) invoicePanel.drafts.delete(key);
+				else value.status = "同源数据已修改，应用时将检查来源冲突";
+			}
+		}
+		if (request.operation === "delete" || request.operation === "replace") {
+			for (const [key, value] of invoicePanel.drafts) {
+				if (value.entry && invoiceSourceKey(value.entry.source) === invoiceSourceKey(draft.entry.source)) {
+					invoicePanel.drafts.delete(key);
+				}
+			}
+		}
+		if (result?.source?.kind) invoicePanel.key = JSON.stringify([invoiceSourceKey(result.source), draft.entry?.index || 0]);
+		await loadDocumentSettings();
+		const warning = invoiceIssues(result?.issues);
+		if (warning) {
+			if (invoiceCurrent()) invoiceCurrent().status = warning;
+			settingsElements.Status.textContent = warning;
+		}
+	} finally {
+		settings.busy = false;
+		settingsElements.Form.inert = false;
+	}
 }
 
 function settingsPages(container, id, value, change) {
@@ -6098,13 +6864,17 @@ function suspendSettings(kind) {
 async function pickSettingsObject(event, picking) {
 	if (picking.settings === "locate") { finishResourcePick(); return; }
 	const available = canvasEditor.itemsAt(event).filter(item => !item.scoped && !item.draft && item.type !== "Annotation"
+		&& (picking.settings !== "invoice" || item.type === "TextObject")
 		&& (picking.settings !== "style" || ["TextObject", "PathObject", "CompositeObject", "CompositeGraphicUnit"].includes(item.type))
 		&& (picking.settings !== "layer" || item.index === settings.page && !settings.data.page.layers[settings.selected]?.ObjectIDs?.includes(item.id)));
 	if (!available.length) return;
 	const choose = async item => {
 		if (resourceManager.pick !== picking || picking.sequence !== state.openSeq) return;
 		finishResourcePick();
-		if (picking.settings === "action") {
+		if (picking.settings === "invoice") {
+			const draft = invoiceCurrent();
+			if (draft) { draft.page = item.index; draft.object = item.id; renderDocumentSettings(); }
+		} else if (picking.settings === "action") {
 			settings.page = item.index;
 			settings.object = item.id;
 			settings.selected = -1;
