@@ -5393,6 +5393,14 @@ function settingsButton(label, action, disabled = false, id = "", container = se
 	return button;
 }
 
+function settingsControlRow(field) {
+	const row = document.createElement("div"), label = field.closest(".form-row");
+	row.className = "settings-control-row";
+	label.replaceWith(row);
+	row.append(label);
+	return row;
+}
+
 function settingsSection(label) {
 	const section = document.createElement("section"), title = document.createElement("div"), actions = document.createElement("div");
 	section.className = "settings-section";
@@ -6118,8 +6126,8 @@ function renderInvoiceFields(container, draft) {
 	if (writable && !fresh && draft.invoice.standard === invoiceReferenceStandard) {
 		const fonts = state.doc.fonts || [];
 		const libraryFonts = fontManager.editorFonts().filter(font => !font.disabled);
-		settingsSelect(container, "字体", "InvoiceFactFont", [["", "原字体"], ...fonts.map(font => [font.id, font.fontName || font.familyName || font.id]), ...libraryFonts.map(font => [`file:${font.id}`, font.fullName || font.name])], change?.font || "", value => update("font", value));
-		settingsButton("添加", () => openFontFile(el.fontInput), false, "InvoiceFactAddFont", container);
+		const font = settingsSelect(container, "字体", "InvoiceFactFont", [["", "原字体"], ...fonts.map(font => [font.id, font.fontName || font.familyName || font.id]), ...libraryFonts.map(font => [`file:${font.id}`, font.fullName || font.name])], change?.font || "", value => update("font", value));
+		settingsButton("添加", () => openFontFile(el.fontInput), false, "InvoiceFactAddFont", settingsControlRow(font));
 	}
 	invoiceInput(container, "空值", "FactNil", change?.nil ?? fact.nil, value => update("nil", value), !writable || draft.invoice.standard === invoiceReferenceStandard, "checkbox");
 	if (!fresh) invoiceInput(container, "删除", "FactDelete", change?.delete || false, value => update("delete", value), !writable || draft.invoice.standard === invoiceReferenceStandard, "checkbox");
@@ -6215,13 +6223,14 @@ function renderInvoiceAppearance(container, draft) {
 		details.addEventListener("toggle", () => { draft.layoutOpen = details.open; });
 		const fonts = state.doc.fonts || [];
 		const libraryFonts = fontManager.editorFonts().filter(font => !font.disabled);
-		settingsSelect(details, "字体", "InvoiceFont", [["", "选择"], ...fonts.map(font => [font.id, font.fontName || font.familyName || font.id]), ...libraryFonts.map(font => [`file:${font.id}`, font.fullName || font.name])], draft.fontChoice || draft.layout.font, value => {
+		const font = settingsSelect(details, "字体", "InvoiceFont", [["", "选择"], ...fonts.map(font => [font.id, font.fontName || font.familyName || font.id]), ...libraryFonts.map(font => [`file:${font.id}`, font.fullName || font.name])], draft.fontChoice || draft.layout.font, value => {
 			draft.fontChoice = value;
 			draft.layout.font = value.startsWith("file:") ? "" : value;
 			if (creatingReference) invoiceDirty(draft, "model");
 			renderDocumentSettings();
 		});
-		settingsButton("添加", () => openFontFile(el.fontInput), false, "InvoiceAddFont", details);
+		const fontRow = settingsControlRow(font);
+		settingsButton("添加", () => openFontFile(el.fontInput), false, "InvoiceAddFont", fontRow);
 		settingsButton("嵌入", async () => {
 			const font = fonts.find(value => value.id === draft.layout.font);
 			if (!font) throw new Error("请选择字体");
@@ -6239,7 +6248,7 @@ function renderInvoiceAppearance(container, draft) {
 			await openFontBinding(font);
 			if (fontBindingElements.Panel.open) fontBindingElements.Panel.addEventListener("close", refresh, { once: true });
 			else refresh();
-		}, !draft.layout.font || !!fonts.find(font => font.id === draft.layout.font)?.embedded, "InvoiceEmbedFont", details);
+		}, !draft.layout.font || !!fonts.find(font => font.id === draft.layout.font)?.embedded, "InvoiceEmbedFont", fontRow);
 		for (const [key, label] of [["fontSize", "字号"], ["pageWidth", "页宽"], ["pageHeight", "页高"], ["margin", "边距"]]) {
 			const input = invoiceInput(details, label, `Layout_${key}`, draft.layout[key], value => { draft.layout[key] = Number(value); if (creatingReference) invoiceDirty(draft, "model"); }, false, "number", "mm");
 			input.min = key === "margin" ? "0" : "0.01";

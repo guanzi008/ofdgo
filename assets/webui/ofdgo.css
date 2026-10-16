@@ -2041,6 +2041,23 @@ body[data-hide-meta] .meta-panel {
 	grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.settings-control-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 12px;
+}
+
+.settings-control-row > .form-row {
+	flex: 1;
+	min-width: 0;
+	margin-bottom: 0;
+}
+
+.settings-control-row > .button {
+	flex: none;
+}
+
 .settings-dialog details.settings-section {
 	margin-bottom: 0;
 }
