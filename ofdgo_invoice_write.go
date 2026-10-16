@@ -205,10 +205,11 @@ func InvoiceFields(value Invoice) []InvoiceFieldDescriptor {
 	return result
 }
 
-// InvoiceFormats 返回独立格式能力副本，历史航空格式仅允许读取和原位修改
+// InvoiceFormats 返回独立格式能力副本，创建及编辑能力按业务版本分别声明
 // 返回: 已适配格式列表
 func InvoiceFormats() []InvoiceFormat {
 	result := []InvoiceFormat{{Kind: "einv", Standard: "EInvoice", Version: "0.3", Read: true, Create: true, Edit: true, Items: true}}
+	result = append(result, InvoiceFormat{Kind: "inv", Standard: invoiceEDRM, Version: "1.0", Read: true, Items: true})
 	for _, kind := range []string{"inv", "einv", "atr", "rai"} {
 		result = append(result, InvoiceFormat{Kind: kind, Standard: "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/" + kind, Version: "2023-12-31", Read: true, Create: true, Edit: true, Items: kind == "inv" || kind == "atr"})
 	}
@@ -914,6 +915,10 @@ func PatchInvoice(ctx context.Context, data []byte, changes []InvoiceFieldChange
 	}
 	allowed := map[string]bool{}
 	for _, inv := range report.Invoices {
+		format, supported := invoiceWriteFormat(inv)
+		if !supported || !format.Edit {
+			continue
+		}
 		for _, f := range inv.Facts {
 			if f.Namespace != invoiceXBRL {
 				allowed[f.Source.NodePath] = true
@@ -1175,6 +1180,9 @@ func UpdateInvoiceXML(ctx context.Context, data []byte, invoiceIndex int, value 
 	old := before.Invoices[invoiceIndex]
 	if reflect.DeepEqual(old, value) {
 		return bytes.Clone(data), nil
+	}
+	if format, supported := invoiceWriteFormat(old); !supported || !format.Edit {
+		return nil, fmt.Errorf("invoice format does not support editing")
 	}
 	if value.Kind != old.Kind || value.Standard != old.Standard || value.Version != old.Version {
 		return nil, fmt.Errorf("invoice update cannot change format")

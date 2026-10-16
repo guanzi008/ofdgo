@@ -105,7 +105,7 @@ func (r *Reader) InvoiceCapabilities(ctx context.Context, source InvoiceSource, 
 	format, known := invoiceWriteFormat(report.Invoices[index])
 	result.Create = known && format.Create
 	result.Edit = known && format.Edit
-	result.Items = known && format.Items
+	result.Items = result.Edit && format.Items
 	result.Bind = known
 	result.Generate = known
 	result.Delete = true

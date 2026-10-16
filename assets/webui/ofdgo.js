@@ -5555,6 +5555,7 @@ async function loadDocumentSettings() {
 	settings.busy = true;
 	settingsElements.Form.inert = true;
 	settingsElements.Status.textContent = "正在读取信息";
+	settingsElements.Status.title = "";
 	try {
 		if (kind === "invoices") { await loadInvoiceSettings(sequence, openSeq); return; }
 		const data = ["bookmarks", "actions", "extensions"].includes(kind) ? await callWASM("ofdgoDocumentNavigation", kind) : {};
@@ -5742,12 +5743,24 @@ function invoiceSetValue(invoice, field, item, value) {
 	target[keys.at(-1)] = value;
 }
 
-function invoiceIssues(issues) {
-	return (issues || []).map(issue => typeof issue === "string" ? issue : [issue.field, issue.message || issue.code].filter(Boolean).join("：")).join("\n");
+function invoiceIssues(issues, details = false) {
+	const messages = {
+		"unsupported invoice XML root or version": "暂不支持此发票格式或版本",
+		"unsupported eInvoice namespace or version": "暂不支持此发票格式或版本",
+		"unsupported EInvoice version": "暂不支持此发票版本",
+		"EInvoice requires a unique versioned Header": "发票头信息不完整"
+	};
+	return [...new Set((issues || []).map(issue => {
+		const message = typeof issue === "string" ? issue : issue.message || issue.code;
+		if (typeof issue === "string") return details ? message : messages[message] || message;
+		if (details) return [issue.source?.fileLoc || issue.source?.id || issue.source?.kind, issue.source?.nodePath, issue.field, message].filter(Boolean).join("：");
+		return [issue.field, messages[message] || message].filter(Boolean).join("：");
+	}).filter(Boolean))].join("\n");
 }
 
 function renderInvoiceSettings() {
 	const context = settingsElements.Context, content = settingsElements.Content;
+	settingsElements.Status.title = "";
 	const draft = invoiceCurrent();
 	const sources = [...new Map(invoicePanel.entries.map(entry => [invoiceSourceKey(entry.source), entry.source])).entries()];
 	if (sources.length) settingsSelect(context, "来源", "InvoiceSource", sources.map(([key, source]) => [key, source.fileLoc || source.id || source.kind]), draft?.entry ? invoiceSourceKey(draft.entry.source) : null, value => {
@@ -5775,6 +5788,7 @@ function renderInvoiceSettings() {
 	}
 	if (!draft) {
 		settingsElements.Status.textContent = invoiceIssues(invoicePanel.issues) || "暂无发票";
+		settingsElements.Status.title = invoiceIssues(invoicePanel.issues, true);
 		return;
 	}
 	const tabs = document.createElement("div");
@@ -5821,6 +5835,7 @@ function renderInvoiceSettings() {
 		}, !draft.detail.capabilities?.delete, "InvoiceDelete");
 	}
 	settingsElements.Status.textContent = draft.status || invoiceIssues(draft.detail.issues) || "";
+	if (!draft.status) settingsElements.Status.title = invoiceIssues(draft.detail.issues, true);
 }
 
 async function newInvoiceDraft() {
@@ -5854,10 +5869,12 @@ function renderInvoiceBasic(container, draft) {
 		grid.className = "settings-grid";
 		container.append(title, grid);
 		for (const field of fields.filter(field => field.group === group)) {
-			invoiceInput(grid, labels[field.field.split(".").at(-1)] || field.label, `Field_${field.field.replaceAll(".", "_")}`, invoiceValue(draft.invoice, field.field), value => {
+			const value = invoiceValue(draft.invoice, field.field);
+			const display = field.field === "standard" && value === "http://www.edrm.org.cn/schema/e-invoice/2019" ? "电子发票/2019" : value;
+			invoiceInput(grid, labels[field.field.split(".").at(-1)] || field.label, `Field_${field.field.replaceAll(".", "_")}`, display, value => {
 				invoiceSetValue(draft.invoice, field.field, -1, value);
 				invoiceDirty(draft, "model");
-			}, !state.editing || !(field.editable || !draft.entry && field.field === "currency" && draft.invoice.standard !== "EInvoice") || !!draft.entry && !draft.detail.capabilities?.edit).title = field.label;
+			}, !state.editing || !(field.editable || !draft.entry && field.field === "currency" && draft.invoice.standard !== "EInvoice") || !!draft.entry && !draft.detail.capabilities?.edit).title = display !== value ? value : field.label;
 		}
 	}
 	if (draft.entry && state.editing) invoiceInput(container, "同步", "Synchronize", draft.synchronize, value => { draft.synchronize = value; }, !draft.detail.capabilities?.sync, "checkbox").title = draft.detail.capabilities?.reasons?.sync || "同步票面";
@@ -5926,7 +5943,7 @@ function renderInvoiceAdvanced(container, draft) {
 
 function renderInvoiceItems(container, draft) {
 	const items = draft.invoice.items ||= [];
-	const editable = state.editing && (!draft.entry ? invoicePanel.formats.find(value => value.kind === draft.invoice.kind && value.standard === draft.invoice.standard && value.version === draft.invoice.version)?.items : draft.detail.capabilities?.items);
+	const editable = state.editing && (!draft.entry ? invoicePanel.formats.find(value => value.kind === draft.invoice.kind && value.standard === draft.invoice.standard && value.version === draft.invoice.version)?.items : draft.detail.capabilities?.edit && draft.detail.capabilities?.items);
 	draft.item = Math.max(0, Math.min(draft.item, items.length - 1));
 	const columns = [["name", "名称"], ["specification", "规格"], ["unit", "单位"], ["quantity", "数量"], ["unitPrice", "单价"], ["amount", "金额"], ["taxRate", "税率"], ["taxAmount", "税额"]];
 	const scroll = document.createElement("div"), table = document.createElement("table");
@@ -6277,10 +6294,11 @@ function resetInvoiceDraft(draft) {
 }
 
 function renderInvoiceXML(container, draft) {
+	const writable = state.editing && (!draft.entry || draft.detail.capabilities?.edit);
 	invoiceInput(container, "原文", "XML", draft.xml, value => {
 		draft.xml = value;
 		invoiceDirty(draft, "xml");
-	}, !state.editing, "textarea").rows = 14;
+	}, !writable, "textarea").rows = 14;
 	const actions = document.createElement("div");
 	actions.className = "invoice-actions";
 	container.append(actions);
@@ -6289,7 +6307,7 @@ function renderInvoiceXML(container, draft) {
 		if (!draft.entry) draft.importing = true;
 		invoiceDirty(draft, "xml");
 		renderDocumentSettings();
-	}), false, "InvoiceLoadXML", actions);
+	}), !writable, "InvoiceLoadXML", actions);
 	settingsButton("导出", async () => {
 		const result = await callWASM("ofdgoExportInvoice", JSON.stringify({ ...draft.scope, source: draft.entry.source, index: draft.entry.index }));
 		downloadBytes(result.bytes, "application/xml", (draft.entry.source.fileLoc?.split("/").at(-1) || "invoice.xml"));

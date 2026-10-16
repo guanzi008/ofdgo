@@ -31,8 +31,11 @@ import (
 // invoiceXBRL 表示XBRL实例命名空间
 const invoiceXBRL = "http://www.xbrl.org/2003/instance"
 
-// invoiceXSI 表示XML Schema实例命名空间
+// invoiceXSI 表示XMLSchema实例命名空间
 const invoiceXSI = "http://www.w3.org/2001/XMLSchema-instance"
+
+// invoiceEDRM 表示2019版电子发票业务命名空间
+const invoiceEDRM = "http://www.edrm.org.cn/schema/e-invoice/2019"
 
 // invoiceDecimalPattern 仅接受XML十进制词法
 var invoiceDecimalPattern = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$`)
@@ -249,7 +252,10 @@ func parseInvoiceXML(ctx context.Context, data []byte, source InvoiceSource) (In
 	issue := func(code, field, msg string, s InvoiceSource) {
 		report.Issues = append(report.Issues, InvoiceIssue{Code: code, Field: field, Message: msg, Source: s})
 	}
-	if root.name == (xml.Name{Local: "EInvoice"}) {
+	if source.Kind == "tag" && invoiceObjectReferences(root) {
+		return report, nil
+	}
+	if root.name == (xml.Name{Local: "EInvoice"}) || root.name.Local == "eInvoice" && (root.name.Space == "" || root.name.Space == invoiceEDRM) {
 		return invoicePlainXML(ctx, root, source)
 	}
 	if root.name != (xml.Name{Space: invoiceXBRL, Local: "xbrl"}) {
@@ -955,22 +961,61 @@ func invoiceAmountCheck(inv *Invoice, report *InvoiceReport, source InvoiceSourc
 	}
 }
 
-// invoicePlainXML 解析官方数电发票指南中的无命名空间0.3版本
+// invoiceObjectReferences 识别由对象引用及对象数据构成的票面标引
+// 入参: root 标引根节点
+// 返回: bool 是否为纯对象映射
+func invoiceObjectReferences(root *invoiceXMLNode) bool {
+	count := 0
+	var walk func(*invoiceXMLNode) bool
+	walk = func(n *invoiceXMLNode) bool {
+		if n.name.Space == ofdNamespace2016 || n.name.Space == ofdNamespaceLegacy || n.name.Space == "ofd" || n.name.Space == invoiceEDRM {
+			if n.name.Local == "ObjectRef" {
+				count++
+				return len(n.children) == 0 && strings.TrimSpace(n.text.String()) != "" && invoiceXMLAttr(n, "", "PageRef") != ""
+			}
+			if n.name.Local == "ObjectData" {
+				return len(n.children) == 0
+			}
+		}
+		if strings.TrimSpace(n.text.String()) != "" {
+			return false
+		}
+		for _, child := range n.children {
+			if !walk(child) {
+				return false
+			}
+		}
+		return true
+	}
+	return walk(root) && count > 0
+}
+
+// invoicePlainXML 解析数电发票0.3及2019版电子发票XML
 // 入参: ctx 上下文，root 根节点，source 来源
 // 返回: 发票及诊断，取消错误
 func invoicePlainXML(ctx context.Context, root *invoiceXMLNode, source InvoiceSource) (InvoiceReport, error) {
 	report := InvoiceReport{}
-	headers := invoiceChildren(root, "", "Header")
-	if len(headers) != 1 {
-		report.Issues = append(report.Issues, InvoiceIssue{Code: "unsupported", Message: "EInvoice requires a unique versioned Header", Source: source})
-		return report, nil
-	}
-	versions := invoiceChildren(headers[0], "", "Version")
-	if len(versions) != 1 || versions[0].text.String() != "0.3" {
-		report.Issues = append(report.Issues, InvoiceIssue{Code: "unsupported", Field: "Version", Message: "unsupported EInvoice version", Source: source})
-		return report, nil
-	}
 	inv := Invoice{Kind: "einv", Standard: "EInvoice", Version: "0.3", Sources: []InvoiceSource{source}}
+	namespace, itemPath := "", "/EInvoice/EInvoiceData/IssuItemInformation"
+	if root.name.Local == "eInvoice" {
+		if invoiceXMLAttr(root, "", "Version") != "1.0" || len(invoiceChildren(root, invoiceEDRM, "InvoiceNo")) == 0 {
+			report.Issues = append(report.Issues, InvoiceIssue{Code: "unsupported", Message: "unsupported eInvoice namespace or version", Source: source})
+			return report, nil
+		}
+		inv.Kind, inv.Standard, inv.Version = "inv", invoiceEDRM, "1.0"
+		namespace, itemPath = invoiceEDRM, "/eInvoice/GoodsInfos/GoodsInfo"
+	} else {
+		headers := invoiceChildren(root, "", "Header")
+		if len(headers) != 1 {
+			report.Issues = append(report.Issues, InvoiceIssue{Code: "unsupported", Message: "EInvoice requires a unique versioned Header", Source: source})
+			return report, nil
+		}
+		versions := invoiceChildren(headers[0], "", "Version")
+		if len(versions) != 1 || versions[0].text.String() != "0.3" {
+			report.Issues = append(report.Issues, InvoiceIssue{Code: "unsupported", Field: "Version", Message: "unsupported EInvoice version", Source: source})
+			return report, nil
+		}
+	}
 	seen := map[string]InvoiceFact{}
 	blocked := map[string]bool{}
 	var walk func(*invoiceXMLNode, string, *InvoiceItem) error
@@ -979,10 +1024,10 @@ func invoicePlainXML(ctx context.Context, root *invoiceXMLNode, source InvoiceSo
 			return err
 		}
 		path += "/" + n.name.Local
-		if n.name.Space != "" {
+		if n != root && n.name.Space != namespace {
 			path = "!" + path
 		}
-		if path == "/EInvoice/EInvoiceData/IssuItemInformation" {
+		if path == itemPath {
 			inv.Items = append(inv.Items, InvoiceItem{})
 			item = &inv.Items[len(inv.Items)-1]
 		}
@@ -1007,6 +1052,9 @@ func invoicePlainXML(ctx context.Context, root *invoiceXMLNode, source InvoiceSo
 			return nil
 		}
 		dst, numeric := invoicePlainField(&inv, item, path)
+		if inv.Standard == invoiceEDRM {
+			dst, numeric = invoiceEDRMField(&inv, item, path)
+		}
 		if dst == nil {
 			return nil
 		}
@@ -1039,9 +1087,65 @@ func invoicePlainXML(ctx context.Context, root *invoiceXMLNode, source InvoiceSo
 	if err := walk(root, "", nil); err != nil {
 		return InvoiceReport{}, err
 	}
+	if inv.Standard == invoiceEDRM && inv.Date != "" {
+		if date, err := time.Parse("2006年01月02日", inv.Date); err == nil {
+			inv.Date = date.Format("2006-01-02")
+		}
+	}
 	invoiceAmountCheck(&inv, &report, source)
 	report.Invoices = append(report.Invoices, inv)
 	return report, nil
+}
+
+// invoiceEDRMField 按2019版电子发票路径映射公共字段，合并信息保留原始事实
+// 入参: inv 发票，item 当前明细，path 命名空间已校验的路径
+// 返回: 字段地址及数值标志
+func invoiceEDRMField(inv *Invoice, item *InvoiceItem, path string) (*string, bool) {
+	switch path {
+	case "/eInvoice/InvoiceCode":
+		return &inv.Code, false
+	case "/eInvoice/InvoiceNo":
+		return &inv.Number, false
+	case "/eInvoice/IssueDate":
+		return &inv.Date, false
+	case "/eInvoice/Buyer/BuyerName":
+		return &inv.Buyer.Name, false
+	case "/eInvoice/Buyer/BuyerTaxID":
+		return &inv.Buyer.TaxID, false
+	case "/eInvoice/Seller/SellerName":
+		return &inv.Seller.Name, false
+	case "/eInvoice/Seller/SellerTaxID":
+		return &inv.Seller.TaxID, false
+	case "/eInvoice/TaxExclusiveTotalAmount":
+		return &inv.Amount, true
+	case "/eInvoice/TaxTotalAmount":
+		return &inv.TaxAmount, true
+	case "/eInvoice/TaxInclusiveTotalAmount":
+		return &inv.TotalAmount, true
+	case "/eInvoice/Note":
+		return &inv.Remarks, false
+	}
+	if item != nil && strings.HasPrefix(path, "/eInvoice/GoodsInfos/GoodsInfo/") {
+		switch strings.TrimPrefix(path, "/eInvoice/GoodsInfos/GoodsInfo/") {
+		case "Item":
+			return &item.Name, false
+		case "Specification":
+			return &item.Specification, false
+		case "MeasurementDimension":
+			return &item.Unit, false
+		case "Quantity":
+			return &item.Quantity, true
+		case "Price":
+			return &item.UnitPrice, true
+		case "Amount":
+			return &item.Amount, true
+		case "TaxScheme":
+			return &item.TaxRate, false
+		case "TaxAmount":
+			return &item.TaxAmount, true
+		}
+	}
+	return nil, false
 }
 
 // invoicePlainField 按官方样例中的完整路径映射字段
