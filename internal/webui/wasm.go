@@ -1186,6 +1186,27 @@ func changeDocumentInvoice(args []js.Value) (any, error) {
 	return invoiceEditorInfo{editorInfo: info.(editorInfo), InvoiceResult: result}, nil
 }
 
+// prepareInvoiceLayout 在发票创建事务内导入票面字体，不修改调用方布局
+// 入参: ctx 取消上下文, editor 事务编辑器, request 发票请求
+// 返回: error 字体处理错误
+func prepareInvoiceLayout(ctx context.Context, editor *ofdgo.Editor, request *invoiceRequest) error {
+	if request.Options.Layout == nil || len(request.FontData) == 0 {
+		return nil
+	}
+	layout := *request.Options.Layout
+	request.Options.Layout = &layout
+	file := ofdgo.FontFile{Data: request.FontData}
+	if layout.Font != "" {
+		return editor.EmbedFont(ctx, layout.Font, file, 0)
+	}
+	id, err := editor.AddFont(file, 0)
+	if err != nil {
+		return err
+	}
+	layout.Font = id
+	return nil
+}
+
 // applyInvoiceRequest 校验来源摘要并执行发票操作
 // 入参: ctx 取消上下文, editor 事务编辑器, request 操作参数
 // 返回: ofdgo.InvoiceUpdateResult 提交结果, error 校验或写入错误
@@ -1211,6 +1232,9 @@ func applyInvoiceRequest(ctx context.Context, editor *ofdgo.Editor, request invo
 		case "create", "import":
 			var source ofdgo.InvoiceSource
 			var err error
+			if err = prepareInvoiceLayout(ctx, editor, &request); err != nil {
+				return err
+			}
 			if request.Operation == "create" {
 				source, err = editor.CreateInvoice(ctx, request.Invoice, request.Options)
 			} else {

@@ -118,9 +118,13 @@ type invoiceXMLPatch struct {
 func InvoiceFields(value Invoice) []InvoiceFieldDescriptor {
 	format, supported := invoiceWriteFormat(value)
 	probe := Invoice{Items: []InvoiceItem{{}}}
-	if value.Standard == invoiceEDRM {
+	if value.Standard == invoiceEDRM || value.Standard == ofdNamespace2016 {
 		for _, path := range invoiceEDRMPaths() {
-			if p, _ := invoiceEDRMField(&probe, &probe.Items[0], path); p != nil {
+			item := &probe.Items[0]
+			if value.Standard == ofdNamespace2016 {
+				item = nil
+			}
+			if p, _ := invoiceEDRMField(&probe, item, path); p != nil {
 				*p = "editable"
 			}
 		}
@@ -150,6 +154,18 @@ func InvoiceFields(value Invoice) []InvoiceFieldDescriptor {
 			}
 		}
 	}
+	referenceFields := map[string]int{}
+	referenceEditable := map[string]bool{}
+	var referenceFacts []bool
+	if value.Standard == ofdNamespace2016 {
+		referenceFacts = invoiceReferenceEditability(value)
+		for i, fact := range value.Facts {
+			if binding, ok := invoiceEDRMFactBinding(value, fact); ok && binding.Item < 0 {
+				referenceFields[binding.Field]++
+				referenceEditable[binding.Field] = fact.Source.NodePath != "" && referenceFacts[i]
+			}
+		}
+	}
 	var result []InvoiceFieldDescriptor
 	for _, field := range invoiceLayoutFields(value) {
 		if strings.HasPrefix(field.field, "facts.") || strings.HasPrefix(field.field, "items.fields.") {
@@ -169,6 +185,9 @@ func InvoiceFields(value Invoice) []InvoiceFieldDescriptor {
 		}
 		mapped, _ := invoiceBindingValue(probe, binding)
 		d.Editable = supported && format.Edit && mapped == "editable"
+		if value.Standard == ofdNamespace2016 && len(value.Facts) > 0 {
+			d.Editable = d.Editable && referenceFields[field.field] == 1 && referenceEditable[field.field]
+		}
 		switch field.field {
 		case "date":
 			d.Type = "date"
@@ -184,12 +203,15 @@ func InvoiceFields(value Invoice) []InvoiceFieldDescriptor {
 		}
 		result = append(result, d)
 	}
-	appendFact := func(fact InvoiceFact, field string, item int) {
+	appendFact := func(fact InvoiceFact, field string, item, index int) {
 		d := InvoiceFieldDescriptor{Field: field, Label: fact.Name, Group: "facts", Type: "text", Item: item, Value: fact.Value, Bindable: value.Standard != ofdNamespace2016}
 		if item >= 0 {
 			d.Group = "items"
 		}
 		d.Editable = supported && format.Edit && fact.Source.NodePath != "" && fact.Namespace != invoiceXBRL
+		if value.Standard == ofdNamespace2016 {
+			d.Editable = d.Editable && item < 0 && referenceFacts[index]
+		}
 		if invoiceNumeric(value.Kind, fact.Name) {
 			d.Type = "decimal"
 		}
@@ -202,27 +224,28 @@ func InvoiceFields(value Invoice) []InvoiceFieldDescriptor {
 		result = append(result, d)
 	}
 	for i, fact := range value.Facts {
-		appendFact(fact, fmt.Sprintf("facts.%d", i), -1)
+		appendFact(fact, fmt.Sprintf("facts.%d", i), -1, i)
 	}
 	for i, item := range value.Items {
 		for j, fact := range item.Fields {
-			appendFact(fact, fmt.Sprintf("items.fields.%d", j), i)
+			appendFact(fact, fmt.Sprintf("items.fields.%d", j), i, j)
 		}
 	}
 	return result
 }
 
 // InvoiceFormats 返回独立格式能力副本，创建及编辑能力按业务版本分别声明
+// 对象引用的创建及编辑限于Editor文档接口，创建必须提供Layout及字体
 // 返回: 已适配格式列表
 func InvoiceFormats() []InvoiceFormat {
 	result := []InvoiceFormat{{Kind: "einv", Standard: InvoiceStandardEInvoice, Version: "0.3", Read: true, Create: true, Edit: true, Items: true}}
-	result = append(result, InvoiceFormat{Kind: "inv", Standard: invoiceEDRM, Version: "1.0", Read: true, Edit: true, Items: true})
-	result = append(result, InvoiceFormat{Kind: "inv", Standard: ofdNamespace2016, Version: "1.0", Read: true})
+	result = append(result, InvoiceFormat{Kind: "inv", Standard: invoiceEDRM, Version: "1.0", Read: true, Create: true, Edit: true, Items: true})
+	result = append(result, InvoiceFormat{Kind: "inv", Standard: ofdNamespace2016, Version: "1.0", Read: true, Create: true, Edit: true})
 	for _, standard := range []string{InvoiceStandardVAT2023, InvoiceStandardDigital2023, InvoiceStandardAir2023, InvoiceStandardRail2023} {
 		kind, version := invoiceTaxonomy(standard)
 		result = append(result, InvoiceFormat{Kind: kind, Standard: standard, Version: version, Read: true, Create: true, Edit: true, Items: kind == "inv" || kind == "atr"})
 	}
-	return append(result, InvoiceFormat{Kind: "atr", Standard: InvoiceStandardAir2021, Version: "2021-11-30", Read: true, Edit: true, Items: true}, InvoiceFormat{Kind: "inv", Standard: InvoiceStandardVAT2021, Version: "2021-09-30", Read: true, Items: true})
+	return append(result, InvoiceFormat{Kind: "atr", Standard: InvoiceStandardAir2021, Version: "2021-11-30", Read: true, Create: true, Edit: true, Items: true}, InvoiceFormat{Kind: "inv", Standard: InvoiceStandardVAT2021, Version: "2021-09-30", Read: true, Create: true, Edit: true, Items: true})
 }
 
 // DecodeInvoices 提取独立XML或XBRL中的发票，不执行联网或完整XSD验证
@@ -452,6 +475,9 @@ func EncodeInvoiceWithOptions(ctx context.Context, value Invoice, options Invoic
 	if err := invoiceWriteLimits(ctx, value, options); err != nil {
 		return nil, err
 	}
+	if value.Standard == ofdNamespace2016 {
+		return nil, fmt.Errorf("object reference creation requires Editor.CreateInvoice with Layout.Font; standalone XML cannot create page objects")
+	}
 	issues, err := ValidateInvoice(ctx, value)
 	if err != nil {
 		return nil, err
@@ -467,7 +493,12 @@ func EncodeInvoiceWithOptions(ctx context.Context, value Invoice, options Invoic
 		return nil, err
 	}
 	var data []byte
-	if value.Standard == InvoiceStandardEInvoice {
+	if value.Standard == invoiceEDRM {
+		if len(options.HeaderXML)+len(options.SellerAuthenticationXML)+len(options.TaxSupervisionXML)+len(options.TaxBureauSignatureXML) != 0 {
+			return nil, fmt.Errorf("EDRM creation does not support EInvoice sections")
+		}
+		data, err = invoiceEncodeEDRM(value)
+	} else if value.Standard == InvoiceStandardEInvoice {
 		data, err = invoiceEncodePlain(value)
 		if err == nil {
 			data, err = invoiceWritePlainSections(ctx, data, options)
@@ -648,22 +679,36 @@ func invoiceEncodeXBRL(value Invoice, options InvoiceEncodingOptions) ([]byte, e
 		ids[unit.ID] = true
 		fmt.Fprintf(&b, `<xbrli:unit id="%s"><xbrli:measure xmlns:m="%s">m:%s</xbrli:measure></xbrli:unit>`, unit.ID, invoiceWriteEscape(unit.Namespace), unit.Name)
 	}
+	factsByName := map[string]InvoiceFact{}
+	for _, fact := range value.Facts {
+		if fact.Source.NodePath != "" || fact.Namespace == invoiceXBRL {
+			return nil, fmt.Errorf("source facts require source-preserving invoice update")
+		}
+		if _, exists := factsByName[fact.Name]; exists {
+			return nil, fmt.Errorf("duplicate invoice fact %s", fact.Name)
+		}
+		factsByName[fact.Name] = fact
+	}
 	header := map[string]bool{}
 	for _, name := range invoiceWriteHeader(value) {
 		p := invoiceXMLField(&value, value.Kind, name)
-		if p != nil && *p != "" {
-			if err := invoiceWriteFact(&b, value, InvoiceFact{Name: name, Value: *p}, options); err != nil {
+		fact, has := factsByName[name]
+		if has && p != nil && (fact.Nil && *p != "" || !fact.Nil && fact.Value != *p) {
+			return nil, fmt.Errorf("conflicting mapped invoice fact %s", name)
+		}
+		if !has && p != nil && *p != "" {
+			fact, has = InvoiceFact{Name: name, Value: *p}, true
+		}
+		if has {
+			if err := invoiceWriteFact(&b, value, fact, options); err != nil {
 				return nil, err
 			}
 		}
 		header[name] = true
 	}
 	for _, fact := range value.Facts {
-		if fact.Source.NodePath != "" || fact.Namespace == invoiceXBRL {
-			return nil, fmt.Errorf("source facts require source-preserving invoice update")
-		}
 		if header[fact.Name] {
-			return nil, fmt.Errorf("duplicate mapped invoice fact %s", fact.Name)
+			continue
 		}
 		if err := invoiceWriteFact(&b, value, fact, options); err != nil {
 			return nil, err
@@ -1488,6 +1533,63 @@ func invoiceEDRMPaths() []string {
 	return strings.Fields("/eInvoice/InvoiceCode /eInvoice/InvoiceNo /eInvoice/IssueDate /eInvoice/Buyer/BuyerName /eInvoice/Buyer/BuyerTaxID /eInvoice/Seller/SellerName /eInvoice/Seller/SellerTaxID /eInvoice/TaxInclusiveTotalAmount /eInvoice/Note /eInvoice/TaxTotalAmount /eInvoice/TaxExclusiveTotalAmount /eInvoice/GoodsInfos/GoodsInfo/Item /eInvoice/GoodsInfos/GoodsInfo/Specification /eInvoice/GoodsInfos/GoodsInfo/MeasurementDimension /eInvoice/GoodsInfos/GoodsInfo/Quantity /eInvoice/GoodsInfos/GoodsInfo/Price /eInvoice/GoodsInfos/GoodsInfo/Amount /eInvoice/GoodsInfos/GoodsInfo/TaxScheme /eInvoice/GoodsInfos/GoodsInfo/TaxAmount")
 }
 
+// invoiceEncodeEDRM 按2019版路径创建业务XML，不伪造认证字段或丢弃扩展事实
+// 入参: value 明确提供的发票业务字段
+// 返回: 独立XML及不可表达错误
+func invoiceEncodeEDRM(value Invoice) ([]byte, error) {
+	if len(value.Facts) != 0 {
+		return nil, fmt.Errorf("EDRM facts require source-preserving invoice update")
+	}
+	if _, err := time.Parse("2006-01-02", value.Date); err != nil {
+		return nil, fmt.Errorf("EDRM creation requires a calendar date")
+	}
+	var b strings.Builder
+	b.WriteString(xml.Header)
+	fmt.Fprintf(&b, `<eInvoice xmlns="%s" Version="1.0">`, invoiceEDRM)
+	write := func(name, text string) {
+		if text != "" {
+			fmt.Fprintf(&b, "<%s>%s</%s>", name, invoiceWriteEscape(text), name)
+		}
+	}
+	for _, name := range strings.Fields("InvoiceCode InvoiceNo IssueDate Buyer Seller TaxInclusiveTotalAmount Note TaxTotalAmount TaxExclusiveTotalAmount") {
+		if name == "Buyer" || name == "Seller" {
+			fmt.Fprintf(&b, "<%s>", name)
+			for _, path := range invoiceEDRMPaths() {
+				if strings.HasPrefix(path, "/eInvoice/"+name+"/") {
+					p, _ := invoiceEDRMField(&value, nil, path)
+					write(path[strings.LastIndexByte(path, '/')+1:], *p)
+				}
+			}
+			fmt.Fprintf(&b, "</%s>", name)
+		} else {
+			p, _ := invoiceEDRMField(&value, nil, "/eInvoice/"+name)
+			write(name, *p)
+		}
+	}
+	if len(value.Items) > 0 {
+		b.WriteString("<GoodsInfos>")
+		for _, item := range value.Items {
+			if len(item.Fields) != 0 {
+				return nil, fmt.Errorf("EDRM item facts require source-preserving invoice update")
+			}
+			if reflect.DeepEqual(item, InvoiceItem{}) {
+				return nil, fmt.Errorf("EDRM creation requires a nonempty item")
+			}
+			b.WriteString("<GoodsInfo>")
+			for _, path := range invoiceEDRMPaths() {
+				if strings.HasPrefix(path, "/eInvoice/GoodsInfos/GoodsInfo/") {
+					p, _ := invoiceEDRMField(&value, &item, path)
+					write(path[strings.LastIndexByte(path, '/')+1:], *p)
+				}
+			}
+			b.WriteString("</GoodsInfo>")
+		}
+		b.WriteString("</GoodsInfos>")
+	}
+	b.WriteString("</eInvoice>")
+	return []byte(b.String()), nil
+}
+
 // invoiceUpdateEDRM 按2019版原节点写回摘要及明细，保留扩展与未修改字节
 // 入参: ctx 上下文，data 原文，old 原发票，value 目标发票
 // 返回: 修改后XML及错误
@@ -2068,7 +2170,7 @@ func invoiceWriteOrderedInsert(data []byte, spans map[string]invoiceXMLSpan, par
 // 入参: value 发票
 // 返回: 缺少元组字段错误
 func invoiceWriteCreation(value Invoice) error {
-	if value.Standard == InvoiceStandardEInvoice {
+	if value.Standard == InvoiceStandardEInvoice || value.Standard == invoiceEDRM {
 		return nil
 	}
 	for i, item := range value.Items {
@@ -2080,7 +2182,7 @@ func invoiceWriteCreation(value Invoice) error {
 			p := invoiceItemField(&item, value.Kind, name)
 			present := p != nil && *p != ""
 			for _, f := range item.Fields {
-				if f.Name == name && (f.Nil || f.Value != "") {
+				if f.Name == name {
 					present = true
 				}
 			}
@@ -2105,7 +2207,7 @@ func invoiceWriteKnownFact(kind, name string) bool {
 	var extras string
 	switch kind {
 	case "inv":
-		extras = "TypeOfInvoice UniqueCodeOfInvoice LocationOfInvoice IdentifyingCode NumberOfInvoiceMachine SecurityCode TaxIncludedAmountInWords Payee Reviewer Issuer AddressPhoneNumberOfPurchaser DepositBankAndAccountNumberOfPurchaser AddressPhoneNumberOfSeller DepositBankAndAccountNumberOfSeller"
+		extras = "TypeOfInvoice UniqueCodeOfInvoice LocationOfInvoice IdentifyingCode NumberOfInvoiceMachine SecurityCode SpecialInvoiceType InvoiceIssuingSign TaxIncludedAmountInWords Payee Reviewer Issuer AddressPhoneNumberOfPurchaser DepositBankAndAccountNumberOfPurchaser AddressPhoneNumberOfSeller DepositBankAndAccountNumberOfSeller"
 	case "atr":
 		extras = "PassengerName ValidIdNumber Endorsement NumberOfGpOrder Fare FuelSurcharge VatRate CivilAviationDevelopmentFund OtherTaxes ETicketNumber VerificationCode PromptInformation Insurance AgentCode IssueParty MarkingOfDomesticOrInternational"
 	case "rai":

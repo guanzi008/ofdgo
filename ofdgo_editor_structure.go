@@ -40,9 +40,11 @@ func (e *Editor) pruneStructureReferences(ctx context.Context, parts map[string]
 	if err != nil {
 		return err
 	}
-	if !slices.ContainsFunc(tags, func(tag CustomTag) bool {
-		return structureOfficial(tag, tag.NameSpace)
-	}) {
+	knownTags, err := e.source.reader.structureReferenceTags(ctx, tags)
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(knownTags, true) {
 		return nil
 	}
 	pages := make(map[string]bool, len(e.pages))
@@ -185,8 +187,8 @@ func (e *Editor) pruneStructureReferences(ctx context.Context, parts map[string]
 		return nil
 	}
 	protected := make(map[string]bool)
-	for _, tag := range tags {
-		if !structureOfficial(tag, tag.NameSpace) {
+	for index, tag := range tags {
+		if !knownTags[index] {
 			protected[e.source.reader.ResPath(tag.FileLoc)] = true
 		}
 	}
@@ -194,7 +196,7 @@ func (e *Editor) pruneStructureReferences(ctx context.Context, parts map[string]
 	originals := make(map[string][]byte)
 	redirects := make(map[int]string)
 	for index, tag := range tags {
-		if !structureOfficial(tag, tag.NameSpace) {
+		if !knownTags[index] {
 			continue
 		}
 		name := e.source.reader.ResPath(tag.FileLoc)
@@ -421,7 +423,11 @@ func (e *Editor) annotationStructureSource(page int, wanted map[string]bool) (*e
 	if err != nil {
 		return nil, err
 	}
-	if !slices.ContainsFunc(tags, func(tag CustomTag) bool { return structureOfficial(tag, tag.NameSpace) }) {
+	knownTags, err := base.reader.structureReferenceTags(context.Background(), tags)
+	if err != nil {
+		return nil, err
+	}
+	if !slices.Contains(knownTags, true) {
 		return base, nil
 	}
 	if _, err := base.reader.Doc(); err != nil {
@@ -461,7 +467,13 @@ func rewriteStructureReferences(ctx context.Context, data []byte, tag CustomTag,
 		return nil, err
 	}
 	if !structureOfficial(tag, root.name.Space) {
-		return data, nil
+		structure, err := parseStructure(ctx, data, tag)
+		if err != nil {
+			return nil, err
+		}
+		if !structureInvoiceReferences(structure) {
+			return data, nil
+		}
 	}
 	var patches []editorXMLPatch
 	count := 0
@@ -528,9 +540,13 @@ func (m *editorPageImport) structures() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	knownTags, err := m.reader.structureReferenceTags(m.ctx, tags)
+	if err != nil {
+		return nil, err
+	}
 	var entries []byte
 	for i, tag := range tags {
-		if !structureOfficial(tag, tag.NameSpace) {
+		if !knownTags[i] {
 			continue
 		}
 		data, err := m.readFile(m.reader.ResPath(tag.FileLoc))

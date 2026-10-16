@@ -180,11 +180,16 @@ func invoiceLayoutFactVisible(invoice Invoice, fact InvoiceFact) bool {
 // 入参: value 发票，fact 原始字段
 // 返回: 公共字段关联及是否明确映射
 func invoiceEDRMFactBinding(value Invoice, fact InvoiceFact) (InvoiceBinding, bool) {
-	if value.Standard != invoiceEDRM || fact.Namespace != invoiceEDRM {
+	if value.Standard != invoiceEDRM && value.Standard != ofdNamespace2016 || fact.Namespace != value.Standard {
 		return InvoiceBinding{}, false
 	}
 	var path strings.Builder
-	for _, segment := range strings.Split(strings.TrimPrefix(strings.ReplaceAll(fact.Source.NodePath, "{"+invoiceEDRM+"}", "{}"), "/"), "/") {
+	nodePath := strings.ReplaceAll(fact.Source.NodePath, "{"+invoiceEDRM+"}", "{}")
+	if value.Standard == ofdNamespace2016 {
+		nodePath = strings.Replace(nodePath, "/root[1]", "/eInvoice[1]", 1)
+		nodePath = strings.ReplaceAll(nodePath, "/", "/{}")
+	}
+	for _, segment := range strings.Split(strings.TrimPrefix(nodePath, "/"), "/") {
 		name, index, ok := strings.Cut(segment, "[")
 		if !ok || !strings.HasPrefix(name, "{}") || !strings.HasSuffix(index, "]") {
 			return InvoiceBinding{}, false
@@ -499,6 +504,9 @@ func invoiceLayoutText(text *TextObject, value string, metrics FontMetrics) (flo
 		bottom = math.Max(bottom, y+float64(descender)*unit)
 		for _, char := range textCodeRunes(code.Value) {
 			glyph := metrics.GlyphIndex(char)
+			if glyph == 0 {
+				return 0, fmt.Errorf("invoice font has no glyph for %U", char)
+			}
 			var bounds Box
 			if provider, ok := metrics.(FontGlyphBounds); ok {
 				bounds, err = provider.GlyphBounds(glyph, text.Size)

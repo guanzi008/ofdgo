@@ -64,7 +64,7 @@ const InvoiceStandardAir2023 = "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/atr"
 // InvoiceStandardRail2023 表示2023版铁路电子客票分类标准
 const InvoiceStandardRail2023 = "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/rai"
 
-// InvoiceStandardVAT2021 表示2021版增值税发票分类标准，仅支持读取
+// InvoiceStandardVAT2021 表示2021版增值税发票分类标准
 const InvoiceStandardVAT2021 = "http://xbrl.mof.gov.cn/taxonomy/2021-09-30/inv"
 
 // InvoiceStandardAir2021 表示2021版航空运输电子客票行程单分类标准
@@ -73,7 +73,7 @@ const InvoiceStandardAir2021 = "http://xbrl.mof.gov.cn/taxonomy/2021-11-30/atr"
 // InvoiceStandardEInvoice 表示无命名空间的EInvoice业务标准，版本由Invoice.Version指定
 const InvoiceStandardEInvoice = "EInvoice"
 
-// InvoiceStandardObjectReference 表示基于OFD对象引用的只读发票标引
+// InvoiceStandardObjectReference 表示基于OFD对象引用的发票标引，业务值来自当前文档的图元
 const InvoiceStandardObjectReference = ofdNamespace2016
 
 // InvoiceStandardEDRM2019 表示2019版电子发票业务标准
@@ -1035,6 +1035,13 @@ func invoiceObjectReferences(root *invoiceXMLNode) bool {
 		return true
 	}
 	return walk(root) && count > 0
+}
+
+// invoiceReferenceRoot 识别样例使用的OFD发票标引根，不推断其他业务命名空间
+// 入参: root XML根节点
+// 返回: bool 是否为对象引用发票标引
+func invoiceReferenceRoot(root *invoiceXMLNode) bool {
+	return root != nil && root.name.Space == ofdNamespace2016 && root.name.Local == "root" && invoiceObjectReferences(root)
 }
 
 // invoicePlainXML 解析数电发票0.3及2019版电子发票XML

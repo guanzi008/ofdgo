@@ -29,6 +29,7 @@ const settingsElements = Object.fromEntries(["Button", "Panel", "Form", "Title",
 const settings = { sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false, invoice: false };
 const invoicePanel = { tab: "basic", entries: [], formats: [], drafts: new Map(), key: "", result: null };
 const invoiceDocuments = new WeakMap();
+const invoiceReferenceStandard = "http://www.ofdspec.org/2016";
 
 let wasmPromise = null;
 let remoteDownload = null;
@@ -5827,7 +5828,7 @@ function renderInvoiceSettings() {
 async function newInvoiceDraft() {
 	if (!state.editing) return;
 	if (invoicePanel.drafts.get("new")?.dirty.size && !window.confirm("放弃尚未应用的新建发票？")) return;
-	const format = invoicePanel.formats.find(value => value.create);
+	const format = invoicePanel.formats.find(value => value.create && value.standard !== invoiceReferenceStandard) || invoicePanel.formats.find(value => value.create);
 	if (!format) throw new Error("暂无可新建票种");
 	const invoice = { kind: format.kind, standard: format.standard, version: format.version, buyer: {}, seller: {}, items: [], facts: [] };
 	const scope = invoiceScope();
@@ -5860,10 +5861,14 @@ function renderInvoiceBasic(container, draft) {
 			invoiceInput(grid, labels[field.field.split(".").at(-1)] || field.label, `Field_${field.field.replaceAll(".", "_")}`, display, value => {
 				invoiceSetValue(draft.invoice, field.field, -1, value);
 				invoiceDirty(draft, "model");
-			}, !state.editing || !(field.editable || !draft.entry && field.field === "currency" && draft.invoice.standard !== "EInvoice") || !!draft.entry && !draft.detail.capabilities?.edit).title = display !== value ? value : field.label;
+			}, !state.editing || !(field.editable || !draft.entry && field.field === "currency" && invoiceIsXBRL(draft.invoice)) || !!draft.entry && !draft.detail.capabilities?.edit).title = display !== value ? value : field.label;
 		}
 	}
 	if (!draft.entry) renderInvoiceAdvanced(container, draft);
+}
+
+function invoiceIsXBRL(invoice) {
+	return invoice.standard?.startsWith("http://xbrl.mof.gov.cn/taxonomy/") || false;
 }
 
 function renderInvoiceAdvanced(container, draft) {
@@ -5876,9 +5881,10 @@ function renderInvoiceAdvanced(container, draft) {
 	container.append(details);
 	const formats = invoicePanel.formats.filter(value => value.create);
 	const selected = formats.findIndex(value => value.kind === draft.invoice.kind && value.standard === draft.invoice.standard && value.version === draft.invoice.version);
-	settingsSelect(details, "票种", "InvoiceFormat", formats.map((value, index) => [index, `${{ inv: "增值税", einv: "电子票", atr: "航空票", rai: "铁路票" }[value.kind] || value.kind} · ${value.version} · ${value.standard === "EInvoice" ? "XML" : "XBRL"}`]), selected, async value => {
+	settingsSelect(details, "票种", "InvoiceFormat", formats.map((value, index) => [index, `${{ inv: "增值税", einv: "电子票", atr: "航空票", rai: "铁路票" }[value.kind] || value.kind} · ${value.version} · ${value.standard === invoiceReferenceStandard ? "标引" : invoiceIsXBRL(value) ? "XBRL" : "XML"}`]), selected, async value => {
 		try {
 			const format = formats[Number(value)];
+			if (draft.invoice.standard !== format.standard) draft.options.encoding.schemaRef = "";
 			Object.assign(draft.invoice, { kind: format.kind, standard: format.standard, version: format.version });
 			invoiceDirty(draft, "model");
 			await invoiceRefreshFields(draft);
@@ -5889,7 +5895,7 @@ function renderInvoiceAdvanced(container, draft) {
 	});
 	invoiceInput(details, "名称", "Name", draft.options.name, value => { draft.options.name = value; invoiceDirty(draft, "model"); });
 	const encoding = draft.options.encoding;
-	if (draft.invoice.standard !== "EInvoice") {
+	if (invoiceIsXBRL(draft.invoice)) {
 		invoiceInput(details, "模式", "SchemaRef", encoding.schemaRef, value => { encoding.schemaRef = value; invoiceDirty(draft, "model"); }).title = "schemaRef";
 		for (const [key, label] of [["id", "标识"], ["identifier", "主体"], ["scheme", "方案"], ["instant", "时点"], ["startDate", "起日"], ["endDate", "止日"]]) {
 			invoiceInput(details, label, `Context_${key}`, encoding.context[key], value => { encoding.context[key] = value; invoiceDirty(draft, "model"); }).title = `context.${key}`;
@@ -5913,7 +5919,7 @@ function renderInvoiceAdvanced(container, draft) {
 			renderDocumentSettings();
 		}, false, "InvoiceUnitAdd", details);
 	}
-	for (const [key, label] of [["headerXML", "票头"], ["sellerAuthenticationXML", "认证"], ["taxSupervisionXML", "监制"], ["taxBureauSignatureXML", "签名"]]) {
+	for (const [key, label] of draft.invoice.standard === "EInvoice" ? [["headerXML", "票头"], ["sellerAuthenticationXML", "认证"], ["taxSupervisionXML", "监制"], ["taxBureauSignatureXML", "签名"]] : []) {
 		invoiceInput(details, label, `Fragment_${key}`, draft.fragments[key], value => {
 			draft.fragments[key] = value;
 			invoiceDirty(draft, "model");
@@ -6023,7 +6029,7 @@ function renderInvoiceFields(container, draft) {
 		}
 	}
 	const options = facts.map(({ fact, item }, index) => [index, `${item >= 0 ? `明细${item + 1} · ` : ""}${fact.name || "未命名"}${fact.context ? ` · ${fact.context}` : ""} · ${index + 1}`]);
-	const owners = [...(!draft.entry ? [[-1, "基本"]] : []), ...(draft.invoice.items || []).flatMap((item, index) => !draft.entry || draft.addedItems.has(item) ? [[index, `明细${index + 1}`]] : [])];
+	const owners = [...(!draft.entry && draft.invoice.standard !== invoiceReferenceStandard ? [[-1, "基本"]] : []), ...(draft.invoice.items || []).flatMap((item, index) => !draft.entry || draft.addedItems.has(item) ? [[index, `明细${index + 1}`]] : [])];
 	if (state.editing && owners.length) {
 		if (!owners.some(([index]) => index === draft.factOwner)) draft.factOwner = owners[0][0];
 		settingsSelect(container, "归属", "InvoiceFactOwner", owners, draft.factOwner, value => { draft.factOwner = Number(value); });
@@ -6103,8 +6109,8 @@ function renderInvoiceFields(container, draft) {
 		invoiceDirty(draft, "fields");
 	};
 	invoiceInput(container, "数值", "FactValue", change?.value ?? fact.value, value => update("value", value), !writable, "textarea");
-	invoiceInput(container, "空值", "FactNil", change?.nil ?? fact.nil, value => update("nil", value), !writable, "checkbox");
-	if (!fresh) invoiceInput(container, "删除", "FactDelete", change?.delete || false, value => update("delete", value), !writable, "checkbox");
+	invoiceInput(container, "空值", "FactNil", change?.nil ?? fact.nil, value => update("nil", value), !writable || draft.invoice.standard === invoiceReferenceStandard, "checkbox");
+	if (!fresh) invoiceInput(container, "删除", "FactDelete", change?.delete || false, value => update("delete", value), !writable || draft.invoice.standard === invoiceReferenceStandard, "checkbox");
 	else if (state.editing) settingsButton("删除", () => {
 		const index = Number(field.split(".").at(-1));
 		(item < 0 ? draft.invoice.facts : draft.invoice.items[item].fields).splice(index, 1);
@@ -6115,6 +6121,7 @@ function renderInvoiceFields(container, draft) {
 
 function renderInvoiceAppearance(container, draft) {
 	const capabilities = draft.detail.capabilities || {};
+	const creatingReference = !draft.entry && draft.invoice.standard === invoiceReferenceStandard;
 	const writable = state.editing && !!draft.entry;
 	const fields = (draft.detail.fields || []).filter(field => field.bindable);
 	const choices = fields.map(field => [JSON.stringify([field.field, field.item]), `${field.item >= 0 ? `明细${field.item + 1} · ` : ""}${field.label}`]);
@@ -6179,14 +6186,14 @@ function renderInvoiceAppearance(container, draft) {
 			draft.bindings = draft.bindings.filter(binding => !(JSON.stringify([binding.field, binding.item]) === draft.field && binding.page === draft.page && binding.objectId === draft.object));
 			invoiceDirty(draft, "bindings");
 			renderDocumentSettings();
-		}, !writable || !bound.length, "InvoiceUnbind", actions);
+		}, !writable || !capabilities.bind || !bound.length, "InvoiceUnbind", actions);
 		settingsButton("清空", () => {
 			draft.bindings = [];
 			invoiceDirty(draft, "bindings");
 			renderDocumentSettings();
-		}, !writable || !draft.bindings.length, "InvoiceUnbindAll", actions);
+		}, !writable || !capabilities.bind || !draft.bindings.length, "InvoiceUnbindAll", actions);
 	}
-	if (writable) {
+	if (writable || state.editing && creatingReference) {
 		const details = document.createElement("details"), summary = document.createElement("summary");
 		summary.textContent = "生成";
 		details.className = "invoice-advanced";
@@ -6199,6 +6206,7 @@ function renderInvoiceAppearance(container, draft) {
 		settingsSelect(details, "字体", "InvoiceFont", [["", "选择"], ...fonts.map(font => [font.id, font.fontName || font.familyName || font.id]), ...libraryFonts.map(font => [`file:${font.id}`, font.fullName || font.name])], draft.fontChoice || draft.layout.font, value => {
 			draft.fontChoice = value;
 			draft.layout.font = value.startsWith("file:") ? "" : value;
+			if (creatingReference) invoiceDirty(draft, "model");
 			renderDocumentSettings();
 		});
 		settingsButton("添加", () => openFontFile(el.fontInput), false, "InvoiceAddFont", details);
@@ -6221,7 +6229,7 @@ function renderInvoiceAppearance(container, draft) {
 			else refresh();
 		}, !draft.layout.font || !!fonts.find(font => font.id === draft.layout.font)?.embedded, "InvoiceEmbedFont", details);
 		for (const [key, label] of [["fontSize", "字号"], ["pageWidth", "页宽"], ["pageHeight", "页高"], ["margin", "边距"]]) {
-			const input = invoiceInput(details, label, `Layout_${key}`, draft.layout[key], value => { draft.layout[key] = Number(value); }, false, "number", "mm");
+			const input = invoiceInput(details, label, `Layout_${key}`, draft.layout[key], value => { draft.layout[key] = Number(value); if (creatingReference) invoiceDirty(draft, "model"); }, false, "number", "mm");
 			input.min = key === "margin" ? "0" : "0.01";
 		}
 		settingsButton("生成", async () => {
@@ -6321,6 +6329,7 @@ function readInvoiceFile(accept) {
 
 async function validateInvoiceDraft(draft) {
 	const request = draft.dirty.size ? buildInvoiceRequest(draft) : { invoice: draft.invoice };
+	if (!await prepareInvoiceRequest(draft, request)) return;
 	const result = await callWASM("ofdgoValidateInvoice", JSON.stringify({ ...draft.scope, source: draft.entry?.source, index: draft.entry?.index, digest: draft.detail.digest, ...request }));
 	if (invoiceCurrent() !== draft) return;
 	const appearance = result.appearance || [];
@@ -6334,21 +6343,52 @@ async function validateInvoiceDraft(draft) {
 async function applyInvoiceDraft(draft, synchronize = draft.synchronize) {
 	if (!state.editing || !draft.dirty.size) return;
 	const request = buildInvoiceRequest(draft);
-	request.synchronize = synchronize;
+	request.synchronize = draft.invoice.standard === invoiceReferenceStandard || synchronize;
+	if (!await prepareInvoiceRequest(draft, request)) return;
 	if (request.operation === "replace" && !window.confirm("替换此来源中的全部发票原文？" + invoiceOtherDraftWarning(draft))) return;
 	await commitInvoice(draft, request);
+}
+
+async function prepareInvoiceRequest(draft, request) {
+	if (request.operation !== "create" || draft.invoice.standard !== invoiceReferenceStandard) return true;
+	if (!draft.layout.font && !draft.fontChoice?.startsWith("file:")) {
+		invoicePanel.tab = "appearance";
+		draft.layoutOpen = true;
+		renderDocumentSettings();
+		throw new Error("请选择标引票面字体");
+	}
+	const sequence = settings.sequence, openSeq = state.openSeq;
+	const snapshot = JSON.stringify(request), fontChoice = draft.fontChoice;
+	settingsElements.Form.inert = true;
+	try {
+		if (fontChoice?.startsWith("file:")) {
+			const font = fontManager.editorFonts().find(value => `file:${value.id}` === fontChoice && !value.disabled);
+			if (!font) throw new Error("所选字体不可用");
+			request.fontData = invoiceBase64(await readTextFont(font));
+		}
+		if (sequence !== settings.sequence || openSeq !== state.openSeq || invoiceCurrent() !== draft || !settingsElements.Panel.open || !settings.invoice) return false;
+		if (draft.fontChoice !== fontChoice || JSON.stringify(buildInvoiceRequest(draft)) !== snapshot) throw new Error("内容已变更，请重新应用");
+		return true;
+	} finally {
+		if (sequence === settings.sequence) settingsElements.Form.inert = false;
+	}
 }
 
 function buildInvoiceRequest(draft) {
 	if (draft.dirty.has("xml") && draft.dirty.size > 1) throw new Error("原文替换与其他修改冲突，草稿已保留，请先还原其中一项");
 	if (draft.dirty.has("model") && draft.dirty.has("fields")) throw new Error("基本、明细与原字段不能同时应用，请先还原一项");
 	const section = draft.dirty.has("xml") ? "xml" : "model";
-	const request = { synchronize: draft.synchronize };
+	const request = { synchronize: draft.invoice.standard === invoiceReferenceStandard || draft.synchronize };
 	if (section === "xml") {
 		Object.assign(request, { operation: draft.entry ? "replace" : "import", xml: draft.xml, options: { name: draft.options.name } });
 	} else {
 		const options = structuredClone(draft.options);
-		for (const [key, text] of Object.entries(draft.fragments)) {
+		if (!invoiceIsXBRL(draft.invoice)) options.encoding = {};
+		if (!draft.entry && draft.invoice.standard === invoiceReferenceStandard) {
+			delete options.encoding;
+			options.layout = structuredClone(draft.layout);
+		}
+		for (const [key, text] of draft.invoice.standard === "EInvoice" ? Object.entries(draft.fragments) : []) {
 			options.encoding[key] = invoiceBase64(new TextEncoder().encode(text));
 		}
 		if (!draft.entry) Object.assign(request, { operation: "create", invoice: draft.invoice, options });

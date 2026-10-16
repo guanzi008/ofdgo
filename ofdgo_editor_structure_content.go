@@ -153,7 +153,11 @@ func (e *Editor) AddStructureNode(index int, parent []int, node StructureNode) (
 		if err != nil {
 			return nil, err
 		}
-		if structureOfficial(tag, root.name.Space) && target.name.Space == root.name.Space && target.name.Local == "ObjectRef" {
+		structure, err := parseStructure(context.Background(), data, tag)
+		if err != nil {
+			return nil, err
+		}
+		if (structureOfficial(tag, root.name.Space) || structureInvoiceReferences(structure)) && target.name.Space == root.name.Space && target.name.Local == "ObjectRef" {
 			return nil, fmt.Errorf("ObjectRef cannot contain child nodes")
 		}
 		content := bytes.Clone(encoded)
@@ -213,7 +217,11 @@ func (e *Editor) SetStructureReferences(index int, path []int, references []Stru
 		if err != nil {
 			return nil, err
 		}
-		if !structureOfficial(tag, root.name.Space) || node.name.Local == "ObjectRef" {
+		structure, err := parseStructure(context.Background(), data, tag)
+		if err != nil {
+			return nil, err
+		}
+		if !(structureOfficial(tag, root.name.Space) || structureInvoiceReferences(structure)) || node.name.Local == "ObjectRef" {
 			return nil, fmt.Errorf("custom tag does not support ObjectRef binding")
 		}
 		for parent := node; parent != nil; parent = parent.parent {
@@ -426,7 +434,7 @@ func (e *Editor) validateStructureReferences(root *StructureNode, tag CustomTag,
 		}
 		return nil
 	}
-	if err := collect(root, structureOfficial(tag, root.Namespace)); err != nil {
+	if err := collect(root, structureOfficial(tag, root.Namespace) || structureInvoiceReferences(root)); err != nil {
 		return nil, err
 	}
 	if len(refs) == 0 {

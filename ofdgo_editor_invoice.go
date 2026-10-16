@@ -103,8 +103,21 @@ func (r *Reader) InvoiceCapabilities(ctx context.Context, source InvoiceSource, 
 		return result, fmt.Errorf("invoice index out of range")
 	}
 	if report.Invoices[index].Standard == ofdNamespace2016 {
-		for _, operation := range []string{"create", "edit", "items", "bind", "generate", "sync", "delete"} {
-			result.Reasons[operation] = "对象引用标引仅支持读取和导出"
+		result.Create = true
+		result.Delete = true
+		for _, operation := range []string{"items", "bind", "generate"} {
+			result.Reasons[operation] = "对象引用依赖已有图元，不定义从零业务创建、明细分组或独立票面绑定"
+		}
+		for _, editable := range invoiceReferenceEditability(report.Invoices[index]) {
+			result.Edit = result.Edit || editable
+		}
+		result.Edit = result.Edit && len(report.Issues) == 0
+		result.Sync = result.Edit
+		result.Reasons["edit"] = "需核对原文字，多对象仅支持按原引用顺序及原码点边界等长修改，字体和布局须通过校验"
+		result.Reasons["sync"] = result.Reasons["edit"]
+		if !result.Edit {
+			result.Reasons["edit"] = "没有有效且无共享的文字引用"
+			result.Reasons["sync"] = result.Reasons["edit"]
 		}
 		return result, nil
 	}
@@ -254,6 +267,9 @@ func (e *Editor) CreateInvoice(ctx context.Context, invoice Invoice, options Inv
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if invoice.Standard == ofdNamespace2016 {
+		return e.createInvoiceReferences(ctx, invoice, options)
+	}
 	encoding := InvoiceEncodingOptions{}
 	if options.Encoding != nil {
 		encoding = *options.Encoding
@@ -271,6 +287,13 @@ func (e *Editor) CreateInvoice(ctx context.Context, invoice Invoice, options Inv
 func (e *Editor) ImportInvoice(ctx context.Context, data []byte, options InvoiceCreateOptions) (InvoiceSource, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	root, err := invoiceXMLTree(ctx, data)
+	if err != nil {
+		return InvoiceSource{}, err
+	}
+	if invoiceReferenceRoot(root) {
+		return e.importInvoiceReferences(ctx, data, options)
 	}
 	report, err := invoiceWritableReport(ctx, data)
 	if err != nil {
@@ -335,6 +358,41 @@ func (e *Editor) UpdateInvoice(ctx context.Context, source InvoiceSource, digest
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	root, err := invoiceXMLTree(ctx, data)
+	if err != nil {
+		return InvoiceUpdateResult{}, err
+	}
+	if source.Kind == "tag" && invoiceReferenceRoot(root) {
+		var result InvoiceUpdateResult
+		err := e.Transaction(func(next *Editor) error {
+			updated, err := next.ReplaceInvoiceData(ctx, source, digest, data)
+			if err != nil {
+				return err
+			}
+			actual, err := next.ExportInvoice(ctx, updated)
+			if err != nil {
+				return err
+			}
+			result = InvoiceUpdateResult{Source: updated, Digest: InvoiceDigest(actual), Synchronized: true}
+			r, err := next.ReaderContext(ctx)
+			if err != nil {
+				return err
+			}
+			defer r.Close()
+			signed, err := r.hasOutputSignatures(ctx)
+			if err != nil {
+				return err
+			}
+			if signed {
+				result.Issues = append(result.Issues, InvoiceIssue{Code: "signature-recheck-required", Message: "modified signed content requires signature verification", Source: updated})
+			}
+			return ctx.Err()
+		})
+		if err != nil {
+			return InvoiceUpdateResult{}, err
+		}
+		return result, nil
+	}
 	report, err := invoiceWritableReport(ctx, data)
 	if err != nil {
 		return InvoiceUpdateResult{}, err
@@ -367,12 +425,12 @@ func (e *Editor) UpdateInvoice(ctx context.Context, source InvoiceSource, digest
 		}
 		pages := make(map[string]string)
 		for _, entry := range entries {
-			for _, binding := range entry.bindings {
+			for i, binding := range entry.bindings {
 				page, err := next.Page(binding.Page)
 				if err != nil {
 					return err
 				}
-				pages[fmt.Sprintf("%d/%s", entry.index, binding.ObjectID)] = page.ID
+				pages[fmt.Sprintf("%d/%d", entry.index, i)] = page.ID
 			}
 		}
 		updated, err := next.ReplaceInvoiceData(ctx, source, digest, data)
@@ -405,7 +463,7 @@ func (e *Editor) UpdateInvoice(ctx context.Context, source InvoiceSource, digest
 				return err
 			}
 			for i := range entry.bindings {
-				id := pages[fmt.Sprintf("%d/%s", entry.index, entry.bindings[i].ObjectID)]
+				id := pages[fmt.Sprintf("%d/%d", entry.index, i)]
 				page := slices.IndexFunc(next.pages, func(page PageContent) bool { return sameResourceID(page.ID, id) })
 				if page < 0 {
 					return fmt.Errorf("invoice appearance page no longer exists")
@@ -486,6 +544,13 @@ func (e *Editor) EditInvoice(ctx context.Context, source InvoiceSource, digest s
 	if InvoiceDigest(data) != digest {
 		return InvoiceUpdateResult{}, fmt.Errorf("invoice source changed")
 	}
+	root, err := invoiceXMLTree(ctx, data)
+	if err != nil {
+		return InvoiceUpdateResult{}, err
+	}
+	if source.Kind == "tag" && invoiceReferenceRoot(root) {
+		return e.editInvoiceReferences(ctx, source, digest, changes, synchronize)
+	}
 	changes = slices.Clone(changes)
 	for i := range changes {
 		change := &changes[i]
@@ -523,6 +588,13 @@ func (e *Editor) SetInvoice(ctx context.Context, source InvoiceSource, digest st
 	}
 	if InvoiceDigest(data) != digest {
 		return InvoiceUpdateResult{}, fmt.Errorf("invoice source changed")
+	}
+	root, err := invoiceXMLTree(ctx, data)
+	if err != nil {
+		return InvoiceUpdateResult{}, err
+	}
+	if source.Kind == "tag" && invoiceReferenceRoot(root) {
+		return e.setInvoiceReferences(ctx, source, digest, index, invoice, synchronize)
 	}
 	data, err = UpdateInvoiceXML(ctx, data, index, invoice)
 	if err != nil {
@@ -682,6 +754,9 @@ func (r *Reader) InvoiceBindings(ctx context.Context, source InvoiceSource, inde
 	if index < 0 || index >= len(report.Invoices) {
 		return nil, fmt.Errorf("invoice index out of range")
 	}
+	if report.Invoices[index].Standard == ofdNamespace2016 {
+		return r.invoiceReferenceBindings(ctx, report.Invoices[index])
+	}
 	entries, err := r.invoiceBindings(ctx, source, InvoiceDigest(data), true)
 	if err != nil {
 		return nil, err
@@ -711,6 +786,9 @@ func (r *Reader) CheckInvoiceAppearance(ctx context.Context, source InvoiceSourc
 	}
 	if index < 0 || index >= len(report.Invoices) {
 		return nil, fmt.Errorf("invoice index out of range")
+	}
+	if report.Invoices[index].Standard == ofdNamespace2016 {
+		return slices.Clone(report.Issues), ctx.Err()
 	}
 	bindings, err := r.InvoiceBindings(ctx, source, index)
 	if err != nil {

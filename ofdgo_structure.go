@@ -122,7 +122,7 @@ func (r *Reader) readStructureContext(ctx context.Context, tag CustomTag) (Struc
 	if err != nil {
 		return item, fmt.Errorf("read custom tag %s: %w", tag.FileLoc, err)
 	}
-	item.CanBind = structureOfficial(tag, item.Root.Namespace)
+	item.CanBind = structureOfficial(tag, item.Root.Namespace) || structureInvoiceReferences(item.Root)
 	item.Internal = tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace && item.Root.Namespace == richTextNamespace && item.Root.Name == "RichText"
 	item.Internal = item.Internal || tag.TypeID == invoiceTagType && tag.NameSpace == invoiceNamespace && item.Root.Namespace == invoiceNamespace && item.Root.Name == "Invoice"
 	return item, nil
@@ -213,7 +213,92 @@ func parseStructure(ctx context.Context, data []byte, tag CustomTag) (*Structure
 	if root == nil {
 		return nil, fmt.Errorf("empty custom tag document")
 	}
+	if structureInvoiceReferences(root) {
+		var bind func(*StructureNode)
+		bind = func(node *StructureNode) {
+			if node.Name == "ObjectRef" {
+				for _, attr := range node.Attributes {
+					if attr.Name == "PageRef" && attr.Namespace == "" {
+						node.References = []StructureReference{{PageID: attr.Value, ObjectIDs: structureObjectIDs(node.Text)}}
+					}
+				}
+			}
+			for i := range node.Children {
+				bind(&node.Children[i])
+			}
+		}
+		bind(root)
+	}
 	return root, nil
+}
+
+// structureInvoiceReferences 仅识别已核实的root和InvoiceNo发票引用树，不扩展公文类型规则
+// 入参: root 标引根节点
+// 返回: bool 是否为纯对象引用发票
+func structureInvoiceReferences(root *StructureNode) bool {
+	if root == nil || root.Name != "root" || root.Namespace != ofdNamespace2016 {
+		return false
+	}
+	known, refs := false, 0
+	for _, child := range root.Children {
+		known = known || child.Name == "InvoiceNo" && child.Namespace == ofdNamespace2016
+	}
+	var check func(*StructureNode) bool
+	check = func(node *StructureNode) bool {
+		if node.Namespace != ofdNamespace2016 {
+			return false
+		}
+		if node.Name == "ObjectRef" {
+			page := ""
+			for _, attr := range node.Attributes {
+				if attr.Name == "PageRef" && attr.Namespace == "" {
+					page = attr.Value
+				}
+			}
+			ids := structureObjectIDs(node.Text)
+			if len(node.Children) != 0 || len(ids) == 0 || editorResourceID(page) == "" {
+				return false
+			}
+			for _, id := range ids {
+				if editorResourceID(id) == "" {
+					return false
+				}
+			}
+			refs++
+			return true
+		}
+		if node.Name == "ObjectData" {
+			return len(node.Children) == 0
+		}
+		if strings.TrimSpace(node.Text) != "" {
+			return false
+		}
+		for i := range node.Children {
+			if !check(&node.Children[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return known && check(root) && refs > 0
+}
+
+// structureReferenceTags 按声明及实际内容识别可维护引用的标引，不将未知解析失败当作公文
+// 入参: ctx 取消上下文, tags 当前文档标引声明
+// 返回: []bool 与声明顺序对应的引用能力, error 取消错误
+func (r *Reader) structureReferenceTags(ctx context.Context, tags []CustomTag) ([]bool, error) {
+	known := make([]bool, len(tags))
+	for i, tag := range tags {
+		known[i] = structureOfficial(tag, tag.NameSpace)
+		if !known[i] {
+			item, err := r.readStructureContext(ctx, tag)
+			known[i] = err == nil && item.CanBind
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return known, nil
 }
 
 // structureOfficial 识别公文、富文本及发票标引的明确引用规则，不推断未知行业语义

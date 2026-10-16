@@ -21,9 +21,12 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // InvoiceDigest 计算原始导出数据的SHA256摘要
@@ -236,7 +239,15 @@ func (e *Editor) ExportInvoice(ctx context.Context, source InvoiceSource) ([]byt
 	if e == nil || e.source == nil {
 		return nil, fmt.Errorf("invoice source not found")
 	}
-	return e.source.reader.ExportInvoice(ctx, source)
+	if len(e.pages) == 0 {
+		return e.source.reader.ExportInvoice(invoiceWriteContext(ctx), source)
+	}
+	r, err := e.ReaderContext(invoiceWriteContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return r.ExportInvoice(ctx, source)
 }
 
 // ReplaceInvoiceData 仅替换选中声明，独立资源写时复制，旧数据允许诊断而新数据必须无诊断
@@ -273,24 +284,35 @@ func (e *Editor) changeInvoiceSource(ctx context.Context, source InvoiceSource, 
 	if InvoiceDigest(old) != digest {
 		return InvoiceSource{}, fmt.Errorf("invoice source has changed")
 	}
+	objectReference := false
 	if source.Kind == "tag" {
 		root, err := invoiceXMLTree(ctx, old)
 		if err != nil {
 			return InvoiceSource{}, err
 		}
-		if root.name.Space == ofdNamespace2016 && root.name.Local == "root" && invoiceObjectReferences(root) {
-			return InvoiceSource{}, fmt.Errorf("object reference invoice is read-only")
-		}
+		objectReference = invoiceReferenceRoot(root)
 	}
 	if !remove {
 		if len(data) > invoiceXMLLimit {
 			return InvoiceSource{}, fmt.Errorf("invoice data limit exceeded")
 		}
-		if _, err := invoiceWritableReport(ctx, data); err != nil {
-			return InvoiceSource{}, err
-		}
-		if err := invoiceValidateXMLWrite(ctx, old, data); err != nil {
-			return InvoiceSource{}, err
+		if objectReference {
+			r, err := e.ReaderContext(ctx)
+			if err != nil {
+				return InvoiceSource{}, err
+			}
+			_, err = r.invoiceReferenceReport(ctx, data)
+			r.Close()
+			if err != nil {
+				return InvoiceSource{}, err
+			}
+		} else {
+			if _, err := invoiceWritableReport(ctx, data); err != nil {
+				return InvoiceSource{}, err
+			}
+			if err := invoiceValidateXMLWrite(ctx, old, data); err != nil {
+				return InvoiceSource{}, err
+			}
 		}
 		if bytes.Equal(old, data) {
 			return source, ctx.Err()
@@ -472,4 +494,478 @@ func (r *Reader) invoiceSourceNode(ctx context.Context, source InvoiceSource) (s
 		return "", nil, nil, nil, fmt.Errorf("invoice source declaration is missing or ambiguous")
 	}
 	return name, data, selected, reference, ctx.Err()
+}
+
+// invoiceReferenceReport 校验当前文档中可解引用的发票标引，不将对象标识作为业务值
+// 入参: ctx 取消上下文, data 标引原文
+// 返回: InvoiceReport 解引用结果, error 格式或引用错误
+func (r *Reader) invoiceReferenceReport(ctx context.Context, data []byte) (InvoiceReport, error) {
+	root, err := invoiceXMLTree(ctx, data)
+	if err != nil {
+		return InvoiceReport{}, err
+	}
+	if !invoiceReferenceRoot(root) {
+		return InvoiceReport{}, fmt.Errorf("expected an OFD object reference invoice")
+	}
+	report, err := r.readInvoiceXML(ctx, data, InvoiceSource{Kind: "tag"})
+	if err != nil {
+		return InvoiceReport{}, err
+	}
+	if len(report.Invoices) != 1 || len(report.Invoices[0].Facts) == 0 || len(report.Issues) != 0 {
+		return InvoiceReport{}, fmt.Errorf("invoice object references are missing, ambiguous or invalid")
+	}
+	return report, nil
+}
+
+// importInvoiceReferences 将已有页面的有效引用创建为独立标引，保留原始XML扩展
+// 入参: ctx 取消上下文, data 标引原文, options 创建选项
+// 返回: InvoiceSource 标引来源, error 校验或提交错误
+func (e *Editor) importInvoiceReferences(ctx context.Context, data []byte, options InvoiceCreateOptions) (InvoiceSource, error) {
+	if options.Layout != nil || options.Encoding != nil {
+		return InvoiceSource{}, fmt.Errorf("object reference import requires existing pages and no encoding options")
+	}
+	var source InvoiceSource
+	err := e.Transaction(func(next *Editor) error {
+		r, err := next.ReaderContext(ctx)
+		if err != nil {
+			return err
+		}
+		_, err = r.invoiceReferenceReport(ctx, data)
+		r.Close()
+		if err != nil {
+			return err
+		}
+		root, err := parseStructure(ctx, data, CustomTag{TypeID: structureTypeOfficial, NameSpace: ofdNamespace2016})
+		if err != nil {
+			return err
+		}
+		index, err := next.AddStructure(CustomTag{TypeID: "root", NameSpace: ofdNamespace2016}, *root)
+		if err != nil {
+			return err
+		}
+		if err := next.editStructure(index, func(_ []byte, _ *editorXML, _ CustomTag) ([]byte, error) { return bytes.Clone(data), nil }); err != nil {
+			return err
+		}
+		r, err = next.ReaderContext(ctx)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		tags, err := r.CustomTagsContext(ctx)
+		if err != nil {
+			return err
+		}
+		source = InvoiceSource{Kind: "tag", ID: strconv.Itoa(index), FileLoc: r.ResPath(tags[index].FileLoc)}
+		_, err = r.ExportInvoice(ctx, source)
+		return err
+	})
+	if err != nil {
+		return InvoiceSource{}, err
+	}
+	return source, nil
+}
+
+// invoiceReferenceBindings 解析唯一单对象事实的固有绑定，不猜测多对象文字分配
+// 入参: ctx 取消上下文, invoice 解引用发票
+// 返回: []InvoiceBinding 事实关联, error 文档读取错误
+func (r *Reader) invoiceReferenceBindings(ctx context.Context, invoice Invoice) ([]InvoiceBinding, error) {
+	doc, err := r.DocContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pages := signaturePageNumbers(doc)
+	counts := make(map[string]int)
+	for _, fact := range invoice.Facts {
+		for _, ref := range fact.References {
+			for _, id := range ref.ObjectIDs {
+				counts[editorResourceID(ref.PageID)+"/"+editorResourceID(id)]++
+			}
+		}
+	}
+	var bindings []InvoiceBinding
+	for i, fact := range invoice.Facts {
+		if len(fact.References) != 1 || len(fact.References[0].ObjectIDs) != 1 {
+			continue
+		}
+		ref := fact.References[0]
+		page, _ := resourceValue(pages, ref.PageID)
+		if page == 0 || counts[editorResourceID(ref.PageID)+"/"+editorResourceID(ref.ObjectIDs[0])] != 1 {
+			continue
+		}
+		bindings = append(bindings, InvoiceBinding{Field: fmt.Sprintf("facts.%d", i), Item: -1, Page: page - 1, ObjectID: ref.ObjectIDs[0]})
+	}
+	return bindings, ctx.Err()
+}
+
+// invoiceReferenceEditability 一次计数并生成无共享引用的事实能力，字体和布局仍由事务预检
+// 入参: invoice 发票
+// 返回: []bool 与事实索引对应的编辑条件
+func invoiceReferenceEditability(invoice Invoice) []bool {
+	counts := make(map[string]int)
+	for _, fact := range invoice.Facts {
+		for _, ref := range fact.References {
+			for _, id := range ref.ObjectIDs {
+				counts[editorResourceID(ref.PageID)+"/"+editorResourceID(id)]++
+			}
+		}
+	}
+	result := make([]bool, len(invoice.Facts))
+	for i, fact := range invoice.Facts {
+		result[i] = len(fact.References) != 0
+		for _, ref := range fact.References {
+			result[i] = result[i] && editorResourceID(ref.PageID) != "" && len(ref.ObjectIDs) != 0
+			for _, id := range ref.ObjectIDs {
+				result[i] = result[i] && editorResourceID(id) != "" && counts[editorResourceID(ref.PageID)+"/"+editorResourceID(id)] == 1
+			}
+		}
+	}
+	return result
+}
+
+// editInvoiceReferences 原子修改引用目标并重新解引用校验，XML摘要外必须核对原文字
+// 入参: ctx 取消上下文, source 来源, digest 标引摘要, changes 事实修改, synchronize 必须为真
+// 返回: InvoiceUpdateResult 同步结果, error 冲突、布局或提交错误
+func (e *Editor) editInvoiceReferences(ctx context.Context, source InvoiceSource, digest string, changes []InvoiceFieldChange, synchronize bool) (InvoiceUpdateResult, error) {
+	if !synchronize {
+		return InvoiceUpdateResult{}, fmt.Errorf("object reference values are page text and require synchronization")
+	}
+	var result InvoiceUpdateResult
+	err := e.Transaction(func(next *Editor) error {
+		r, err := next.ReaderContext(ctx)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		data, err := r.ExportInvoice(ctx, source)
+		if err != nil {
+			return err
+		}
+		if digest == "" || InvoiceDigest(data) != digest {
+			return fmt.Errorf("invoice source changed")
+		}
+		report, err := r.invoiceReferenceReport(ctx, data)
+		if err != nil {
+			return err
+		}
+		invoice := report.Invoices[0]
+		invoice.Facts = slices.Clone(invoice.Facts)
+		bindings, err := r.invoiceReferenceBindings(ctx, invoice)
+		if err != nil {
+			return err
+		}
+		var selected []InvoiceBinding
+		var singles []InvoiceBinding
+		joint := make(map[int][]InvoiceBinding)
+		editable := invoiceReferenceEditability(invoice)
+		seen := make(map[int]bool)
+		for _, change := range changes {
+			if change.Source.Kind != "" && change.Source.Kind != source.Kind || change.Source.ID != "" && change.Source.ID != source.ID || change.Source.FileLoc != "" && change.Source.FileLoc != source.FileLoc || change.Revision != "" && change.Revision != digest {
+				return fmt.Errorf("invoice field belongs to another source or revision")
+			}
+			index := slices.IndexFunc(invoice.Facts, func(fact InvoiceFact) bool { return fact.Source.NodePath == change.Source.NodePath })
+			if index < 0 || seen[index] || change.Delete || change.Nil || change.ExpectedNil != nil && *change.ExpectedNil || change.ExpectedValue == nil || *change.ExpectedValue != invoice.Facts[index].Value {
+				return fmt.Errorf("object reference edit requires a unique fact and matching expected text")
+			}
+			seen[index] = true
+			if change.Value == invoice.Facts[index].Value {
+				continue
+			}
+			if !editable[index] {
+				return fmt.Errorf("invoice text object is shared by multiple facts")
+			}
+			binding := slices.IndexFunc(bindings, func(binding InvoiceBinding) bool { return binding.Field == fmt.Sprintf("facts.%d", index) })
+			value, err := invoiceReferenceDisplay(invoice, invoice.Facts[index], change.Value)
+			if err != nil {
+				return err
+			}
+			if binding >= 0 {
+				selected = append(selected, bindings[binding])
+				singles = append(singles, bindings[binding])
+			} else {
+				fact := invoice.Facts[index]
+				if utf8.RuneCountInString(value) != utf8.RuneCountInString(fact.Value) || value == "" {
+					return fmt.Errorf("multiple invoice references require equal-length positioned replacement")
+				}
+				for _, ref := range fact.References {
+					page := slices.IndexFunc(next.pages, func(page PageContent) bool { return sameResourceID(page.ID, ref.PageID) })
+					if page < 0 {
+						return fmt.Errorf("invoice reference page not found")
+					}
+					for _, id := range ref.ObjectIDs {
+						item := InvoiceBinding{Field: fmt.Sprintf("facts.%d", index), Item: -1, Page: page, ObjectID: id}
+						joint[index] = append(joint[index], item)
+						selected = append(selected, item)
+					}
+				}
+			}
+			invoice.Facts[index].Value = value
+		}
+		structures, err := r.StructureContext(ctx)
+		if err != nil {
+			return err
+		}
+		for i, structure := range structures {
+			if strconv.Itoa(i) == source.ID {
+				continue
+			}
+			if structure.Error != "" {
+				return fmt.Errorf("cannot verify shared invoice references")
+			}
+			var check func(*StructureNode) error
+			check = func(node *StructureNode) error {
+				if node == nil {
+					return nil
+				}
+				for _, ref := range node.References {
+					for _, binding := range selected {
+						if sameResourceID(next.pages[binding.Page].ID, ref.PageID) {
+							for _, id := range ref.ObjectIDs {
+								if sameResourceID(id, binding.ObjectID) {
+									return fmt.Errorf("invoice text object is referenced by another structure")
+								}
+							}
+						}
+					}
+				}
+				for j := range node.Children {
+					if err := check(&node.Children[j]); err != nil {
+						return err
+					}
+				}
+				return ctx.Err()
+			}
+			if err := check(structure.Root); err != nil {
+				return err
+			}
+		}
+		for i, fact := range report.Invoices[0].Facts {
+			if len(joint[i]) == 0 {
+				continue
+			}
+			value := []rune(invoice.Facts[i].Value)
+			offset := 0
+			var original strings.Builder
+			for _, binding := range joint[i] {
+				object, err := next.Object(binding.Page, binding.ObjectID)
+				if err != nil || object.Type != "TextObject" {
+					return fmt.Errorf("joint invoice reference requires text objects")
+				}
+				text := object.TextObject.Text()
+				original.WriteString(text)
+				end := offset + utf8.RuneCountInString(text)
+				if end > len(value) {
+					return fmt.Errorf("invoice reference text length changed")
+				}
+				replacement := string(value[offset:end])
+				offset = end
+				if text == replacement {
+					continue
+				}
+				analysis, err := next.AnalyzeTextSelection(binding.Page, TextSelection{IDs: []string{binding.ObjectID}})
+				if err != nil {
+					return err
+				}
+				if analysis.Text != text {
+					return fmt.Errorf("invoice reference requires explicit line break mapping")
+				}
+				if err := next.UpdateTextSelection(binding.Page, analysis.Selection, TextSelectionEdit{End: utf8.RuneCountInString(text), Text: replacement}); err != nil {
+					return err
+				}
+			}
+			if original.String() != fact.Value || offset != len(value) {
+				return fmt.Errorf("invoice reference text changed")
+			}
+		}
+		if err := next.SyncInvoicePages(ctx, invoice, singles); err != nil {
+			return err
+		}
+		view, err := next.ReaderContext(ctx)
+		if err != nil {
+			return err
+		}
+		defer view.Close()
+		verified, err := view.invoiceReferenceReport(ctx, data)
+		if err != nil {
+			return err
+		}
+		for i := range invoice.Facts {
+			if verified.Invoices[0].Facts[i].Value != invoice.Facts[i].Value {
+				return fmt.Errorf("invoice text failed to round-trip after synchronization")
+			}
+		}
+		result = InvoiceUpdateResult{Source: source, Digest: digest, Synchronized: true}
+		signed, err := view.hasOutputSignatures(ctx)
+		if err != nil {
+			return err
+		}
+		if signed {
+			result.Issues = append(result.Issues, InvoiceIssue{Code: "signature-recheck-required", Message: "modified signed content requires signature verification", Source: source})
+		}
+		return ctx.Err()
+	})
+	if err != nil {
+		return InvoiceUpdateResult{}, err
+	}
+	return result, nil
+}
+
+// invoiceReferenceDisplay 保留金额符号及已识别日期的显示格式，不改写引用结构
+// 入参: invoice 原发票, fact 原事实, value 新业务值
+// 返回: string 显示文字, error 值格式错误
+func invoiceReferenceDisplay(invoice Invoice, fact InvoiceFact, value string) (string, error) {
+	binding, ok := invoiceEDRMFactBinding(invoice, fact)
+	if !ok {
+		return value, nil
+	}
+	switch binding.Field {
+	case "amount", "taxAmount", "totalAmount":
+		old := strings.TrimSpace(fact.Value)
+		prefix := ""
+		for _, symbol := range []string{"¥", "￥"} {
+			if strings.HasPrefix(old, symbol) {
+				prefix = symbol
+			}
+		}
+		value = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(value), "¥￥"))
+		if invoiceDecimal(value) == nil {
+			return "", fmt.Errorf("invalid invoice amount")
+		}
+		return prefix + value, nil
+	case "date":
+		layouts := []string{"2006年01月02日", "2006-01-02", "20060102", "2006/01/02"}
+		for _, layout := range layouts {
+			if _, err := time.Parse(layout, fact.Value); err == nil {
+				for _, input := range layouts {
+					if date, err := time.Parse(input, value); err == nil {
+						return date.Format(layout), nil
+					}
+				}
+				return "", fmt.Errorf("invalid invoice date")
+			}
+		}
+		return "", fmt.Errorf("invoice date display format is unknown")
+	}
+	return value, nil
+}
+
+// setInvoiceReferences 将已有摘要字段变化映射回唯一事实，原Facts作为图元旧值基线
+// 入参: ctx 取消上下文, source 来源, digest 标引摘要, index 发票索引, invoice 新业务值, synchronize 是否同步
+// 返回: InvoiceUpdateResult 同步结果, error 不可表达字段或提交错误
+func (e *Editor) setInvoiceReferences(ctx context.Context, source InvoiceSource, digest string, index int, invoice Invoice, synchronize bool) (InvoiceUpdateResult, error) {
+	if index != 0 {
+		return InvoiceUpdateResult{}, fmt.Errorf("invoice index out of range")
+	}
+	r, err := e.ReaderContext(ctx)
+	if err != nil {
+		return InvoiceUpdateResult{}, err
+	}
+	defer r.Close()
+	report, err := r.ReadInvoice(ctx, source)
+	if err != nil {
+		return InvoiceUpdateResult{}, err
+	}
+	if len(report.Invoices) != 1 {
+		return InvoiceUpdateResult{}, fmt.Errorf("object reference invoice not found")
+	}
+	before := report.Invoices[0]
+	if !reflect.DeepEqual(invoice.Facts, before.Facts) || !reflect.DeepEqual(invoice.Items, before.Items) {
+		return InvoiceUpdateResult{}, fmt.Errorf("object reference SetInvoice requires unchanged original facts and items; use EditInvoice for fact edits")
+	}
+	var changes []InvoiceFieldChange
+	for _, field := range invoiceLayoutFields(invoice) {
+		value, err := invoiceBindingValue(before, InvoiceBinding{Field: field.field, Item: field.item})
+		if err != nil {
+			return InvoiceUpdateResult{}, err
+		}
+		if value == field.value {
+			continue
+		}
+		match := -1
+		for i, fact := range before.Facts {
+			binding, ok := invoiceEDRMFactBinding(before, fact)
+			if ok && binding.Field == field.field && binding.Item == field.item {
+				if match >= 0 {
+					return InvoiceUpdateResult{}, fmt.Errorf("invoice summary field is ambiguous")
+				}
+				match = i
+			}
+		}
+		if match < 0 {
+			return InvoiceUpdateResult{}, fmt.Errorf("invoice field %s has no object reference", field.field)
+		}
+		fact := before.Facts[match]
+		changes = append(changes, InvoiceFieldChange{Source: fact.Source, Value: field.value, ExpectedValue: &fact.Value})
+	}
+	return e.editInvoiceReferences(ctx, source, digest, changes, synchronize)
+}
+
+// createInvoiceReferences 按已知样例摘要字段生成信息页和真实标引，不推定税务业务创建规范
+// 入参: ctx 取消上下文, invoice 摘要数据, options 必填票面字体和排版
+// 返回: InvoiceSource 标引来源, error 不可表达字段、排版或提交错误
+func (e *Editor) createInvoiceReferences(ctx context.Context, invoice Invoice, options InvoiceCreateOptions) (InvoiceSource, error) {
+	if options.Layout == nil || options.Layout.Font == "" || options.Encoding != nil {
+		return InvoiceSource{}, fmt.Errorf("object reference creation requires Editor.CreateInvoice with Layout.Font and no standalone encoding")
+	}
+	if invoice.Kind != "inv" || invoice.Version != "1.0" || invoice.Number == "" || len(invoice.Facts) != 0 || len(invoice.Items) != 0 || len(invoice.Sources) != 0 {
+		return InvoiceSource{}, fmt.Errorf("object reference creation supports version 1.0 invoice summaries without existing facts, sources or inferred item groups")
+	}
+	paths := make(map[string]string)
+	probe := Invoice{Standard: ofdNamespace2016}
+	for _, path := range invoiceEDRMPaths() {
+		field, _ := invoiceEDRMField(&probe, nil, path)
+		if field == nil {
+			continue
+		}
+		*field = "mapped"
+		for _, candidate := range invoiceLayoutFields(probe) {
+			if candidate.value == "mapped" {
+				paths[candidate.field] = strings.TrimPrefix(path, "/eInvoice/")
+			}
+		}
+		*field = ""
+	}
+	for _, field := range invoiceLayoutFields(invoice) {
+		if field.value != "" && field.field != "kind" && field.field != "standard" && field.field != "version" && paths[field.field] == "" {
+			return InvoiceSource{}, fmt.Errorf("object reference sample cannot represent field %s", field.field)
+		}
+	}
+	issues, err := ValidateInvoice(ctx, invoice)
+	if err != nil {
+		return InvoiceSource{}, err
+	}
+	if len(issues) != 0 {
+		return InvoiceSource{}, fmt.Errorf("invalid object reference invoice: %s", issues[0].Message)
+	}
+	var source InvoiceSource
+	err = e.Transaction(func(next *Editor) error {
+		display := invoice
+		display.Kind, display.Standard, display.Version = "", "", ""
+		bindings, err := next.AppendInvoicePages(ctx, display, *options.Layout)
+		if err != nil {
+			return err
+		}
+		root := StructureNode{Name: "root", Namespace: ofdNamespace2016, Attributes: []StructureAttribute{{Name: "version", Value: "1.0"}}}
+		for _, binding := range bindings {
+			node := &root
+			for _, name := range strings.Split(paths[binding.Field], "/") {
+				i := slices.IndexFunc(node.Children, func(child StructureNode) bool { return child.Name == name })
+				if i < 0 {
+					node.Children = append(node.Children, StructureNode{Name: name, Namespace: ofdNamespace2016})
+					i = len(node.Children) - 1
+				}
+				node = &node.Children[i]
+			}
+			node.Children = append(node.Children, StructureNode{Name: "ObjectRef", Namespace: ofdNamespace2016, Attributes: []StructureAttribute{{Name: "PageRef", Value: next.pages[binding.Page].ID}}, Text: binding.ObjectID})
+		}
+		data, err := encodeStructureNode(root)
+		if err != nil {
+			return err
+		}
+		source, err = next.importInvoiceReferences(ctx, data, InvoiceCreateOptions{})
+		return err
+	})
+	if err != nil {
+		return InvoiceSource{}, err
+	}
+	return source, nil
 }
