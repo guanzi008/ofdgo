@@ -19,6 +19,18 @@ import (
 	"unicode/utf8"
 )
 
+// XMLNamespace 表示XML预定义命名空间
+const XMLNamespace = "http://www.w3.org/XML/1998/namespace"
+
+// XMLSchemaInstanceNamespace 表示XMLSchema实例命名空间
+const XMLSchemaInstanceNamespace = "http://www.w3.org/2001/XMLSchema-instance"
+
+// XLinkNamespace 表示XML链接命名空间
+const XLinkNamespace = "http://www.w3.org/1999/xlink"
+
+// xmlDeclarationNamespace 表示XML命名空间声明标识
+const xmlDeclarationNamespace = "http://www.w3.org/2000/xmlns/"
+
 // 旧版与2016版OFD命名空间
 const (
 	ofdNamespaceLegacy = "http://www.ofdspec.org"

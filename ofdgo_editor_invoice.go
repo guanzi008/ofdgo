@@ -30,7 +30,7 @@ import (
 // invoiceTagType 标识发票票面编辑关联，业务数据保持原规范格式
 const invoiceTagType = "OFDGo.Invoice"
 
-// invoiceNamespace 标识发票编辑关联的命名空间，版本仅随不兼容的语义变更升级
+// invoiceNamespace 表示发票编辑关联命名空间
 const invoiceNamespace = "https://ofdgo.aite.me/ns/invoice/1"
 
 // InvoiceCreateOptions 指定结构化附件名称和可选票面，未指定票面时不新增页面
@@ -1129,7 +1129,7 @@ func invoiceRemapBindings(before, after Invoice, bindings []InvoiceBinding) ([]I
 	return result, nil
 }
 
-// invoiceBindingCoverage 拒绝将未关联的字段修改误报为已同步，不猜测缺失图元
+// invoiceBindingCoverage 检查修改字段的票面关联覆盖情况
 // 入参: before 原发票, after 新发票, bindings 显式关联
 // 返回: error 未绑定字段错误
 func invoiceBindingCoverage(before, after Invoice, bindings []InvoiceBinding) error {

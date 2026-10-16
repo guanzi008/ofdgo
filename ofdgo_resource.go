@@ -394,7 +394,7 @@ func scanResourcePage(ctx context.Context, file *editorFontXML, pages map[string
 				return false, false, nil, nil
 			}
 			for _, attr := range token.Attr {
-				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != "http://www.w3.org/XML/1998/namespace" {
+				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace {
 					return false, false, nil, nil
 				}
 			}

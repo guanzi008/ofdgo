@@ -1,4 +1,4 @@
-import { CanvasEditor, canEditObject, editTextValue, richTextModel, fontFaceStyle, missingGlyphMessage, objectEditReason, selectedText, lineShape, selectionBounds, pagePoint } from "./ofdgo_edit.js";
+import { SVG_NAMESPACE, CanvasEditor, canEditObject, editTextValue, richTextModel, fontFaceStyle, missingGlyphMessage, objectEditReason, selectedText, lineShape, selectionBounds, pagePoint } from "./ofdgo_edit.js";
 import { FontManager, FontPicker } from "./ofdgo_font.js";
 
 const MM_TO_PX = 96 / 25.4;
@@ -9063,9 +9063,9 @@ function mountPageLinks(page, surface) {
 		anchor.style.height = `${link.height / page.height * 100}%`;
 		if (link.path) {
 			anchor.classList.add("page-region-link");
-			const region = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+			const region = document.createElementNS(SVG_NAMESPACE, "svg");
 			region.setAttribute("viewBox", `${link.x} ${link.y} ${link.width} ${link.height}`);
-			const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+			const path = document.createElementNS(SVG_NAMESPACE, "path");
 			path.setAttribute("d", link.path);
 			region.append(path);
 			anchor.append(region);

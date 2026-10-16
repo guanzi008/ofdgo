@@ -1,4 +1,5 @@
 const PX_PER_MM = 96 / 25.4;
+export const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
 const FORMAT_KEYS = ["font", "size", "color", "bold", "italic", "underline", "strikeout", "shadow", "background"];
 const RICH_CLIPBOARD = "application/x-ofdgo-rich-text";
@@ -620,18 +621,18 @@ export class CanvasEditor {
 			}
 			if (object.type === "PathObject" && (object.shape || object.outline || object.contours?.length)) {
 				node.classList.add("edit-contour");
-				const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+				const svg = document.createElementNS(SVG_NAMESPACE, "svg");
 				svg.classList.add("edit-outline");
 				svg.setAttribute("preserveAspectRatio", "none");
 				let contour;
 				if (object.shape || object.oriented || !object.contours?.length) {
 					const shape = object.shape || object.oriented?.kind;
-					contour = document.createElementNS("http://www.w3.org/2000/svg", shape === "line" ? "line" : shape === "ellipse" ? "ellipse" : shape === "rectangle" ? "rect" : "path");
+					contour = document.createElementNS(SVG_NAMESPACE, shape === "line" ? "line" : shape === "ellipse" ? "ellipse" : shape === "rectangle" ? "rect" : "path");
 					if (!shape) contour.setAttribute("d", object.outline);
 					svg.append(contour);
 				} else {
 					for (const path of object.contours) {
-						const contour = document.createElementNS("http://www.w3.org/2000/svg", "path");
+						const contour = document.createElementNS(SVG_NAMESPACE, "path");
 						contour.setAttribute("d", path.path);
 						svg.append(contour);
 					}
@@ -1354,10 +1355,10 @@ export class CanvasEditor {
 	}
 
 	createPreview(surface, page, shape, style) {
-		const preview = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+		const preview = document.createElementNS(SVG_NAMESPACE, "svg");
 		preview.classList.add("edit-preview");
 		preview.setAttribute("viewBox", `0 0 ${page.width} ${page.height}`);
-		const node = document.createElementNS("http://www.w3.org/2000/svg", lineShape(shape) && shape !== "line" ? "path" : shape === "rectangle" ? "rect" : shape);
+		const node = document.createElementNS(SVG_NAMESPACE, lineShape(shape) && shape !== "line" ? "path" : shape === "rectangle" ? "rect" : shape);
 		node.setAttribute("fill", style.fill ? style.fillColor : "none");
 		node.setAttribute("stroke", style.stroke ? style.strokeColor : "none");
 		node.setAttribute("stroke-width", style.lineWidth);

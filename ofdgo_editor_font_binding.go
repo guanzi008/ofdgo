@@ -679,7 +679,7 @@ func checkFontBinding(ctx context.Context, object TextObject, font *FontResource
 	return ctx.Err()
 }
 
-// externalFontName 去除PDF字体子集前缀，不猜测或改写其他名称
+// externalFontName 去除PDF字体子集前缀
 // 入参: name 字体名称
 // 返回: string 外部匹配名称
 func externalFontName(name string) string {
@@ -966,7 +966,7 @@ func pruneUnreferencedFiles(ctx context.Context, reader *Reader, candidates ...s
 				return fmt.Errorf("unknown file dependencies in %s", name)
 			}
 			for _, attr := range node.Attr {
-				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != "http://www.w3.org/XML/1998/namespace" {
+				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace {
 					uncertain = true
 					return fmt.Errorf("unknown file dependencies in %s", name)
 				}

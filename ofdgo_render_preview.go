@@ -22,6 +22,9 @@ import (
 	"io"
 )
 
+// svgNamespace 表示SVG预览文档命名空间
+const svgNamespace = "http://www.w3.org/2000/svg"
+
 // PreviewOptions 指定页面显示方式，光栅预览不提供SVG对象分组
 type PreviewOptions struct {
 	Raster  bool
@@ -50,7 +53,7 @@ func (r *Renderer) RenderPreview(page *PageContent, writer io.Writer, options Pr
 		return SVGResources{}, err
 	}
 	name := fmt.Sprintf("ofdgo-image-%x", sha256.Sum256(pixels.Bytes()))
-	_, err = fmt.Fprintf(writer, `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="%gmm" height="%gmm" viewBox="0 0 %g %g"><image width="%g" height="%g" preserveAspectRatio="none" xlink:href="%s"/></svg>`, box.W, box.H, box.W, box.H, box.W, box.H, name)
+	_, err = fmt.Fprintf(writer, `<svg xmlns="`+svgNamespace+`" xmlns:xlink="`+XLinkNamespace+`" width="%gmm" height="%gmm" viewBox="0 0 %g %g"><image width="%g" height="%g" preserveAspectRatio="none" xlink:href="%s"/></svg>`, box.W, box.H, box.W, box.H, box.W, box.H, name)
 	if err != nil {
 		return SVGResources{}, err
 	}
@@ -120,6 +123,6 @@ func (r *Renderer) RenderFontPreview(ctx context.Context, id string, writer io.W
 		return fmt.Errorf("font has no visible glyphs")
 	}
 	width, height := min(count, 8)*36, (count+7)/8*40
-	_, err = fmt.Fprintf(writer, `<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">%s</svg>`, width, height, width, height, paths.Bytes())
+	_, err = fmt.Fprintf(writer, `<svg xmlns="`+svgNamespace+`" width="%d" height="%d" viewBox="0 0 %d %d">%s</svg>`, width, height, width, height, paths.Bytes())
 	return err
 }

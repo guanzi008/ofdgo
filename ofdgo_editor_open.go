@@ -456,7 +456,7 @@ func (e *Editor) repairSourceObjectIDs(data []byte, root *editorXML) ([]byte, bo
 	return editorPatchXML(data, patches), true, nil
 }
 
-// checkDuplicateObjectReferences 拒绝无法判定目标的编号引用，不猜测其所属对象
+// checkDuplicateObjectReferences 检查编号引用的目标歧义
 // 入参: duplicates 重复编号
 // 返回: error 引用歧义或读取错误
 func (e *Editor) checkDuplicateObjectReferences(duplicates map[string]bool) error {

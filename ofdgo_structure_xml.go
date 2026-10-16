@@ -45,7 +45,7 @@ func encodeStructureNode(node StructureNode) ([]byte, error) {
 		switch node.Namespace {
 		case "":
 			start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Local: "xmlns"}, Value: ""})
-		case "http://www.w3.org/XML/1998/namespace":
+		case XMLNamespace:
 			start.Name = xml.Name{Local: "xml:" + node.Name}
 		}
 		for _, attr := range node.Attributes {
@@ -73,20 +73,20 @@ func encodeStructureNode(node StructureNode) ([]byte, error) {
 	return output.Bytes(), nil
 }
 
-// validateStructureNode 校验XML名称和文本，禁止重复属性及伪造命名空间声明
+// validateStructureNode 校验标引节点名称、属性和文本
 // 入参: node 节点字段
 // 返回: error 字段校验错误
 func validateStructureNode(node StructureNode) error {
 	if !ofdXMLIDValid(node.Name) || node.Name == "xmlns" {
 		return fmt.Errorf("invalid custom tag node name: %s", node.Name)
 	}
-	if !structureXMLText(node.Text) || !structureXMLText(node.Namespace) || node.Namespace == "http://www.w3.org/2000/xmlns/" {
+	if !structureXMLText(node.Text) || !structureXMLText(node.Namespace) || node.Namespace == xmlDeclarationNamespace {
 		return fmt.Errorf("invalid custom tag text or namespace")
 	}
 	seen := make(map[xml.Name]bool)
 	for _, attr := range node.Attributes {
 		name := xml.Name{Space: attr.Namespace, Local: attr.Name}
-		if !ofdXMLIDValid(attr.Name) || attr.Name == "xmlns" || attr.Namespace == "http://www.w3.org/2000/xmlns/" || !structureXMLText(attr.Namespace) || !structureXMLText(attr.Value) || seen[name] {
+		if !ofdXMLIDValid(attr.Name) || attr.Name == "xmlns" || attr.Namespace == xmlDeclarationNamespace || !structureXMLText(attr.Namespace) || !structureXMLText(attr.Value) || seen[name] {
 			return fmt.Errorf("invalid or duplicate custom tag attribute: %s", attr.Name)
 		}
 		seen[name] = true
@@ -159,7 +159,7 @@ func updateStructureNodeXML(data []byte, source *editorXML, node StructureNode) 
 		if namespace == "" {
 			return name
 		}
-		if namespace == "http://www.w3.org/XML/1998/namespace" {
+		if namespace == XMLNamespace {
 			return "xml:" + name
 		}
 		for _, attr := range attrs {

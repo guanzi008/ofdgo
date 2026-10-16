@@ -28,30 +28,6 @@ import (
 	"time"
 )
 
-// invoiceXMLNamespace 表示XML预定义命名空间
-const invoiceXMLNamespace = "http://www.w3.org/XML/1998/namespace"
-
-// invoiceXSI 表示XMLSchema实例命名空间
-const invoiceXSI = "http://www.w3.org/2001/XMLSchema-instance"
-
-// invoiceXLink 表示XML链接命名空间
-const invoiceXLink = "http://www.w3.org/1999/xlink"
-
-// invoiceXMLSignature 表示XML数字签名命名空间
-const invoiceXMLSignature = "http://www.w3.org/2000/09/xmldsig#"
-
-// invoiceXBRL 表示XBRL实例命名空间
-const invoiceXBRL = "http://www.xbrl.org/2003/instance"
-
-// invoiceLinkbase 表示XBRL链接库命名空间
-const invoiceLinkbase = "http://www.xbrl.org/2003/linkbase"
-
-// invoiceDimension 表示XBRL实例维度命名空间
-const invoiceDimension = "http://xbrl.org/2006/xbrldi"
-
-// InvoiceCurrencyNamespace 表示InvoiceUnit中ISO货币度量使用的命名空间
-const InvoiceCurrencyNamespace = "http://www.xbrl.org/2003/iso4217"
-
 // InvoiceStandardVAT2023 表示2023版增值税发票分类标准
 const InvoiceStandardVAT2023 = "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/inv"
 
@@ -70,17 +46,29 @@ const InvoiceStandardVAT2021 = "http://xbrl.mof.gov.cn/taxonomy/2021-09-30/inv"
 // InvoiceStandardAir2021 表示2021版航空运输电子客票行程单分类标准
 const InvoiceStandardAir2021 = "http://xbrl.mof.gov.cn/taxonomy/2021-11-30/atr"
 
-// InvoiceStandardEInvoice 表示无命名空间的EInvoice业务标准，版本由Invoice.Version指定
-const InvoiceStandardEInvoice = "EInvoice"
-
-// InvoiceStandardObjectReference 表示基于OFD对象引用的发票标引，业务值来自当前文档的图元
-const InvoiceStandardObjectReference = ofdNamespace2016
-
 // InvoiceStandardEDRM2019 表示2019版电子发票业务标准
 const InvoiceStandardEDRM2019 = "http://www.edrm.org.cn/schema/e-invoice/2019"
 
-// invoiceEDRM 表示2019版电子发票业务命名空间
-const invoiceEDRM = InvoiceStandardEDRM2019
+// InvoiceStandardEInvoice 表示无命名空间的EInvoice业务标准，版本由Invoice.Version指定
+const InvoiceStandardEInvoice = "EInvoice"
+
+// InvoiceStandardObjectReference 表示基于OFD对象引用的发票标引
+const InvoiceStandardObjectReference = ofdNamespace2016
+
+// InvoiceCurrencyNamespace 表示InvoiceUnit中ISO货币度量使用的命名空间
+const InvoiceCurrencyNamespace = "http://www.xbrl.org/2003/iso4217"
+
+// invoiceXBRL 表示XBRL实例命名空间
+const invoiceXBRL = "http://www.xbrl.org/2003/instance"
+
+// invoiceLinkbase 表示XBRL链接库命名空间
+const invoiceLinkbase = "http://www.xbrl.org/2003/linkbase"
+
+// invoiceDimension 表示XBRL实例维度命名空间
+const invoiceDimension = "http://xbrl.org/2006/xbrldi"
+
+// invoiceXMLSignature 表示XML数字签名命名空间
+const invoiceXMLSignature = "http://www.w3.org/2000/09/xmldsig#"
 
 // invoiceDecimalPattern 仅接受XML十进制词法
 var invoiceDecimalPattern = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$`)
@@ -195,7 +183,7 @@ func invoiceXMLTree(ctx context.Context, data []byte) (*invoiceXMLNode, error) {
 					return nil, fmt.Errorf("invoice XML exceeds namespace URI limit")
 				}
 			}
-			n := &invoiceXMLNode{name: v.Name, attrs: v.Attr, parent: current, ns: map[string]string{"xml": invoiceXMLNamespace}, counts: map[xml.Name]int{}, start: d.InputOffset()}
+			n := &invoiceXMLNode{name: v.Name, attrs: v.Attr, parent: current, ns: map[string]string{"xml": XMLNamespace}, counts: map[xml.Name]int{}, start: d.InputOffset()}
 			index := 1
 			if current != nil {
 				for k, v := range current.ns {
@@ -302,7 +290,7 @@ func parseInvoiceXML(ctx context.Context, data []byte, source InvoiceSource) (In
 	if source.Kind == "tag" && invoiceObjectReferences(root) {
 		return report, nil
 	}
-	if root.name == (xml.Name{Local: "EInvoice"}) || root.name.Local == "eInvoice" && (root.name.Space == "" || root.name.Space == invoiceEDRM) {
+	if root.name == (xml.Name{Local: "EInvoice"}) || root.name.Local == "eInvoice" && (root.name.Space == "" || root.name.Space == InvoiceStandardEDRM2019) {
 		return invoicePlainXML(ctx, root, source)
 	}
 	if root.name != (xml.Name{Space: invoiceXBRL, Local: "xbrl"}) {
@@ -413,7 +401,7 @@ func parseInvoiceXML(ctx context.Context, data []byte, source InvoiceSource) (In
 		ref := invoiceXMLAttr(n, "", "contextRef")
 		s := source
 		s.NodePath += n.path
-		fact := InvoiceFact{Name: n.name.Local, Namespace: n.name.Space, Value: n.text.String(), Context: ref, Unit: invoiceXMLAttr(n, "", "unitRef"), Decimals: invoiceXMLAttr(n, "", "decimals"), Precision: invoiceXMLAttr(n, "", "precision"), Source: s, Nil: invoiceXMLAttr(n, invoiceXSI, "nil") == "true" || invoiceXMLAttr(n, invoiceXSI, "nil") == "1", Dimensions: dimensions[ref]}
+		fact := InvoiceFact{Name: n.name.Local, Namespace: n.name.Space, Value: n.text.String(), Context: ref, Unit: invoiceXMLAttr(n, "", "unitRef"), Decimals: invoiceXMLAttr(n, "", "decimals"), Precision: invoiceXMLAttr(n, "", "precision"), Source: s, Nil: invoiceXMLAttr(n, XMLSchemaInstanceNamespace, "nil") == "true" || invoiceXMLAttr(n, XMLSchemaInstanceNamespace, "nil") == "1", Dimensions: dimensions[ref]}
 		if len(n.children) > 0 {
 			fact.Value = string(n.inner)
 		}
@@ -431,8 +419,8 @@ func parseInvoiceXML(ctx context.Context, data []byte, source InvoiceSource) (In
 		}
 		inv := &report.Invoices[i]
 		inv.Facts = append(inv.Facts, fact)
-		nilValue := invoiceXMLAttr(n, invoiceXSI, "nil")
-		if invoiceXMLHasAttr(n, invoiceXSI, "nil") && nilValue != "true" && nilValue != "false" && nilValue != "1" && nilValue != "0" {
+		nilValue := invoiceXMLAttr(n, XMLSchemaInstanceNamespace, "nil")
+		if invoiceXMLHasAttr(n, XMLSchemaInstanceNamespace, "nil") && nilValue != "true" && nilValue != "false" && nilValue != "1" && nilValue != "0" {
 			issue("invalid-value", fact.Name, "invalid xsi:nil", s)
 			return nil
 		}
@@ -948,7 +936,7 @@ func invoiceMonetary(kind, name string) bool {
 	return invoiceNumeric(kind, name) && name != "QuantityOfGoodsOrServices" && name != "VatRate" && name != "TaxRate"
 }
 
-// invoiceCurrencyUnit 检查单一ISO币种度量，不猜测币种
+// invoiceCurrencyUnit 检查单一ISO币种度量
 // 入参: unit 展开的单位表示
 // 返回: 是否为三位大写币种度量
 func invoiceCurrencyUnit(unit string) bool {
@@ -1015,7 +1003,7 @@ func invoiceObjectReferences(root *invoiceXMLNode) bool {
 	count := 0
 	var walk func(*invoiceXMLNode) bool
 	walk = func(n *invoiceXMLNode) bool {
-		if n.name.Space == ofdNamespace2016 || n.name.Space == ofdNamespaceLegacy || n.name.Space == "ofd" || n.name.Space == invoiceEDRM {
+		if n.name.Space == ofdNamespace2016 || n.name.Space == ofdNamespaceLegacy || n.name.Space == "ofd" || n.name.Space == InvoiceStandardEDRM2019 {
 			if n.name.Local == "ObjectRef" {
 				count++
 				return len(n.children) == 0 && strings.TrimSpace(n.text.String()) != "" && invoiceXMLAttr(n, "", "PageRef") != ""
@@ -1052,12 +1040,12 @@ func invoicePlainXML(ctx context.Context, root *invoiceXMLNode, source InvoiceSo
 	inv := Invoice{Kind: "einv", Standard: InvoiceStandardEInvoice, Version: "0.3", Sources: []InvoiceSource{source}}
 	namespace, itemPath := "", "/EInvoice/EInvoiceData/IssuItemInformation"
 	if root.name.Local == "eInvoice" {
-		if invoiceXMLAttr(root, "", "Version") != "1.0" || len(invoiceChildren(root, invoiceEDRM, "InvoiceNo")) == 0 {
+		if invoiceXMLAttr(root, "", "Version") != "1.0" || len(invoiceChildren(root, InvoiceStandardEDRM2019, "InvoiceNo")) == 0 {
 			report.Issues = append(report.Issues, InvoiceIssue{Code: "unsupported", Message: "unsupported eInvoice namespace or version", Source: source})
 			return report, nil
 		}
-		inv.Kind, inv.Standard, inv.Version = "inv", invoiceEDRM, "1.0"
-		namespace, itemPath = invoiceEDRM, "/eInvoice/GoodsInfos/GoodsInfo"
+		inv.Kind, inv.Standard, inv.Version = "inv", InvoiceStandardEDRM2019, "1.0"
+		namespace, itemPath = InvoiceStandardEDRM2019, "/eInvoice/GoodsInfos/GoodsInfo"
 	} else {
 		headers := invoiceChildren(root, "", "Header")
 		if len(headers) != 1 {
@@ -1095,18 +1083,18 @@ func invoicePlainXML(ctx context.Context, root *invoiceXMLNode, source InvoiceSo
 		}
 		s := source
 		s.NodePath += n.path
-		f := InvoiceFact{Name: n.name.Local, Namespace: n.name.Space, Value: n.text.String(), Source: s, Nil: invoiceXMLAttr(n, invoiceXSI, "nil") == "true" || invoiceXMLAttr(n, invoiceXSI, "nil") == "1"}
+		f := InvoiceFact{Name: n.name.Local, Namespace: n.name.Space, Value: n.text.String(), Source: s, Nil: invoiceXMLAttr(n, XMLSchemaInstanceNamespace, "nil") == "true" || invoiceXMLAttr(n, XMLSchemaInstanceNamespace, "nil") == "1"}
 		inv.Facts = append(inv.Facts, f)
 		if item != nil {
 			item.Fields = append(item.Fields, f)
 		}
-		nilValue := invoiceXMLAttr(n, invoiceXSI, "nil")
-		if invoiceXMLHasAttr(n, invoiceXSI, "nil") && nilValue != "true" && nilValue != "false" && nilValue != "1" && nilValue != "0" {
+		nilValue := invoiceXMLAttr(n, XMLSchemaInstanceNamespace, "nil")
+		if invoiceXMLHasAttr(n, XMLSchemaInstanceNamespace, "nil") && nilValue != "true" && nilValue != "false" && nilValue != "1" && nilValue != "0" {
 			report.Issues = append(report.Issues, InvoiceIssue{Code: "invalid-value", Field: f.Name, Message: "invalid xsi:nil", Source: s})
 			return nil
 		}
 		dst, numeric := invoicePlainField(&inv, item, path)
-		if inv.Standard == invoiceEDRM {
+		if inv.Standard == InvoiceStandardEDRM2019 {
 			dst, numeric = invoiceEDRMField(&inv, item, path)
 		}
 		if dst == nil {
@@ -1116,7 +1104,7 @@ func invoicePlainXML(ctx context.Context, root *invoiceXMLNode, source InvoiceSo
 			report.Issues = append(report.Issues, InvoiceIssue{Code: "invalid-value", Field: f.Name, Message: "nil fact contains a value", Source: s})
 			return nil
 		}
-		if numeric && inv.Standard == invoiceEDRM && strings.TrimSpace(f.Value) == "" && !f.Nil {
+		if numeric && inv.Standard == InvoiceStandardEDRM2019 && strings.TrimSpace(f.Value) == "" && !f.Nil {
 			return nil
 		}
 		if numeric && !f.Nil && invoiceDecimal(f.Value) == nil {
@@ -1144,7 +1132,7 @@ func invoicePlainXML(ctx context.Context, root *invoiceXMLNode, source InvoiceSo
 	if err := walk(root, "", nil); err != nil {
 		return InvoiceReport{}, err
 	}
-	if inv.Standard == invoiceEDRM && inv.Date != "" {
+	if inv.Standard == InvoiceStandardEDRM2019 && inv.Date != "" {
 		if date, err := time.Parse("2006年01月02日", inv.Date); err == nil {
 			inv.Date = date.Format("2006-01-02")
 		}

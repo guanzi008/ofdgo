@@ -31,8 +31,11 @@ import (
 	"golang.org/x/image/draw"
 )
 
+// xmpNamespace 表示XMP元数据命名空间
+const xmpNamespace = "http://ns.adobe.com/xap/1.0/"
+
 // creatorXMP 记录独立导出文件的制作软件
-const creatorXMP = `<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/"><xmp:CreatorTool>` + ofdCreator + `</xmp:CreatorTool></rdf:Description></rdf:RDF>`
+const creatorXMP = `<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:xmp="` + xmpNamespace + `"><xmp:CreatorTool>` + ofdCreator + `</xmp:CreatorTool></rdf:Description></rdf:RDF>`
 
 // imageMetadataWriter 在图像固定头之后插入元数据，不缓存图像主体
 type imageMetadataWriter struct {
@@ -279,7 +282,7 @@ func (r *Renderer) RenderToJPEG(page *PageContent, writer io.Writer, options *jp
 	if err != nil {
 		return err
 	}
-	metadata := []byte("http://ns.adobe.com/xap/1.0/\x00" + creatorXMP)
+	metadata := []byte(xmpNamespace + "\x00" + creatorXMP)
 	segment := make([]byte, len(metadata)+4)
 	segment[0], segment[1] = 0xff, 0xe1
 	binary.BigEndian.PutUint16(segment[2:], uint16(len(metadata)+2))

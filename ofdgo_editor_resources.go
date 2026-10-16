@@ -427,7 +427,7 @@ func normalizeResourceReferences(references map[string]bool) {
 	}
 }
 
-// editorResourceNode 按资源标识查找标准资源节点，等价别名冲突时不猜测
+// editorResourceNode 按资源标识查找标准资源节点并检查别名冲突
 // 入参: root 资源文件根节点, group 资源集合名称, kind 资源类型, id 资源标识
 // 返回: *editorXML 资源节点，未找到时为nil
 func editorResourceNode(root *editorXML, group, kind, id string) *editorXML {

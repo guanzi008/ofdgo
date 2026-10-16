@@ -671,7 +671,7 @@ func (m *editorPageImport) outlines() ([]byte, error) {
 			if attr.Name.Space == "" || attr.Name.Space == "xmlns" {
 				continue
 			}
-			if attr.Name.Space == "http://www.w3.org/2001/XMLSchema-instance" && (attr.Name.Local == "schemaLocation" || attr.Name.Local == "noNamespaceSchemaLocation") {
+			if attr.Name.Space == XMLSchemaInstanceNamespace && (attr.Name.Local == "schemaLocation" || attr.Name.Local == "noNamespaceSchemaLocation") {
 				continue
 			}
 			return fmt.Errorf("cannot remap outline extension attribute %q", attr.Name.Local)

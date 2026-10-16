@@ -23,7 +23,7 @@ import (
 	"strings"
 )
 
-// 发票读取限额，不扫描未声明资源或嵌套附件包
+// 发票读取限额
 const (
 	invoiceXMLLimit    = 16 << 20
 	invoiceTotalLimit  = 64 << 20
@@ -63,7 +63,7 @@ type Invoice struct {
 	Facts       []InvoiceFact   `json:"facts,omitempty"`
 }
 
-// InvoiceParty 保存购销双方信息，不从名称或其他字段推测税号
+// InvoiceParty 保存购销双方信息
 type InvoiceParty struct {
 	Name    string `json:"name,omitempty"`
 	TaxID   string `json:"taxId,omitempty"`
@@ -94,7 +94,7 @@ type InvoiceSource struct {
 	NodePath string `json:"nodePath,omitempty"`
 }
 
-// InvoiceIssue 保存来源明确的解析诊断，Code为机器可读类别，不包含真伪判断
+// InvoiceIssue 保存来源明确的解析诊断，Code为机器可读类别
 type InvoiceIssue struct {
 	Code    string        `json:"code"`
 	Message string        `json:"message"`
@@ -103,7 +103,7 @@ type InvoiceIssue struct {
 }
 
 // InvoiceFact 保存命名空间限定的业务事实、原始数值及精度属性，Nil与空文本分别表达
-// References保留对象引用标引的原始页标识和有序图元标识，不推测明细归属
+// References保留对象引用标引的原始页标识和有序图元标识
 type InvoiceFact struct {
 	Name       string               `json:"name"`
 	Namespace  string               `json:"namespace,omitempty"`

@@ -283,7 +283,7 @@ func sameResourceID(first, second string) bool {
 	return id != "" && id == editorResourceID(second)
 }
 
-// resourceValue 优先查找原标识与标准十进制标识，回退别名有冲突时不猜测
+// resourceValue 优先查找原标识与标准十进制标识，回退时检查别名冲突
 // 入参: values 已加载资源, id 标识文本
 // 返回: T 资源值, bool 是否存在唯一结果
 func resourceValue[T comparable](values map[string]T, id string) (T, bool) {

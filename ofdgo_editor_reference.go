@@ -181,7 +181,7 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			}
 		}
 		for _, attr := range token.Attr {
-			if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" || attr.Name.Local == "xmlns:ofd" || attr.Name.Space == "http://www.w3.org/XML/1998/namespace" {
+			if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" || attr.Name.Local == "xmlns:ofd" || attr.Name.Space == XMLNamespace {
 				continue
 			}
 			if attr.Name.Space != "" {

@@ -70,7 +70,7 @@ func invoiceAppearanceMatches(text TextObject, value string) bool {
 	return actual == expected
 }
 
-// invoiceLayoutFields 按稳定顺序展开公共字段及明细，不推算缺失值
+// invoiceLayoutFields 按稳定顺序展开公共字段及明细
 // 入参: invoice 发票数据
 // 返回: []invoiceLayoutField 字段列表
 func invoiceLayoutFields(invoice Invoice) []invoiceLayoutField {
@@ -181,11 +181,11 @@ func invoiceLayoutFactVisible(invoice Invoice, fact InvoiceFact) bool {
 // 入参: value 发票，fact 原始字段
 // 返回: 公共字段关联及是否明确映射
 func invoiceEDRMFactBinding(value Invoice, fact InvoiceFact) (InvoiceBinding, bool) {
-	if value.Standard != invoiceEDRM && value.Standard != ofdNamespace2016 || fact.Namespace != value.Standard {
+	if value.Standard != InvoiceStandardEDRM2019 && value.Standard != ofdNamespace2016 || fact.Namespace != value.Standard {
 		return InvoiceBinding{}, false
 	}
 	var path strings.Builder
-	nodePath := strings.ReplaceAll(fact.Source.NodePath, "{"+invoiceEDRM+"}", "{}")
+	nodePath := strings.ReplaceAll(fact.Source.NodePath, "{"+InvoiceStandardEDRM2019+"}", "{}")
 	if value.Standard == ofdNamespace2016 {
 		nodePath = strings.Replace(nodePath, "/root[1]", "/eInvoice[1]", 1)
 		nodePath = strings.ReplaceAll(nodePath, "/", "/{}")
