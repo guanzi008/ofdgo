@@ -1536,7 +1536,7 @@ export class CanvasEditor {
 		const editing = this.input;
 		if (rich) editing.rich = new RichTextSession(this, rich.model, rich.faces, rich.fonts);
 		if (rich && !rich.model.layout.lineHeight) input.style.lineHeight = "normal";
-		if (source) editing.history = { entries: [{ value: item.text }], index: 0 };
+		if (source) editing.history = { entries: [{ value: item.text, face, fontChoice: item.fontChoice }], index: 0 };
 		item.artwork?.classList.add("edit-text-source");
 		item.node.classList.add("edit-text-source");
 		item.surface.append(input);
@@ -1631,7 +1631,8 @@ export class CanvasEditor {
 		if (editing.rich) editing.rich.render();
 		input.focus({ preventScroll: true });
 		if (!item.draft) document.getSelection().selectAllChildren(input);
-		if (editing.rich) { editing.rich.selection(); this.options.onTextChange(); }
+		if (editing.rich) editing.rich.selection();
+		this.options.onTextChange();
 	}
 
 	textUndo(direction) {
@@ -1715,8 +1716,10 @@ export class CanvasEditor {
 		const editing = this.input;
 		if (!editing?.history || editing.composing) return;
 		const { history, input } = editing, value = editTextValue(input);
-		if (history.entries[history.index].value === value) return;
-		history.entries.splice(++history.index, Infinity, { value, caret: editTextSelection(input) });
+		const previous = history.entries[history.index];
+		if (previous.value === value && previous.fontData === editing.fontData && previous.style === editing.style && !!previous.reflow === !!editing.reflow) return;
+		history.entries.splice(++history.index, Infinity, { value, caret: editTextSelection(input), face: editing.face,
+			fontData: editing.fontData, fontChoice: editing.fontChoice, style: editing.style, reflow: editing.reflow });
 	}
 
 	restoreSourceText(direction) {
@@ -1726,6 +1729,14 @@ export class CanvasEditor {
 		if (index < 0 || index >= history.entries.length) return;
 		history.index = index;
 		const entry = history.entries[index], fragment = document.createDocumentFragment(), positions = [];
+		if (entry.face) {
+			document.fonts.delete(editing.face);
+			document.fonts.add(entry.face);
+			Object.assign(editing, { face: entry.face, fontData: entry.fontData, fontChoice: entry.fontChoice, style: entry.style, reflow: entry.reflow });
+			editing.input.style.fontFamily = `"${entry.face.family}"`;
+			editing.input.style.fontSize = `${(entry.style?.size || editing.item.size) * PX_PER_MM}px`;
+			editing.input.style.color = entry.style?.color || editing.item.color;
+		}
 		let position = 0;
 		for (const text of entry.value.split("\n")) {
 			const paragraph = document.createElement("div");
@@ -1745,11 +1756,11 @@ export class CanvasEditor {
 	async previewSourceText() {
 		const editing = this.input;
 		if (!editing?.source || editing.composing || editing.saving) return;
-		const value = editTextValue(editing.input), font = editing.fontData, size = editing.style?.size || editing.item.size;
+		const value = editTextValue(editing.input), font = editing.fontData, size = editing.style?.size || editing.item.size, reflow = !!editing.reflow;
 		const current = () => this.input === editing && !editing.rich && !editing.composing && !editing.saving && editing.fontData === font
-			&& (editing.style?.size || editing.item.size) === size && editTextValue(editing.input) === value;
+			&& (editing.style?.size || editing.item.size) === size && !!editing.reflow === reflow && editTextValue(editing.input) === value;
 		try {
-			const source = await this.options.onPreviewText(editing.item, value, font, size);
+			const source = await this.options.onPreviewText(editing.item, value, font, size, reflow);
 			if (!current()) return;
 			this.setTextError(null);
 			this.paintSourceText(source);
@@ -1768,7 +1779,8 @@ export class CanvasEditor {
 		const metrics = context.measureText("Mg"), baseline = (size + metrics.fontBoundingBoxAscent - metrics.fontBoundingBoxDescent) / 2;
 		Object.assign(input.style, { lineHeight: `${size}px`, fontWeight: String(source.weight || 400), fontStyle: source.italic ? "italic" : "normal" });
 		const fragment = document.createDocumentFragment(), positions = [];
-		let line, lineIndex = -1, naturalX = 0, position = 0;
+		let line, lineIndex = -1, naturalX = 0, position = 0, glyphIndex = 0;
+		const angle = (source.rotation || 0) * Math.PI / 180, cos = Math.cos(angle), sin = Math.sin(angle);
 		let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
 		for (const run of source.runs) {
 			if (!line || run.line) {
@@ -1790,15 +1802,23 @@ export class CanvasEditor {
 				y = run.positions[index][1] * PX_PER_MM;
 				const span = document.createElement("span"), node = document.createTextNode(char);
 				span.append(node);
-				Object.assign(span.style, { display: "inline-block", opacity: String((item.alpha ?? 255) / 255), transformOrigin: "left top", transform: `translate(${x - naturalX}px,${y - baseline - lineIndex * size}px) scaleX(${source.scale})` });
+				const glyph = source.glyphs?.[glyphIndex++];
+				if (glyph) span.dataset.glyph = glyph;
+				Object.assign(span.style, { display: "inline-block", opacity: String((item.alpha ?? 255) / 255), transformOrigin: `left ${baseline}px`, transform: `translate(${x - naturalX}px,${y - baseline - lineIndex * size}px) rotate(${source.rotation || 0}deg) scale(${source.scale},${source.vscale || 1})` });
 				line.append(span);
 				positions.push({ node, start: position, end: position + char.length });
 				position += char.length;
-				const advance = context.measureText(char).width;
-				left = Math.min(left, x);
-				top = Math.min(top, y - baseline);
-				right = Math.max(right, x + advance * source.scale);
-				bottom = Math.max(bottom, y + size - baseline);
+				const advance = context.measureText(glyph || char).width;
+				if (glyph) span.style.width = `${advance}px`;
+				for (const dx of [0, advance * source.scale]) {
+					for (const dy of [-baseline * (source.vscale || 1), (size - baseline) * (source.vscale || 1)]) {
+						const px = x + dx * cos - dy * sin, py = y + dx * sin + dy * cos;
+						left = Math.min(left, px);
+						top = Math.min(top, py);
+						right = Math.max(right, px);
+						bottom = Math.max(bottom, py);
+					}
+				}
 				naturalX += advance;
 				index++;
 			}
@@ -1827,6 +1847,7 @@ export class CanvasEditor {
 		editing.face = face;
 		editing.fontData = data;
 		editing.input.style.fontFamily = `"${face.family}"`;
+		this.recordSourceText();
 		this.options.onTextChange();
 		editing.input.focus({ preventScroll: true });
 		this.previewSourceText();
@@ -1841,6 +1862,7 @@ export class CanvasEditor {
 		const item = { ...editing.item, ...editing.style };
 		editing.input.style.fontSize = `${item.size * PX_PER_MM}px`;
 		editing.input.style.color = item.color;
+		this.recordSourceText();
 		this.fitTextInput();
 		this.options.onTextChange();
 		if ("size" in values) this.previewSourceText();
@@ -1852,7 +1874,7 @@ export class CanvasEditor {
 		if (editing.rich) return Boolean(editing.refreshPending) || (!editing.item.draft || Boolean(editing.rich.text.trim())) && editing.rich.changed;
 		const value = editTextValue(editing.input);
 		return (!editing.item.draft || Boolean(value.trim()))
-			&& (value !== editing.item.text || Boolean(editing.fontData || editing.style));
+			&& (value !== editing.item.text || Boolean(editing.fontData || editing.style || editing.reflow));
 	}
 
 	async commitText() {
@@ -1874,7 +1896,7 @@ export class CanvasEditor {
 		let saved = false;
 		try {
 			saved = editing.rich ? await this.options.onCommitRichText(editing.item, editing.rich.model, editing.rich.fonts)
-				: await this.options.onCommitText(editing.style ? { ...editing.item, ...editing.style } : editing.item, value, editing.fontData, editing.style?.color ?? null);
+				: await this.options.onCommitText(editing.style ? { ...editing.item, ...editing.style } : editing.item, value, editing.fontData, editing.style?.color ?? null, !!editing.reflow);
 		} catch (error) {
 			if (this.input === editing) this.setTextError(error);
 		}

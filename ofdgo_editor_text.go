@@ -55,10 +55,12 @@ type TextLayout struct {
 // TextStyle 文字样式增量
 // Font为空时保留原字体，Size单位为毫米且为0时保留原字号
 // Color为OFD的RGB分量字符串，空值保留原颜色，修改时保留原透明度
+// Reflow显式重新排版，默认保留原文定位
 type TextStyle struct {
-	Font  string
-	Size  float64
-	Color string
+	Font   string
+	Size   float64
+	Color  string
+	Reflow bool
 }
 
 // textLayout 保存编辑中的原文与选项，不写入OFD，也不参与渲染
@@ -140,11 +142,37 @@ func (e *Editor) UpdateTextContent(page int, id, value string, style TextStyle) 
 			}
 		}
 	}()
+	reflow := style.Reflow
+	if reflow {
+		if object.TextObject.ReadDirection != 0 || object.TextObject.CharDirection != 0 {
+			return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("paragraph layout requires horizontal text")}
+		}
+		if style.Font != "" {
+			object.TextObject.Font = style.Font
+		}
+		if style.Size != 0 {
+			object.TextObject.Size = style.Size
+		}
+		if err := e.LayoutText(&object.TextObject, value, TextLayout{AutoBidi: true}); err != nil {
+			return err
+		}
+		style.Font, style.Size = "", 0
+		style.Reflow = false
+	}
+	if !capability.LayoutKnown && !reflow && style.Font != "" {
+		if err := e.RewriteTextWithFont(&object.TextObject, value, style.Font); err != nil {
+			return err
+		}
+		style.Font = ""
+	}
 	updates, err := e.styleTextObjects([]GraphicObject{object}, style)
 	if err != nil {
 		return err
 	}
 	text := &updates[0].TextObject
+	if reflow {
+		return e.updateObjects(page, updates, true)
+	}
 	if capability.LayoutKnown {
 		_, layout := text.TextLayout()
 		err = e.LayoutText(text, value, layout)
@@ -283,10 +311,12 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 				}
 				if mapping < len(transforms) && position+j >= transforms[mapping].CodePosition {
 					transform := &transforms[mapping]
-					if transform.CodeCount != 1 || transform.GlyphCount != 1 {
+					if transform.CodeCount != transform.GlyphCount {
 						return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("changing a combined glyph requires explicit layout")}
 					}
-					transform.Glyphs = strconv.Itoa(int(sfnt.GlyphIndex(char)))
+					glyphs := strings.Fields(transform.Glyphs)
+					glyphs[position+j-transform.CodePosition] = strconv.Itoa(int(sfnt.GlyphIndex(char)))
+					transform.Glyphs = strings.Join(glyphs, " ")
 				}
 			}
 		}
@@ -297,6 +327,52 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 		return err
 	}
 	obj.TextCode, obj.CGTransform, obj.layout = codes, transforms, nil
+	return nil
+}
+
+// RewriteTextWithFont 更换字体并修改定位文字，保留原始坐标及逐字映射，失败时不改变对象
+// 入参: obj 文字对象, value 新内容, fontID 目标字体，空值沿用原字体
+// 返回: error 字体、定位或字形错误
+func (e *Editor) RewriteTextWithFont(obj *TextObject, value, fontID string) error {
+	value = strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n")
+	if fontID == "" || fontID == obj.Font {
+		return e.RewriteText(obj, value)
+	}
+	text := cloneEditorData(*obj)
+	if err := validateTextGlyphs(text, 1<<16); err != nil {
+		return err
+	}
+	for _, transform := range text.CGTransform {
+		if transform.CodeCount != transform.GlyphCount {
+			return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("changing the font of combined glyphs requires explicit layout")}
+		}
+	}
+	if len(text.CGTransform) != 0 && len([]rune(text.Text())) != len([]rune(value)) {
+		return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("changing positioned text length requires explicit layout")}
+	}
+	transforms := text.CGTransform
+	text.Font, text.CGTransform = fontID, nil
+	if err := e.RewriteText(&text, value); err != nil {
+		return err
+	}
+	font, err := e.editorFont(fontID)
+	if err != nil {
+		return err
+	}
+	var missing []rune
+	for _, char := range text.Text() {
+		if char != '\n' && font.GlyphIndex(char) == 0 {
+			missing = append(missing, char)
+		}
+	}
+	if err := missingGlyphError(fontID, missing); err != nil {
+		return err
+	}
+	text.Font, text.CGTransform = obj.Font, transforms
+	if err := e.replaceTextFont(&text, fontID); err != nil {
+		return err
+	}
+	*obj = text
 	return nil
 }
 
@@ -393,6 +469,13 @@ func (e *Editor) styleTextObjects(objects []GraphicObject, style TextStyle) ([]G
 		text := &updates[i].TextObject
 		value, layout := text.TextLayout()
 		known := e.objectOrigin(id) == nil || text.layout != nil
+		if style.Reflow {
+			if text.ReadDirection != 0 || text.CharDirection != 0 {
+				return nil, &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("paragraph layout requires horizontal text")}
+			}
+			known = true
+			layout.AutoBidi = true
+		}
 		fontChanged := style.Font != "" && style.Font != text.Font
 		sizeChanged := style.Size != 0 && style.Size != text.Size
 		if sizeChanged && !known {
@@ -408,7 +491,7 @@ func (e *Editor) styleTextObjects(objects []GraphicObject, style TextStyle) ([]G
 		if sizeChanged {
 			text.Size = style.Size
 		}
-		if known && (fontChanged || sizeChanged) {
+		if known && (fontChanged || sizeChanged || style.Reflow) {
 			if err := e.LayoutText(text, value, layout); err != nil {
 				return nil, err
 			}
@@ -458,15 +541,19 @@ func (e *Editor) replaceTextFont(text *TextObject, id string) error {
 	var missing []rune
 	for i := range transforms {
 		transform := &transforms[i]
-		if transform.CodeCount != 1 || transform.GlyphCount != 1 {
+		if transform.CodeCount != transform.GlyphCount {
 			return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("changing the font of combined glyphs requires explicit layout")}
 		}
-		char := chars[transform.CodePosition]
-		glyph := font.GlyphIndex(char)
-		if glyph == 0 {
-			missing = append(missing, char)
+		glyphs := make([]string, transform.CodeCount)
+		for j := range glyphs {
+			char := chars[transform.CodePosition+j]
+			glyph := font.GlyphIndex(char)
+			if glyph == 0 {
+				missing = append(missing, char)
+			}
+			glyphs[j] = strconv.Itoa(int(glyph))
 		}
-		transform.Glyphs = strconv.Itoa(int(glyph))
+		transform.Glyphs = strings.Join(glyphs, " ")
 	}
 	if err := missingGlyphError(id, missing); err != nil {
 		return err

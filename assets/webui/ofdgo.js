@@ -356,12 +356,6 @@ const el = {
 	objectHeight: document.querySelector("#objectHeight"),
 	objectAspect: document.querySelector("#objectAspect"),
 	objectStylePanel: document.querySelector("#objectStylePanel"),
-	sourceTextPanel: document.querySelector("#sourceTextPanel"),
-	sourceTextForm: document.querySelector("#sourceTextForm"),
-	sourceTextValue: document.querySelector("#sourceTextValue"),
-	sourceTextPreview: document.querySelector("#sourceTextPreview"),
-	sourceTextStatus: document.querySelector("#sourceTextStatus"),
-	sourceTextCancel: document.querySelector("#sourceTextCancel"),
 	objectStyleForm: document.querySelector("#objectStyleForm"),
 	groupObjectsButton: document.querySelector("#groupObjectsButton"),
 	ungroupObjectButton: document.querySelector("#ungroupObjectButton"),
@@ -603,7 +597,7 @@ const annotationFields = Object.fromEntries(["CreateForm", "CreateCancel", "Cont
 el.editorTools.addEventListener("scroll", () => fontPicker.position());
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
-	textControls: [el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.fontInput],
+	textControls: [el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.fontInput, document.querySelector("#textReflow")],
 	keepTextFocus: () => fontPicker.open || canvasEditor.input?.fontDialog,
 	textClipboardScope: () => `${state.wasmSeq}:${state.fileName}:${state.doc?.documents?.[state.doc.documentIndex || 0]?.root}:${state.doc?.documentIndex || 0}:${state.doc?.documentVersion || ""}`,
 	busy: () => document.body.hasAttribute("aria-busy"),
@@ -673,20 +667,21 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onDrawText: beginCanvasText,
 	onDrawAnnotation: placeAnnotation,
 	onDrawInk: (index, points, style, pressure) => changeDocument("ofdgoInsertInk", null, index, JSON.stringify(points), style.lineWidth, pressure, style.strokeColor),
-	onPreviewText: (item, value, font, size) => callWASM("ofdgoPreviewText", item.index, item.id, value, font || null, size),
+	onPreviewText: (item, value, font, size, reflow) => callWASM("ofdgoPreviewText", item.index, item.id, value, font || null, size, !!reflow),
 	onCommitRichText: saveRichText,
 	onPreviewRichText: validateRichText,
 	onTextError: (message, previous) => {
 		if (message) setStatus(message);
 		else if (el.statusText.textContent === previous) setStatus(state.doc ? pageStatus(state.pageIndex, state.doc.pageCount) : STATUS.ready);
 	},
-	onCommitText: (item, value, fontData, color = null) => item.draft
+	onCommitText: (item, value, fontData, color = null, reflow = false) => item.draft
 		? changeDocument("ofdgoInsertText", null, item.index, value, fontData || item.fontData, item.x, item.y, item.size, item.color, item.width, item.wrap, item.align, item.paragraphHeight, item.letterSpacing, ...textIndents(item))
-		: changeDocument("ofdgoUpdateText", item, value, fontData || null, item.size, color),
+		: changeDocument("ofdgoUpdateText", item, value, fontData || null, item.size, color, reflow),
 	onTextChange: () => {
 		const editing = canvasEditor.input;
 		updatePendingChanges();
-		if (editing?.rich) updateObjectControls(canvasEditor.selected);
+		if (editing?.rich || editing?.source) updateObjectControls(canvasEditor.selected);
+		if (editing?.source) updateTextFonts(canvasEditor.selected, true);
 		if (!editing) {
 			updateObjectControls(canvasEditor.selected);
 			updateTextFonts(canvasEditor.selected, true);
@@ -1120,7 +1115,7 @@ el.resetCropButton.addEventListener("click", () => {
 });
 for (const [button, direction, command] of [[el.undoButton, -1, "ofdgoUndo"], [el.redoButton, 1, "ofdgoRedo"]]) {
 	button.addEventListener("click", async () => {
-		if (canvasEditor.input?.rich) { canvasEditor.textUndo(direction); return; }
+		if (canvasEditor.input?.rich || canvasEditor.input?.source) { canvasEditor.textUndo(direction); return; }
 		if (!await canvasEditor.commitNudge() || !await canvasEditor.commitText() || !await canvasEditor.commitCrop()) return;
 		await changeDocument(command);
 	});
@@ -1279,22 +1274,7 @@ el.objectBoundsForm.addEventListener("submit", async event => {
 	if (saved) el.objectBoundsPanel.close();
 });
 el.objectStyleCancel.addEventListener("click", () => el.objectStylePanel.close());
-el.sourceTextCancel.addEventListener("click", () => el.sourceTextPanel.close());
-el.sourceTextValue.addEventListener("input", () => {
-	clearTimeout(state.sourceTextTimer);
-	state.sourceTextTimer = setTimeout(previewPositionedText, 150);
-});
-el.sourceTextPanel.addEventListener("close", () => {
-	clearTimeout(state.sourceTextTimer);
-	state.sourceText = null;
-	el.sourceTextPreview.replaceChildren();
-});
-el.sourceTextForm.addEventListener("submit", async event => {
-	event.preventDefault();
-	const item = state.sourceText?.item;
-	if (!item) return;
-	if (await changeDocument("ofdgoUpdateText", item, el.sourceTextValue.value, null, item.size, null)) el.sourceTextPanel.close();
-});
+document.querySelector("#textReflow").addEventListener("click", reflowCanvasText);
 el.objectLinkKind.addEventListener("change", updateObjectLinkFields);
 el.gradientKind.addEventListener("change", () => {
 	el.gradientControls.hidden = el.gradientKind.value === "keep";
@@ -1831,7 +1811,7 @@ function handleKeyDown(event) {
 
 function formDialogOpen() {
 	return Boolean(sealPreview || resourceManager.pick) || settingsElements.Panel.open || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
-		|| resourceElements.Panel.open || el.structureDialog.open || el.versionPanel.open || el.batchPagesPanel.open || el.objectStylePanel.open || el.sourceTextPanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
+		|| resourceElements.Panel.open || el.structureDialog.open || el.versionPanel.open || el.batchPagesPanel.open || el.objectStylePanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
 
 function setObjectDimension(input, value) {
@@ -2908,18 +2888,7 @@ async function editCanvasObject(item) {
 		return;
 	}
 	if (item.type === "TextObject") {
-		if (!canEditObject(item, "textContent")) {
-			if (canEditObject(item, "rewriteText")) {
-				state.sourceText = { item, openSeq: state.openSeq };
-				el.sourceTextValue.value = item.text;
-				el.sourceTextStatus.textContent = "";
-				el.sourceTextPreview.replaceChildren();
-				el.sourceTextPanel.showModal();
-				el.sourceTextValue.focus();
-				await previewPositionedText();
-			}
-			return;
-		}
+		if (!canEditObject(item, "textContent") && !canEditObject(item, "rewriteText")) return;
 	} else if (!canEditObject(item, item.type === "ImageObject" ? "replaceImage" : "update")) return;
 	if (item.type === "PathObject") {
 		el.shapeWidth.focus();
@@ -2931,7 +2900,7 @@ async function editCanvasObject(item) {
 	const openSeq = state.openSeq;
 	setBusy(true);
 	try {
-		const data = await callWASM("ofdgoEditorFont", item.font);
+		const data = await callWASM("ofdgoEditorFont", item.font, !canEditObject(item, "layoutKnown"));
 		const face = new FontFace(`ofdgo-edit-${item.font}`, data.bytes, fontFaceStyle(data.bytes));
 		await face.load();
 		let rich = null;
@@ -2950,22 +2919,6 @@ async function editCanvasObject(item) {
 	} finally {
 		if (openSeq === state.openSeq) {
 			setBusy(false);
-		}
-	}
-}
-
-async function previewPositionedText() {
-	const request = state.sourceText, value = el.sourceTextValue.value;
-	if (!request || !el.sourceTextPanel.open) return;
-	try {
-		const svg = await callWASM("ofdgoPreviewPositionedText", request.item.index, request.item.id, value);
-		if (state.sourceText !== request || request.openSeq !== state.openSeq || el.sourceTextValue.value !== value) return;
-		el.sourceTextPreview.replaceChildren(parseSVG(svg));
-		el.sourceTextStatus.textContent = "";
-	} catch (error) {
-		if (state.sourceText === request && request.openSeq === state.openSeq && el.sourceTextValue.value === value) {
-			el.sourceTextPreview.replaceChildren();
-			el.sourceTextStatus.textContent = error.message;
 		}
 	}
 }
@@ -3106,6 +3059,16 @@ async function ensureRichInput() {
 	const rich = await loadRichText(editing.item, editing.face);
 	if (canvasEditor.input !== editing) return false;
 	return canvasEditor.promoteText(rich);
+}
+
+async function reflowCanvasText() {
+	const editing = canvasEditor.input;
+	if (document.body.hasAttribute("aria-busy") || !editing?.source || editing.composing || editing.saving || !canEditObject(editing.item, "reflow")) return;
+	if (!window.confirm("将重新排版原文，是否继续？")) return;
+	editing.reflow = true;
+	canvasEditor.recordSourceText();
+	await canvasEditor.previewSourceText();
+	updateObjectControls(canvasEditor.selected, true);
 }
 
 async function changeRangeFormat(key, value) {
@@ -3480,6 +3443,7 @@ async function changeTextStyle(color) {
 		try { if (!await ensureRichInput()) return; } catch (error) { showError(error, false); return; }
 	}
 	if (canvasEditor.input) {
+		if (!color && canvasEditor.input.source && !canvasEditor.input.reflow && size !== item.size && !confirmTextReflow(item)) return;
 		canvasEditor.setTextStyle(color ? { color: selectedColor } : { size });
 		updateObjectControls(canvasEditor.selected, true);
 		return;
@@ -3782,8 +3746,6 @@ async function changeDocument(name, item, ...args) {
 				el.batchPagesStatus.textContent = err.message;
 			} else if (el.objectStylePanel.open) {
 				el.objectStyleStatus.textContent = err.message;
-			} else if (el.sourceTextPanel.open) {
-				el.sourceTextStatus.textContent = err.message;
 			} else if (el.objectBoundsPanel.open) {
 				el.objectBoundsStatus.textContent = err.message;
 			} else if (el.outlinePanel.open) {
@@ -4583,7 +4545,6 @@ async function openOFD(file, remote = null) {
 		el.importPanel.close();
 		el.batchPagesPanel.close();
 		el.objectStylePanel.close();
-		el.sourceTextPanel.close();
 		el.objectBoundsPanel.close();
 		el.outlinePanel.close();
 		el.structureDialog.close();
@@ -11799,12 +11760,16 @@ function updateObjectControls(item, reset = false) {
 	textBackground.classList.toggle("mixed-color", Boolean((canvasEditor.input?.rich || item?.richText) && text.background === undefined));
 	if (text.background) textBackground.value = text.background;
 	document.querySelector("#textHighlight").style.setProperty("--highlight-color", textBackground.value);
-	const richHistory = canvasEditor.input?.rich;
+	const richHistory = canvasEditor.input?.rich || canvasEditor.input?.history;
 	if (richHistory) {
 		el.undoButton.disabled = textDisabled || richHistory.index === 0;
 		el.redoButton.disabled = textDisabled || richHistory.index === richHistory.entries.length - 1;
 	}
 	el.textAlign.disabled = el.textWrap.disabled = el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled || Boolean(item?.items || item?.draft) || Boolean(canvasEditor.input);
+	const reflow = document.querySelector("#textReflow"), positioned = canvasEditor.input?.source && !canEditObject(item, "layoutKnown");
+	reflow.hidden = !positioned;
+	el.textWrap.hidden = !!positioned;
+	reflow.disabled = textDisabled || !canEditObject(item, "reflow") || !!canvasEditor.input?.reflow;
 	el.paragraphButton.disabled = el.textAlign.disabled;
 	const layoutKnown = text === state.textDefaults || Boolean(item?.draft) || canEditObject(item, "layoutKnown");
 	el.textAlign.value = layoutKnown ? text.align || "left" : "";

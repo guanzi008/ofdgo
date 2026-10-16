@@ -1428,7 +1428,7 @@ func resourceLocations(args []js.Value) (any, error) {
 }
 
 // fontPreview 使用当前文档和版本的字形轮廓生成独立预览
-// 入参: args 字体资源标识
+// 入参: args 字体资源标识及可选字形映射标记
 // 返回: any SVG数据, error 字体或绘制错误
 func fontPreview(args []js.Value) (any, error) {
 	if currentSession == nil || len(args) != 1 {
@@ -3009,6 +3009,9 @@ func changeCompositeText(page int, path ofdgo.ObjectPath, indexes []int, operati
 		args = args[1:]
 	}
 	style := ofdgo.TextStyle{Size: args[1].Float()}
+	if len(args) > 3 {
+		style.Reflow = args[3].Bool()
+	}
 	if !args[0].IsNull() {
 		data, err := bytesFromJS(args[0])
 		if err != nil {
@@ -3061,6 +3064,12 @@ func editorFont(args []js.Value) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(args) > 1 && args[1].Bool() {
+		_, data, _, _, err = ofdgo.FixFontDataAggressive(data, true, false)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return successResult(map[string]any{"bytes": bytesToJS(data)}), nil
 }
 
@@ -3090,7 +3099,7 @@ func editorObjectAt(page int, key string) (ofdgo.GraphicObject, error) {
 }
 
 // previewText 生成保留原定位的输入预览，不修改文档或历史
-// 入参: args 页码、对象路径、新文字、可选字体数据和字号
+// 入参: args 页码、对象路径、新文字、可选字体数据、字号及重排标记
 // 返回: any 定位段及字体样式, error 错误信息
 func previewText(args []js.Value) (any, error) {
 	key := args[1].String()
@@ -3103,18 +3112,23 @@ func previewText(args []js.Value) (any, error) {
 		return nil, fmt.Errorf("object is not text")
 	}
 	editor := currentEditor
+	fontID := ""
 	if len(args) > 3 && !args[3].IsNull() {
 		data, err := bytesFromJS(args[3])
 		if err != nil {
 			return nil, err
 		}
 		editor = ofdgo.NewEditor()
-		text.Font, err = editor.AddFont(FontFile{Data: data}, 0)
+		fontID, err = editor.AddFont(FontFile{Data: data}, 0)
 		if err != nil {
 			return nil, err
 		}
+		text.Font = ""
 	}
-	if len(args) > 4 && args[4].Float() != text.Size {
+	if len(args) > 4 && args[4].Float() != text.Size || len(args) > 5 && args[5].Bool() {
+		if fontID != "" {
+			text.Font = fontID
+		}
 		var x, y float64
 		if strings.Contains(key, "/") {
 			x, _ = strconv.ParseFloat(text.TextCode[0].X, 64)
@@ -3134,7 +3148,7 @@ func previewText(args []js.Value) (any, error) {
 				code.X, code.Y = fmt.Sprint(cx+x), fmt.Sprint(cy+y-baseline)
 			}
 		}
-	} else if err := editor.RewriteText(&text, args[2].String()); err != nil {
+	} else if err := editor.RewriteTextWithFont(&text, args[2].String(), fontID); err != nil {
 		return nil, err
 	}
 	var runs []any
@@ -3166,7 +3180,22 @@ func previewText(args []js.Value) (any, error) {
 	if scale == 0 {
 		scale = 1
 	}
-	return map[string]any{"runs": runs, "scale": scale, "weight": text.Weight, "italic": text.Italic}, nil
+	glyphs := make(map[int]string)
+	if fontID == "" {
+		for _, transform := range text.CGTransform {
+			if transform.CodeCount != transform.GlyphCount {
+				continue
+			}
+			for i, value := range strings.Fields(transform.Glyphs) {
+				glyph, err := strconv.ParseUint(value, 10, 16)
+				if err != nil {
+					return nil, err
+				}
+				glyphs[transform.CodePosition+i] = string(rune(0xF0000 + glyph))
+			}
+		}
+	}
+	return map[string]any{"runs": runs, "glyphs": glyphs, "scale": scale, "vscale": text.VScale, "rotation": text.CharDirection, "weight": text.Weight, "italic": text.Italic}, nil
 }
 
 // previewPositionedText 预览保留定位的文字替换，不修改编辑器或撤销记录
@@ -3204,78 +3233,71 @@ func previewPositionedText(args []js.Value) (any, error) {
 }
 
 // updateText 修改文字，null内容保留定位且允许替换字体，null字体数据和颜色沿用对象属性
-// 入参: args 页码、对象标识、内容、字体数据、字号和颜色
+// 入参: args 页码、对象标识、内容、字体数据、字号、颜色及可选重排标记
 // 返回: any 文档信息, error 错误信息
 func updateText(args []js.Value) (any, error) {
-	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being edited")
-	}
+	return changeObjects(func() error { return applyTextUpdate(args) })
+}
+
+// applyTextUpdate 在当前事务中修改文字及字体，不刷新会话
+// 入参: args 页码、对象标识、内容、字体数据、字号、颜色及可选重排标记
+// 返回: error 字体、排版或提交错误
+func applyTextUpdate(args []js.Value) error {
 	page, id := args[0].Int(), args[1].String()
 	object, err := currentEditor.Object(page, id)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if object.Type != "TextObject" {
-		return nil, fmt.Errorf("object %q is not text", id)
+		return fmt.Errorf("object %q is not text", id)
 	}
 	if !args[3].IsNull() {
 		data, err := bytesFromJS(args[3])
 		if err != nil {
-			return nil, err
+			return err
 		}
 		value := object.TextObject.Text()
 		if !args[2].IsNull() {
 			value = args[2].String()
 		}
 		if err := checkFontGlyphs(data, value); err != nil {
-			return nil, err
+			return err
 		}
 		object.TextObject.Font, err = currentEditor.AddFont(FontFile{Data: data}, 0)
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if !args[2].IsNull() {
-		if args[4].Float() == object.TextObject.Size {
-			var style ofdgo.TextStyle
+		if args[4].Float() == object.TextObject.Size || len(args) > 6 && args[6].Bool() {
+			style := ofdgo.TextStyle{Reflow: len(args) > 6 && args[6].Bool()}
+			if style.Reflow {
+				style.Size = args[4].Float()
+			}
 			if !args[3].IsNull() {
 				style.Font = object.TextObject.Font
 			}
 			if !args[5].IsNull() {
 				var fill ofdgo.FillColor
 				if err := setEditorColor(&fill, args[5].String()); err != nil {
-					return nil, err
+					return err
 				}
 				style.Color = fill.Value
 			}
-			revision := currentEditor.Revision()
-			if err := currentEditor.UpdateTextContent(page, id, args[2].String(), style); err != nil {
-				return nil, err
-			}
-			if currentEditor.Revision() == revision {
-				return editorSummary(), nil
-			}
-			return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+			return currentEditor.UpdateTextContent(page, id, args[2].String(), style)
 		}
 		object.TextObject.Size = args[4].Float()
 		_, layout := object.TextObject.TextLayout()
 		if err := currentEditor.LayoutText(&object.TextObject, args[2].String(), layout); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if !args[5].IsNull() {
 		if err := setTextColor(&object.TextObject, args[5].String()); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	revision := currentEditor.Revision()
-	if err := currentEditor.UpdateObject(page, id, object); err != nil {
-		return nil, err
-	}
-	if currentEditor.Revision() == revision {
-		return editorSummary(), nil
-	}
-	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+	return currentEditor.UpdateObject(page, id, object)
 }
 
 // checkFontGlyphs 只检查候选字体，不注册资源或改变文档

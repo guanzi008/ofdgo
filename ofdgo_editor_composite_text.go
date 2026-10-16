@@ -70,6 +70,9 @@ func (e *Editor) changeCompositeText(page int, path ObjectPath, indexes []int, v
 // 入参: node 原文节点, member 有效快照, value 新内容, style 样式增量, options 段落选项, frame 文字框调整
 // 返回: error 错误信息
 func (e *Editor) updateCompositeText(node *editorCompositeNode, member CompositeMember, value *string, style TextStyle, options *TextLayout, frame *Box) error {
+	if style.Reflow {
+		options = &TextLayout{AutoBidi: true}
+	}
 	rewriteOnly := value != nil && options == nil && frame == nil && style.Color == "" && (style.Font == "" || style.Font == member.Object.TextObject.Font) && (style.Size == 0 || style.Size == member.Object.TextObject.Size)
 	if node.object.Type != "TextObject" || !member.Capabilities.ReplaceFont && !(rewriteOnly && member.Capabilities.RewriteText) {
 		return fmt.Errorf("composite text style is not supported")
@@ -81,7 +84,11 @@ func (e *Editor) updateCompositeText(node *editorCompositeNode, member Composite
 	original := content
 	if style.Font != "" {
 		if state.layout == nil && options == nil && (style.Size == 0 || style.Size == text.Size) {
-			if err := e.replaceTextFont(&text, style.Font); err != nil {
+			replacement := content
+			if value != nil {
+				replacement = *value
+			}
+			if err := e.RewriteTextWithFont(&text, replacement, style.Font); err != nil {
 				return err
 			}
 		} else {

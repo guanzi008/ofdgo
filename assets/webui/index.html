@@ -132,6 +132,7 @@
 				</select>
 				<label class="editor-field"><span>行距</span><span class="editor-number"><input id="textLineHeight" type="number" min="0" step="any" placeholder="自动" aria-label="行距" title="行距，0为自动" disabled><span>pt</span></span></label>
 				<button id="textWrap" class="button" type="button" aria-label="自动折行" aria-pressed="false" disabled>折行</button>
+				<button id="textReflow" class="button" type="button" title="重新排版" hidden>重排</button>
 				<label class="editor-field"><span>字距</span><span class="editor-number"><input id="textSpacing" type="number" step="any" placeholder="0" aria-label="字距" title="字距" disabled><span>pt</span></span></label>
 				<button id="paragraphButton" class="editor-group-action" type="button" title="段落缩进" aria-label="段落缩进" aria-haspopup="dialog" aria-controls="paragraphPanel" disabled>段落</button>
 			</div>
@@ -481,14 +482,6 @@
 		</dialog>
 		<dialog id="objectPicker" class="form-dialog" aria-label="选取对象">
 			<form method="dialog"><div id="objectPickerList" class="object-picker-list"></div><div class="form-actions"><button class="button" type="submit">关闭</button></div></form>
-		</dialog>
-		<dialog id="sourceTextPanel" class="form-dialog" aria-label="保留排版">
-			<form id="sourceTextForm">
-				<h2 class="form-title">保留排版</h2>
-				<div class="form-row"><label for="sourceTextValue">内容</label><textarea id="sourceTextValue" rows="3" dir="auto" aria-label="文字内容" required></textarea></div>
-				<div id="sourceTextPreview" aria-label="文字预览"></div>
-				<div class="form-actions"><span id="sourceTextStatus" class="form-status" role="status"></span><button id="sourceTextCancel" class="button" type="button">取消</button><button class="button primary" type="submit">确定</button></div>
-			</form>
 		</dialog>
 		<dialog id="annotationNote" class="form-dialog" aria-label="注解">
 			<form id="annotationForm" method="dialog">
