@@ -1757,6 +1757,10 @@ export class CanvasEditor {
 		const editing = this.input;
 		if (!editing?.source || editing.composing || editing.saving) return;
 		const value = editTextValue(editing.input), font = editing.fontData, size = editing.style?.size || editing.item.size, reflow = !!editing.reflow;
+		if (value === "") {
+			this.setTextError(null);
+			return;
+		}
 		const current = () => this.input === editing && !editing.rich && !editing.composing && !editing.saving && editing.fontData === font
 			&& (editing.style?.size || editing.item.size) === size && !!editing.reflow === reflow && editTextValue(editing.input) === value;
 		try {
@@ -1895,7 +1899,8 @@ export class CanvasEditor {
 		editing.input.contentEditable = "false";
 		let saved = false;
 		try {
-			saved = editing.rich ? await this.options.onCommitRichText(editing.item, editing.rich.model, editing.rich.fonts)
+			saved = value === "" && !editing.item.draft ? await this.options.onDelete(editing.item)
+				: editing.rich ? await this.options.onCommitRichText(editing.item, editing.rich.model, editing.rich.fonts)
 				: await this.options.onCommitText(editing.style ? { ...editing.item, ...editing.style } : editing.item, value, editing.fontData, editing.style?.color ?? null, !!editing.reflow);
 		} catch (error) {
 			if (this.input === editing) this.setTextError(error);
