@@ -305,6 +305,9 @@ func RunWASM() {
 	registerCallback("ofdgoInsertText", insertText)
 	registerCallback("ofdgoUpdateText", updateText)
 	registerCallback("ofdgoPreviewText", previewText)
+	registerCallback("ofdgoTextSelection", textSelection)
+	registerCallback("ofdgoPreviewTextSelection", previewTextSelection)
+	registerCallback("ofdgoUpdateTextSelection", updateTextSelection)
 	registerCallback("ofdgoStyleText", styleText)
 	registerCallback("ofdgoGetRichText", getRichText)
 	registerCallback("ofdgoSaveRichText", saveRichText)
@@ -3196,6 +3199,303 @@ func previewText(args []js.Value) (any, error) {
 		}
 	}
 	return map[string]any{"runs": runs, "glyphs": glyphs, "scale": scale, "vscale": text.VScale, "rotation": text.CharDirection, "weight": text.Weight, "italic": text.Italic}, nil
+}
+
+// readTextSelection 将画布路径转换为同一容器的库层文字选区
+// 入参: ids 图元路径列表
+// 返回: ofdgo.TextSelection 文字选区, error 路径错误
+func readTextSelection(ids []string) (ofdgo.TextSelection, error) {
+	selection := ofdgo.TextSelection{IDs: ids}
+	if currentEditor == nil {
+		return selection, fmt.Errorf("no document is being edited")
+	}
+	if len(ids) == 0 {
+		return selection, fmt.Errorf("text selection is empty")
+	}
+	if index := strings.LastIndex(ids[0], "/"); index >= 0 {
+		key := ids[0][:index]
+		path, err := compositePath(key)
+		if err != nil {
+			return selection, err
+		}
+		indexes, err := compositeIndexes(key, ids)
+		return ofdgo.TextSelection{Root: &path, Indexes: indexes}, err
+	}
+	for _, id := range ids {
+		if strings.Contains(id, "/") {
+			return selection, fmt.Errorf("text selection crosses containers")
+		}
+	}
+	return selection, nil
+}
+
+// textSelection 分析联合文字并加载预览所需字体，不改变文档资源
+// 入参: args 页码和图元路径列表
+// 返回: any 文字选区、定位预览和字体, error 分析错误
+func textSelection(args []js.Value) (any, error) {
+	selection, err := readTextSelection(stringsFromJS(args[1]))
+	if err != nil {
+		return nil, err
+	}
+	analysis, err := currentEditor.AnalyzeTextSelection(args[0].Int(), selection)
+	if err != nil {
+		return nil, err
+	}
+	source, err := textSelectionSource(analysis.Parts, analysis.Bounds, analysis.Text, true)
+	if err != nil {
+		return nil, err
+	}
+	first := analysis.Parts[0].TextObject
+	_, origin := analysis.Parts[0].Matrix.Transform(0, 0)
+	_, unit := analysis.Parts[0].Matrix.Transform(0, 1)
+	item := editorBox(analysis.Bounds)
+	item["text"], item["font"], item["size"] = analysis.Text, first.Font, first.Size*(unit-origin)
+	item["color"] = richTextColorHex(analysis.Parts[0].Color)
+	item["alpha"] = 255
+	if first.Alpha != nil {
+		item["alpha"] = *first.Alpha
+	}
+	item["capabilities"] = map[string]any{"textContent": true, "rewriteText": analysis.Replace, "replaceFont": true, "paint": true, "reflow": analysis.Reflow, "layoutKnown": false}
+	item["textFrame"] = map[string]any{"width": analysis.Bounds.W, "height": analysis.Bounds.H, "matrix": editorMatrix(ofdgo.TranslationMatrix(analysis.Bounds.X, analysis.Bounds.Y))}
+	available, err := currentSession.Reader.Fonts()
+	if err != nil {
+		return nil, err
+	}
+	for _, font := range available {
+		if font.ID == first.Font {
+			item["fontName"] = font.FontName
+			break
+		}
+	}
+	data, err := json.Marshal(map[string]any{"item": item, "source": source})
+	if err != nil {
+		return nil, err
+	}
+	result := js.Global().Get("JSON").Call("parse", string(data))
+	fonts := js.Global().Get("Array").New()
+	seen := make(map[string]bool)
+	for _, part := range analysis.Parts {
+		id := part.TextObject.Font
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		data, err := currentEditor.FontData(id)
+		if err != nil {
+			return nil, err
+		}
+		_, data, _, _, err = ofdgo.FixFontDataAggressive(data, true, false)
+		if err != nil {
+			return nil, err
+		}
+		font := js.Global().Get("Object").New()
+		font.Set("id", id)
+		font.Set("bytes", bytesToJS(data))
+		fonts.Call("push", font)
+	}
+	result.Set("fonts", fonts)
+	return successResult(result), nil
+}
+
+// textSelectionSource 将库层逐字定位转换为选区局部坐标及分段字体样式
+// 入参: parts 预览文字图元, box 原始选区边界, value 完整原文, mapped 是否使用原字形映射
+// 返回: map[string]any 定位预览, error 字形映射错误
+func textSelectionSource(parts []ofdgo.TextSelectionPart, box ofdgo.Box, value string, mapped bool) (map[string]any, error) {
+	runs := make([]any, 0, len(parts))
+	glyphs := make(map[int]string)
+	offset := 0
+	logical, cursor := []rune(value), 0
+	for _, part := range parts {
+		if part.Deleted {
+			continue
+		}
+		text := part.TextObject
+		originX, originY := part.Matrix.Transform(0, 0)
+		xAxis, _ := part.Matrix.Transform(1, 0)
+		_, yAxis := part.Matrix.Transform(0, 1)
+		sx, sy := xAxis-originX, yAxis-originY
+		scale := text.HScale
+		if scale == 0 {
+			scale = 1
+		}
+		for _, transform := range text.CGTransform {
+			if !mapped {
+				break
+			}
+			if transform.CodeCount != transform.GlyphCount {
+				return nil, fmt.Errorf("text selection contains ambiguous glyph mapping")
+			}
+			for i, value := range strings.Fields(transform.Glyphs) {
+				glyph, err := strconv.ParseUint(value, 10, 16)
+				if err != nil {
+					return nil, err
+				}
+				glyphs[offset+transform.CodePosition+i] = string(rune(0xF0000 + glyph))
+			}
+		}
+		alpha := 255
+		if text.Alpha != nil {
+			alpha = int(*text.Alpha)
+		}
+		chars := []rune(strings.ReplaceAll(text.Text(), "\n", ""))
+		if len(chars) != len(part.Points) {
+			return nil, fmt.Errorf("text selection positions do not match characters")
+		}
+		for i, char := range chars {
+			x, y := part.Matrix.Transform(part.Points[i].X, part.Points[i].Y)
+			line := false
+			for cursor < len(logical) && logical[cursor] == '\n' {
+				if line || len(runs) == 0 {
+					runs = append(runs, map[string]any{"text": "", "x": x - box.X, "y": y - box.Y - text.Size*sy,
+						"positions": [][2]float64{}, "line": line, "font": text.Font, "size": text.Size * sy})
+				}
+				line = true
+				cursor++
+			}
+			if cursor >= len(logical) || logical[cursor] != char {
+				return nil, fmt.Errorf("text selection preview does not match content")
+			}
+			cursor++
+			runs = append(runs, map[string]any{"text": string(char), "x": x - box.X, "y": y - box.Y,
+				"positions": [][2]float64{{x - box.X, y - box.Y}}, "line": line, "font": text.Font,
+				"size": text.Size * sy, "scale": scale * sx / sy, "vscale": 1, "rotation": 0,
+				"weight": text.Weight, "italic": text.Italic, "alpha": alpha, "color": richTextColorHex(part.Color)})
+		}
+		offset += len(chars)
+	}
+	for cursor < len(logical) && logical[cursor] == '\n' && len(runs) > 0 {
+		last := runs[len(runs)-1].(map[string]any)
+		runs = append(runs, map[string]any{"text": "", "x": float64(0), "y": last["y"].(float64) + last["size"].(float64),
+			"positions": [][2]float64{}, "line": true, "font": last["font"], "size": last["size"]})
+		cursor++
+	}
+	if cursor != len(logical) {
+		return nil, fmt.Errorf("text selection preview is incomplete")
+	}
+	return map[string]any{"runs": runs, "glyphs": glyphs}, nil
+}
+
+// readTextSelectionEdit 将完整草稿转为码点范围修改或显式富文本重排
+// 入参: args 编辑参数, analysis 原始选区
+// 返回: ofdgo.TextSelectionEdit 修改内容, error 参数错误
+func readTextSelectionEdit(args []js.Value, analysis ofdgo.TextSelectionAnalysis) (ofdgo.TextSelectionEdit, error) {
+	old, next := []rune(analysis.Text), []rune(args[2].String())
+	start, end, tail := 0, len(old), len(next)
+	for start < end && start < tail && old[start] == next[start] {
+		start++
+	}
+	for end > start && tail > start && old[end-1] == next[tail-1] {
+		end--
+		tail--
+	}
+	edit := ofdgo.TextSelectionEdit{Start: start, End: end, Text: string(next[start:tail])}
+	if !args[3].IsNull() {
+		var err error
+		edit.FontData, err = bytesFromJS(args[3])
+		if err != nil {
+			return edit, err
+		}
+	}
+	if !args[4].IsNull() {
+		edit.Size = args[4].Float()
+	}
+	if !args[5].IsNull() {
+		value := args[5].String()
+		if len(value) != 7 || value[0] != '#' {
+			return edit, fmt.Errorf("invalid RGB color %q", value)
+		}
+		rgb, err := hex.DecodeString(value[1:])
+		if err != nil {
+			return edit, err
+		}
+		edit.Color = fmt.Sprintf("%d %d %d", rgb[0], rgb[1], rgb[2])
+	}
+	if args[6].Bool() && len(next) > 0 {
+		value := analysis.RichText
+		var replacement []ofdgo.RichTextRun
+		if tail > start {
+			part, err := value.Slice(start, start)
+			if tail-start == end-start {
+				part, err = value.Slice(start, end)
+			}
+			if err != nil {
+				return edit, err
+			}
+			if tail-start == end-start {
+				offset := start
+				for _, run := range part.Runs {
+					count := len([]rune(run.Text))
+					replacement = append(replacement, ofdgo.RichTextRun{Text: string(next[offset : offset+count]), Format: run.Format})
+					offset += count
+				}
+			} else {
+				replacement = []ofdgo.RichTextRun{{Text: edit.Text, Format: part.Runs[0].Format}}
+			}
+		}
+		if err := value.Replace(start, end, replacement); err != nil {
+			return edit, err
+		}
+		value.Layout.AutoBidi, value.Layout.Wrap = true, true
+		edit.Reflow = &value
+	}
+	return edit, nil
+}
+
+// previewTextSelection 预览联合修改，不改变文档资源及撤销记录
+// 入参: args 页码、图元路径、内容、字体数据、字号、颜色和重排标记
+// 返回: any 定位预览, error 编辑错误
+func previewTextSelection(args []js.Value) (any, error) {
+	selection, err := readTextSelection(stringsFromJS(args[1]))
+	if err != nil {
+		return nil, err
+	}
+	analysis, err := currentEditor.AnalyzeTextSelection(args[0].Int(), selection)
+	if err != nil {
+		return nil, err
+	}
+	edit, err := readTextSelectionEdit(args, analysis)
+	if err != nil {
+		return nil, err
+	}
+	preview, err := currentEditor.PreviewTextSelection(args[0].Int(), analysis.Selection, edit)
+	if err != nil {
+		return nil, err
+	}
+	return textSelectionSource(preview.Parts, analysis.Bounds, preview.Text, len(edit.FontData) == 0)
+}
+
+// updateTextSelection 原子提交联合修改并恢复删除或重排后的选区
+// 入参: args 页码、图元路径、内容、字体数据、字号、颜色和重排标记
+// 返回: any 文档及选区信息, error 编辑错误
+func updateTextSelection(args []js.Value) (any, error) {
+	ids := stringsFromJS(args[1])
+	selection, err := readTextSelection(ids)
+	if err != nil {
+		return nil, err
+	}
+	page := args[0].Int()
+	analysis, err := currentEditor.AnalyzeTextSelection(page, selection)
+	if err != nil {
+		return nil, err
+	}
+	edit, err := readTextSelectionEdit(args, analysis)
+	if err != nil {
+		return nil, err
+	}
+	preview, err := currentEditor.PreviewTextSelection(page, analysis.Selection, edit)
+	if err != nil {
+		return nil, err
+	}
+	result, err := changeObjects(func() error { return currentEditor.UpdateTextSelection(page, analysis.Selection, edit) })
+	if err != nil {
+		return nil, err
+	}
+	selected := append([]string{}, preview.Selection.IDs...)
+	for _, index := range preview.Selection.Indexes {
+		key := ids[0][:strings.LastIndex(ids[0], "/")]
+		selected = append(selected, fmt.Sprintf("%s/%d", key, index))
+	}
+	return editorSelectionInfo{editorInfo: result.(editorInfo), SelectedIDs: selected}, nil
 }
 
 // previewPositionedText 预览保留定位的文字替换，不修改编辑器或撤销记录

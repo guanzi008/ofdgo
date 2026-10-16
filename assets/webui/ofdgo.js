@@ -667,14 +667,18 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onDrawText: beginCanvasText,
 	onDrawAnnotation: placeAnnotation,
 	onDrawInk: (index, points, style, pressure) => changeDocument("ofdgoInsertInk", null, index, JSON.stringify(points), style.lineWidth, pressure, style.strokeColor),
-	onPreviewText: (item, value, font, size, reflow) => callWASM("ofdgoPreviewText", item.index, item.id, value, font || null, size, !!reflow),
+	onPreviewText: (item, value, font, size, reflow, color = null) => item.selectionIDs
+		? callWASM("ofdgoPreviewTextSelection", item.index, item.selectionIDs, value, font || null, size, color, !!reflow)
+		: callWASM("ofdgoPreviewText", item.index, item.id, value, font || null, size, !!reflow),
 	onCommitRichText: saveRichText,
 	onPreviewRichText: validateRichText,
 	onTextError: (message, previous) => {
 		if (message) setStatus(message);
 		else if (el.statusText.textContent === previous) setStatus(state.doc ? pageStatus(state.pageIndex, state.doc.pageCount) : STATUS.ready);
 	},
-	onCommitText: (item, value, fontData, color = null, reflow = false) => item.draft
+	onCommitText: (item, value, fontData, color = null, reflow = false) => item.selectionIDs
+		? changeDocument("ofdgoUpdateTextSelection", item, value, fontData || null, canvasEditor.input?.style?.size ?? null, color, reflow)
+		: item.draft
 		? changeDocument("ofdgoInsertText", null, item.index, value, fontData || item.fontData, item.x, item.y, item.size, item.color, item.width, item.wrap, item.align, item.paragraphHeight, item.letterSpacing, ...textIndents(item))
 		: changeDocument("ofdgoUpdateText", item, value, fontData || null, item.size, color, reflow),
 	onTextChange: () => {
@@ -2881,7 +2885,30 @@ function updateAnnotationFields() {
 }
 
 async function editCanvasObject(item) {
-	if (!state.editing || document.body.hasAttribute("aria-busy") || canvasEditor.input || item.items) return;
+	if (!state.editing || document.body.hasAttribute("aria-busy") || canvasEditor.input) return;
+	if (item.items) {
+		if (!item.items.every(member => member.type === "TextObject" && !member.richText)) return;
+		const openSeq = state.openSeq;
+		setBusy(true);
+		try {
+			const ids = item.items.map(member => member.id);
+			const data = await callWASM("ofdgoTextSelection", item.index, ids);
+			const faces = new Map();
+			for (const font of data.fonts) {
+				faces.set(font.id, await new FontFace(`ofdgo-selection-${crypto.randomUUID()}`, font.bytes, fontFaceStyle(font.bytes)).load());
+			}
+			if (openSeq !== state.openSeq || canvasEditor.selected !== item || !item.node.isConnected) return;
+			const face = faces.get(data.item.font);
+			if (!face) throw new Error("字体不可用");
+			Object.assign(item, data.item, { type: "TextObject", selectionIDs: ids, id: ids });
+			canvasEditor.editText(item, face, data.source, null, faces);
+		} catch (err) {
+			if (openSeq === state.openSeq) showError(err, false);
+		} finally {
+			if (openSeq === state.openSeq) setBusy(false);
+		}
+		return;
+	}
 	if (!item.richText && canEditObject(item, "enter")) return enterCompositeScope(item.index, item.id);
 	if (item.type === "Annotation") {
 		editAnnotationDetails(item);
@@ -3054,6 +3081,7 @@ async function ensureRichInput() {
 		editing = canvasEditor.input;
 	}
 	if (!editing) return false;
+	if (editing.item.selectionIDs) return false;
 	if (editing.rich) return true;
 	if (editing.composing || editing.saving) return false;
 	const rich = await loadRichText(editing.item, editing.face);
@@ -3603,8 +3631,11 @@ async function changeDocument(name, item, ...args) {
 		const editingAnnotation = name === "ofdgoWriteAnnotation" && Boolean(state.annotationCreate?.item);
 		if (scope && inserting && name === "ofdgoSaveRichText") throw new Error("组合内部暂不支持新增富文本");
 		if (scope && inserting) args.push(scope.key);
-		if (scoped && !operation) throw new Error("内部对象暂不支持此操作");
-		const doc = scoped
+		const textSelection = name === "ofdgoUpdateTextSelection";
+		if (scoped && !operation && !textSelection) throw new Error("内部对象暂不支持此操作");
+		const doc = textSelection
+			? await callWASM(name, item.index, item.selectionIDs, ...args)
+			: scoped
 			? await callWASM("ofdgoChangeCompositeObjects", item.index, scope.key, Array.isArray(item.id) ? item.id : members.map(member => member.id), operation, ...args)
 			: annotated && operation ? await callWASM("ofdgoChangeSelection", item.index, ids, operation, ...args)
 			: await callWASM(name, ...(item ? [item.index, item.id] : []), ...args);
@@ -3666,7 +3697,7 @@ async function changeDocument(name, item, ...args) {
 		}
 		const view = restoredView;
 		const reindex = !!scope && (scoped && ["ofdgoDeleteObject", "ofdgoDeleteObjects", "ofdgoCopyObjects", "ofdgoOrderObjects", "ofdgoEraseObjects", "ofdgoEraseObjectsPath", "ofdgoGroupObjects"].includes(name)
-			|| inserting || name === "ofdgoPasteObjects" && !!args[4]);
+			|| textSelection || inserting || name === "ofdgoPasteObjects" && !!args[4]);
 		const reindexed = restoring ? view?.reindex && view.before : reindex && before;
 		const clipboard = state.objectClipboard;
 		if (reindexed && clipboard?.scope?.startsWith(reindexed.scope + "/") && clipboard.page === reindexed.page) state.objectClipboard = null;
@@ -3709,6 +3740,7 @@ async function changeDocument(name, item, ...args) {
 			canvasEditor.pendingSelection = { index: item?.index ?? args[0], ids: name === "ofdgoInsertInk" ? [] : doc.selectedIDs };
 		}
 		if (scoped && name === "ofdgoOrderObjects") canvasEditor.pendingSelection = { index: item.index, ids: doc.selectedIDs };
+		if (textSelection) canvasEditor.pendingSelection = { index: item.index, ids: doc.selectedIDs || [] };
 		openSeq = ++state.openSeq;
 		if (changingFont) {
 			await refreshFontBinding(doc, openSeq);
@@ -11737,8 +11769,9 @@ function updateObjectControls(item, reset = false) {
 	el.resetCropButton.setAttribute("aria-label", cropping ? "取消裁剪" : "还原图片");
 	el.resetCropButton.disabled = canEditObject(item, "resetCrop") ? disabled : el.cropImageButton.disabled || !cropping && (item.scoped ? !item.cropped : !item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
 	el.objectDistribute.disabled = el.objectAlign.disabled || !item.items || item.items.length < 3;
-	el.editObjectButton.disabled = disabled || Boolean(item.items) || !canEditObject(item, "enter") && (item.type === "PathObject"
-		|| !(item.type === "TextObject" && canEditObject(item, "rewriteText")) && !canEditObject(item, item.type === "TextObject" ? "textContent" : item.type === "ImageObject" ? "replaceImage" : "update"));
+	el.editObjectButton.disabled = disabled || (item.items ? !item.items.every(member => member.type === "TextObject" && !member.richText)
+		: !canEditObject(item, "enter") && (item.type === "PathObject"
+		|| !(item.type === "TextObject" && canEditObject(item, "rewriteText")) && !canEditObject(item, item.type === "TextObject" ? "textContent" : item.type === "ImageObject" ? "replaceImage" : "update")));
 	el.editObjectButton.textContent = canEditObject(item, "enter") ? "进入" : item?.type === "ImageObject" ? "替换" : "修改";
 	el.editObjectButton.title = canEditObject(item, "enter") ? item?.type === "Annotation" ? "进入注解" : "进入组合" : item?.type === "ImageObject" ? "替换图片" : item?.type === "Annotation" ? "修改注解" : "修改对象";
 	el.editObjectButton.setAttribute("aria-label", el.editObjectButton.title);
@@ -11747,7 +11780,7 @@ function updateObjectControls(item, reset = false) {
 	const text = selection ? currentTextStyle() : state.textDefaults;
 	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items && (!selection || item.items.some(member => member.richText))) || Boolean(canvasEditor.input?.composing || canvasEditor.input?.saving);
 	fontPicker.setDisabled(textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "replaceFont"));
-	el.textSize.disabled = textDisabled || text !== state.textDefaults && !item.draft && (!canEditObject(item, "reflow") || Boolean(item?.items) && !canEditObject(item, "layoutKnown"));
+	el.textSize.disabled = textDisabled || text !== state.textDefaults && !item.draft && (!canEditObject(item, "reflow") || Boolean(item?.items && !item.selectionIDs) && !canEditObject(item, "layoutKnown"));
 	el.textColor.disabled = textDisabled || text !== state.textDefaults && !item.draft && !item.richText && !canEditObject(item, "paint");
 	el.textFontAdd.disabled = !state.editing || !state.ready || state.exporting;
 	const formatsDisabled = textDisabled || Boolean(item?.items || item?.scoped) || Boolean(item && !item.draft && (!selection || !canEditObject(item, "textContent")));
@@ -11764,9 +11797,12 @@ function updateObjectControls(item, reset = false) {
 	if (richHistory) {
 		el.undoButton.disabled = textDisabled || richHistory.index === 0;
 		el.redoButton.disabled = textDisabled || richHistory.index === richHistory.entries.length - 1;
+	} else {
+		el.undoButton.disabled = !state.editorInfo?.canUndo || !state.ready || state.exporting;
+		el.redoButton.disabled = !state.editorInfo?.canRedo || !state.ready || state.exporting;
 	}
 	el.textAlign.disabled = el.textWrap.disabled = el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled || Boolean(item?.items || item?.draft) || Boolean(canvasEditor.input);
-	const reflow = document.querySelector("#textReflow"), positioned = canvasEditor.input?.source && !canEditObject(item, "layoutKnown");
+	const reflow = document.querySelector("#textReflow"), positioned = canvasEditor.input?.source && (item?.selectionIDs || !canEditObject(item, "layoutKnown"));
 	reflow.hidden = !positioned;
 	el.textWrap.hidden = !!positioned;
 	reflow.disabled = textDisabled || !canEditObject(item, "reflow") || !!canvasEditor.input?.reflow;
