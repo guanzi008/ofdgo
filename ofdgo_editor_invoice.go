@@ -992,7 +992,7 @@ func invoicePayloadSignature(ctx context.Context, data []byte) (bool, error) {
 		}
 		node := nodes[len(nodes)-1]
 		nodes = nodes[:len(nodes)-1]
-		if node.name.Space == "http://www.w3.org/2000/09/xmldsig#" && node.name.Local == "Signature" || root.name.Space == "" && root.name.Local == "EInvoice" && node.parent == root && node.name.Space == "" && node.name.Local == "TaxBureauSignature" {
+		if node.name.Space == invoiceXMLSignature && node.name.Local == "Signature" || root.name.Space == "" && root.name.Local == "EInvoice" && node.parent == root && node.name.Space == "" && node.name.Local == "TaxBureauSignature" {
 			return true, nil
 		}
 		nodes = append(nodes, node.children...)

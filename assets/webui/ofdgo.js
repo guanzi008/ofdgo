@@ -5857,7 +5857,6 @@ async function newInvoiceDraft() {
 
 function renderInvoiceBasic(container, draft) {
 	const fields = (draft.detail.fields || []).filter(field => field.item < 0 && !field.field.startsWith("facts.") && !field.field.startsWith("items."));
-	const standards = {"http://www.edrm.org.cn/schema/e-invoice/2019": "电子发票/2019", "http://www.ofdspec.org/2016": "发票标引"};
 	const labels = {
 		kind: "票种", standard: "规范", version: "版本", number: "号码", code: "代码", date: "日期",
 		currency: "币种", status: "状态", amount: "金额", taxAmount: "税额", totalAmount: "合计", remarks: "备注",
@@ -5871,7 +5870,7 @@ function renderInvoiceBasic(container, draft) {
 		container.append(title, grid);
 		for (const field of fields.filter(field => field.group === group)) {
 			const value = invoiceValue(draft.invoice, field.field);
-			const display = field.field === "standard" ? standards[value] || value : value;
+			const display = field.field === "standard" ? draft.detail.standardLabel || value : value;
 			invoiceInput(grid, labels[field.field.split(".").at(-1)] || field.label, `Field_${field.field.replaceAll(".", "_")}`, display, value => {
 				invoiceSetValue(draft.invoice, field.field, -1, value);
 				invoiceDirty(draft, "model");

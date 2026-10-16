@@ -28,14 +28,59 @@ import (
 	"time"
 )
 
-// invoiceXBRL 表示XBRL实例命名空间
-const invoiceXBRL = "http://www.xbrl.org/2003/instance"
+// invoiceXMLNamespace 表示XML预定义命名空间
+const invoiceXMLNamespace = "http://www.w3.org/XML/1998/namespace"
 
 // invoiceXSI 表示XMLSchema实例命名空间
 const invoiceXSI = "http://www.w3.org/2001/XMLSchema-instance"
 
+// invoiceXLink 表示XML链接命名空间
+const invoiceXLink = "http://www.w3.org/1999/xlink"
+
+// invoiceXMLSignature 表示XML数字签名命名空间
+const invoiceXMLSignature = "http://www.w3.org/2000/09/xmldsig#"
+
+// invoiceXBRL 表示XBRL实例命名空间
+const invoiceXBRL = "http://www.xbrl.org/2003/instance"
+
+// invoiceLinkbase 表示XBRL链接库命名空间
+const invoiceLinkbase = "http://www.xbrl.org/2003/linkbase"
+
+// invoiceDimension 表示XBRL实例维度命名空间
+const invoiceDimension = "http://xbrl.org/2006/xbrldi"
+
+// InvoiceCurrencyNamespace 表示InvoiceUnit中ISO货币度量使用的命名空间
+const InvoiceCurrencyNamespace = "http://www.xbrl.org/2003/iso4217"
+
+// InvoiceStandardVAT2023 表示2023版增值税发票分类标准
+const InvoiceStandardVAT2023 = "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/inv"
+
+// InvoiceStandardDigital2023 表示2023版数字化电子发票分类标准
+const InvoiceStandardDigital2023 = "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/einv"
+
+// InvoiceStandardAir2023 表示2023版航空运输电子客票行程单分类标准
+const InvoiceStandardAir2023 = "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/atr"
+
+// InvoiceStandardRail2023 表示2023版铁路电子客票分类标准
+const InvoiceStandardRail2023 = "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/rai"
+
+// InvoiceStandardVAT2021 表示2021版增值税发票分类标准，仅支持读取
+const InvoiceStandardVAT2021 = "http://xbrl.mof.gov.cn/taxonomy/2021-09-30/inv"
+
+// InvoiceStandardAir2021 表示2021版航空运输电子客票行程单分类标准
+const InvoiceStandardAir2021 = "http://xbrl.mof.gov.cn/taxonomy/2021-11-30/atr"
+
+// InvoiceStandardEInvoice 表示无命名空间的EInvoice业务标准，版本由Invoice.Version指定
+const InvoiceStandardEInvoice = "EInvoice"
+
+// InvoiceStandardObjectReference 表示基于OFD对象引用的只读发票标引
+const InvoiceStandardObjectReference = ofdNamespace2016
+
+// InvoiceStandardEDRM2019 表示2019版电子发票业务标准
+const InvoiceStandardEDRM2019 = "http://www.edrm.org.cn/schema/e-invoice/2019"
+
 // invoiceEDRM 表示2019版电子发票业务命名空间
-const invoiceEDRM = "http://www.edrm.org.cn/schema/e-invoice/2019"
+const invoiceEDRM = InvoiceStandardEDRM2019
 
 // invoiceDecimalPattern 仅接受XML十进制词法
 var invoiceDecimalPattern = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$`)
@@ -150,7 +195,7 @@ func invoiceXMLTree(ctx context.Context, data []byte) (*invoiceXMLNode, error) {
 					return nil, fmt.Errorf("invoice XML exceeds namespace URI limit")
 				}
 			}
-			n := &invoiceXMLNode{name: v.Name, attrs: v.Attr, parent: current, ns: map[string]string{"xml": "http://www.w3.org/XML/1998/namespace"}, counts: map[xml.Name]int{}, start: d.InputOffset()}
+			n := &invoiceXMLNode{name: v.Name, attrs: v.Attr, parent: current, ns: map[string]string{"xml": invoiceXMLNamespace}, counts: map[xml.Name]int{}, start: d.InputOffset()}
 			index := 1
 			if current != nil {
 				for k, v := range current.ns {
@@ -223,16 +268,18 @@ func invoiceXMLTree(ctx context.Context, data []byte) (*invoiceXMLNode, error) {
 // 返回: 票种及版本，未知时为空
 func invoiceTaxonomy(ns string) (string, string) {
 	switch ns {
-	case "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/inv":
+	case InvoiceStandardVAT2023:
 		return "inv", "2023-12-31"
-	case "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/einv":
+	case InvoiceStandardDigital2023:
 		return "einv", "2023-12-31"
-	case "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/atr":
+	case InvoiceStandardAir2023:
 		return "atr", "2023-12-31"
-	case "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/rai":
+	case InvoiceStandardRail2023:
 		return "rai", "2023-12-31"
-	case "http://xbrl.mof.gov.cn/taxonomy/2021-11-30/atr":
+	case InvoiceStandardAir2021:
 		return "atr", "2021-11-30"
+	case InvoiceStandardVAT2021:
+		return "inv", "2021-09-30"
 	}
 	return "", ""
 }
@@ -351,7 +398,7 @@ func parseInvoiceXML(ctx context.Context, data []byte, source InvoiceSource) (In
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if n.name.Space == invoiceXBRL || n.name.Space == "http://www.xbrl.org/2003/linkbase" {
+		if n.name.Space == invoiceXBRL || n.name.Space == invoiceLinkbase {
 			return nil
 		}
 		if len(n.children) > 0 && invoiceXMLAttr(n, "", "contextRef") == "" {
@@ -421,7 +468,7 @@ func parseInvoiceXML(ctx context.Context, data []byte, source InvoiceSource) (In
 			return nil
 		}
 		if numeric && invoiceMonetary(kind, fact.Name) && invoiceCurrencyUnit(unitValues[fact.Unit]) {
-			currency := strings.TrimPrefix(unitValues[fact.Unit], "{http://www.xbrl.org/2003/iso4217}")
+			currency := strings.TrimPrefix(unitValues[fact.Unit], "{"+InvoiceCurrencyNamespace+"}")
 			cf := fact
 			cf.Value = currency
 			cf.Unit = ""
@@ -762,7 +809,7 @@ func invoiceContext(n *invoiceXMLNode) ([]InvoiceDimension, bool) {
 	seen := map[xml.Name]bool{}
 	var walk func(*invoiceXMLNode)
 	walk = func(c *invoiceXMLNode) {
-		if c.name.Space == "http://xbrl.org/2006/xbrldi" && (c.name.Local == "explicitMember" || c.name.Local == "typedMember") {
+		if c.name.Space == invoiceDimension && (c.name.Local == "explicitMember" || c.name.Local == "typedMember") {
 			name, ok := invoiceQName(c, invoiceXMLAttr(c, "", "dimension"))
 			if !ok || name.Space == "" || seen[name] {
 				valid = false
@@ -905,7 +952,7 @@ func invoiceMonetary(kind, name string) bool {
 // 入参: unit 展开的单位表示
 // 返回: 是否为三位大写币种度量
 func invoiceCurrencyUnit(unit string) bool {
-	const prefix = "{http://www.xbrl.org/2003/iso4217}"
+	const prefix = "{" + InvoiceCurrencyNamespace + "}"
 	if !strings.HasPrefix(unit, prefix) {
 		return false
 	}
@@ -995,7 +1042,7 @@ func invoiceObjectReferences(root *invoiceXMLNode) bool {
 // 返回: 发票及诊断，取消错误
 func invoicePlainXML(ctx context.Context, root *invoiceXMLNode, source InvoiceSource) (InvoiceReport, error) {
 	report := InvoiceReport{}
-	inv := Invoice{Kind: "einv", Standard: "EInvoice", Version: "0.3", Sources: []InvoiceSource{source}}
+	inv := Invoice{Kind: "einv", Standard: InvoiceStandardEInvoice, Version: "0.3", Sources: []InvoiceSource{source}}
 	namespace, itemPath := "", "/EInvoice/EInvoiceData/IssuItemInformation"
 	if root.name.Local == "eInvoice" {
 		if invoiceXMLAttr(root, "", "Version") != "1.0" || len(invoiceChildren(root, invoiceEDRM, "InvoiceNo")) == 0 {

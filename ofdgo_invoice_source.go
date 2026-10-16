@@ -34,7 +34,7 @@ func InvoiceDigest(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ReadInvoice 读取当前文档及版本声明的发票，标引按对象引用提取文本
+// ReadInvoice 读取当前文档及版本声明的发票，字段路径相对导出XML，标引按对象引用提取文本
 // 入参: ctx 取消上下文, source 精确来源
 // 返回: InvoiceReport 发票及诊断, error 来源或读取错误
 func (r *Reader) ReadInvoice(ctx context.Context, source InvoiceSource) (InvoiceReport, error) {
@@ -43,7 +43,12 @@ func (r *Reader) ReadInvoice(ctx context.Context, source InvoiceSource) (Invoice
 	if err != nil {
 		return InvoiceReport{}, err
 	}
-	report, err := r.readInvoiceXML(ctx, data, source)
+	local := source
+	local.NodePath = ""
+	report, err := r.readInvoiceXML(ctx, data, local)
+	for i := range report.Invoices {
+		report.Invoices[i].Sources = []InvoiceSource{source}
+	}
 	report.DocumentIndex = r.DocumentIndex()
 	if r.versionInfo != nil {
 		report.Version = r.versionInfo.ID
@@ -64,6 +69,9 @@ func (r *Reader) readInvoiceXML(ctx context.Context, data []byte, source Invoice
 		return report, err
 	}
 	if root.name.Space != ofdNamespace2016 || root.name.Local != "root" || !invoiceObjectReferences(root) {
+		if root.name.Local != "eInvoice" && root.name.Local != "EInvoice" && root.name.Local != "xbrl" {
+			return InvoiceReport{}, nil
+		}
 		return report, nil
 	}
 	structure, err := parseStructure(ctx, data, CustomTag{TypeID: structureTypeOfficial, NameSpace: ofdNamespace2016})

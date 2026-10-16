@@ -1004,6 +1004,13 @@ func documentInvoice(args []js.Value) (any, error) {
 		return nil, fmt.Errorf("invoice index out of range")
 	}
 	value := report.Invoices[request.Index]
+	standardLabel := value.Standard
+	switch value.Standard {
+	case ofdgo.InvoiceStandardEDRM2019:
+		standardLabel = "电子发票/2019"
+	case ofdgo.InvoiceStandardObjectReference:
+		standardLabel = "发票标引"
+	}
 	capabilities, err := r.InvoiceCapabilities(ctx, request.Source, request.Index)
 	if err != nil {
 		return nil, err
@@ -1012,7 +1019,7 @@ func documentInvoice(args []js.Value) (any, error) {
 	if bindingErr != nil {
 		report.Issues = append(report.Issues, ofdgo.InvoiceIssue{Code: "binding-error", Message: bindingErr.Error(), Source: request.Source})
 	}
-	return map[string]any{"invoice": value, "fields": ofdgo.InvoiceFields(value), "capabilities": capabilities, "bindings": bindings, "digest": ofdgo.InvoiceDigest(data), "xml": string(data), "issues": report.Issues}, nil
+	return map[string]any{"invoice": value, "standardLabel": standardLabel, "fields": ofdgo.InvoiceFields(value), "capabilities": capabilities, "bindings": bindings, "digest": ofdgo.InvoiceDigest(data), "xml": string(data), "issues": report.Issues}, nil
 }
 
 // exportDocumentInvoice 导出发票原文

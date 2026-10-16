@@ -117,7 +117,7 @@ type invoiceXMLPatch struct {
 func InvoiceFields(value Invoice) []InvoiceFieldDescriptor {
 	format, supported := invoiceWriteFormat(value)
 	probe := Invoice{Items: []InvoiceItem{{}}}
-	if value.Standard == "EInvoice" {
+	if value.Standard == InvoiceStandardEInvoice {
 		probe.Number, probe.Date = "editable", "editable"
 		for _, group := range invoicePlainGroups() {
 			for _, name := range strings.Fields(group.value) {
@@ -171,7 +171,7 @@ func InvoiceFields(value Invoice) []InvoiceFieldDescriptor {
 		case "amount", "taxAmount", "totalAmount", "items.quantity", "items.unitPrice", "items.amount", "items.taxAmount":
 			d.Type = "decimal"
 		case "items.taxRate":
-			if value.Standard == "EInvoice" {
+			if value.Standard == InvoiceStandardEInvoice {
 				d.Type = "decimal"
 			}
 		}
@@ -208,13 +208,14 @@ func InvoiceFields(value Invoice) []InvoiceFieldDescriptor {
 // InvoiceFormats 返回独立格式能力副本，创建及编辑能力按业务版本分别声明
 // 返回: 已适配格式列表
 func InvoiceFormats() []InvoiceFormat {
-	result := []InvoiceFormat{{Kind: "einv", Standard: "EInvoice", Version: "0.3", Read: true, Create: true, Edit: true, Items: true}}
+	result := []InvoiceFormat{{Kind: "einv", Standard: InvoiceStandardEInvoice, Version: "0.3", Read: true, Create: true, Edit: true, Items: true}}
 	result = append(result, InvoiceFormat{Kind: "inv", Standard: invoiceEDRM, Version: "1.0", Read: true, Items: true})
 	result = append(result, InvoiceFormat{Kind: "inv", Standard: ofdNamespace2016, Version: "1.0", Read: true})
-	for _, kind := range []string{"inv", "einv", "atr", "rai"} {
-		result = append(result, InvoiceFormat{Kind: kind, Standard: "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/" + kind, Version: "2023-12-31", Read: true, Create: true, Edit: true, Items: kind == "inv" || kind == "atr"})
+	for _, standard := range []string{InvoiceStandardVAT2023, InvoiceStandardDigital2023, InvoiceStandardAir2023, InvoiceStandardRail2023} {
+		kind, version := invoiceTaxonomy(standard)
+		result = append(result, InvoiceFormat{Kind: kind, Standard: standard, Version: version, Read: true, Create: true, Edit: true, Items: kind == "inv" || kind == "atr"})
 	}
-	return append(result, InvoiceFormat{Kind: "atr", Standard: "http://xbrl.mof.gov.cn/taxonomy/2021-11-30/atr", Version: "2021-11-30", Read: true, Edit: true, Items: true})
+	return append(result, InvoiceFormat{Kind: "atr", Standard: InvoiceStandardAir2021, Version: "2021-11-30", Read: true, Edit: true, Items: true}, InvoiceFormat{Kind: "inv", Standard: InvoiceStandardVAT2021, Version: "2021-09-30", Read: true, Items: true})
 }
 
 // DecodeInvoices 提取独立XML或XBRL中的发票，不执行联网或完整XSD验证
@@ -280,7 +281,7 @@ func ValidateInvoice(ctx context.Context, value Invoice) ([]InvoiceIssue, error)
 			add("invalid-date", "Date", "invalid invoice date")
 		}
 	}
-	if value.Currency != "" && !invoiceCurrencyUnit("{http://www.xbrl.org/2003/iso4217}"+value.Currency) {
+	if value.Currency != "" && !invoiceCurrencyUnit("{"+InvoiceCurrencyNamespace+"}"+value.Currency) {
 		add("invalid-value", "Currency", "invalid ISO currency code")
 	}
 	for _, field := range []invoiceWriteField{{"Amount", value.Amount}, {"TaxAmount", value.TaxAmount}, {"TotalAmount", value.TotalAmount}} {
@@ -303,11 +304,11 @@ func ValidateInvoice(ctx context.Context, value Invoice) ([]InvoiceIssue, error)
 				add("invalid-decimal", fmt.Sprintf("Items[%d].%s", i, field.name), "invalid decimal lexical value")
 			}
 		}
-		if value.Standard == "EInvoice" && item.TaxRate != "" && invoiceDecimal(item.TaxRate) == nil {
+		if value.Standard == InvoiceStandardEInvoice && item.TaxRate != "" && invoiceDecimal(item.TaxRate) == nil {
 			add("invalid-decimal", fmt.Sprintf("Items[%d].TaxRate", i), "invalid decimal lexical value")
 		}
 	}
-	if value.Kind == "inv" || value.Standard == "EInvoice" {
+	if value.Kind == "inv" || value.Standard == InvoiceStandardEInvoice {
 		for _, total := range []invoiceWriteField{{"Amount", value.Amount}, {"TaxAmount", value.TaxAmount}} {
 			sum := new(big.Rat)
 			complete := len(value.Items) > 0
@@ -459,7 +460,7 @@ func EncodeInvoiceWithOptions(ctx context.Context, value Invoice, options Invoic
 		return nil, err
 	}
 	var data []byte
-	if value.Standard == "EInvoice" {
+	if value.Standard == InvoiceStandardEInvoice {
 		data, err = invoiceEncodePlain(value)
 		if err == nil {
 			data, err = invoiceWritePlainSections(ctx, data, options)
@@ -621,7 +622,7 @@ func invoiceEncodeXBRL(value Invoice, options InvoiceEncodingOptions) ([]byte, e
 	}
 	var b strings.Builder
 	b.WriteString(xml.Header)
-	fmt.Fprintf(&b, `<xbrli:xbrl xmlns:xbrli="%s" xmlns:xsi="%s" xmlns:iso4217="http://www.xbrl.org/2003/iso4217" xmlns:f="%s" xmlns:link="http://www.xbrl.org/2003/linkbase" xmlns:xlink="http://www.w3.org/1999/xlink">`, invoiceXBRL, invoiceXSI, value.Standard)
+	fmt.Fprintf(&b, `<xbrli:xbrl xmlns:xbrli="%s" xmlns:xsi="%s" xmlns:iso4217="%s" xmlns:f="%s" xmlns:link="%s" xmlns:xlink="%s">`, invoiceXBRL, invoiceXSI, InvoiceCurrencyNamespace, value.Standard, invoiceLinkbase, invoiceXLink)
 	fmt.Fprintf(&b, `<link:schemaRef xlink:type="simple" xlink:href="%s"/><xbrli:context id="%s"><xbrli:entity><xbrli:identifier scheme="%s">%s</xbrli:identifier></xbrli:entity><xbrli:period>`, invoiceWriteEscape(options.SchemaRef), options.Context.ID, invoiceWriteEscape(options.Context.Scheme), invoiceWriteEscape(options.Context.Identifier))
 	if options.Context.Instant != "" {
 		if options.Context.StartDate != "" || options.Context.EndDate != "" {
@@ -722,7 +723,7 @@ func invoiceWriteFact(b *strings.Builder, value Invoice, fact InvoiceFact, optio
 	if numeric {
 		unit := ""
 		for _, u := range options.Units {
-			match := u.Namespace == "http://www.xbrl.org/2003/iso4217" && u.Name == value.Currency
+			match := u.Namespace == InvoiceCurrencyNamespace && u.Name == value.Currency
 			if !invoiceMonetary(value.Kind, fact.Name) {
 				match = u.Namespace == invoiceXBRL && u.Name == "pure"
 				if fact.Unit != "" {
@@ -1215,7 +1216,7 @@ func UpdateInvoiceXML(ctx context.Context, data []byte, invoiceIndex int, value 
 	if err != nil {
 		return nil, err
 	}
-	if value.Standard == "EInvoice" {
+	if value.Standard == InvoiceStandardEInvoice {
 		var expanded []invoiceXMLPatch
 		for _, s := range spans {
 			n := s.node
@@ -1251,7 +1252,7 @@ func UpdateInvoiceXML(ctx context.Context, data []byte, invoiceIndex int, value 
 	clean.Facts = nil
 	clean.Sources = nil
 	clean.Items = append([]InvoiceItem(nil), value.Items...)
-	if clean.Standard != "EInvoice" {
+	if clean.Standard != InvoiceStandardEInvoice {
 		for _, name := range invoiceWriteHeader(clean) {
 			previous := invoiceXMLField(&old, old.Kind, name)
 			target := invoiceXMLField(&clean, clean.Kind, name)
@@ -1262,7 +1263,7 @@ func UpdateInvoiceXML(ctx context.Context, data []byte, invoiceIndex int, value 
 	}
 	for i := range clean.Items {
 		clean.Items[i].Fields = nil
-		if value.Standard != "EInvoice" && (value.Kind == "atr" || value.Kind == "inv") {
+		if value.Standard != InvoiceStandardEInvoice && (value.Kind == "atr" || value.Kind == "inv") {
 			for _, f := range value.Items[i].Fields {
 				if !invoiceWriteContains(invoiceWriteItemNames(value.Kind), f.Name) {
 					continue
@@ -1291,7 +1292,7 @@ func UpdateInvoiceXML(ctx context.Context, data []byte, invoiceIndex int, value 
 		}
 	}
 	var generated []byte
-	if value.Standard == "EInvoice" {
+	if value.Standard == InvoiceStandardEInvoice {
 		generated, err = invoiceEncodePlain(clean)
 	} else {
 		options, e := invoiceWriteOriginalOptions(root, old)
@@ -1310,7 +1311,7 @@ func UpdateInvoiceXML(ctx context.Context, data []byte, invoiceIndex int, value 
 	var patches []invoiceXMLPatch
 	var trailingGroups []invoiceXMLPatch
 	var itemParent, generatedParent *invoiceXMLNode
-	if value.Standard == "EInvoice" {
+	if value.Standard == InvoiceStandardEInvoice {
 		if len(invoiceChildren(root, "", "EInvoiceData")) != 1 || len(invoiceChildren(root, "", "TaxSupervisionInfo")) != 1 {
 			return nil, fmt.Errorf("invoice requires unique data and supervision groups")
 		}
@@ -1425,7 +1426,7 @@ func UpdateInvoiceXML(ctx context.Context, data []byte, invoiceIndex int, value 
 	var matches []Invoice
 	for _, inv := range after.Invoices {
 		if inv.Kind == value.Kind && inv.Standard == value.Standard {
-			if value.Standard == "EInvoice" {
+			if value.Standard == InvoiceStandardEInvoice {
 				matches = append(matches, inv)
 				continue
 			}
@@ -1503,8 +1504,8 @@ func invoiceWriteOriginalOptions(root *invoiceXMLNode, value Invoice) (InvoiceEn
 		}
 	}
 	for _, n := range root.children {
-		if n.name == (xml.Name{Space: "http://www.xbrl.org/2003/linkbase", Local: "schemaRef"}) && options.SchemaRef == "" {
-			options.SchemaRef = invoiceXMLAttr(n, "http://www.w3.org/1999/xlink", "href")
+		if n.name == (xml.Name{Space: invoiceLinkbase, Local: "schemaRef"}) && options.SchemaRef == "" {
+			options.SchemaRef = invoiceXMLAttr(n, invoiceXLink, "href")
 		}
 		if n.name == (xml.Name{Space: invoiceXBRL, Local: "context"}) && invoiceXMLAttr(n, "", "id") == ref {
 			dims, ok := invoiceContext(n)
@@ -1684,7 +1685,7 @@ func invoiceWriteMergeItems(ctx context.Context, data []byte, spans map[string]i
 	}
 	space, name := value.Standard, invoiceWriteTuple(value.Kind)
 	names := invoiceWriteItemNames(value.Kind)
-	if value.Standard == "EInvoice" {
+	if value.Standard == InvoiceStandardEInvoice {
 		space = ""
 		name = "IssuItemInformation"
 		names = strings.Fields("ItemName SpecMod MeaUnits Quantity UnPrice Amount TaxRate ComTaxAm")
@@ -1731,7 +1732,7 @@ func invoiceWriteMergeItems(ctx context.Context, data []byte, spans map[string]i
 		if path == "" {
 			for _, f := range item.Fields {
 				mapped := invoiceItemField(&InvoiceItem{}, value.Kind, f.Name)
-				if value.Standard == "EInvoice" || !invoiceWriteContains(names, f.Name) {
+				if value.Standard == InvoiceStandardEInvoice || !invoiceWriteContains(names, f.Name) {
 					return nil, fmt.Errorf("unsupported new invoice item fact %s", f.Name)
 				}
 				if mapped != nil {
@@ -1793,7 +1794,7 @@ func invoiceWriteMergeItems(ctx context.Context, data []byte, spans map[string]i
 	if len(ordered) == 0 && len(combined) > 0 {
 		var p invoiceXMLPatch
 		var err error
-		if value.Standard == "EInvoice" {
+		if value.Standard == InvoiceStandardEInvoice {
 			p, err = invoiceWriteOrderedInsert(data, spans, parent, "", name, strings.Fields("SellerInformation BuyerInformation BasicInformation IssuItemInformation SpecificInformation AdditionalInformation"), combined)
 		} else {
 			p, err = invoiceWriteInsert(spans[parent.path], combined, data)
@@ -1837,7 +1838,7 @@ func invoiceWriteOrderedInsert(data []byte, spans map[string]invoiceXMLSpan, par
 // 入参: value 发票
 // 返回: 缺少元组字段错误
 func invoiceWriteCreation(value Invoice) error {
-	if value.Standard == "EInvoice" {
+	if value.Standard == InvoiceStandardEInvoice {
 		return nil
 	}
 	for i, item := range value.Items {
