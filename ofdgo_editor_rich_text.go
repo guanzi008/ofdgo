@@ -28,13 +28,13 @@ import (
 	"strconv"
 )
 
-// richTextTagType 标识富文本编辑标引，正文使用标准复合资源和图元。
+// richTextTagType 标识富文本编辑标引，正文使用标准复合资源和图元
 const richTextTagType = "OFDGo.RichText"
 
-// richTextNamespace 标识富文本编辑语义的命名空间，版本仅随不兼容的语义变更升级。
+// richTextNamespace 标识富文本编辑语义的命名空间，版本仅随不兼容的语义变更升级
 const richTextNamespace = "https://ofdgo.aite.me/ns/rich-text/1"
 
-// richTextMetadata 不保存字体编号，以标准主文字对象序号恢复当前文档字体。
+// richTextMetadata 不保存字体编号，以标准主文字对象序号恢复当前文档字体
 type richTextMetadata struct {
 	Version int        `json:"version"`
 	Value   RichText   `json:"value"`
@@ -45,14 +45,14 @@ type richTextMetadata struct {
 	Digest  string     `json:"digest"`
 }
 
-// richTextEntry 保存标引入口及延迟报告的损坏诊断。
+// richTextEntry 保存标引入口及延迟报告的损坏诊断
 type richTextEntry struct {
 	index    int
 	metadata richTextMetadata
 	err      error
 }
 
-// richTextIndex 缓存当前文档修订的标引，不创建页面预览快照。
+// richTextIndex 缓存当前文档修订的标引，不创建页面预览快照
 type richTextIndex struct {
 	source   *editorSource
 	revision uint64
@@ -60,7 +60,7 @@ type richTextIndex struct {
 	err      error
 }
 
-// AddRichText 原子添加标准组合及持久化编辑标引，成功时只产生一条历史。
+// AddRichText 原子添加标准组合及持久化编辑标引，成功时只产生一条历史
 // 入参: page 页面索引, box 页面编辑框, value 富文本内容
 // 返回: string 组合对象标识, error 排版、资源或持久化错误
 func (e *Editor) AddRichText(page int, box Box, value RichText) (string, error) {
@@ -88,15 +88,15 @@ func (e *Editor) AddRichText(page int, box Box, value RichText) (string, error) 
 	return id, nil
 }
 
-// UpdateRichText 原子替换富文本内容，保留对象标识、局部编辑框及页面变换。
-// 安全普通文字显式重排后提升为组合；不修改共享的旧组合资源。
+// UpdateRichText 原子替换富文本内容，保留对象标识、局部编辑框及页面变换
+// 安全普通文字显式重排后提升为组合；不修改共享的旧组合资源
 // 入参: page 页面索引, id 对象标识, value 完整富文本
 // 返回: error 识别、排版或提交错误
 func (e *Editor) UpdateRichText(page int, id string, value RichText) error {
 	return e.updateRichTextFrame(page, id, value, 0, 0)
 }
 
-// ResizeRichTextFrame 调整局部左边界与段落宽度并原子重排，保留页面方向和缩放。
+// ResizeRichTextFrame 调整局部左边界与段落宽度并原子重排，保留页面方向和缩放
 // 入参: page 页面索引, id 对象标识, offset 局部横向偏移, width 新的局部段落宽度
 // 返回: error 尺寸、排版或提交错误
 func (e *Editor) ResizeRichTextFrame(page int, id string, offset, width float64) error {
@@ -110,7 +110,7 @@ func (e *Editor) ResizeRichTextFrame(page int, id string, offset, width float64)
 	return e.updateRichTextFrame(page, id, value, offset, width)
 }
 
-// updateRichTextFrame 统一提交正文或编辑框变化，width为零时保持原始宽度。
+// updateRichTextFrame 统一提交正文或编辑框变化，width为零时保持原始宽度
 // 入参: page 页面索引, id 对象标识, value 新内容, offset 局部偏移, width 可选宽度
 // 返回: error 校验或提交错误
 func (e *Editor) updateRichTextFrame(page int, id string, value RichText, offset, width float64) error {
@@ -170,7 +170,7 @@ func (e *Editor) updateRichTextFrame(page int, id string, value RichText, offset
 	})
 }
 
-// DeleteRichText 原子删除富文本及其标引，不删除其他实例引用的共享资源。
+// DeleteRichText 原子删除富文本及其标引，不删除其他实例引用的共享资源
 // 入参: page 页面索引, id 对象标识
 // 返回: error 识别或删除错误
 func (e *Editor) DeleteRichText(page int, id string) error {
@@ -195,8 +195,8 @@ func (e *Editor) DeleteRichText(page int, id string) error {
 	})
 }
 
-// RichText 返回独立的富文本编辑值，未标引组合返回ErrNotRichText，损坏标引返回诊断。
-// 普通文字仅在定位和外观可以安全提升时返回单片段，否则明确拒绝。
+// RichText 返回独立的富文本编辑值，未标引组合返回ErrNotRichText，损坏标引返回诊断
+// 普通文字仅在定位和外观可以安全提升时返回单片段，否则明确拒绝
 // 入参: page 页面索引, id 对象标识
 // 返回: RichText 编辑内容, error 识别或持久化错误
 func (e *Editor) RichText(page int, id string) (RichText, error) {
@@ -238,7 +238,7 @@ func (e *Editor) RichText(page int, id string) (RichText, error) {
 	return value, nil
 }
 
-// RichTextFrame 返回原始局部编辑框及局部到页面的完整变换，不按组合缩放重新解释宽度。
+// RichTextFrame 返回原始局部编辑框及局部到页面的完整变换，不按组合缩放重新解释宽度
 // 入参: page 页面索引, id 富文本或安全普通文字对象标识
 // 返回: Box 局部编辑框, Matrix 页面变换, error 识别或几何错误
 func (e *Editor) RichTextFrame(page int, id string) (Box, Matrix, error) {
@@ -275,7 +275,7 @@ func (e *Editor) RichTextFrame(page int, id string) (Box, Matrix, error) {
 	return entry.metadata.Frame, TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(object.CompositeGraphicUnit.CTM)).Multiply(TranslationMatrix(entry.metadata.Offset[0], entry.metadata.Offset[1])), nil
 }
 
-// prepareRichText 构造独立组合资源和不含字体编号的编辑标引。
+// prepareRichText 构造独立组合资源和不含字体编号的编辑标引
 // 入参: box 页面或局部编辑框, value 富文本
 // 返回: GraphicObject 标准组合, richTextMetadata 标引, error 准备错误
 func (e *Editor) prepareRichText(box Box, value RichText) (GraphicObject, richTextMetadata, error) {
@@ -322,7 +322,7 @@ func (e *Editor) prepareRichText(box Box, value RichText) (GraphicObject, richTe
 	return object, meta, nil
 }
 
-// richTextPlacement 根据局部逻辑坐标确定物理组合边界，负向装饰不会被资源裁剪。
+// richTextPlacement 根据局部逻辑坐标确定物理组合边界，负向装饰不会被资源裁剪
 // 入参: meta 编辑框与资源尺寸, matrix 逻辑坐标到页面变换
 // 返回: CompositeGraphicUnit 组合几何
 func richTextPlacement(meta richTextMetadata, matrix Matrix) CompositeGraphicUnit {
@@ -331,7 +331,7 @@ func richTextPlacement(meta richTextMetadata, matrix Matrix) CompositeGraphicUni
 	return CompositeGraphicUnit{Boundary: editorBoxString(box), CTM: TranslationMatrix(-box.X, -box.Y).Multiply(matrix).String()}
 }
 
-// richTextDigest 对已编码图元计算不含字体、颜色空间和字形编号的内容摘要。
+// richTextDigest 对已编码图元计算不含字体、颜色空间和字形编号的内容摘要
 // 入参: objects 标准子对象
 // 返回: string 稳定内容摘要
 func richTextDigest(objects []GraphicObject) string {
@@ -363,7 +363,7 @@ func richTextDigest(objects []GraphicObject) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// richTextEntry 从当前文档标引缓存定位对象，损坏项不降级为普通组合。
+// richTextEntry 从当前文档标引缓存定位对象，损坏项不降级为普通组合
 // 入参: page 页面索引, id 组合标识
 // 返回: richTextEntry 标引, error 缺失或损坏错误
 func (e *Editor) richTextEntry(page int, id string) (richTextEntry, error) {
@@ -381,7 +381,7 @@ func (e *Editor) richTextEntry(page int, id string) (richTextEntry, error) {
 	return entry, nil
 }
 
-// richTextMetadataIndex 按来源和修订缓存标引，仅读取标引文件，不生成Reader快照。
+// richTextMetadataIndex 按来源和修订缓存标引，仅读取标引文件，不生成Reader快照
 // 返回: *richTextIndex 只读缓存
 func (e *Editor) richTextMetadataIndex() *richTextIndex {
 	if index := e.richIndex; index != nil && index.source == e.source && index.revision == e.revision {
@@ -437,7 +437,7 @@ func (e *Editor) richTextMetadataIndex() *richTextIndex {
 	return index
 }
 
-// putRichTextMetadata 添加或替换带有标准标引引用的富文本语义。
+// putRichTextMetadata 添加或替换带有标准标引引用的富文本语义
 // 入参: page 页面索引, id 对象标识, meta 编辑信息, index 原入口或-1
 // 返回: error 编码或提交错误
 func (e *Editor) putRichTextMetadata(page int, id string, meta richTextMetadata, index int) error {
@@ -454,7 +454,7 @@ func (e *Editor) putRichTextMetadata(page int, id string, meta richTextMetadata,
 	return err
 }
 
-// promoteRichText 仅提升已有明确排版或可验证单行定位的普通文字。
+// promoteRichText 仅提升已有明确排版或可验证单行定位的普通文字
 // 入参: page 页面索引, object 普通文字快照
 // 返回: RichText 单片段, error 不安全提升错误
 func (e *Editor) promoteRichText(page int, object GraphicObject) (RichText, error) {
@@ -524,7 +524,7 @@ func (e *Editor) promoteRichText(page int, object GraphicObject) (RichText, erro
 	return result, result.Validate()
 }
 
-// richPlainOffset 保存可提升单行原文的基线偏移，不推断复杂定位布局。
+// richPlainOffset 保存可提升单行原文的基线偏移，不推断复杂定位布局
 // 入参: text 已校验的普通文字
 // 返回: float64 横向偏移, float64 基线偏移, error 无效坐标
 func (e *Editor) richPlainOffset(text TextObject) (float64, float64, error) {
@@ -553,7 +553,7 @@ func (e *Editor) richPlainOffset(text TextObject) (float64, float64, error) {
 	return x, y - baseline, nil
 }
 
-// copyRichTextMetadata 复制已识别组合的语义，使用目标标准子对象的字体引用。
+// copyRichTextMetadata 复制已识别组合的语义，使用目标标准子对象的字体引用
 // 入参: source 来源编辑器, sourcePage 来源页, ids 来源标识, page 目标页, copied 目标标识
 // 返回: error 元数据损坏或提交错误
 func (e *Editor) copyRichTextMetadata(source *Editor, sourcePage int, ids []string, page int, copied []string) error {
@@ -582,7 +582,7 @@ func (e *Editor) copyRichTextMetadata(source *Editor, sourcePage int, ids []stri
 	return nil
 }
 
-// richTextColors 为自产RGB颜色指定文档内有效颜色空间，不改变默认颜色空间。
+// richTextColors 为自产RGB颜色指定文档内有效颜色空间，不改变默认颜色空间
 // 入参: object 排版生成的标准图元
 // 返回: error 颜色或资源错误
 func (e *Editor) richTextColors(object *GraphicObject) error {
@@ -612,7 +612,7 @@ func (e *Editor) richTextColors(object *GraphicObject) error {
 	return nil
 }
 
-// copiedRichTextMetadata 检查当前文档对象快照的标引，不将外部同号对象误认成本地对象。
+// copiedRichTextMetadata 检查当前文档对象快照的标引，不将外部同号对象误认成本地对象
 // 入参: objects 待复制快照
 // 返回: map[int]richTextMetadata 需要复制的语义, error 损坏诊断
 func (e *Editor) copiedRichTextMetadata(objects []GraphicObject) (map[int]richTextMetadata, error) {
@@ -668,7 +668,7 @@ func (e *Editor) copiedRichTextMetadata(objects []GraphicObject) (map[int]richTe
 	return result, nil
 }
 
-// attachRichTextSnapshot 为普通对象快照附加不可变编辑语义，复制后不依赖原对象继续存在。
+// attachRichTextSnapshot 为普通对象快照附加不可变编辑语义，复制后不依赖原对象继续存在
 // 入参: page 页面索引, object 对象快照
 func (e *Editor) attachRichTextSnapshot(page int, object *GraphicObject) {
 	object.richText = nil
@@ -683,7 +683,7 @@ func (e *Editor) attachRichTextSnapshot(page int, object *GraphicObject) {
 	object.richText = &meta
 }
 
-// richTextTagsFontSafe 仅允许完整识别且不含资源编号的本库标引通过字体重绑定检查。
+// richTextTagsFontSafe 仅允许完整识别且不含资源编号的本库标引通过字体重绑定检查
 // 入参: ctx 取消上下文, reader 包阅读器, index 文档索引
 // 返回: bool 是否可以排除字体引用, error 读取或取消错误
 func richTextTagsFontSafe(ctx context.Context, reader *Reader, index int) (bool, error) {

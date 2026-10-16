@@ -23,22 +23,22 @@ import (
 	"github.com/go-text/typesetting/segmenter"
 )
 
-// ErrNotRichText 表示对象没有富文本信息且不属于可提升的普通文字。
+// ErrNotRichText 表示对象没有富文本信息且不属于可提升的普通文字
 var ErrNotRichText = errors.New("object is not rich text")
 
-// RichText 保存有序文字片段及段落选项，长度和范围使用Unicode码点而非字节。
+// RichText 保存有序文字片段及段落选项，长度和范围使用Unicode码点而非字节
 type RichText struct {
 	Runs   []RichTextRun `json:"runs"`
 	Layout TextLayout    `json:"layout"`
 }
 
-// RichTextRun 保存文字及完整格式，换行使用LF，长度单位为毫米。
+// RichTextRun 保存文字及完整格式，换行使用LF，长度单位为毫米
 type RichTextRun struct {
 	Text   string     `json:"text"`
 	Format TextFormat `json:"format"`
 }
 
-// TextFormat 保存完整文字格式，Font为当前文档字体资源标识，颜色使用OFD RGB分量。
+// TextFormat 保存完整文字格式，Font为当前文档字体资源标识，颜色使用OFD RGB分量
 type TextFormat struct {
 	Font       string  `json:"font"`
 	Size       float64 `json:"size"`
@@ -51,7 +51,7 @@ type TextFormat struct {
 	Background string  `json:"background"`
 }
 
-// TextFormatPatch 保存格式增量，nil保持原值，false和空背景显式清除对应格式。
+// TextFormatPatch 保存格式增量，nil保持原值，false和空背景显式清除对应格式
 type TextFormatPatch struct {
 	Font       *string  `json:"font,omitempty"`
 	Size       *float64 `json:"size,omitempty"`
@@ -64,7 +64,7 @@ type TextFormatPatch struct {
 	Background *string  `json:"background,omitempty"`
 }
 
-// Text 返回包含显式换行的原文，不包含排版产生的软换行。
+// Text 返回包含显式换行的原文，不包含排版产生的软换行
 // 返回: string 完整原文
 func (v RichText) Text() string {
 	var text strings.Builder
@@ -74,11 +74,11 @@ func (v RichText) Text() string {
 	return text.String()
 }
 
-// Len 返回原文的Unicode码点数量。
+// Len 返回原文的Unicode码点数量
 // 返回: int 码点数量
 func (v RichText) Len() int { return utf8.RuneCountInString(v.Text()) }
 
-// Validate 校验文字、格式、段落选项及跨片段的字素边界，不加载字体。
+// Validate 校验文字、格式、段落选项及跨片段的字素边界，不加载字体
 // 返回: error 无效文字、格式或边界
 func (v RichText) Validate() error {
 	if len(v.Runs) == 0 {
@@ -104,7 +104,7 @@ func (v RichText) Validate() error {
 	return nil
 }
 
-// validate 校验完整文字格式，不解析文档资源。
+// validate 校验完整文字格式，不解析文档资源
 // 返回: error 格式错误
 func (f TextFormat) validate() error {
 	if strings.TrimSpace(f.Font) == "" || !finite(f.Size) || f.Size <= 0 {
@@ -126,7 +126,7 @@ func (f TextFormat) validate() error {
 	return nil
 }
 
-// validateRichLayout 校验富文本段落的有限数值及枚举。
+// validateRichLayout 校验富文本段落的有限数值及枚举
 // 入参: v 段落选项
 // 返回: error 无效选项
 func validateRichLayout(v TextLayout) error {
@@ -141,7 +141,7 @@ func validateRichLayout(v TextLayout) error {
 	return nil
 }
 
-// richTextBoundaries 返回包含首尾位置的扩展字素边界。
+// richTextBoundaries 返回包含首尾位置的扩展字素边界
 // 入参: value 原文
 // 返回: map[int]bool 有效码点边界
 func richTextBoundaries(value string) map[int]bool {
@@ -156,7 +156,7 @@ func richTextBoundaries(value string) map[int]bool {
 	return result
 }
 
-// checkRange 检查半开范围及其字素边界。
+// checkRange 检查半开范围及其字素边界
 // 入参: start 起点, end 终点
 // 返回: error 无效范围
 func (v RichText) checkRange(start, end int) error {
@@ -170,7 +170,7 @@ func (v RichText) checkRange(start, end int) error {
 	return nil
 }
 
-// Slice 返回半开范围的独立片段，空范围保留插入位置的格式。
+// Slice 返回半开范围的独立片段，空范围保留插入位置的格式
 // 入参: start 起点, end 终点
 // 返回: RichText 独立片段, error 无效范围
 func (v RichText) Slice(start, end int) (RichText, error) {
@@ -193,7 +193,7 @@ func (v RichText) Slice(start, end int) (RichText, error) {
 	return result, nil
 }
 
-// sliceRuns 提取已校验范围，不保留空片段。
+// sliceRuns 提取已校验范围，不保留空片段
 // 入参: start 起点, end 终点
 // 返回: []RichTextRun 独立片段
 func (v RichText) sliceRuns(start, end int) []RichTextRun {
@@ -210,7 +210,7 @@ func (v RichText) sliceRuns(start, end int) []RichTextRun {
 	return result
 }
 
-// Replace 原子替换半开范围，空片段列表表示删除，相邻相同格式自动合并。
+// Replace 原子替换半开范围，空片段列表表示删除，相邻相同格式自动合并
 // 入参: start 起点, end 终点, runs 替换片段
 // 返回: error 范围或内容错误
 func (v *RichText) Replace(start, end int, runs []RichTextRun) error {
@@ -235,7 +235,7 @@ func (v *RichText) Replace(start, end int, runs []RichTextRun) error {
 	return nil
 }
 
-// ApplyFormat 原子修改半开范围的格式，空范围不改变正文。
+// ApplyFormat 原子修改半开范围的格式，空范围不改变正文
 // 入参: start 起点, end 终点, patch 格式增量
 // 返回: error 范围或格式错误
 func (v *RichText) ApplyFormat(start, end int, patch TextFormatPatch) error {
@@ -258,7 +258,7 @@ func (v *RichText) ApplyFormat(start, end int, patch TextFormatPatch) error {
 	return v.Replace(start, end, part.Runs)
 }
 
-// apply 应用显式给出的格式字段。
+// apply 应用显式给出的格式字段
 // 入参: f 完整原格式
 // 返回: TextFormat 修改后的格式
 func (p TextFormatPatch) apply(f TextFormat) TextFormat {
@@ -292,7 +292,7 @@ func (p TextFormatPatch) apply(f TextFormat) TextFormat {
 	return f
 }
 
-// normalizeRichText 合并相同格式，保留空文档的插入格式。
+// normalizeRichText 合并相同格式，保留空文档的插入格式
 // 入参: v 完整富文本
 // 返回: RichText 归一化副本
 func normalizeRichText(v RichText) RichText {

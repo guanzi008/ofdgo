@@ -29,14 +29,14 @@ import (
 	"golang.org/x/text/unicode/bidi"
 )
 
-// richLayout 保存局部标准对象、含墨迹的边界及各片段的字体锚点序号。
+// richLayout 保存局部标准对象、含墨迹的边界及各片段的字体锚点序号
 type richLayout struct {
 	objects []GraphicObject
 	bounds  Box
 	anchors []int
 }
 
-// richMetrics 保存片段字体、共用基线度量和实际需要的合成样式。
+// richMetrics 保存片段字体、共用基线度量和实际需要的合成样式
 type richMetrics struct {
 	font                    FontMetrics
 	ascent, descent, height float64
@@ -44,7 +44,7 @@ type richMetrics struct {
 	outlines                map[uint16]GeometryPath
 }
 
-// richSpan 保存方向和格式均一致的逻辑区间及行内视觉坐标。
+// richSpan 保存方向和格式均一致的逻辑区间及行内视觉坐标
 type richSpan struct {
 	start, end, owner int
 	rtl               bool
@@ -52,7 +52,7 @@ type richSpan struct {
 	x, width          float64
 }
 
-// richContextShaper 将带上下文的区间塑形接入已有簇校验流程。
+// richContextShaper 将带上下文的区间塑形接入已有簇校验流程
 type richContextShaper struct {
 	FontShaperRun
 	text       []rune
@@ -60,12 +60,12 @@ type richContextShaper struct {
 	options    TextShapeOptions
 }
 
-// LayoutRichText 生成局部坐标的标准文字和路径，不修改页面或编辑历史。
-// 边界包含内容的排版高度和溢出墨迹，不包含空余段落宽度，可能有负的X或Y。
-// 非标准RGB文档按需复用或注册RGB颜色空间，返回对象可直接用于当前文档。
-// 注册不产生修订或撤销记录；失败时不保留新增资源和资源编号。
-// 提交对象后应创建新的Reader；已有Reader是独立快照，不包含新注册的资源。
-// 返回值的资源编号属于当前资源视图，切换文档、版本或替换资源快照后须重新排版。
+// LayoutRichText 生成局部坐标的标准文字和路径，不修改页面或编辑历史
+// 边界包含内容的排版高度和溢出墨迹，不包含空余段落宽度，可能有负的X或Y
+// 非标准RGB文档按需复用或注册RGB颜色空间，返回对象可直接用于当前文档
+// 注册不产生修订或撤销记录；失败时不保留新增资源和资源编号
+// 提交对象后应创建新的Reader；已有Reader是独立快照，不包含新注册的资源
+// 返回值的资源编号属于当前资源视图，切换文档、版本或替换资源快照后须重新排版
 func (e *Editor) LayoutRichText(value RichText, width float64) ([]GraphicObject, Box, error) {
 	result, err := e.layoutRichText(value, width)
 	if err != nil {
@@ -85,7 +85,7 @@ func (e *Editor) LayoutRichText(value RichText, width float64) ([]GraphicObject,
 	return result.objects, result.bounds, nil
 }
 
-// layoutRichText 统一计算段落换行、视觉顺序和基线，颜色资源由调用方绑定。
+// layoutRichText 统一计算段落换行、视觉顺序和基线，颜色资源由调用方绑定
 func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, error) {
 	if err := value.Validate(); err != nil {
 		return richLayout{}, err
@@ -327,7 +327,7 @@ func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, erro
 	return result, nil
 }
 
-// richParagraphOptions 以整段原文检测双向排版，与普通文字的自动模式一致。
+// richParagraphOptions 以整段原文检测双向排版，与普通文字的自动模式一致
 func richParagraphOptions(chars []rune, options TextLayout) TextLayout {
 	if options.AutoBidi && !options.Shaping.Bidi {
 		for _, char := range chars {
@@ -341,7 +341,7 @@ func richParagraphOptions(chars []rune, options TextLayout) TextLayout {
 	return options
 }
 
-// richShapeLine 按方向、脚本和格式塑形整行，跨同格式片段合并，保留区间外的塑形上下文。
+// richShapeLine 按方向、脚本和格式塑形整行，跨同格式片段合并，保留区间外的塑形上下文
 func richShapeLine(chars []rune, owners []int, value RichText, metrics []richMetrics, options TextLayout, face *typefont.Face) ([]richSpan, []float64, error) {
 	advances := make([]float64, len(chars))
 	if len(chars) == 0 {
@@ -430,7 +430,7 @@ func richShapeLine(chars []rune, owners []int, value RichText, metrics []richMet
 	return spans, advances, nil
 }
 
-// ShapeText 返回区间相对簇索引，同时保留完整行提供的上下文。
+// ShapeText 返回区间相对簇索引，同时保留完整行提供的上下文
 func (s richContextShaper) ShapeText(_ string, size float64) ([]ShapedGlyph, error) {
 	glyphs, err := s.ShapeTextRun(s.text, s.start, s.end, size, s.options)
 	if err != nil {
@@ -442,7 +442,7 @@ func (s richContextShaper) ShapeText(_ string, size float64) ([]ShapedGlyph, err
 	return glyphs, nil
 }
 
-// richPositionSpans 按核心排版相同的方向分组规则排列片段，按视觉簇分配字距及两端对齐。
+// richPositionSpans 按核心排版相同的方向分组规则排列片段，按视觉簇分配字距及两端对齐
 func richPositionSpans(spans []richSpan, steps []float64, options TextLayout, x float64) error {
 	order := make([]int, len(spans))
 	for i := range order {
@@ -490,7 +490,7 @@ func richPositionSpans(spans []richSpan, steps []float64, options TextLayout, x 
 	return nil
 }
 
-// richSpanText 将逻辑原文和绝对视觉位置写为标准字符字形映射。
+// richSpanText 将逻辑原文和绝对视觉位置写为标准字符字形映射
 func richSpanText(chars []rune, span richSpan, format TextFormat, baseline float64) TextObject {
 	text := richTextObject(format)
 	code := TextCode{Value: escapeOFDText(string(chars[span.start:span.end]))}
@@ -524,7 +524,7 @@ func richSpanText(chars []rune, span richSpan, format TextFormat, baseline float
 	return text
 }
 
-// richSpanOutline 使用现有字体及几何后端生成与文字合成样式一致的墨迹。
+// richSpanOutline 使用现有字体及几何后端生成与文字合成样式一致的墨迹
 func richSpanOutline(span richSpan, format TextFormat, metrics richMetrics, geometry GeometryBackend, baseline float64) (GeometryPath, error) {
 	font, ok := metrics.font.(FontOutlines)
 	if !ok {
@@ -567,7 +567,7 @@ func richSpanOutline(span richSpan, format TextFormat, metrics richMetrics, geom
 	return result, nil
 }
 
-// richSynthetic 与标准绘制一样避免对已加粗或倾斜的字体重复合成。
+// richSynthetic 与标准绘制一样避免对已加粗或倾斜的字体重复合成
 func (e *Editor) richSynthetic(format TextFormat) (bool, bool) {
 	bold, italic := format.Bold, format.Italic
 	var definition *Font
@@ -590,7 +590,7 @@ func (e *Editor) richSynthetic(format TextFormat) (bool, bool) {
 	return bold, italic
 }
 
-// richTextObject 构造具有显式填充和标准字重的文字对象。
+// richTextObject 构造具有显式填充和标准字重的文字对象
 func richTextObject(format TextFormat) TextObject {
 	fill, stroke := true, false
 	weight := 400
@@ -600,7 +600,7 @@ func richTextObject(format TextFormat) TextObject {
 	return TextObject{Font: format.Font, Size: format.Size, Weight: weight, Italic: format.Italic, Fill: &fill, Stroke: &stroke, FillColor: &FillColor{Value: richColor(format.Color)}}
 }
 
-// richColor 将空前景色转换为标准黑色。
+// richColor 将空前景色转换为标准黑色
 func richColor(value string) string {
 	if value == "" {
 		return "0 0 0"
@@ -608,13 +608,13 @@ func richColor(value string) string {
 	return value
 }
 
-// richUnion 合并排版范围和墨迹范围，保留负坐标及零宽空行。
+// richUnion 合并排版范围和墨迹范围，保留负坐标及零宽空行
 func richUnion(a, b Box) Box {
 	x, y := math.Min(a.X, b.X), math.Min(a.Y, b.Y)
 	return Box{X: x, Y: y, W: math.Max(a.X+a.W, b.X+b.W) - x, H: math.Max(a.Y+a.H, b.Y+b.H) - y}
 }
 
-// richRectangle 使用标准填充路径绘制背景或文字装饰。
+// richRectangle 使用标准填充路径绘制背景或文字装饰
 func richRectangle(box Box, color string) GraphicObject {
 	fill, stroke := true, false
 	return GraphicObject{Type: "PathObject", PathObject: PathObject{Boundary: editorBoxString(box), Fill: &fill, Stroke: &stroke, FillColor: &FillColor{Value: color}, AbbreviatedData: fmt.Sprintf("M 0 0 L %s 0 L %s %s L 0 %s C", ofdNumber(box.W), ofdNumber(box.W), ofdNumber(box.H), ofdNumber(box.H))}}

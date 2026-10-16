@@ -21,15 +21,15 @@ import (
 	"path"
 )
 
-// TemplateReference 普通页面的模板引用，保留原始模板标识及绑定层次。
-// PageIndex为当前文档的零基页面索引，PageID为页面标识；ZOrder为空表示沿用模板默认层次。
+// TemplateReference 普通页面的模板引用，保留原始模板标识及绑定层次
+// PageIndex为当前文档的零基页面索引，PageID为页面标识；ZOrder为空表示沿用模板默认层次
 type TemplateReference struct {
 	PageIndex int
 	PageID    string
 	Template
 }
 
-// Templates 返回当前文档及所选版本的模板定义副本，省略的ZOrder返回Background。
+// Templates 返回当前文档及所选版本的模板定义副本，省略的ZOrder返回Background
 // 返回: []TemplatePage 独立模板清单, error 文档读取错误
 func (e *Editor) Templates() ([]TemplatePage, error) {
 	if e.source == nil {
@@ -42,7 +42,7 @@ func (e *Editor) Templates() ([]TemplatePage, error) {
 	return result, nil
 }
 
-// Templates 直接返回当前文档及版本的模板清单，不创建编辑器，省略的ZOrder返回Background。
+// Templates 直接返回当前文档及版本的模板清单，不创建编辑器，省略的ZOrder返回Background
 // 返回: []TemplatePage 独立模板定义副本, error 文档读取错误
 func (r *Reader) Templates() ([]TemplatePage, error) {
 	doc, err := r.Doc()
@@ -56,7 +56,7 @@ func (r *Reader) Templates() ([]TemplatePage, error) {
 	return result, nil
 }
 
-// PageTemplates 按文件顺序返回普通页面模板引用，ZOrder为空表示沿用模板默认层次。
+// PageTemplates 按文件顺序返回普通页面模板引用，ZOrder为空表示沿用模板默认层次
 // 入参: page 零基页面索引
 // 返回: []Template 独立引用清单, error 页面读取错误
 func (e *Editor) PageTemplates(page int) ([]Template, error) {
@@ -67,8 +67,8 @@ func (e *Editor) PageTemplates(page int) ([]Template, error) {
 	return append([]Template{}, p.Template...), nil
 }
 
-// TemplateReferences 返回当前文档及所选版本全部普通页面的模板引用副本，不包含模板页自身引用。
-// 清单按页面索引及页内引用文件顺序排列，无引用时返回空切片，读取失败时不返回部分结果。
+// TemplateReferences 返回当前文档及所选版本全部普通页面的模板引用副本，不包含模板页自身引用
+// 清单按页面索引及页内引用文件顺序排列，无引用时返回空切片，读取失败时不返回部分结果
 // 返回: []TemplateReference 引用定位及绑定层次清单, error 页面读取错误
 func (e *Editor) TemplateReferences() ([]TemplateReference, error) {
 	result := []TemplateReference{}
@@ -84,8 +84,8 @@ func (e *Editor) TemplateReferences() ([]TemplateReference, error) {
 	return result, nil
 }
 
-// TemplateReferences 只读枚举当前文档及所选版本全部普通页面的模板引用，不创建编辑器或遍历其他文档、版本。
-// 返回独立副本，按页面索引及页内引用文件顺序排列；无引用时返回空切片，读取失败时不返回部分结果。
+// TemplateReferences 只读枚举当前文档及所选版本全部普通页面的模板引用，不创建编辑器或遍历其他文档、版本
+// 返回独立副本，按页面索引及页内引用文件顺序排列；无引用时返回空切片，读取失败时不返回部分结果
 // 返回: []TemplateReference 引用定位及绑定层次清单, error 文档或页面读取错误
 func (r *Reader) TemplateReferences() ([]TemplateReference, error) {
 	doc, err := r.Doc()
@@ -105,7 +105,7 @@ func (r *Reader) TemplateReferences() ([]TemplateReference, error) {
 	return result, nil
 }
 
-// BindTemplate 在页面末尾绑定模板，空ZOrder沿用模板默认层次，重复绑定拒绝。
+// BindTemplate 在页面末尾绑定模板，空ZOrder沿用模板默认层次，重复绑定拒绝
 // 入参: page 页面索引, id 模板标识, zOrder 页面覆盖层次
 // 返回: error 标识、层次或重复绑定错误
 func (e *Editor) BindTemplate(page int, id, zOrder string) error {
@@ -139,7 +139,7 @@ func (e *Editor) BindTemplate(page int, id, zOrder string) error {
 	})
 }
 
-// UnbindTemplate 解除当前页面的唯一指定模板引用，保留模板定义与其他页面绑定。
+// UnbindTemplate 解除当前页面的唯一指定模板引用，保留模板定义与其他页面绑定
 // 入参: page 页面索引, id 模板标识
 // 返回: error 引用或结构错误
 func (e *Editor) UnbindTemplate(page int, id string) error {
@@ -152,7 +152,7 @@ func (e *Editor) UnbindTemplate(page int, id string) error {
 	})
 }
 
-// SetPageTemplateZOrder 设置页面模板的前景或背景层次，空值删除覆盖以沿用模板默认值。
+// SetPageTemplateZOrder 设置页面模板的前景或背景层次，空值删除覆盖以沿用模板默认值
 // 入参: page 页面索引, id 模板标识, zOrder 页面覆盖层次
 // 返回: error 引用、层次或结构错误
 func (e *Editor) SetPageTemplateZOrder(page int, id, zOrder string) error {
@@ -171,7 +171,7 @@ func (e *Editor) SetPageTemplateZOrder(page int, id, zOrder string) error {
 	})
 }
 
-// MovePageTemplate 调整引用在页面全部模板引用中的零基文件顺序，同层次引用按此顺序绘制。
+// MovePageTemplate 调整引用在页面全部模板引用中的零基文件顺序，同层次引用按此顺序绘制
 // 入参: page 页面索引, id 模板标识, order 全部引用中的目标顺序
 // 返回: error 引用、顺序或结构错误
 func (e *Editor) MovePageTemplate(page int, id string, order int) error {
@@ -184,9 +184,9 @@ func (e *Editor) MovePageTemplate(page int, id string, order int) error {
 	})
 }
 
-// CreateTemplateFromPage 复制指定普通页面自身内容为模板，不改变源页或自动绑定，空层次采用Background。
-// 复用页面复制的标识重映射并保留原XML及资源；模板引用不递归复制，注解和签章不属于模板内容。
-// 模板编辑可使用普通页面副本及现有编辑接口，再通过ReplaceTemplateFromPage保持模板身份提交。
+// CreateTemplateFromPage 复制指定普通页面自身内容为模板，不改变源页或自动绑定，空层次采用Background
+// 复用页面复制的标识重映射并保留原XML及资源；模板引用不递归复制，注解和签章不属于模板内容
+// 模板编辑可使用普通页面副本及现有编辑接口，再通过ReplaceTemplateFromPage保持模板身份提交
 // 入参: page 源页面索引, name 模板名称, zOrder 默认前景背景层次
 // 返回: string 新模板标识, error 页面、标识重映射或提交错误
 func (e *Editor) CreateTemplateFromPage(page int, name, zOrder string) (string, error) {
@@ -300,7 +300,7 @@ func (e *Editor) CreateTemplateFromPage(page int, name, zOrder string) (string, 
 	return id, nil
 }
 
-// RenameTemplate 修改当前文档模板名称，空字符串清空名称，不修改共享模板内容。
+// RenameTemplate 修改当前文档模板名称，空字符串清空名称，不修改共享模板内容
 // 入参: id 模板标识, name 模板名称
 // 返回: error 标识或结构错误
 func (e *Editor) RenameTemplate(id, name string) error {
@@ -312,7 +312,7 @@ func (e *Editor) RenameTemplate(id, name string) error {
 	})
 }
 
-// SetTemplateZOrder 设置模板默认前景背景层次，不修改页面显式覆盖，空值采用Background。
+// SetTemplateZOrder 设置模板默认前景背景层次，不修改页面显式覆盖，空值采用Background
 // 入参: id 模板标识, zOrder 默认前景背景层次
 // 返回: error 标识、层次或结构错误
 func (e *Editor) SetTemplateZOrder(id, zOrder string) error {
@@ -328,8 +328,8 @@ func (e *Editor) SetTemplateZOrder(id, zOrder string) error {
 	})
 }
 
-// ReplaceTemplateFromPage 复制普通页自身内容替换模板内容，保持模板标识、名称、层次及全部绑定。
-// 源页及其他文档和历史版本保持不变，整个替换仅产生一条撤销记录。
+// ReplaceTemplateFromPage 复制普通页自身内容替换模板内容，保持模板标识、名称、层次及全部绑定
+// 源页及其他文档和历史版本保持不变，整个替换仅产生一条撤销记录
 // 入参: id 目标模板标识, page 普通源页面索引
 // 返回: error 标识、复制或提交错误
 func (e *Editor) ReplaceTemplateFromPage(id string, page int) error {
@@ -382,7 +382,7 @@ func (e *Editor) ReplaceTemplateFromPage(id string, page int) error {
 	})
 }
 
-// DeleteTemplate 删除当前文档未被普通页面引用的模板定义，保留可能被其他文档、版本或扩展引用的文件。
+// DeleteTemplate 删除当前文档未被普通页面引用的模板定义，保留可能被其他文档、版本或扩展引用的文件
 // 入参: id 模板标识
 // 返回: error 标识、被引用或结构错误
 func (e *Editor) DeleteTemplate(id string) error {
@@ -406,7 +406,7 @@ func (e *Editor) DeleteTemplate(id string) error {
 	})
 }
 
-// editorTemplateOrder 将省略的模板默认层次规范化为Background。
+// editorTemplateOrder 将省略的模板默认层次规范化为Background
 // 入参: value 原始层次
 // 返回: string 有效默认层次
 func editorTemplateOrder(value string) string {
@@ -416,14 +416,14 @@ func editorTemplateOrder(value string) string {
 	return value
 }
 
-// validEditorTemplateOrder 校验模板前景背景枚举及未指定状态。
+// validEditorTemplateOrder 校验模板前景背景枚举及未指定状态
 // 入参: value 层次值
 // 返回: bool 是否有效
 func validEditorTemplateOrder(value string) bool {
 	return value == "" || value == "Background" || value == "Foreground"
 }
 
-// editorTemplateDefinition 查找当前阅读器中的唯一模板定义，拒绝缺失及歧义标识。
+// editorTemplateDefinition 查找当前阅读器中的唯一模板定义，拒绝缺失及歧义标识
 // 入参: reader 当前阅读器, id 模板标识
 // 返回: TemplatePage 定义副本, error 文档或标识错误
 func editorTemplateDefinition(reader *Reader, id string) (TemplatePage, error) {
@@ -446,7 +446,7 @@ func editorTemplateDefinition(reader *Reader, id string) (TemplatePage, error) {
 	return result, nil
 }
 
-// editTemplateDefinition 在事务快照中局部修改模板声明，保留命名空间、扩展及其他版本。
+// editTemplateDefinition 在事务快照中局部修改模板声明，保留命名空间、扩展及其他版本
 // 入参: id 模板标识, edit 文档原文修改回调
 // 返回: error 读取、修改或提交错误
 func (e *Editor) editTemplateDefinition(id string, edit func(*Reader, []byte, *editorXML) ([]byte, error)) error {

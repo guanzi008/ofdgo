@@ -140,7 +140,7 @@ type CompositeGraphicUnit struct {
 	extentSet            bool
 }
 
-// UnmarshalXML 解析资源文件，隔离外部命名空间的同名集合。
+// UnmarshalXML 解析资源文件，隔离外部命名空间的同名集合
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解码错误
 func (res *Res) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
@@ -168,14 +168,14 @@ func (res *Res) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	})
 }
 
-// UnmarshalXML 解析颜色空间集合。
+// UnmarshalXML 解析颜色空间集合
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解码错误
 func (spaces *ColorSpaces) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	return decodeOFDCollection(d, start, "ColorSpace", &spaces.ColorSpace)
 }
 
-// UnmarshalXML 解析颜色空间属性及调色板。
+// UnmarshalXML 解析颜色空间属性及调色板
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解码错误
 func (space *ColorSpace) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
@@ -195,14 +195,14 @@ func (space *ColorSpace) UnmarshalXML(d *xml.Decoder, start xml.StartElement) er
 	})
 }
 
-// UnmarshalXML 解析字体集合。
+// UnmarshalXML 解析字体集合
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解码错误
 func (fonts *Fonts) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	return decodeOFDCollection(d, start, "Font", &fonts.Font)
 }
 
-// UnmarshalXML 解析字体声明及内嵌字体路径。
+// UnmarshalXML 解析字体声明及内嵌字体路径
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解码错误
 func (font *Font) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
@@ -238,14 +238,14 @@ func (font *Font) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	})
 }
 
-// UnmarshalXML 解析多媒体集合。
+// UnmarshalXML 解析多媒体集合
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解码错误
 func (media *MultiMedias) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	return decodeOFDCollection(d, start, "MultiMedia", &media.MultiMedia)
 }
 
-// UnmarshalXML 解析多媒体声明及包内文件路径。
+// UnmarshalXML 解析多媒体声明及包内文件路径
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解码错误
 func (media *MultiMedia) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
@@ -258,14 +258,14 @@ func (media *MultiMedia) UnmarshalXML(d *xml.Decoder, start xml.StartElement) er
 	})
 }
 
-// UnmarshalXML 解析绘制参数集合。
+// UnmarshalXML 解析绘制参数集合
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解码错误
 func (params *DrawParams) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	return decodeOFDCollection(d, start, "DrawParam", &params.DrawParam)
 }
 
-// UnmarshalXML 解析复合图元资源集合。
+// UnmarshalXML 解析复合图元资源集合
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解码错误
 func (units *CompositeGraphicUnits) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {

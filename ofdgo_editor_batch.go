@@ -118,7 +118,7 @@ func (e *Editor) CopyObjectsContext(ctx context.Context, page int, objects []Gra
 	return ids, nil
 }
 
-// copyObjectsContext 复制标准对象及资源来源，由上层按需同步富文本标引。
+// copyObjectsContext 复制标准对象及资源来源，由上层按需同步富文本标引
 // 入参: ctx 取消上下文, page 目标页, objects 对象快照, dx 横向位移, dy 纵向位移
 // 返回: []string 新对象标识, error 校验或取消错误
 func (e *Editor) copyObjectsContext(ctx context.Context, page int, objects []GraphicObject, dx, dy float64) ([]string, error) {
@@ -529,7 +529,7 @@ func (e *Editor) DeleteObjects(page int, ids []string) error {
 	})
 }
 
-// deleteObjects 删除已选择图元，由上层同步必要的富文本标引。
+// deleteObjects 删除已选择图元，由上层同步必要的富文本标引
 // 入参: page 页面索引, ids 对象标识
 // 返回: error 校验或删除错误
 func (e *Editor) deleteObjects(page int, ids []string) error {

@@ -28,16 +28,16 @@ import (
 	"time"
 )
 
-// invoiceXBRL 表示XBRL实例命名空间。
+// invoiceXBRL 表示XBRL实例命名空间
 const invoiceXBRL = "http://www.xbrl.org/2003/instance"
 
-// invoiceXSI 表示XML Schema实例命名空间。
+// invoiceXSI 表示XML Schema实例命名空间
 const invoiceXSI = "http://www.w3.org/2001/XMLSchema-instance"
 
-// invoiceDecimalPattern 仅接受XML十进制词法。
+// invoiceDecimalPattern 仅接受XML十进制词法
 var invoiceDecimalPattern = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$`)
 
-// invoiceXMLNode 保存有界XML节点及原始文本切片。
+// invoiceXMLNode 保存有界XML节点及原始文本切片
 type invoiceXMLNode struct {
 	name     xml.Name
 	attrs    []xml.Attr
@@ -52,23 +52,23 @@ type invoiceXMLNode struct {
 	parts    []invoiceXMLPart
 }
 
-// invoiceXMLPart 保留混合内容顺序，供类型化维度规范化使用。
+// invoiceXMLPart 保留混合内容顺序，供类型化维度规范化使用
 type invoiceXMLPart struct {
 	text  string
 	child *invoiceXMLNode
 }
 
-// invoiceDecimalEqual 精确比较十进制词法值，不接受指数或分数。
-// 入参: a、b 原始十进制文本。
-// 返回: bool 两个合法值是否相等。
+// invoiceDecimalEqual 精确比较十进制词法值，不接受指数或分数
+// 入参: a、b 原始十进制文本
+// 返回: bool 两个合法值是否相等
 func invoiceDecimalEqual(a, b string) bool {
 	x, y := invoiceDecimal(a), invoiceDecimal(b)
 	return x != nil && y != nil && x.Cmp(y) == 0
 }
 
-// invoiceDecimal 解析有界十进制文本。
-// 入参: s 原始文本。
-// 返回: *big.Rat 精确数值，非法时为空。
+// invoiceDecimal 解析有界十进制文本
+// 入参: s 原始文本
+// 返回: *big.Rat 精确数值，非法时为空
 func invoiceDecimal(s string) *big.Rat {
 	s = strings.TrimSpace(s)
 	if len(s) > 256 || !invoiceDecimalPattern.MatchString(s) {
@@ -81,9 +81,9 @@ func invoiceDecimal(s string) *big.Rat {
 	return r
 }
 
-// invoiceXMLAttr 按命名空间读取属性。
-// 入参: n 节点，space 命名空间，name 属性名。
-// 返回: string 属性值。
+// invoiceXMLAttr 按命名空间读取属性
+// 入参: n 节点，space 命名空间，name 属性名
+// 返回: string 属性值
 func invoiceXMLAttr(n *invoiceXMLNode, space, name string) string {
 	for _, a := range n.attrs {
 		if a.Name.Space == space && a.Name.Local == name {
@@ -93,9 +93,9 @@ func invoiceXMLAttr(n *invoiceXMLNode, space, name string) string {
 	return ""
 }
 
-// invoiceXMLHasAttr 区分缺省属性与空字符串属性。
-// 入参: n 节点，space 命名空间，name 属性名。
-// 返回: 属性是否存在。
+// invoiceXMLHasAttr 区分缺省属性与空字符串属性
+// 入参: n 节点，space 命名空间，name 属性名
+// 返回: 属性是否存在
 func invoiceXMLHasAttr(n *invoiceXMLNode, space, name string) bool {
 	for _, a := range n.attrs {
 		if a.Name == (xml.Name{Space: space, Local: name}) {
@@ -105,9 +105,9 @@ func invoiceXMLHasAttr(n *invoiceXMLNode, space, name string) bool {
 	return false
 }
 
-// invoiceXMLTree 读取受限XML树，不解析外部实体。
-// 入参: ctx 取消上下文，data 文档字节。
-// 返回: 根节点及解析错误。
+// invoiceXMLTree 读取受限XML树，不解析外部实体
+// 入参: ctx 取消上下文，data 文档字节
+// 返回: 根节点及解析错误
 func invoiceXMLTree(ctx context.Context, data []byte) (*invoiceXMLNode, error) {
 	if len(data) > 16<<20 {
 		return nil, fmt.Errorf("invoice XML exceeds size limit")
@@ -215,9 +215,9 @@ func invoiceXMLTree(ctx context.Context, data []byte) (*invoiceXMLNode, error) {
 	return root, nil
 }
 
-// invoiceTaxonomy 识别已核实的官方命名空间。
-// 入参: ns 命名空间URI。
-// 返回: 票种及版本，未知时为空。
+// invoiceTaxonomy 识别已核实的官方命名空间
+// 入参: ns 命名空间URI
+// 返回: 票种及版本，未知时为空
 func invoiceTaxonomy(ns string) (string, string) {
 	switch ns {
 	case "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/inv":
@@ -234,9 +234,9 @@ func invoiceTaxonomy(ns string) (string, string) {
 	return "", ""
 }
 
-// parseInvoiceXML 解析明确识别的发票格式，未知格式仅产生诊断。
-// 入参: ctx 取消上下文，data XML数据，source 来源。
-// 返回: InvoiceReport 独立候选与诊断，error XML或限额错误。
+// parseInvoiceXML 解析明确识别的发票格式，未知格式仅产生诊断
+// 入参: ctx 取消上下文，data XML数据，source 来源
+// 返回: InvoiceReport 独立候选与诊断，error XML或限额错误
 func parseInvoiceXML(ctx context.Context, data []byte, source InvoiceSource) (InvoiceReport, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -498,9 +498,9 @@ func parseInvoiceXML(ctx context.Context, data []byte, source InvoiceSource) (In
 	return report, nil
 }
 
-// invoiceXMLField 映射官方分类标准明确规定的概念。
-// 入参: inv 发票，kind 标准类别，name 概念名。
-// 返回: 对应字段地址，未映射时为空。
+// invoiceXMLField 映射官方分类标准明确规定的概念
+// 入参: inv 发票，kind 标准类别，name 概念名
+// 返回: 对应字段地址，未映射时为空
 func invoiceXMLField(inv *Invoice, kind, name string) *string {
 	if kind == "inv" {
 		switch name {
@@ -588,9 +588,9 @@ func invoiceXMLField(inv *Invoice, kind, name string) *string {
 	return nil
 }
 
-// invoiceSortedNodes 为定义生成稳定顺序。
-// 入参: nodes 定义索引。
-// 返回: 排序后的标识。
+// invoiceSortedNodes 为定义生成稳定顺序
+// 入参: nodes 定义索引
+// 返回: 排序后的标识
 func invoiceSortedNodes(nodes map[string]*invoiceXMLNode) []string {
 	ids := make([]string, 0, len(nodes))
 	for id := range nodes {
@@ -600,9 +600,9 @@ func invoiceSortedNodes(nodes map[string]*invoiceXMLNode) []string {
 	return ids
 }
 
-// invoiceQName 依据节点处的前缀绑定展开QName。
-// 入参: n 节点，value QName文本。
-// 返回: 展开名称及有效标志。
+// invoiceQName 依据节点处的前缀绑定展开QName
+// 入参: n 节点，value QName文本
+// 返回: 展开名称及有效标志
 func invoiceQName(n *invoiceXMLNode, value string) (xml.Name, bool) {
 	value = strings.TrimSpace(value)
 	parts := strings.Split(value, ":")
@@ -626,9 +626,9 @@ func invoiceQName(n *invoiceXMLNode, value string) (xml.Name, bool) {
 	return xml.Name{Space: ns, Local: local}, true
 }
 
-// invoiceNCName 验证XML 1.0不含冒号的名称。
-// 入参: name 名称文本。
-// 返回: 是否满足NCName词法。
+// invoiceNCName 验证XML 1.0不含冒号的名称
+// 入参: name 名称文本
+// 返回: 是否满足NCName词法
 func invoiceNCName(name string) bool {
 	if name == "" {
 		return false
@@ -642,9 +642,9 @@ func invoiceNCName(name string) bool {
 	return true
 }
 
-// invoicePeriodTime 解析标准期间的日期或日期时间。
-// 入参: value 日期文本。
-// 返回: 时刻及有效标志。
+// invoicePeriodTime 解析标准期间的日期或日期时间
+// 入参: value 日期文本
+// 返回: 时刻及有效标志
 func invoicePeriodTime(value string) (time.Time, bool) {
 	value = strings.TrimSpace(value)
 	if len(value) > 64 {
@@ -668,14 +668,14 @@ func invoicePeriodTime(value string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// invoiceExpanded 返回不依赖前缀的名称表示。
-// 入参: name 展开名称。
-// 返回: Clark名称。
+// invoiceExpanded 返回不依赖前缀的名称表示
+// 入参: name 展开名称
+// 返回: Clark名称
 func invoiceExpanded(name xml.Name) string { return "{" + name.Space + "}" + name.Local }
 
-// invoiceCanonicalXML 以展开名称序列化类型化维度，保留混合文本顺序。
-// 入参: n 类型化维度域元素。
-// 返回: 不依赖输入元素前缀的XML。
+// invoiceCanonicalXML 以展开名称序列化类型化维度，保留混合文本顺序
+// 入参: n 类型化维度域元素
+// 返回: 不依赖输入元素前缀的XML
 func invoiceCanonicalXML(n *invoiceXMLNode) string {
 	var b bytes.Buffer
 	e := xml.NewEncoder(&b)
@@ -709,9 +709,9 @@ func invoiceCanonicalXML(n *invoiceXMLNode) string {
 	return b.String()
 }
 
-// invoiceChildren 按展开名称选择直接子节点。
-// 入参: n 父节点，space 命名空间，local 本地名。
-// 返回: 匹配节点。
+// invoiceChildren 按展开名称选择直接子节点
+// 入参: n 父节点，space 命名空间，local 本地名
+// 返回: 匹配节点
 func invoiceChildren(n *invoiceXMLNode, space, local string) []*invoiceXMLNode {
 	var result []*invoiceXMLNode
 	for _, c := range n.children {
@@ -722,9 +722,9 @@ func invoiceChildren(n *invoiceXMLNode, space, local string) []*invoiceXMLNode {
 	return result
 }
 
-// invoiceContext 校验主体、期间及维度，不把不同上下文合并。
-// 入参: n 上下文节点。
-// 返回: 维度及有效标志。
+// invoiceContext 校验主体、期间及维度，不把不同上下文合并
+// 入参: n 上下文节点
+// 返回: 维度及有效标志
 func invoiceContext(n *invoiceXMLNode) ([]InvoiceDimension, bool) {
 	entities, periods := invoiceChildren(n, invoiceXBRL, "entity"), invoiceChildren(n, invoiceXBRL, "period")
 	if len(entities) != 1 || len(periods) != 1 {
@@ -788,9 +788,9 @@ func invoiceContext(n *invoiceXMLNode) ([]InvoiceDimension, bool) {
 	return dims, valid
 }
 
-// invoiceUnit 校验单位结构并展开所有度量QName。
-// 入参: n 单位定义。
-// 返回: 规范单位表达及有效标志。
+// invoiceUnit 校验单位结构并展开所有度量QName
+// 入参: n 单位定义
+// 返回: 规范单位表达及有效标志
 func invoiceUnit(n *invoiceXMLNode) (string, bool) {
 	measures := func(c *invoiceXMLNode) (string, bool) {
 		if len(c.children) == 0 {
@@ -823,9 +823,9 @@ func invoiceUnit(n *invoiceXMLNode) (string, bool) {
 	return measures(n)
 }
 
-// invoiceNumeric 判断已核实标准中的十进制概念。
-// 入参: kind 标准类别，name 概念名称。
-// 返回: 是否为数值概念。
+// invoiceNumeric 判断已核实标准中的十进制概念
+// 入参: kind 标准类别，name 概念名称
+// 返回: 是否为数值概念
 func invoiceNumeric(kind, name string) bool {
 	if name == "RecordedAmount" {
 		return true
@@ -860,9 +860,9 @@ func invoiceNumeric(kind, name string) bool {
 	return false
 }
 
-// invoiceAccuracy 校验XBRL精度属性，precision允许零。
-// 入参: value 原文，nonnegative 是否要求非负整数。
-// 返回: 是否为整数或INF。
+// invoiceAccuracy 校验XBRL精度属性，precision允许零
+// 入参: value 原文，nonnegative 是否要求非负整数
+// 返回: 是否为整数或INF
 func invoiceAccuracy(value string, nonnegative bool) bool {
 	value = strings.TrimSpace(value)
 	if value == "INF" {
@@ -888,16 +888,16 @@ func invoiceAccuracy(value string, nonnegative bool) bool {
 	return !nonnegative || !negative || !nonzero
 }
 
-// invoiceMonetary 区分货币事实与数量、百分率。
-// 入参: kind 类别，name 概念名称。
-// 返回: 是否为已映射货币概念。
+// invoiceMonetary 区分货币事实与数量、百分率
+// 入参: kind 类别，name 概念名称
+// 返回: 是否为已映射货币概念
 func invoiceMonetary(kind, name string) bool {
 	return invoiceNumeric(kind, name) && name != "QuantityOfGoodsOrServices" && name != "VatRate" && name != "TaxRate"
 }
 
-// invoiceCurrencyUnit 检查单一ISO币种度量，不猜测币种。
-// 入参: unit 展开的单位表示。
-// 返回: 是否为三位大写币种度量。
+// invoiceCurrencyUnit 检查单一ISO币种度量，不猜测币种
+// 入参: unit 展开的单位表示
+// 返回: 是否为三位大写币种度量
 func invoiceCurrencyUnit(unit string) bool {
 	const prefix = "{http://www.xbrl.org/2003/iso4217}"
 	if !strings.HasPrefix(unit, prefix) {
@@ -907,16 +907,16 @@ func invoiceCurrencyUnit(unit string) bool {
 	return len(code) == 3 && code[0] >= 'A' && code[0] <= 'Z' && code[1] >= 'A' && code[1] <= 'Z' && code[2] >= 'A' && code[2] <= 'Z'
 }
 
-// invoiceItemTuple 识别明细元组，不把会计分录当作商品。
-// 入参: kind 标准类别，name 元组名。
-// 返回: 是否为明细。
+// invoiceItemTuple 识别明细元组，不把会计分录当作商品
+// 入参: kind 标准类别，name 元组名
+// 返回: 是否为明细
 func invoiceItemTuple(kind, name string) bool {
 	return kind == "atr" && name == "DetailInformationOfAirTicketTuple" || kind == "inv" && (name == "InformationOfTaxableGoodsOrServicesDetailItemsTuple" || name == "InformationOfTollFeeDetailItemsTuple")
 }
 
-// invoiceItemField 映射增值税商品明细公共字段。
-// 入参: item 明细，kind 类别，name 概念名。
-// 返回: 字段地址，其他明细仅保留事实。
+// invoiceItemField 映射增值税商品明细公共字段
+// 入参: item 明细，kind 类别，name 概念名
+// 返回: 字段地址，其他明细仅保留事实
 func invoiceItemField(item *InvoiceItem, kind, name string) *string {
 	if kind != "inv" {
 		return nil
@@ -942,9 +942,9 @@ func invoiceItemField(item *InvoiceItem, kind, name string) *string {
 	return nil
 }
 
-// invoiceAmountCheck 精确检查明确的价税合计关系，不推算航空费用。
-// 入参: inv 发票，report 诊断目标，source 来源。
-// 返回: 无。
+// invoiceAmountCheck 精确检查明确的价税合计关系，不推算航空费用
+// 入参: inv 发票，report 诊断目标，source 来源
+// 返回: 无
 func invoiceAmountCheck(inv *Invoice, report *InvoiceReport, source InvoiceSource) {
 	if inv.Kind != "inv" && inv.Kind != "einv" {
 		return
@@ -955,9 +955,9 @@ func invoiceAmountCheck(inv *Invoice, report *InvoiceReport, source InvoiceSourc
 	}
 }
 
-// invoicePlainXML 解析官方数电发票指南中的无命名空间0.3版本。
-// 入参: ctx 上下文，root 根节点，source 来源。
-// 返回: 发票及诊断，取消错误。
+// invoicePlainXML 解析官方数电发票指南中的无命名空间0.3版本
+// 入参: ctx 上下文，root 根节点，source 来源
+// 返回: 发票及诊断，取消错误
 func invoicePlainXML(ctx context.Context, root *invoiceXMLNode, source InvoiceSource) (InvoiceReport, error) {
 	report := InvoiceReport{}
 	headers := invoiceChildren(root, "", "Header")
@@ -1044,9 +1044,9 @@ func invoicePlainXML(ctx context.Context, root *invoiceXMLNode, source InvoiceSo
 	return report, nil
 }
 
-// invoicePlainField 按官方样例中的完整路径映射字段。
-// 入参: inv 发票，item 当前明细，path 完整无命名空间路径。
-// 返回: 字段地址及数值标志。
+// invoicePlainField 按官方样例中的完整路径映射字段
+// 入参: inv 发票，item 当前明细，path 完整无命名空间路径
+// 返回: 字段地址及数值标志
 func invoicePlainField(inv *Invoice, item *InvoiceItem, path string) (*string, bool) {
 	switch path {
 	case "/EInvoice/TaxSupervisionInfo/InvoiceNumber":

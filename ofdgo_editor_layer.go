@@ -23,8 +23,8 @@ import (
 	"strconv"
 )
 
-// LayerInfo 描述普通页面图层，Order为同类型零基顺序，ObjectCount包含页块中的图元。
-// ObjectIDs按层内文件顺序列出图元标识，包含PageBlock成员但不展开复合图元，空层返回空切片。
+// LayerInfo 描述普通页面图层，Order为同类型零基顺序，ObjectCount包含页块中的图元
+// ObjectIDs按层内文件顺序列出图元标识，包含PageBlock成员但不展开复合图元，空层返回空切片
 type LayerInfo struct {
 	ID          string
 	Type        string
@@ -34,7 +34,7 @@ type LayerInfo struct {
 	ObjectIDs   []string
 }
 
-// Layers 按文件顺序返回普通页面图层，省略的类型规范化为Body，不包含模板图层。
+// Layers 按文件顺序返回普通页面图层，省略的类型规范化为Body，不包含模板图层
 // 入参: page 零基页面索引
 // 返回: []LayerInfo 独立图层清单, error 页面读取错误
 func (e *Editor) Layers(page int) ([]LayerInfo, error) {
@@ -45,7 +45,7 @@ func (e *Editor) Layers(page int) ([]LayerInfo, error) {
 	return editorLayerInfos(p), nil
 }
 
-// Layers 直接读取普通页面图层，不创建编辑器或分配新标识，返回值不持有页面可变数据。
+// Layers 直接读取普通页面图层，不创建编辑器或分配新标识，返回值不持有页面可变数据
 // 入参: page 零基页面索引
 // 返回: []LayerInfo 按文件顺序排列的图层, error 页面读取错误
 func (r *Reader) Layers(page int) ([]LayerInfo, error) {
@@ -56,7 +56,7 @@ func (r *Reader) Layers(page int) ([]LayerInfo, error) {
 	return editorLayerInfos(p), nil
 }
 
-// editorLayerInfos 将页面图层投影为不共享可变容器的管理清单。
+// editorLayerInfos 将页面图层投影为不共享可变容器的管理清单
 // 入参: p 已读取的页面
 // 返回: []LayerInfo 图层清单
 func editorLayerInfos(p *PageContent) []LayerInfo {
@@ -74,7 +74,7 @@ func editorLayerInfos(p *PageContent) []LayerInfo {
 	return result
 }
 
-// AddLayer 追加空图层并返回新标识，空类型采用Body，空DrawParam表示不设置继承参数。
+// AddLayer 追加空图层并返回新标识，空类型采用Body，空DrawParam表示不设置继承参数
 // 入参: page 页面索引, layerType 图层类型, drawParam 绘制参数标识
 // 返回: string 新图层标识, error 类型、资源或结构错误
 func (e *Editor) AddLayer(page int, layerType, drawParam string) (string, error) {
@@ -120,7 +120,7 @@ func (e *Editor) AddLayer(page int, layerType, drawParam string) (string, error)
 	return id, nil
 }
 
-// SetLayerType 设置图层类型，不改变图元坐标及绘制参数；同类型顺序由文件位置决定。
+// SetLayerType 设置图层类型，不改变图元坐标及绘制参数；同类型顺序由文件位置决定
 // 入参: page 页面索引, id 图层标识, layerType 图层类型
 // 返回: error 标识、类型或结构错误
 func (e *Editor) SetLayerType(page int, id, layerType string) error {
@@ -140,7 +140,7 @@ func (e *Editor) SetLayerType(page int, id, layerType string) error {
 	})
 }
 
-// SetLayerDrawParam 设置图层绘制参数，空标识清除引用，图元局部覆盖保持不变。
+// SetLayerDrawParam 设置图层绘制参数，空标识清除引用，图元局部覆盖保持不变
 // 入参: page 页面索引, id 图层标识, drawParam 绘制参数标识
 // 返回: error 标识、资源或结构错误
 func (e *Editor) SetLayerDrawParam(page int, id, drawParam string) error {
@@ -159,7 +159,7 @@ func (e *Editor) SetLayerDrawParam(page int, id, drawParam string) error {
 	})
 }
 
-// MoveLayer 调整图层在同类型图层中的零基顺序，保留其他类型及扩展节点的位置。
+// MoveLayer 调整图层在同类型图层中的零基顺序，保留其他类型及扩展节点的位置
 // 入参: page 页面索引, id 图层标识, order 同类型目标顺序
 // 返回: error 标识、顺序或结构错误
 func (e *Editor) MoveLayer(page int, id string, order int) error {
@@ -178,7 +178,7 @@ func (e *Editor) MoveLayer(page int, id string, order int) error {
 	})
 }
 
-// DeleteLayer 删除空图层，含图元、页块或扩展子元素时拒绝；可先在Transaction中迁移图元。
+// DeleteLayer 删除空图层，含图元、页块或扩展子元素时拒绝；可先在Transaction中迁移图元
 // 入参: page 页面索引, id 图层标识
 // 返回: error 标识、非空图层或结构错误
 func (e *Editor) DeleteLayer(page int, id string) error {
@@ -201,8 +201,8 @@ func (e *Editor) DeleteLayer(page int, id string) error {
 	})
 }
 
-// MoveObjectsToLayer 将普通页面选区按原绘制顺序追加到目标层，保持标识、坐标、扩展及有效样式。
-// 不接受模板或注解标识；页块成员须先通过已有复合编辑接口处理，失败不产生部分移动。
+// MoveObjectsToLayer 将普通页面选区按原绘制顺序追加到目标层，保持标识、坐标、扩展及有效样式
+// 不接受模板或注解标识；页块成员须先通过已有复合编辑接口处理，失败不产生部分移动
 // 入参: page 页面索引, ids 不重复的普通图元标识, layerID 目标图层标识
 // 返回: error 选区、继承参数或结构错误
 func (e *Editor) MoveObjectsToLayer(page int, ids []string, layerID string) error {
@@ -295,7 +295,7 @@ func (e *Editor) MoveObjectsToLayer(page int, ids []string, layerID string) erro
 	})
 }
 
-// editorLayerType 将标准省略类型规范化，不改变已明确指定的类型。
+// editorLayerType 将标准省略类型规范化，不改变已明确指定的类型
 // 入参: value 原类型
 // 返回: string 有效类型
 func editorLayerType(value string) string {
@@ -305,14 +305,14 @@ func editorLayerType(value string) string {
 	return value
 }
 
-// validEditorLayerType 按正文表15校验可管理的图层类型。
+// validEditorLayerType 按正文表15校验可管理的图层类型
 // 入参: value 类型值
 // 返回: bool 是否为支持的标准类型
 func validEditorLayerType(value string) bool {
 	return value == "Body" || value == "Background" || value == "Foreground"
 }
 
-// validateLayerDrawParam 在目标页面资源环境中核验完整绘制参数继承链。
+// validateLayerDrawParam 在目标页面资源环境中核验完整绘制参数继承链
 // 入参: page 页面索引, id 绘制参数标识
 // 返回: error 页面或资源错误
 func (e *Editor) validateLayerDrawParam(page int, id string) error {
@@ -323,7 +323,7 @@ func (e *Editor) validateLayerDrawParam(page int, id string) error {
 	return err
 }
 
-// editLayerPage 在完整包快照上编辑页面原文，事务失败回滚，提交时隔离共享页面及历史版本。
+// editLayerPage 在完整包快照上编辑页面原文，事务失败回滚，提交时隔离共享页面及历史版本
 // 入参: page 页面索引, edit 页面原文修改回调
 // 返回: error 读取、修改或提交错误
 func (e *Editor) editLayerPage(page int, edit func(*Reader, []byte, *editorXML) ([]byte, error)) error {
@@ -380,7 +380,7 @@ func (e *Editor) editLayerPage(page int, edit func(*Reader, []byte, *editorXML) 
 	})
 }
 
-// editorStructureChildren 仅枚举当前标准命名空间中的直接子元素。
+// editorStructureChildren 仅枚举当前标准命名空间中的直接子元素
 // 入参: root 容器节点, kind 子元素名称
 // 返回: []*editorXML 文件顺序节点清单
 func editorStructureChildren(root *editorXML, kind string) []*editorXML {
@@ -395,7 +395,7 @@ func editorStructureChildren(root *editorXML, kind string) []*editorXML {
 	return nodes
 }
 
-// editorFindStructureID 按数值标识查找唯一直接子元素，拒绝缺失及歧义标识。
+// editorFindStructureID 按数值标识查找唯一直接子元素，拒绝缺失及歧义标识
 // 入参: root 容器节点, kind 元素名称, attribute 标识属性名, id 标识值
 // 返回: *editorXML 唯一节点, error 标识错误
 func editorFindStructureID(root *editorXML, kind, attribute, id string) (*editorXML, error) {
@@ -417,7 +417,7 @@ func editorFindStructureID(root *editorXML, kind, attribute, id string) (*editor
 	return found, nil
 }
 
-// editorStructureAttribute 局部替换或删除无命名空间属性，保留扩展及其余原文。
+// editorStructureAttribute 局部替换或删除无命名空间属性，保留扩展及其余原文
 // 入参: data 原文, node 目标节点, name 属性名, value 新值，空值删除属性
 // 返回: []byte 更新后的完整原文, error XML错误
 func editorStructureAttribute(data []byte, node *editorXML, name, value string) ([]byte, error) {
@@ -432,7 +432,7 @@ func editorStructureAttribute(data []byte, node *editorXML, name, value string) 
 	return editorPatchXML(data, []editorXMLPatch{patch}), nil
 }
 
-// editorAppendStructure 向普通或自闭合容器追加已绑定命名空间的元素。
+// editorAppendStructure 向普通或自闭合容器追加已绑定命名空间的元素
 // 入参: data 原文, node 容器节点, fragment 待追加片段
 // 返回: []byte 更新后的完整原文
 func editorAppendStructure(data []byte, node *editorXML, fragment []byte) []byte {
@@ -442,7 +442,7 @@ func editorAppendStructure(data []byte, node *editorXML, fragment []byte) []byte
 	return editorPatchXML(data, []editorXMLPatch{{node.close, node.close, fragment}})
 }
 
-// editorMoveStructure 在指定同类节点位置间移动完整原文，不触及夹杂的扩展元素。
+// editorMoveStructure 在指定同类节点位置间移动完整原文，不触及夹杂的扩展元素
 // 入参: data 原文, nodes 同类节点, node 被移动节点, order 目标零基顺序
 // 返回: []byte 更新后的完整原文, error 顺序错误
 func editorMoveStructure(data []byte, nodes []*editorXML, node *editorXML, order int) ([]byte, error) {
@@ -463,7 +463,7 @@ func editorMoveStructure(data []byte, nodes []*editorXML, node *editorXML, order
 	return editorPatchXML(data, patches), nil
 }
 
-// commitLayerTemplateParts 持久化结构与已注册资源，隔离共享文件并恢复未变图元的会话编辑状态。
+// commitLayerTemplateParts 持久化结构与已注册资源，隔离共享文件并恢复未变图元的会话编辑状态
 // 入参: reader 当前独立包快照, parts 文件修改集
 // 返回: error 资源、隔离或提交错误
 func (e *Editor) commitLayerTemplateParts(reader *Reader, parts map[string][]byte) error {

@@ -25,8 +25,8 @@ import (
 	"unicode/utf8"
 )
 
-// Bookmarks 按声明顺序读取当前文档版本的命名书签，返回独立副本，不读取跳转引用。
-// 返回: []Bookmark 书签列表，无书签时为nil；error 读取、结构或名称重复错误。
+// Bookmarks 按声明顺序读取当前文档版本的命名书签，返回独立副本，不读取跳转引用
+// 返回: []Bookmark 书签列表，无书签时为nil；error 读取、结构或名称重复错误
 func (e *Editor) Bookmarks() ([]Bookmark, error) {
 	if e.source == nil {
 		return nil, nil
@@ -42,30 +42,30 @@ func (e *Editor) Bookmarks() ([]Bookmark, error) {
 	return editorBookmarks(data, root)
 }
 
-// AddBookmark 在当前文档版本末尾添加名称唯一的书签，保留扩展内容并记录一次撤销。
-// 入参: name 非空且区分大小写的名称，不自动裁剪空白；dest 目标，PageID为当前页面标识而非页序号。
-// 返回: error 名称、目标、页面或提交错误。
+// AddBookmark 在当前文档版本末尾添加名称唯一的书签，保留扩展内容并记录一次撤销
+// 入参: name 非空且区分大小写的名称，不自动裁剪空白；dest 目标，PageID为当前页面标识而非页序号
+// 返回: error 名称、目标、页面或提交错误
 func (e *Editor) AddBookmark(name string, dest Dest) error {
 	return e.editBookmark("", &Bookmark{Name: name, Dest: dest}, true)
 }
 
-// UpdateBookmark 按原名称更新书签，重命名同步当前文档全部标准跳转引用，整体可撤销。
-// 入参: name 原名称；next 完整的新书签，Dest.PageID为当前页面标识；名称不变时仅修改目标。
-// 返回: error 名称不存在、重名、目标无效、引用读取或提交错误；内容未变时不记录撤销。
+// UpdateBookmark 按原名称更新书签，重命名同步当前文档全部标准跳转引用，整体可撤销
+// 入参: name 原名称；next 完整的新书签，Dest.PageID为当前页面标识；名称不变时仅修改目标
+// 返回: error 名称不存在、重名、目标无效、引用读取或提交错误；内容未变时不记录撤销
 func (e *Editor) UpdateBookmark(name string, next Bookmark) error {
 	return e.editBookmark(name, &next, false)
 }
 
-// DeleteBookmark 删除当前文档版本的命名书签，存在标准跳转引用时拒绝删除。
-// 入参: name 书签名称；其他文档和历史版本的引用不阻止当前版本删除。
-// 返回: error 名称不存在、仍被引用、引用读取或提交错误。
+// DeleteBookmark 删除当前文档版本的命名书签，存在标准跳转引用时拒绝删除
+// 入参: name 书签名称；其他文档和历史版本的引用不阻止当前版本删除
+// 返回: error 名称不存在、仍被引用、引用读取或提交错误
 func (e *Editor) DeleteBookmark(name string) error {
 	return e.editBookmark(name, nil, false)
 }
 
-// editorBookmarks 读取标准书签定义，拒绝重复集合、重名及缺失或重复目标，不解析扩展子树。
-// 入参: data 文档原文；root 文档根节点。
-// 返回: []Bookmark 独立定义列表；error 结构或解码错误。
+// editorBookmarks 读取标准书签定义，拒绝重复集合、重名及缺失或重复目标，不解析扩展子树
+// 入参: data 文档原文；root 文档根节点
+// 返回: []Bookmark 独立定义列表；error 结构或解码错误
 func editorBookmarks(data []byte, root *editorXML) ([]Bookmark, error) {
 	if root.childAt("Bookmarks", 1) != nil {
 		return nil, fmt.Errorf("multiple bookmark collections")
@@ -104,9 +104,9 @@ func editorBookmarks(data []byte, root *editorXML) ([]Bookmark, error) {
 	return result, nil
 }
 
-// validateBookmarkName 校验非空名称及XML可无损表示的Unicode字符。
-// 入参: name 名称。
-// 返回: error 名称错误。
+// validateBookmarkName 校验非空名称及XML可无损表示的Unicode字符
+// 入参: name 名称
+// 返回: error 名称错误
 func validateBookmarkName(name string) error {
 	if strings.TrimSpace(name) == "" || !utf8.ValidString(name) {
 		return fmt.Errorf("bookmark name must be nonempty valid UTF-8")
@@ -119,9 +119,9 @@ func validateBookmarkName(name string) error {
 	return nil
 }
 
-// validateBookmark 校验书签名称、标准目标参数及当前编辑页树中的目标标识。
-// 入参: bookmark 待写入定义。
-// 返回: error 名称、目标或页面错误。
+// validateBookmark 校验书签名称、标准目标参数及当前编辑页树中的目标标识
+// 入参: bookmark 待写入定义
+// 返回: error 名称、目标或页面错误
 func (e *Editor) validateBookmark(bookmark Bookmark) error {
 	if err := validateBookmarkName(bookmark.Name); err != nil {
 		return err
@@ -138,9 +138,9 @@ func (e *Editor) validateBookmark(bookmark Bookmark) error {
 	return fmt.Errorf("bookmark destination page %q does not exist", bookmark.Dest.PageID)
 }
 
-// editBookmark 校验定义后原子提交局部XML补丁，重命名使用包含未保存编辑的完整快照。
-// 入参: name 原名称；next 新定义，nil表示删除；add 是否新增。
-// 返回: error 校验、引用扫描或提交错误。
+// editBookmark 校验定义后原子提交局部XML补丁，重命名使用包含未保存编辑的完整快照
+// 入参: name 原名称；next 新定义，nil表示删除；add 是否新增
+// 返回: error 校验、引用扫描或提交错误
 func (e *Editor) editBookmark(name string, next *Bookmark, add bool) error {
 	if !add {
 		if err := validateBookmarkName(name); err != nil {
@@ -241,9 +241,9 @@ func (e *Editor) editBookmark(name string, next *Bookmark, add bool) error {
 	})
 }
 
-// commitBookmarkSnapshot 接入重命名后的包，保留已加载对象的会话排版、裁剪及尚未使用的注册资源。
-// 入参: reader 已完成隔离和重命名的包快照。
-// 返回: error 快照重建或页面加载错误。
+// commitBookmarkSnapshot 接入重命名后的包，保留已加载对象的会话排版、裁剪及尚未使用的注册资源
+// 入参: reader 已完成隔离和重命名的包快照
+// 返回: error 快照重建或页面加载错误
 func (e *Editor) commitBookmarkSnapshot(reader *Reader) error {
 	before := e.transactionSnapshot()
 	if err := e.commitResourceSnapshot(context.Background(), reader); err != nil {
@@ -282,9 +282,9 @@ func (e *Editor) commitBookmarkSnapshot(reader *Reader) error {
 	return nil
 }
 
-// commitBookmarkParts 隔离修改后复用注解快照提交，保守复制路径不覆盖未知扩展可能引用的原文件。
-// 入参: base 原包快照；parts 当前入口修改集。
-// 返回: error 依赖解析、隔离或提交错误。
+// commitBookmarkParts 隔离修改后复用注解快照提交，保守复制路径不覆盖未知扩展可能引用的原文件
+// 入参: base 原包快照；parts 当前入口修改集
+// 返回: error 依赖解析、隔离或提交错误
 func (e *Editor) commitBookmarkParts(base *editorSource, parts map[string][]byte) error {
 	changes, err := base.reader.versionChanges(context.Background(), parts)
 	if err != nil {
@@ -303,9 +303,9 @@ func (e *Editor) commitBookmarkParts(base *editorSource, parts map[string][]byte
 	return e.commitAnnotationParts(&source, nil)
 }
 
-// editorBookmarkIsolate 在无法完整分析其他入口时保护所有已有文件，复制修改文件及其标准引用祖先。
-// 入参: reader 原包；changes 当前入口修改集。
-// 返回: map[string][]byte 隔离后的修改集；error 当前入口依赖或版本清单错误。
+// editorBookmarkIsolate 在无法完整分析其他入口时保护所有已有文件，复制修改文件及其标准引用祖先
+// 入参: reader 原包；changes 当前入口修改集
+// 返回: map[string][]byte 隔离后的修改集；error 当前入口依赖或版本清单错误
 func editorBookmarkIsolate(reader *Reader, changes map[string][]byte) (map[string][]byte, error) {
 	ctx := context.Background()
 	entry, err := reader.DocumentRootContext(ctx)
@@ -386,9 +386,9 @@ func editorBookmarkIsolate(reader *Reader, changes map[string][]byte) (map[strin
 	return parts, nil
 }
 
-// editorBookmarkDefinition 修改指定书签的标准字段，保留其扩展属性、扩展节点及其他定义原文。
-// 入参: data 文档原文；name 原名称；next 新定义，nil表示删除；add 是否新增。
-// 返回: []byte 修改后的文档；error 结构或编码错误。
+// editorBookmarkDefinition 修改指定书签的标准字段，保留其扩展属性、扩展节点及其他定义原文
+// 入参: data 文档原文；name 原名称；next 新定义，nil表示删除；add 是否新增
+// 返回: []byte 修改后的文档；error 结构或编码错误
 func editorBookmarkDefinition(data []byte, name string, next *Bookmark, add bool) ([]byte, error) {
 	root, err := parseEditorXML(data)
 	if err != nil {
@@ -497,9 +497,9 @@ func editorBookmarkDefinition(data []byte, name string, next *Bookmark, add bool
 	return nil, fmt.Errorf("bookmark %q not found", name)
 }
 
-// editorBookmarkReferences 扫描当前入口依赖中的标准书签跳转，拒绝带引用删除或生成重命名补丁。
-// 入参: reader 包含未保存修改的快照；name 原名称；next 新定义，nil表示删除。
-// 返回: map[string][]byte 需要修改的结构文件；error 读取、解析或被引用错误。
+// editorBookmarkReferences 扫描当前入口依赖中的标准书签跳转，拒绝带引用删除或生成重命名补丁
+// 入参: reader 包含未保存修改的快照；name 原名称；next 新定义，nil表示删除
+// 返回: map[string][]byte 需要修改的结构文件；error 读取、解析或被引用错误
 func editorBookmarkReferences(reader *Reader, name string, next *Bookmark) (map[string][]byte, error) {
 	_, structures, err := reader.versionDependencies(context.Background(), reader.documentRoot, nil, nil)
 	if err != nil {
@@ -522,9 +522,9 @@ func editorBookmarkReferences(reader *Reader, name string, next *Bookmark) (map[
 	return parts, nil
 }
 
-// editorBookmarkReferenceXML 仅识别标准动作中的名称引用，保留扩展命名空间及不透明扩展负载。
-// 入参: data 结构原文；file 错误上下文中的文件名；name 原名称；next 新定义，nil表示检查删除。
-// 返回: []byte 修改后的原文；error 解析、属性编码或被引用错误。
+// editorBookmarkReferenceXML 仅识别标准动作中的名称引用，保留扩展命名空间及不透明扩展负载
+// 入参: data 结构原文；file 错误上下文中的文件名；name 原名称；next 新定义，nil表示检查删除
+// 返回: []byte 修改后的原文；error 解析、属性编码或被引用错误
 func editorBookmarkReferenceXML(data []byte, file, name string, next *Bookmark) ([]byte, error) {
 	root, err := parseEditorXML(data)
 	if err != nil {

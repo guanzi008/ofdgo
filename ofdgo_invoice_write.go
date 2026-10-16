@@ -1,0 +1,1818 @@
+// Copyright 2025-2026 肖其顿 (XIAO QI DUN)
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ofdgo
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/xml"
+	"fmt"
+	"io"
+	"math/big"
+	"reflect"
+	"slices"
+	"sort"
+	"strings"
+	"unicode/utf8"
+)
+
+// InvoiceFormat 描述已适配格式，校验不代表完整XSD验证或发票验真
+type InvoiceFormat struct {
+	Kind     string `json:"kind"`
+	Standard string `json:"standard"`
+	Version  string `json:"version"`
+	Read     bool   `json:"read"`
+	Create   bool   `json:"create"`
+	Edit     bool   `json:"edit"`
+	Items    bool   `json:"items"`
+}
+
+// InvoiceFieldChange 修改已有叶节点，Revision为源XML的SHA256十六进制摘要
+// 未提供Revision时必须提供ExpectedValue，ExpectedNil缺省表示原节点非空值
+type InvoiceFieldChange struct {
+	Source        InvoiceSource `json:"source"`
+	Value         string        `json:"value"`
+	Nil           bool          `json:"nil,omitempty"`
+	Delete        bool          `json:"delete,omitempty"`
+	Revision      string        `json:"revision,omitempty"`
+	ExpectedValue *string       `json:"expectedValue,omitempty"`
+	ExpectedNil   *bool         `json:"expectedNil,omitempty"`
+}
+
+// InvoiceContext 保存调用方指定的单主体、无维度XBRL上下文
+type InvoiceContext struct {
+	ID         string `json:"id"`
+	Identifier string `json:"identifier"`
+	Scheme     string `json:"scheme"`
+	Instant    string `json:"instant,omitempty"`
+	StartDate  string `json:"startDate,omitempty"`
+	EndDate    string `json:"endDate,omitempty"`
+}
+
+// InvoiceUnit 保存单一度量的XBRL单位，不推测币种或数量单位
+type InvoiceUnit struct {
+	ID        string `json:"id"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+// InvoiceEncodingOptions 指定XBRL定义或官方XML片段，不加载外部资源或生成税务签名
+type InvoiceEncodingOptions struct {
+	SchemaRef               string         `json:"schemaRef"`
+	Context                 InvoiceContext `json:"context"`
+	Units                   []InvoiceUnit  `json:"units"`
+	HeaderXML               []byte         `json:"headerXML,omitempty"`
+	SellerAuthenticationXML []byte         `json:"sellerAuthenticationXML,omitempty"`
+	TaxSupervisionXML       []byte         `json:"taxSupervisionXML,omitempty"`
+	TaxBureauSignatureXML   []byte         `json:"taxBureauSignatureXML,omitempty"`
+}
+
+// invoiceWriteField 保存按规范排列的字段与值
+type invoiceWriteField struct{ name, value string }
+
+// invoiceXMLSpan 保存节点原始字节边界
+type invoiceXMLSpan struct {
+	node                     *invoiceXMLNode
+	begin, inner, close, end int
+	empty                    bool
+}
+
+// invoiceXMLPatch 保存不重序列化其他节点的字节修改
+type invoiceXMLPatch struct {
+	begin, end int
+	data       []byte
+}
+
+// InvoiceFormats 返回独立格式能力副本，历史航空格式仅允许读取和原位修改
+// 返回: 已适配格式列表
+func InvoiceFormats() []InvoiceFormat {
+	result := []InvoiceFormat{{Kind: "einv", Standard: "EInvoice", Version: "0.3", Read: true, Create: true, Edit: true, Items: true}}
+	for _, kind := range []string{"inv", "einv", "atr", "rai"} {
+		result = append(result, InvoiceFormat{Kind: kind, Standard: "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/" + kind, Version: "2023-12-31", Read: true, Create: true, Edit: true, Items: kind == "inv" || kind == "atr"})
+	}
+	return append(result, InvoiceFormat{Kind: "atr", Standard: "http://xbrl.mof.gov.cn/taxonomy/2021-11-30/atr", Version: "2021-11-30", Read: true, Edit: true, Items: true})
+}
+
+// DecodeInvoices 提取独立XML或XBRL中的发票，不执行联网或完整XSD验证
+// 入参: ctx 取消上下文，data 原始XML
+// 返回: 提取结果及解析错误
+func DecodeInvoices(ctx context.Context, data []byte) (InvoiceReport, error) {
+	return parseInvoiceXML(ctx, data, InvoiceSource{})
+}
+
+// invoiceWriteContext 统一空上下文
+// 入参: ctx 取消上下文
+// 返回: 可用上下文
+func invoiceWriteContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+// invoiceWriteFormat 查找完整格式标识，不推测缺失版本
+// 入参: value 发票
+// 返回: 格式与匹配状态
+func invoiceWriteFormat(value Invoice) (InvoiceFormat, bool) {
+	for _, f := range InvoiceFormats() {
+		if value.Kind == f.Kind && value.Standard == f.Standard && value.Version == f.Version {
+			return f, true
+		}
+	}
+	return InvoiceFormat{}, false
+}
+
+// ValidateInvoice 检查已映射字段的词法、金额及可表达性，不替代税务业务或XSD验证
+// 入参: ctx 取消上下文，value 发票
+// 返回: 字段诊断及取消错误
+func ValidateInvoice(ctx context.Context, value Invoice) ([]InvoiceIssue, error) {
+	ctx = invoiceWriteContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := invoiceWriteLimits(ctx, value, InvoiceEncodingOptions{}); err != nil {
+		return nil, err
+	}
+	if len(value.Items) > 100000 || len(value.Facts) > 100000 {
+		return nil, fmt.Errorf("invoice exceeds structural limit")
+	}
+	var issues []InvoiceIssue
+	add := func(code, field, message string) {
+		issues = append(issues, InvoiceIssue{Code: code, Field: field, Message: message})
+	}
+	f, ok := invoiceWriteFormat(value)
+	if !ok {
+		add("unsupported", "Standard", "unsupported invoice format or version")
+		return issues, nil
+	}
+	for _, field := range []invoiceWriteField{{"Number", value.Number}, {"Date", value.Date}, {"TotalAmount", value.TotalAmount}} {
+		if strings.TrimSpace(field.value) == "" {
+			add("required", field.name, "missing invoice field")
+		}
+	}
+	if value.Date != "" {
+		date := strings.Replace(value.Date, " ", "T", 1)
+		if _, ok := invoicePeriodTime(date); !ok {
+			add("invalid-date", "Date", "invalid invoice date")
+		}
+	}
+	if value.Currency != "" && !invoiceCurrencyUnit("{http://www.xbrl.org/2003/iso4217}"+value.Currency) {
+		add("invalid-value", "Currency", "invalid ISO currency code")
+	}
+	for _, field := range []invoiceWriteField{{"Amount", value.Amount}, {"TaxAmount", value.TaxAmount}, {"TotalAmount", value.TotalAmount}} {
+		if field.value != "" && invoiceDecimal(field.value) == nil {
+			add("invalid-decimal", field.name, "invalid decimal lexical value")
+		}
+	}
+	report := InvoiceReport{}
+	invoiceAmountCheck(&value, &report, InvoiceSource{})
+	issues = append(issues, report.Issues...)
+	if !f.Items && len(value.Items) > 0 {
+		add("unsupported", "Items", "format has no supported invoice item tuple")
+	}
+	for i, item := range value.Items {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		for _, field := range []invoiceWriteField{{"Quantity", item.Quantity}, {"UnitPrice", item.UnitPrice}, {"Amount", item.Amount}, {"TaxAmount", item.TaxAmount}} {
+			if field.value != "" && invoiceDecimal(field.value) == nil {
+				add("invalid-decimal", fmt.Sprintf("Items[%d].%s", i, field.name), "invalid decimal lexical value")
+			}
+		}
+		if value.Standard == "EInvoice" && item.TaxRate != "" && invoiceDecimal(item.TaxRate) == nil {
+			add("invalid-decimal", fmt.Sprintf("Items[%d].TaxRate", i), "invalid decimal lexical value")
+		}
+	}
+	if value.Kind == "inv" || value.Standard == "EInvoice" {
+		for _, total := range []invoiceWriteField{{"Amount", value.Amount}, {"TaxAmount", value.TaxAmount}} {
+			sum := new(big.Rat)
+			complete := len(value.Items) > 0
+			for _, item := range value.Items {
+				s := item.Amount
+				if total.name == "TaxAmount" {
+					s = item.TaxAmount
+				}
+				n := invoiceDecimal(s)
+				if n == nil {
+					complete = false
+					break
+				}
+				sum.Add(sum, n)
+			}
+			if n := invoiceDecimal(total.value); complete && n != nil && sum.Cmp(n) != 0 {
+				add("amount-mismatch", total.name, "item sum differs from invoice total")
+			}
+		}
+	}
+	total := 0
+	for _, field := range invoiceWriteAllValues(value) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		total += len(field.value)
+		if total > invoiceXMLLimit {
+			return nil, fmt.Errorf("invoice exceeds size limit")
+		}
+		if !invoiceWriteText(field.value) {
+			add("invalid-value", field.name, "invalid XML character or oversized field")
+		}
+	}
+	return issues, nil
+}
+
+// invoiceWriteAllValues 收集公共字段及扩展事实文本
+// 入参: value 发票
+// 返回: 待校验字段
+func invoiceWriteAllValues(value Invoice) []invoiceWriteField {
+	r := []invoiceWriteField{{"Number", value.Number}, {"Code", value.Code}, {"Date", value.Date}, {"Status", value.Status}, {"Remarks", value.Remarks}}
+	for _, p := range []InvoiceParty{value.Buyer, value.Seller} {
+		for _, s := range []string{p.Name, p.TaxID, p.Address, p.Phone, p.Bank, p.Account} {
+			r = append(r, invoiceWriteField{"Party", s})
+		}
+	}
+	for _, item := range value.Items {
+		for _, s := range []string{item.Name, item.Specification, item.Unit, item.Quantity, item.UnitPrice, item.Amount, item.TaxRate, item.TaxAmount} {
+			r = append(r, invoiceWriteField{"Items", s})
+		}
+		for _, f := range item.Fields {
+			r = append(r, invoiceWriteField{f.Name, f.Value})
+		}
+	}
+	for _, f := range value.Facts {
+		r = append(r, invoiceWriteField{f.Name, f.Value})
+	}
+	return r
+}
+
+// invoiceWriteText 检查XML文本且不替换非法字符
+// 入参: value 原始文本
+// 返回: 文本是否合法
+func invoiceWriteText(value string) bool {
+	if len(value) > invoiceXMLLimit || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if r != 9 && r != 10 && r != 13 && (r < 32 || r == 0xfffe || r == 0xffff) {
+			return false
+		}
+	}
+	return true
+}
+
+// invoiceWriteHeader 返回明确映射的规范字段顺序
+// 入参: value 发票
+// 返回: 字段名列表
+func invoiceWriteHeader(value Invoice) []string {
+	switch value.Kind {
+	case "inv":
+		return strings.Fields("CodeOfInvoice NumberOfInvoice DateOfIssue NameOfPurchaser TaxpayerIdentificationNumberUnifiedSocialCreditCodeOfPurchaser TotalAmountExcludingTax TotalTaxAmount TaxIncludedAmountInFigures NameOfSeller TaxpayerIdentificationNumberUnifiedSocialCreditCodeOfSeller Remarks")
+	case "einv":
+		return strings.Fields("InvoiceNumber SellerName SellerIdNum TotalAmWithoutTax RequestTime TotalTaxAm TotalTax-includedAmount")
+	case "atr":
+		return strings.Fields("ElectronicInvoiceAirTransportReceiptNumber IssuingStatus VatTaxAmount TotalAmount IssueDate NameOfPurchaser UnifiedSocialCreditCodeOfPurchaser NameOfSeller")
+	case "rai":
+		return strings.Fields("ElectronicInvoiceRailwayETicketNumber DateOfIssue NameOfPurchaser UnifiedSocialCreditCodeOfPurchaser TotalAmountExcludingTax TaxAmount Fare NameOfSeller UnifiedSocialCreditCodeOfSeller Remarks")
+	}
+	return nil
+}
+
+// invoiceWriteItemNames 返回元组内部字段顺序
+// 入参: kind 票种
+// 返回: 规范字段列表
+func invoiceWriteItemNames(kind string) []string {
+	if kind == "atr" {
+		return strings.Fields("DepartureStation DestinationStation FlightSegment Carrier Flight Class CarrierDate DepartureTime FareBasis EffectiveDate ExpirationDate FreeBaggageAllowance")
+	}
+	return strings.Fields("NatureOfInvoiceLine NameOfTaxableGoodsOrServices Specification UnitOfGoodsOrServices QuantityOfGoodsOrServices UnitPriceOfGoodsOrServices AmountExcludingTax TaxRate TaxAmount")
+}
+
+// invoiceWriteTuple 返回已支持的明细元组名称
+// 入参: kind 票种
+// 返回: 元组名
+func invoiceWriteTuple(kind string) string {
+	if kind == "atr" {
+		return "DetailInformationOfAirTicketTuple"
+	}
+	return "InformationOfTaxableGoodsOrServicesDetailItemsTuple"
+}
+
+// invoiceWriteEscape 转义已校验的XML值
+// 入参: value 文本
+// 返回: XML安全文本
+func invoiceWriteEscape(value string) string {
+	var b bytes.Buffer
+	_ = xml.EscapeText(&b, []byte(value))
+	return b.String()
+}
+
+// EncodeInvoice 从明确业务字段生成独立XML，不将提取摘要覆盖原始载荷
+// 入参: ctx 取消上下文，value 发票
+// 返回: 结构化XML及创建错误
+func EncodeInvoice(ctx context.Context, value Invoice) ([]byte, error) {
+	return EncodeInvoiceWithOptions(ctx, value, InvoiceEncodingOptions{})
+}
+
+// EncodeInvoiceWithOptions 使用调用方指定的XBRL定义创建独立结构化文件
+// 入参: ctx 上下文，value 发票，options 分类标准入口、上下文及单位
+// 返回: XML及创建错误
+func EncodeInvoiceWithOptions(ctx context.Context, value Invoice, options InvoiceEncodingOptions) ([]byte, error) {
+	ctx = invoiceWriteContext(ctx)
+	if err := invoiceWriteLimits(ctx, value, options); err != nil {
+		return nil, err
+	}
+	issues, err := ValidateInvoice(ctx, value)
+	if err != nil {
+		return nil, err
+	}
+	if len(issues) > 0 {
+		return nil, fmt.Errorf("invoice %s: %s", issues[0].Field, issues[0].Message)
+	}
+	f, _ := invoiceWriteFormat(value)
+	if !f.Create {
+		return nil, fmt.Errorf("invoice format does not support standalone creation")
+	}
+	if err := invoiceWriteCreation(value); err != nil {
+		return nil, err
+	}
+	var data []byte
+	if value.Standard == "EInvoice" {
+		data, err = invoiceEncodePlain(value)
+		if err == nil {
+			data, err = invoiceWritePlainSections(ctx, data, options)
+		}
+	} else {
+		data, err = invoiceEncodeXBRL(value, options)
+	}
+	if err != nil {
+		return nil, err
+	}
+	report, err := DecodeInvoices(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	if len(report.Issues) > 0 {
+		return nil, fmt.Errorf("encoded invoice: %s", report.Issues[0].Message)
+	}
+	if len(report.Invoices) != 1 {
+		return nil, fmt.Errorf("encoded invoice has ambiguous contexts")
+	}
+	if err = invoiceWriteRepresented(value, report.Invoices[0]); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// invoiceWriteLimits 在构造字段列表和XML前限制节点数及转义后的保守空间上界
+// 入参: ctx 上下文，value 发票，options 显式定义和XML片段
+// 返回: 取消或限额错误
+func invoiceWriteLimits(ctx context.Context, value Invoice, options InvoiceEncodingOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(value.Items) > 100000 || len(value.Facts) > 100000 || len(options.Units) > 256 || len(options.SchemaRef) > 4096 || len(options.Context.Scheme) > 4096 || len(options.Context.Identifier) > 64<<10 {
+		return fmt.Errorf("invoice exceeds structural limit")
+	}
+	total := 0
+	charge := func(values ...string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if total > invoiceXMLLimit-512 {
+			return fmt.Errorf("invoice exceeds encoded size limit")
+		}
+		total += 512
+		for _, s := range values {
+			if len(s) > (invoiceXMLLimit-total)/6 {
+				return fmt.Errorf("invoice exceeds encoded size limit")
+			}
+			total += 6 * len(s)
+		}
+		return nil
+	}
+	for _, s := range []string{value.Kind, value.Standard, value.Version, value.Number, value.Code, value.Date, value.Currency, value.Status, value.Amount, value.TaxAmount, value.TotalAmount, value.Remarks} {
+		if err := charge(s); err != nil {
+			return err
+		}
+	}
+	for _, party := range []InvoiceParty{value.Buyer, value.Seller} {
+		if err := charge(party.Name, party.TaxID, party.Address, party.Phone, party.Bank, party.Account); err != nil {
+			return err
+		}
+	}
+	facts := func(fields []InvoiceFact) error {
+		if len(fields) > 100000 {
+			return fmt.Errorf("invoice exceeds structural limit")
+		}
+		for _, f := range fields {
+			if err := charge(f.Name, f.Namespace, f.Value, f.Context, f.Unit, f.Decimals, f.Precision); err != nil {
+				return err
+			}
+			if len(f.Dimensions) > 128 {
+				return fmt.Errorf("invoice exceeds structural limit")
+			}
+			for _, d := range f.Dimensions {
+				if err := charge(d.Name, d.Namespace, d.Value); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := facts(value.Facts); err != nil {
+		return err
+	}
+	for _, item := range value.Items {
+		for _, text := range []string{item.Name, item.Specification, item.Unit, item.Quantity, item.UnitPrice, item.Amount, item.TaxRate, item.TaxAmount} {
+			if err := charge(text); err != nil {
+				return err
+			}
+		}
+		if err := facts(item.Fields); err != nil {
+			return err
+		}
+	}
+	if err := charge(options.SchemaRef, options.Context.ID, options.Context.Identifier, options.Context.Scheme, options.Context.Instant, options.Context.StartDate, options.Context.EndDate); err != nil {
+		return err
+	}
+	for _, unit := range options.Units {
+		if len(unit.Namespace) > 4096 {
+			return fmt.Errorf("invoice unit namespace exceeds limit")
+		}
+		if err := charge(unit.ID, unit.Namespace, unit.Name); err != nil {
+			return err
+		}
+	}
+	for _, raw := range [][]byte{options.HeaderXML, options.SellerAuthenticationXML, options.TaxSupervisionXML, options.TaxBureauSignatureXML} {
+		if len(raw) > invoiceXMLLimit-total {
+			return fmt.Errorf("invoice sections exceed size limit")
+		}
+		total += len(raw)
+	}
+	return nil
+}
+
+// invoiceWriteRepresented 拒绝格式无法承载的非空公共字段
+// 入参: want 输入业务数据，got 编码后数据
+// 返回: 不可表达字段错误
+func invoiceWriteRepresented(want, got Invoice) error {
+	a := []string{want.Number, want.Code, want.Date, want.Status, want.Amount, want.TaxAmount, want.TotalAmount, want.Remarks, want.Buyer.Name, want.Buyer.TaxID, want.Buyer.Address, want.Buyer.Phone, want.Buyer.Bank, want.Buyer.Account, want.Seller.Name, want.Seller.TaxID, want.Seller.Address, want.Seller.Phone, want.Seller.Bank, want.Seller.Account}
+	b := []string{got.Number, got.Code, got.Date, got.Status, got.Amount, got.TaxAmount, got.TotalAmount, got.Remarks, got.Buyer.Name, got.Buyer.TaxID, got.Buyer.Address, got.Buyer.Phone, got.Buyer.Bank, got.Buyer.Account, got.Seller.Name, got.Seller.TaxID, got.Seller.Address, got.Seller.Phone, got.Seller.Bank, got.Seller.Account}
+	for i, v := range a {
+		if v != "" && v != b[i] {
+			return fmt.Errorf("invoice format cannot represent field value at index %d", i)
+		}
+	}
+	if want.Currency != "" && want.Currency != got.Currency {
+		return fmt.Errorf("invoice format cannot represent currency")
+	}
+	if len(want.Items) != len(got.Items) {
+		return fmt.Errorf("invoice format cannot represent items")
+	}
+	for i, v := range want.Items {
+		w := got.Items[i]
+		for j, a := range []string{v.Name, v.Specification, v.Unit, v.Quantity, v.UnitPrice, v.Amount, v.TaxRate, v.TaxAmount} {
+			b := []string{w.Name, w.Specification, w.Unit, w.Quantity, w.UnitPrice, w.Amount, w.TaxRate, w.TaxAmount}[j]
+			if a != "" && a != b {
+				return fmt.Errorf("invoice format cannot represent item %d field %d", i, j)
+			}
+		}
+	}
+	return nil
+}
+
+// invoiceEncodeXBRL 构造单主体实例，扩展事实不得携带无法重建的上下文或元组
+// 入参: value 发票，options 显式分类标准、上下文和单位
+// 返回: XBRL数据及表达错误
+func invoiceEncodeXBRL(value Invoice, options InvoiceEncodingOptions) ([]byte, error) {
+	if options.SchemaRef == "" || !invoiceWriteText(options.SchemaRef) || !invoiceNCName(options.Context.ID) || options.Context.Identifier == "" || options.Context.Scheme == "" {
+		return nil, fmt.Errorf("XBRL creation requires schema reference and explicit context")
+	}
+	for _, s := range []string{options.Context.Identifier, options.Context.Scheme, options.Context.Instant, options.Context.StartDate, options.Context.EndDate} {
+		if !invoiceWriteText(s) {
+			return nil, fmt.Errorf("invalid XBRL context text")
+		}
+	}
+	if value.Currency == "" {
+		return nil, fmt.Errorf("XBRL creation requires an explicit currency")
+	}
+	var b strings.Builder
+	b.WriteString(xml.Header)
+	fmt.Fprintf(&b, `<xbrli:xbrl xmlns:xbrli="%s" xmlns:xsi="%s" xmlns:iso4217="http://www.xbrl.org/2003/iso4217" xmlns:f="%s" xmlns:link="http://www.xbrl.org/2003/linkbase" xmlns:xlink="http://www.w3.org/1999/xlink">`, invoiceXBRL, invoiceXSI, value.Standard)
+	fmt.Fprintf(&b, `<link:schemaRef xlink:type="simple" xlink:href="%s"/><xbrli:context id="%s"><xbrli:entity><xbrli:identifier scheme="%s">%s</xbrli:identifier></xbrli:entity><xbrli:period>`, invoiceWriteEscape(options.SchemaRef), options.Context.ID, invoiceWriteEscape(options.Context.Scheme), invoiceWriteEscape(options.Context.Identifier))
+	if options.Context.Instant != "" {
+		if options.Context.StartDate != "" || options.Context.EndDate != "" {
+			return nil, fmt.Errorf("ambiguous XBRL period")
+		}
+		fmt.Fprintf(&b, "<xbrli:instant>%s</xbrli:instant>", invoiceWriteEscape(options.Context.Instant))
+	} else {
+		fmt.Fprintf(&b, "<xbrli:startDate>%s</xbrli:startDate><xbrli:endDate>%s</xbrli:endDate>", invoiceWriteEscape(options.Context.StartDate), invoiceWriteEscape(options.Context.EndDate))
+	}
+	b.WriteString("</xbrli:period></xbrli:context>")
+	ids := map[string]bool{options.Context.ID: true}
+	for _, unit := range options.Units {
+		if !invoiceNCName(unit.ID) || !invoiceNCName(unit.Name) || unit.Namespace == "" || !invoiceWriteText(unit.Namespace) || ids[unit.ID] {
+			return nil, fmt.Errorf("invalid or duplicate XBRL unit")
+		}
+		ids[unit.ID] = true
+		fmt.Fprintf(&b, `<xbrli:unit id="%s"><xbrli:measure xmlns:m="%s">m:%s</xbrli:measure></xbrli:unit>`, unit.ID, invoiceWriteEscape(unit.Namespace), unit.Name)
+	}
+	header := map[string]bool{}
+	for _, name := range invoiceWriteHeader(value) {
+		p := invoiceXMLField(&value, value.Kind, name)
+		if p != nil && *p != "" {
+			if err := invoiceWriteFact(&b, value, InvoiceFact{Name: name, Value: *p}, options); err != nil {
+				return nil, err
+			}
+		}
+		header[name] = true
+	}
+	for _, fact := range value.Facts {
+		if fact.Source.NodePath != "" || fact.Namespace == invoiceXBRL {
+			return nil, fmt.Errorf("source facts require source-preserving invoice update")
+		}
+		if header[fact.Name] {
+			return nil, fmt.Errorf("duplicate mapped invoice fact %s", fact.Name)
+		}
+		if err := invoiceWriteFact(&b, value, fact, options); err != nil {
+			return nil, err
+		}
+		header[fact.Name] = true
+	}
+	for _, item := range value.Items {
+		fmt.Fprintf(&b, "<f:%s>", invoiceWriteTuple(value.Kind))
+		facts := map[string]InvoiceFact{}
+		for _, fact := range item.Fields {
+			if _, ok := facts[fact.Name]; ok {
+				return nil, fmt.Errorf("duplicate invoice item fact")
+			}
+			facts[fact.Name] = fact
+		}
+		for _, name := range invoiceWriteItemNames(value.Kind) {
+			fact, has := facts[name]
+			p := invoiceItemField(&item, value.Kind, name)
+			if p != nil && *p != "" {
+				if has && (fact.Nil || fact.Value != *p) {
+					return nil, fmt.Errorf("conflicting invoice item fact %s", name)
+				}
+				if !has {
+					fact = InvoiceFact{Name: name, Value: *p}
+				}
+				has = true
+			}
+			if has {
+				if err := invoiceWriteFact(&b, value, fact, options); err != nil {
+					return nil, err
+				}
+				delete(facts, name)
+			}
+		}
+		if len(facts) > 0 {
+			return nil, fmt.Errorf("unsupported invoice item fields")
+		}
+		fmt.Fprintf(&b, "</f:%s>", invoiceWriteTuple(value.Kind))
+	}
+	b.WriteString("</xbrli:xbrl>")
+	return []byte(b.String()), nil
+}
+
+// invoiceWriteFact 写入单个无维度事实，数值不经过浮点转换
+// 入参: b 输出，value 发票，fact 事实，options 上下文和单位
+// 返回: 不支持的事实错误
+func invoiceWriteFact(b *strings.Builder, value Invoice, fact InvoiceFact, options InvoiceEncodingOptions) error {
+	if !invoiceWriteKnownFact(value.Kind, fact.Name) {
+		return fmt.Errorf("unsupported invoice concept %s", fact.Name)
+	}
+	if !invoiceNCName(fact.Name) || fact.Namespace != "" && fact.Namespace != value.Standard || len(fact.Dimensions) > 0 || fact.Context != "" && fact.Context != options.Context.ID {
+		return fmt.Errorf("unsupported invoice fact context or namespace")
+	}
+	if fact.Nil && fact.Value != "" {
+		return fmt.Errorf("nil invoice fact contains value")
+	}
+	if !fact.Nil && invoiceWriteDateFact(value.Kind, fact.Name) {
+		if _, ok := invoicePeriodTime(fact.Value); !ok || strings.ContainsAny(fact.Value, "T ") {
+			return fmt.Errorf("invalid invoice date fact %s", fact.Name)
+		}
+	}
+	fmt.Fprintf(b, `<f:%s contextRef="%s"`, fact.Name, options.Context.ID)
+	numeric := invoiceNumeric(value.Kind, fact.Name)
+	if numeric {
+		unit := ""
+		for _, u := range options.Units {
+			match := u.Namespace == "http://www.xbrl.org/2003/iso4217" && u.Name == value.Currency
+			if !invoiceMonetary(value.Kind, fact.Name) {
+				match = u.Namespace == invoiceXBRL && u.Name == "pure"
+				if fact.Unit != "" {
+					match = u.ID == fact.Unit
+				}
+			}
+			if match && (fact.Unit == "" || fact.Unit == u.ID) {
+				unit = u.ID
+				break
+			}
+		}
+		if unit == "" {
+			return fmt.Errorf("missing matching XBRL unit for %s", fact.Name)
+		}
+		fmt.Fprintf(b, ` unitRef="%s"`, unit)
+	}
+	if fact.Nil {
+		b.WriteString(` xsi:nil="true"`)
+	} else if numeric {
+		if invoiceDecimal(fact.Value) == nil {
+			return fmt.Errorf("invalid decimal invoice fact")
+		}
+		if fact.Precision != "" {
+			if fact.Decimals != "" || !invoiceAccuracy(fact.Precision, true) {
+				return fmt.Errorf("invalid fact accuracy")
+			}
+			fmt.Fprintf(b, ` precision="%s"`, fact.Precision)
+		} else {
+			decimals := fact.Decimals
+			if decimals == "" {
+				decimals = "INF"
+			}
+			if !invoiceAccuracy(decimals, false) {
+				return fmt.Errorf("invalid fact accuracy")
+			}
+			fmt.Fprintf(b, ` decimals="%s"`, decimals)
+		}
+	} else if fact.Decimals != "" || fact.Precision != "" || fact.Unit != "" {
+		return fmt.Errorf("accuracy or unit on nonnumeric fact")
+	}
+	fmt.Fprintf(b, ">%s</f:%s>", invoiceWriteEscape(fact.Value), fact.Name)
+	return nil
+}
+
+// invoicePlainGroups 返回官方公共字段分组
+// 返回: 组名与字段顺序
+func invoicePlainGroups() []invoiceWriteField {
+	return []invoiceWriteField{{"SellerInformation", "SellerIdNum SellerName SellerAddr SellerTelNum SellerBankName SellerBankAccNum"}, {"BuyerInformation", "BuyerIdNum BuyerName"}, {"BasicInformation", "TotalAmWithoutTax TotalTaxAm TotalTax-includedAmount"}, {"AdditionalInformation", "Remark"}}
+}
+
+// invoiceEncodePlain 构造官方0.3字段路径，不捏造税务签名或编号
+// 入参: value 发票
+// 返回: XML及不可表达的扩展错误
+func invoiceEncodePlain(value Invoice) ([]byte, error) {
+	if len(value.Facts) > 0 {
+		return nil, fmt.Errorf("plain XML facts require source-preserving invoice update")
+	}
+	var b strings.Builder
+	b.WriteString(xml.Header + `<EInvoice><Header><Version>0.3</Version></Header><EInvoiceData>`)
+	for _, group := range invoicePlainGroups() {
+		if group.name == "AdditionalInformation" {
+			continue
+		}
+		fmt.Fprintf(&b, "<%s>", group.name)
+		for _, name := range strings.Fields(group.value) {
+			p, _ := invoicePlainField(&value, nil, "/EInvoice/EInvoiceData/"+group.name+"/"+name)
+			if p != nil && *p != "" {
+				fmt.Fprintf(&b, "<%s>%s</%s>", name, invoiceWriteEscape(*p), name)
+			}
+		}
+		fmt.Fprintf(&b, "</%s>", group.name)
+	}
+	for _, item := range value.Items {
+		if len(item.Fields) > 0 {
+			return nil, fmt.Errorf("plain XML item facts require source-preserving invoice update")
+		}
+		b.WriteString("<IssuItemInformation>")
+		for _, name := range strings.Fields("ItemName SpecMod MeaUnits Quantity UnPrice Amount TaxRate ComTaxAm") {
+			p, _ := invoicePlainField(&value, &item, "/EInvoice/EInvoiceData/IssuItemInformation/"+name)
+			if p != nil && *p != "" {
+				fmt.Fprintf(&b, "<%s>%s</%s>", name, invoiceWriteEscape(*p), name)
+			}
+		}
+		b.WriteString("</IssuItemInformation>")
+	}
+	if value.Remarks != "" {
+		fmt.Fprintf(&b, "<AdditionalInformation><Remark>%s</Remark></AdditionalInformation>", invoiceWriteEscape(value.Remarks))
+	}
+	fmt.Fprintf(&b, "</EInvoiceData><TaxSupervisionInfo><InvoiceNumber>%s</InvoiceNumber><IssueTime>%s</IssueTime></TaxSupervisionInfo></EInvoice>", invoiceWriteEscape(value.Number), invoiceWriteEscape(value.Date))
+	return []byte(b.String()), nil
+}
+
+// invoiceWriteSpans 将有界解析树与原始字节边界关联，保留BOM和空元素
+// 入参: ctx 上下文，data XML
+// 返回: 根节点、路径索引及错误
+func invoiceWriteSpans(ctx context.Context, data []byte) (*invoiceXMLNode, map[string]invoiceXMLSpan, error) {
+	root, err := invoiceXMLTree(ctx, data)
+	if err != nil {
+		return nil, nil, err
+	}
+	var nodes []*invoiceXMLNode
+	var walk func(*invoiceXMLNode)
+	walk = func(n *invoiceXMLNode) {
+		nodes = append(nodes, n)
+		for _, c := range n.children {
+			walk(c)
+		}
+	}
+	walk(root)
+	d := xml.NewDecoder(bytes.NewReader(data))
+	spans := map[string]invoiceXMLSpan{}
+	var stack []invoiceXMLSpan
+	index := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		before := int(d.InputOffset())
+		token, err := d.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		after := int(d.InputOffset())
+		switch token.(type) {
+		case xml.StartElement:
+			n := nodes[index]
+			index++
+			empty := after >= 2 && bytes.Equal(data[after-2:after], []byte("/>"))
+			stack = append(stack, invoiceXMLSpan{node: n, begin: before, inner: after, empty: empty})
+		case xml.EndElement:
+			s := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			s.close = before
+			s.end = after
+			if s.empty {
+				s.close = s.inner
+				s.end = s.inner
+			}
+			spans[s.node.path] = s
+		}
+	}
+	return root, spans, nil
+}
+
+// invoiceApplyXMLPatches 原子合并互不重叠的字节修改
+// 入参: ctx 上下文，data 原文，patches 修改列表
+// 返回: 新XML及错误
+func invoiceApplyXMLPatches(ctx context.Context, data []byte, patches []invoiceXMLPatch) ([]byte, error) {
+	sort.SliceStable(patches, func(i, j int) bool { return patches[i].begin < patches[j].begin })
+	var b bytes.Buffer
+	offset := 0
+	for _, p := range patches {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if p.begin < offset || p.end < p.begin || p.end > len(data) {
+			return nil, fmt.Errorf("overlapping invoice XML changes")
+		}
+		if b.Len()+p.begin-offset+len(p.data) > invoiceXMLLimit {
+			return nil, fmt.Errorf("invoice XML exceeds size limit")
+		}
+		b.Write(data[offset:p.begin])
+		b.Write(p.data)
+		offset = p.end
+	}
+	if b.Len()+len(data)-offset > invoiceXMLLimit {
+		return nil, fmt.Errorf("invoice XML exceeds size limit")
+	}
+	b.Write(data[offset:])
+	return b.Bytes(), nil
+}
+
+// PatchInvoice 精确修改已有事实叶节点，未知节点及其他字节保持不变
+// 入参: ctx 上下文，data 原始XML，changes 节点修改与原值或摘要前置条件
+// 返回: 修改后XML及路径、校验或取消错误
+func PatchInvoice(ctx context.Context, data []byte, changes []InvoiceFieldChange) ([]byte, error) {
+	ctx = invoiceWriteContext(ctx)
+	report, err := DecodeInvoices(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	if len(report.Invoices) == 0 {
+		return nil, fmt.Errorf("unsupported invoice XML")
+	}
+	_, spans, err := invoiceWriteSpans(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	allowed := map[string]bool{}
+	for _, inv := range report.Invoices {
+		for _, f := range inv.Facts {
+			if f.Namespace != invoiceXBRL {
+				allowed[f.Source.NodePath] = true
+			}
+		}
+	}
+	sum := sha256.Sum256(data)
+	revision := hex.EncodeToString(sum[:])
+	seen := map[string]bool{}
+	var patches []invoiceXMLPatch
+	for _, change := range changes {
+		path := change.Source.NodePath
+		s, ok := spans[path]
+		if !ok || !allowed[path] || len(s.node.children) > 0 || seen[path] {
+			return nil, fmt.Errorf("missing, ambiguous or non-leaf invoice path")
+		}
+		seen[path] = true
+		if change.Revision == "" && change.ExpectedValue == nil {
+			return nil, fmt.Errorf("invoice change requires source revision or expected value")
+		}
+		if change.Revision != "" && change.Revision != revision {
+			return nil, fmt.Errorf("stale invoice source revision")
+		}
+		oldNil := invoiceXMLAttr(s.node, invoiceXSI, "nil")
+		isNil := oldNil == "true" || oldNil == "1"
+		expectedNil := false
+		if change.ExpectedNil != nil {
+			expectedNil = *change.ExpectedNil
+		}
+		if change.ExpectedValue != nil && (*change.ExpectedValue != s.node.text.String() || expectedNil != isNil) {
+			return nil, fmt.Errorf("stale invoice field value")
+		}
+		if !invoiceWriteText(change.Value) || change.Nil && change.Value != "" || change.Delete && (change.Nil || change.Value != "") {
+			return nil, fmt.Errorf("invalid invoice field change")
+		}
+		if !change.Delete && change.Nil == isNil && change.Value == s.node.text.String() {
+			continue
+		}
+		if change.Delete {
+			patches = append(patches, invoiceXMLPatch{s.begin, s.end, nil})
+			continue
+		}
+		replacement, err := invoiceWriteLeaf(s.node, change.Value, change.Nil)
+		if err != nil {
+			return nil, err
+		}
+		if change.Nil == isNil && !s.empty {
+			patches = append(patches, invoiceXMLPatch{s.inner, s.close, []byte(invoiceWriteEscape(change.Value))})
+		} else {
+			patches = append(patches, invoiceXMLPatch{s.begin, s.end, replacement})
+		}
+	}
+	result, err := invoiceApplyXMLPatches(ctx, data, patches)
+	if err != nil {
+		return nil, err
+	}
+	after, err := DecodeInvoices(ctx, result)
+	if err != nil {
+		return nil, err
+	}
+	if len(after.Invoices) == 0 {
+		return nil, fmt.Errorf("invoice patch removes all recognized facts")
+	}
+	if err := invoiceWriteNewIssues(report.Issues, after.Issues); err != nil {
+		return nil, err
+	}
+	if err := invoiceValidateXMLWrite(ctx, data, result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// invoiceValidateXMLWrite 检查已有字段词法及相对原文新增的损坏，不强制补齐历史创建字段
+// 入参: ctx 上下文，before 原文，nil表示导入，after 待写入XML
+// 返回: 新增或变更诊断错误
+func invoiceValidateXMLWrite(ctx context.Context, before, after []byte) error {
+	ctx = invoiceWriteContext(ctx)
+	var original map[string]InvoiceIssue
+	if before != nil {
+		var err error
+		original, err = invoiceWriteXMLProblems(ctx, before, true)
+		if err != nil {
+			return err
+		}
+	}
+	problems, err := invoiceWriteXMLProblems(ctx, after, before != nil)
+	if err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(problems))
+	for key := range problems {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if _, ok := original[key]; !ok {
+			issue := problems[key]
+			return fmt.Errorf("invoice %s: %s", issue.Field, issue.Message)
+		}
+	}
+	return nil
+}
+
+// invoiceWriteXMLProblems 按节点路径及问题值区分诊断，避免不同候选的同类问题相互抵消
+// 入参: ctx 上下文，data 原文，tuples 是否检查元组必有字段
+// 返回: 定位诊断及解析错误
+func invoiceWriteXMLProblems(ctx context.Context, data []byte, tuples bool) (map[string]InvoiceIssue, error) {
+	report, err := DecodeInvoices(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	root, err := invoiceXMLTree(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	problems := map[string]InvoiceIssue{}
+	nodes := map[string]*invoiceXMLNode{}
+	add := func(issue InvoiceIssue, value string) {
+		hash := sha256.Sum256([]byte(value))
+		key := issue.Code + "\x00" + issue.Field + "\x00" + issue.Source.NodePath + "\x00" + issue.Message + "\x00" + hex.EncodeToString(hash[:])
+		problems[key] = issue
+	}
+	var walk func(*invoiceXMLNode, string) error
+	walk = func(n *invoiceXMLNode, path string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		nodes[n.path] = n
+		if n.name.Space != "" {
+			path = "!" + path
+		}
+		path += "/" + n.name.Local
+		kind, _ := invoiceTaxonomy(n.name.Space)
+		nilValue := invoiceXMLAttr(n, invoiceXSI, "nil")
+		empty := nilValue == "true" || nilValue == "1"
+		date := kind != "" && invoiceWriteDateFact(kind, n.name.Local)
+		plainDate := root.name == (xml.Name{Local: "EInvoice"}) && path == "/EInvoice/TaxSupervisionInfo/IssueTime"
+		if len(n.children) == 0 && !empty && (date || plainDate) {
+			value := n.text.String()
+			parseValue := value
+			if plainDate {
+				parseValue = strings.Replace(value, " ", "T", 1)
+			}
+			_, valid := invoicePeriodTime(parseValue)
+			if !valid || date && strings.ContainsAny(value, "T ") {
+				add(InvoiceIssue{Code: "invalid-date", Field: n.name.Local, Message: "invalid invoice date", Source: InvoiceSource{NodePath: n.path}}, value)
+			}
+		}
+		if tuples && kind != "" && invoiceItemTuple(kind, n.name.Local) {
+			required := strings.Fields("NatureOfInvoiceLine NameOfTaxableGoodsOrServices AmountExcludingTax TaxRate TaxAmount")
+			if kind == "atr" {
+				required = strings.Fields("DepartureStation DestinationStation FlightSegment Carrier Flight Class FareBasis FreeBaggageAllowance")
+			} else if n.name.Local == "InformationOfTollFeeDetailItemsTuple" {
+				required = strings.Fields("NatureOfInvoiceLine NameOfTollFeeItems PlateNumber TypesOfVehicle EntranceDate ExitDate AmountExcludingTax TaxRate TaxAmount")
+			}
+			for _, name := range required {
+				if len(invoiceChildren(n, n.name.Space, name)) == 0 {
+					add(InvoiceIssue{Code: "required-tuple-field", Field: name, Message: "missing invoice tuple field", Source: InvoiceSource{NodePath: n.path}}, "")
+				}
+			}
+		}
+		for _, child := range n.children {
+			if err := walk(child, path); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := walk(root, ""); err != nil {
+		return nil, err
+	}
+	for _, issue := range report.Issues {
+		value := ""
+		if n := nodes[issue.Source.NodePath]; n != nil {
+			value = n.text.String() + "\x00" + invoiceXMLAttr(n, invoiceXSI, "nil")
+		}
+		add(issue, value)
+	}
+	return problems, nil
+}
+
+// invoiceWriteLeaf 使用展开名称写入单个节点，并保留原有属性
+// 入参: n 原节点，value 新值，nilValue 空值标记
+// 返回: 节点XML及编码错误
+func invoiceWriteLeaf(n *invoiceXMLNode, value string, nilValue bool) ([]byte, error) {
+	var b bytes.Buffer
+	e := xml.NewEncoder(&b)
+	start := xml.StartElement{Name: n.name}
+	var prefixes []string
+	for prefix := range n.ns {
+		if prefix != "" && prefix != "xml" {
+			prefixes = append(prefixes, prefix)
+		}
+	}
+	sort.Strings(prefixes)
+	for _, prefix := range prefixes {
+		start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Local: "xmlns:" + prefix}, Value: n.ns[prefix]})
+	}
+	for _, a := range n.attrs {
+		if a.Name.Space == "xmlns" || a.Name.Local == "xmlns" && a.Name.Space == "" || a.Name.Space == invoiceXSI && a.Name.Local == "nil" || nilValue && a.Name.Space == "" && (a.Name.Local == "decimals" || a.Name.Local == "precision") {
+			continue
+		}
+		start.Attr = append(start.Attr, a)
+	}
+	if nilValue {
+		start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Space: invoiceXSI, Local: "nil"}, Value: "true"})
+	} else if invoiceXMLAttr(n, invoiceXSI, "nil") == "true" || invoiceXMLAttr(n, invoiceXSI, "nil") == "1" {
+		kind, _ := invoiceTaxonomy(n.name.Space)
+		if invoiceNumeric(kind, n.name.Local) {
+			start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Local: "decimals"}, Value: "INF"})
+		}
+	}
+	if err := e.EncodeToken(start); err != nil {
+		return nil, err
+	}
+	if err := e.EncodeToken(xml.CharData(value)); err != nil {
+		return nil, err
+	}
+	if err := e.EncodeToken(start.End()); err != nil {
+		return nil, err
+	}
+	if err := e.Flush(); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
+// invoiceWriteNewIssues 拒绝修改新增的解析诊断，不隐藏原始文件诊断
+// 入参: before 修改前诊断，after 修改后诊断
+// 返回: 新增诊断错误
+func invoiceWriteNewIssues(before, after []InvoiceIssue) error {
+	counts := map[string]int{}
+	key := func(i InvoiceIssue) string { return i.Code + "\x00" + i.Field + "\x00" + i.Message }
+	for _, i := range before {
+		counts[key(i)]++
+	}
+	for _, i := range after {
+		k := key(i)
+		if counts[k] == 0 {
+			return fmt.Errorf("invoice update: %s", i.Message)
+		}
+		counts[k]--
+	}
+	return nil
+}
+
+// UpdateInvoiceXML 更新指定候选的公共字段和明细，保留未映射原文及其他候选
+// 入参: ctx 上下文，data 原XML，invoiceIndex 候选序号，value 完整目标值
+// 返回: 修改后XML及不可安全表达的修改错误
+func UpdateInvoiceXML(ctx context.Context, data []byte, invoiceIndex int, value Invoice) ([]byte, error) {
+	ctx = invoiceWriteContext(ctx)
+	before, err := DecodeInvoices(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	if invoiceIndex < 0 || invoiceIndex >= len(before.Invoices) {
+		return nil, fmt.Errorf("invoice index out of range")
+	}
+	old := before.Invoices[invoiceIndex]
+	if reflect.DeepEqual(old, value) {
+		return bytes.Clone(data), nil
+	}
+	if value.Kind != old.Kind || value.Standard != old.Standard || value.Version != old.Version {
+		return nil, fmt.Errorf("invoice update cannot change format")
+	}
+	if value.Currency != old.Currency {
+		return nil, fmt.Errorf("invoice update cannot change shared currency units")
+	}
+	oldIssues, err := ValidateInvoice(ctx, old)
+	if err != nil {
+		return nil, err
+	}
+	newIssues, err := ValidateInvoice(ctx, value)
+	if err != nil {
+		return nil, err
+	}
+	filter := func(issues []InvoiceIssue) []InvoiceIssue {
+		var r []InvoiceIssue
+		for _, i := range issues {
+			if i.Code != "required" {
+				r = append(r, i)
+			}
+		}
+		return r
+	}
+	if err = invoiceWriteNewIssues(filter(oldIssues), filter(newIssues)); err != nil {
+		return nil, err
+	}
+	root, spans, err := invoiceWriteSpans(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	if value.Standard == "EInvoice" {
+		var expanded []invoiceXMLPatch
+		for _, s := range spans {
+			n := s.node
+			if !s.empty || n.name.Space != "" || n.parent == nil {
+				continue
+			}
+			container := n.parent == root && (n.name.Local == "EInvoiceData" || n.name.Local == "TaxSupervisionInfo")
+			if n.parent.name == (xml.Name{Local: "EInvoiceData"}) && n.parent.parent == root {
+				for _, g := range invoicePlainGroups() {
+					container = container || g.name == n.name.Local
+				}
+			}
+			if container {
+				p, e := invoiceWriteInsert(s, nil, data)
+				if e != nil {
+					return nil, e
+				}
+				expanded = append(expanded, p)
+			}
+		}
+		if len(expanded) > 0 {
+			normalized, e := invoiceApplyXMLPatches(ctx, data, expanded)
+			if e != nil {
+				return nil, e
+			}
+			return UpdateInvoiceXML(ctx, normalized, invoiceIndex, value)
+		}
+	}
+	if err = invoiceWriteUnmapped(old.Facts, value.Facts); err != nil {
+		return nil, err
+	}
+	clean := value
+	clean.Facts = nil
+	clean.Sources = nil
+	clean.Items = append([]InvoiceItem(nil), value.Items...)
+	if clean.Standard != "EInvoice" {
+		for _, name := range invoiceWriteHeader(clean) {
+			previous := invoiceXMLField(&old, old.Kind, name)
+			target := invoiceXMLField(&clean, clean.Kind, name)
+			if previous != nil && target != nil && *previous == *target {
+				*target = ""
+			}
+		}
+	}
+	for i := range clean.Items {
+		clean.Items[i].Fields = nil
+		if value.Standard != "EInvoice" && (value.Kind == "atr" || value.Kind == "inv") {
+			for _, f := range value.Items[i].Fields {
+				if !invoiceWriteContains(invoiceWriteItemNames(value.Kind), f.Name) {
+					continue
+				}
+				if p := invoiceItemField(&clean.Items[i], value.Kind, f.Name); p != nil {
+					if *p == "" && !f.Nil {
+						continue
+					}
+					f.Value = *p
+					if *p != "" {
+						f.Nil = false
+					}
+				}
+				f.Source = InvoiceSource{}
+				f.Context = ""
+				clean.Items[i].Fields = append(clean.Items[i].Fields, f)
+			}
+		}
+	}
+	if reflect.DeepEqual(old.Items, value.Items) {
+		clean.Items = nil
+	}
+	if invoiceWriteCreation(old) == nil {
+		if err = invoiceWriteCreation(value); err != nil {
+			return nil, err
+		}
+	}
+	var generated []byte
+	if value.Standard == "EInvoice" {
+		generated, err = invoiceEncodePlain(clean)
+	} else {
+		options, e := invoiceWriteOriginalOptions(root, old)
+		if e != nil {
+			return nil, e
+		}
+		generated, err = invoiceEncodeXBRL(clean, options)
+	}
+	if err != nil {
+		return nil, err
+	}
+	generatedRoot, err := invoiceXMLTree(ctx, generated)
+	if err != nil {
+		return nil, err
+	}
+	var patches []invoiceXMLPatch
+	var trailingGroups []invoiceXMLPatch
+	var itemParent, generatedParent *invoiceXMLNode
+	if value.Standard == "EInvoice" {
+		if len(invoiceChildren(root, "", "EInvoiceData")) != 1 || len(invoiceChildren(root, "", "TaxSupervisionInfo")) != 1 {
+			return nil, fmt.Errorf("invoice requires unique data and supervision groups")
+		}
+		itemParent = invoiceChildren(root, "", "EInvoiceData")[0]
+		generatedParent = invoiceChildren(generatedRoot, "", "EInvoiceData")[0]
+		for _, group := range append(invoicePlainGroups(), invoiceWriteField{"TaxSupervisionInfo", "InvoiceNumber IssueTime"}) {
+			parent, newParent := itemParent, generatedParent
+			if group.name == "TaxSupervisionInfo" {
+				parent, newParent = root, generatedRoot
+			}
+			existing := invoiceChildren(parent, "", group.name)
+			desired := invoiceChildren(newParent, "", group.name)
+			if len(existing) > 1 {
+				return nil, fmt.Errorf("ambiguous invoice group %s", group.name)
+			}
+			if len(existing) == 0 {
+				if len(desired) > 0 && len(desired[0].children) > 0 {
+					raw, e := invoiceWriteNode(desired[0])
+					if e != nil {
+						return nil, e
+					}
+					p, e := invoiceWriteOrderedInsert(data, spans, parent, "", group.name, strings.Fields("SellerInformation BuyerInformation BasicInformation IssuItemInformation SpecificInformation AdditionalInformation"), raw)
+					if e != nil {
+						return nil, e
+					}
+					if group.name == "AdditionalInformation" {
+						trailingGroups = append(trailingGroups, p)
+					} else {
+						patches = append(patches, p)
+					}
+				}
+				continue
+			}
+			var target *invoiceXMLNode
+			if len(desired) > 0 {
+				target = desired[0]
+			}
+			retained := invoiceXMLNode{}
+			if target != nil {
+				retained = *target
+				retained.children = append([]*invoiceXMLNode(nil), target.children...)
+			}
+			for _, name := range strings.Fields(group.value) {
+				path := "/EInvoice/EInvoiceData/" + group.name + "/" + name
+				if group.name == "TaxSupervisionInfo" {
+					path = "/EInvoice/TaxSupervisionInfo/" + name
+				}
+				previous, _ := invoicePlainField(&old, nil, path)
+				desired, _ := invoicePlainField(&value, nil, path)
+				if previous != nil && desired != nil && *previous == *desired && len(invoiceChildren(&retained, "", name)) == 0 {
+					retained.children = append(retained.children, invoiceChildren(existing[0], "", name)...)
+				}
+			}
+			ps, e := invoiceWriteMergeChildren(data, spans, existing[0], &retained, "", strings.Fields(group.value))
+			if e != nil {
+				return nil, e
+			}
+			patches = append(patches, ps...)
+		}
+	} else {
+		itemParent, generatedParent = root, generatedRoot
+		contextID := ""
+		for _, f := range old.Facts {
+			if f.Namespace == invoiceXBRL && f.Name == "context" {
+				contextID = f.Context
+				break
+			}
+		}
+		if contextID == "" {
+			return nil, fmt.Errorf("missing invoice context")
+		}
+		filtered := *root
+		filtered.children = nil
+		for _, n := range root.children {
+			if invoiceXMLAttr(n, "", "contextRef") == contextID {
+				filtered.children = append(filtered.children, n)
+			}
+		}
+		for _, name := range invoiceWriteHeader(value) {
+			previous := invoiceXMLField(&old, old.Kind, name)
+			desired := invoiceXMLField(&value, value.Kind, name)
+			if previous != nil && desired != nil && *previous == *desired {
+				generatedRoot.children = append(generatedRoot.children, invoiceChildren(&filtered, value.Standard, name)...)
+			}
+		}
+		ps, e := invoiceWriteMergeChildren(data, spans, &filtered, generatedRoot, value.Standard, invoiceWriteHeader(value))
+		if e != nil {
+			return nil, e
+		}
+		patches = append(patches, ps...)
+	}
+	ps, err := invoiceWriteMergeItems(ctx, data, spans, itemParent, generatedParent, old, value)
+	if err != nil {
+		return nil, err
+	}
+	patches = append(patches, ps...)
+	patches = append(patches, trailingGroups...)
+	result, err := invoiceApplyXMLPatches(ctx, data, patches)
+	if err != nil {
+		return nil, err
+	}
+	after, err := DecodeInvoices(ctx, result)
+	if err != nil {
+		return nil, err
+	}
+	if err = invoiceWriteNewIssues(before.Issues, after.Issues); err != nil {
+		return nil, err
+	}
+	if len(after.Invoices) != len(before.Invoices) {
+		return nil, fmt.Errorf("invoice update changed candidate contexts")
+	}
+	var matches []Invoice
+	for _, inv := range after.Invoices {
+		if inv.Kind == value.Kind && inv.Standard == value.Standard {
+			if value.Standard == "EInvoice" {
+				matches = append(matches, inv)
+				continue
+			}
+			for _, f := range inv.Facts {
+				if f.Name == "context" && f.Namespace == invoiceXBRL {
+					for _, of := range old.Facts {
+						if of.Name == "context" && of.Namespace == invoiceXBRL && of.Context == f.Context {
+							matches = append(matches, inv)
+						}
+					}
+				}
+			}
+		}
+	}
+	if len(matches) != 1 {
+		return nil, fmt.Errorf("invoice update target is ambiguous")
+	}
+	if err = invoiceWriteRepresented(value, matches[0]); err != nil {
+		return nil, err
+	}
+	if err = invoiceValidateXMLWrite(ctx, data, result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// invoiceWriteContains 判断字段是否位于已知顺序表
+// 入参: names 字段列表，name 字段
+// 返回: 是否存在
+func invoiceWriteContains(names []string, name string) bool {
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// invoiceWriteUnmapped 拒绝通过摘要更改或删除未映射事实，原文修改使用PatchInvoice
+// 入参: before 原事实，after 目标事实
+// 返回: 不支持的事实修改错误
+func invoiceWriteUnmapped(before, after []InvoiceFact) error {
+	if len(after) == 0 {
+		return nil
+	}
+	old := map[string]InvoiceFact{}
+	for _, f := range before {
+		old[f.Source.NodePath] = f
+	}
+	for _, f := range after {
+		prior, ok := old[f.Source.NodePath]
+		if !ok {
+			return fmt.Errorf("new unmapped facts require explicit source editing")
+		}
+		if f.Name != prior.Name || f.Namespace != prior.Namespace || f.Context != prior.Context || f.Unit != prior.Unit || f.Decimals != prior.Decimals || f.Precision != prior.Precision || !slices.Equal(f.Dimensions, prior.Dimensions) {
+			return fmt.Errorf("invoice update cannot alter fact metadata")
+		}
+		if f.Value != prior.Value || f.Nil != prior.Nil {
+			return fmt.Errorf("unmapped fact changes require PatchInvoice")
+		}
+	}
+	return nil
+}
+
+// invoiceWriteOriginalOptions 读取原上下文及单位，不猜测或改写定义
+// 入参: root 原XML，value 原候选
+// 返回: 原定义及不支持的复杂上下文错误
+func invoiceWriteOriginalOptions(root *invoiceXMLNode, value Invoice) (InvoiceEncodingOptions, error) {
+	var options InvoiceEncodingOptions
+	ref := ""
+	for _, f := range value.Facts {
+		if f.Namespace == invoiceXBRL && f.Name == "context" {
+			ref = f.Context
+			break
+		}
+	}
+	for _, n := range root.children {
+		if n.name == (xml.Name{Space: "http://www.xbrl.org/2003/linkbase", Local: "schemaRef"}) && options.SchemaRef == "" {
+			options.SchemaRef = invoiceXMLAttr(n, "http://www.w3.org/1999/xlink", "href")
+		}
+		if n.name == (xml.Name{Space: invoiceXBRL, Local: "context"}) && invoiceXMLAttr(n, "", "id") == ref {
+			dims, ok := invoiceContext(n)
+			if !ok || len(dims) > 0 {
+				return options, fmt.Errorf("invoice update requires an unambiguous nondimensional context")
+			}
+			entity := invoiceChildren(n, invoiceXBRL, "entity")[0]
+			id := invoiceChildren(entity, invoiceXBRL, "identifier")[0]
+			options.Context = InvoiceContext{ID: ref, Identifier: id.text.String(), Scheme: invoiceXMLAttr(id, "", "scheme")}
+			period := invoiceChildren(n, invoiceXBRL, "period")[0]
+			for _, p := range period.children {
+				switch p.name.Local {
+				case "instant":
+					options.Context.Instant = p.text.String()
+				case "startDate":
+					options.Context.StartDate = p.text.String()
+				case "endDate":
+					options.Context.EndDate = p.text.String()
+				}
+			}
+		}
+		if n.name == (xml.Name{Space: invoiceXBRL, Local: "unit"}) {
+			ms := invoiceChildren(n, invoiceXBRL, "measure")
+			if len(ms) == 1 {
+				q, ok := invoiceQName(ms[0], ms[0].text.String())
+				if ok {
+					options.Units = append(options.Units, InvoiceUnit{ID: invoiceXMLAttr(n, "", "id"), Namespace: q.Space, Name: q.Local})
+				}
+			}
+		}
+	}
+	if options.SchemaRef == "" {
+		return options, fmt.Errorf("invoice source has no schema reference")
+	}
+	return options, nil
+}
+
+// invoiceWriteNode 序列化生成的节点，使移动节点的命名空间自足
+// 入参: n 节点
+// 返回: XML及编码错误
+func invoiceWriteNode(n *invoiceXMLNode) ([]byte, error) {
+	var b bytes.Buffer
+	e := xml.NewEncoder(&b)
+	var walk func(*invoiceXMLNode) error
+	walk = func(c *invoiceXMLNode) error {
+		start := xml.StartElement{Name: c.name}
+		for _, a := range c.attrs {
+			if a.Name.Space != "xmlns" && a.Name != (xml.Name{Local: "xmlns"}) {
+				start.Attr = append(start.Attr, a)
+			}
+		}
+		if err := e.EncodeToken(start); err != nil {
+			return err
+		}
+		for _, p := range c.parts {
+			if p.child != nil {
+				if err := walk(p.child); err != nil {
+					return err
+				}
+			} else {
+				if err := e.EncodeToken(xml.CharData(p.text)); err != nil {
+					return err
+				}
+			}
+		}
+		return e.EncodeToken(start.End())
+	}
+	if err := walk(n); err != nil {
+		return nil, err
+	}
+	if err := e.Flush(); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
+// invoiceWriteInsert 生成父节点内追加内容的修改，支持空元素
+// 入参: span 父节点边界，raw 新内容，data 原文
+// 返回: 插入修改及错误
+func invoiceWriteInsert(span invoiceXMLSpan, raw, data []byte) (invoiceXMLPatch, error) {
+	if !span.empty {
+		return invoiceXMLPatch{span.close, span.close, raw}, nil
+	}
+	open := data[span.begin:span.inner]
+	nameEnd := bytes.IndexAny(open, " \t\r\n/>")
+	if nameEnd < 2 {
+		return invoiceXMLPatch{}, fmt.Errorf("invalid empty invoice element")
+	}
+	name := string(open[1:nameEnd])
+	replacement := append([]byte(nil), open[:len(open)-2]...)
+	replacement = append(replacement, '>')
+	replacement = append(replacement, raw...)
+	replacement = append(replacement, []byte("</"+name+">")...)
+	return invoiceXMLPatch{span.begin, span.end, replacement}, nil
+}
+
+// invoiceWriteMergeChildren 合并已知叶节点，其他属性、子节点及空白保持原样
+// 入参: data 原文，spans 边界，old 原父节点，desired 目标父节点，space 命名空间，names 已知字段
+// 返回: 修改列表及歧义错误
+func invoiceWriteMergeChildren(data []byte, spans map[string]invoiceXMLSpan, old, desired *invoiceXMLNode, space string, names []string) ([]invoiceXMLPatch, error) {
+	var patches []invoiceXMLPatch
+	for rank, name := range names {
+		existing := invoiceChildren(old, space, name)
+		var targets []*invoiceXMLNode
+		if desired != nil {
+			targets = invoiceChildren(desired, space, name)
+		}
+		if len(existing) > 1 || len(targets) > 1 {
+			return nil, fmt.Errorf("ambiguous invoice field %s", name)
+		}
+		var raw []byte
+		if len(targets) > 0 {
+			var err error
+			raw, err = invoiceWriteNode(targets[0])
+			if err != nil {
+				return nil, err
+			}
+		}
+		if len(existing) > 0 {
+			s := spans[existing[0].path]
+			if len(existing[0].children) > 0 {
+				return nil, fmt.Errorf("non-leaf invoice field %s", name)
+			}
+			if len(targets) == 0 && (existing[0].text.String() == "" || invoiceXMLAttr(existing[0], invoiceXSI, "nil") == "true" || invoiceXMLAttr(existing[0], invoiceXSI, "nil") == "1") {
+				continue
+			}
+			if len(targets) > 0 && existing[0].text.String() == targets[0].text.String() && invoiceXMLAttr(existing[0], invoiceXSI, "nil") == invoiceXMLAttr(targets[0], invoiceXSI, "nil") {
+				continue
+			}
+			if len(targets) > 0 {
+				oldNil := invoiceXMLAttr(existing[0], invoiceXSI, "nil")
+				newNil := invoiceXMLAttr(targets[0], invoiceXSI, "nil")
+				wasNil := oldNil == "true" || oldNil == "1"
+				isNil := newNil == "true" || newNil == "1"
+				if !s.empty && wasNil == isNil {
+					patches = append(patches, invoiceXMLPatch{s.inner, s.close, []byte(invoiceWriteEscape(targets[0].text.String()))})
+					continue
+				}
+				var err error
+				raw, err = invoiceWriteLeaf(existing[0], targets[0].text.String(), isNil)
+				if err != nil {
+					return nil, err
+				}
+			}
+			patches = append(patches, invoiceXMLPatch{s.begin, s.end, raw})
+		} else if len(raw) > 0 {
+			position := -1
+			for _, next := range names[rank+1:] {
+				nodes := invoiceChildren(old, space, next)
+				if len(nodes) > 0 {
+					candidate := spans[nodes[0].path].begin
+					if position < 0 || candidate < position {
+						position = candidate
+					}
+				}
+			}
+			if position >= 0 {
+				patches = append(patches, invoiceXMLPatch{position, position, raw})
+			} else {
+				p, err := invoiceWriteInsert(spans[old.path], raw, data)
+				if err != nil {
+					return nil, err
+				}
+				patches = append(patches, p)
+			}
+		}
+	}
+	return patches, nil
+}
+
+// invoiceWriteMergeItems 按原明细来源重排或修改元组，删除仅作用于显式移除的明细
+// 入参: ctx 上下文，data 原文，spans 边界，parent 原父节点，generated 新父节点，old 原发票，value 目标发票
+// 返回: 明细修改及错误
+func invoiceWriteMergeItems(ctx context.Context, data []byte, spans map[string]invoiceXMLSpan, parent, generated *invoiceXMLNode, old, value Invoice) ([]invoiceXMLPatch, error) {
+	if reflect.DeepEqual(old.Items, value.Items) {
+		return nil, nil
+	}
+	space, name := value.Standard, invoiceWriteTuple(value.Kind)
+	names := invoiceWriteItemNames(value.Kind)
+	if value.Standard == "EInvoice" {
+		space = ""
+		name = "IssuItemInformation"
+		names = strings.Fields("ItemName SpecMod MeaUnits Quantity UnPrice Amount TaxRate ComTaxAm")
+	}
+	targets := invoiceChildren(generated, space, name)
+	if len(targets) != len(value.Items) {
+		return nil, fmt.Errorf("unsupported invoice item shape")
+	}
+	original := map[string]*invoiceXMLNode{}
+	for _, item := range old.Items {
+		for _, f := range item.Fields {
+			s := spans[f.Source.NodePath]
+			if s.node != nil && s.node.parent != nil && s.node.parent.parent == parent && s.node.parent.name.Space == space {
+				ref := invoiceXMLAttr(s.node, "", "contextRef")
+				for _, child := range s.node.parent.children {
+					if other := invoiceXMLAttr(child, "", "contextRef"); other != "" && other != ref {
+						return nil, fmt.Errorf("invoice item shares multiple contexts")
+					}
+				}
+				original[s.node.parent.path] = s.node.parent
+				break
+			}
+		}
+	}
+	if len(original) != len(old.Items) {
+		return nil, fmt.Errorf("invoice items require explicit tuple sources")
+	}
+	seen := map[string]bool{}
+	var combined []byte
+	for i, item := range value.Items {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		path := ""
+		for _, f := range item.Fields {
+			s := spans[f.Source.NodePath]
+			if s.node != nil && s.node.parent != nil && original[s.node.parent.path] != nil {
+				if path != "" && path != s.node.parent.path {
+					return nil, fmt.Errorf("mixed invoice item sources")
+				}
+				path = s.node.parent.path
+			}
+		}
+		if path == "" {
+			for _, f := range item.Fields {
+				mapped := invoiceItemField(&InvoiceItem{}, value.Kind, f.Name)
+				if value.Standard == "EInvoice" || !invoiceWriteContains(names, f.Name) {
+					return nil, fmt.Errorf("unsupported new invoice item fact %s", f.Name)
+				}
+				if mapped != nil {
+					p := invoiceItemField(&item, value.Kind, f.Name)
+					if f.Nil && *p != "" || !f.Nil && f.Value != *p {
+						return nil, fmt.Errorf("conflicting new invoice item fact %s", f.Name)
+					}
+				}
+			}
+			raw, err := invoiceWriteNode(targets[i])
+			if err != nil {
+				return nil, err
+			}
+			combined = append(combined, raw...)
+			continue
+		}
+		if seen[path] {
+			return nil, fmt.Errorf("duplicate invoice item source")
+		}
+		seen[path] = true
+		for _, f := range item.Fields {
+			if invoiceWriteContains(names, f.Name) {
+				continue
+			}
+			s, ok := spans[f.Source.NodePath]
+			if !ok || s.node.parent == nil || s.node.parent.path != path || f.Value != s.node.text.String() || f.Nil != (invoiceXMLAttr(s.node, invoiceXSI, "nil") == "true" || invoiceXMLAttr(s.node, invoiceXSI, "nil") == "1") {
+				return nil, fmt.Errorf("unmapped item fact changes require PatchInvoice")
+			}
+		}
+		n := original[path]
+		ps, err := invoiceWriteMergeChildren(data, spans, n, targets[i], space, names)
+		if err != nil {
+			return nil, err
+		}
+		s := spans[path]
+		for j := range ps {
+			ps[j].begin -= s.begin
+			ps[j].end -= s.begin
+		}
+		raw, err := invoiceApplyXMLPatches(ctx, data[s.begin:s.end], ps)
+		if err != nil {
+			return nil, err
+		}
+		combined = append(combined, raw...)
+	}
+	var ordered []invoiceXMLSpan
+	for path := range original {
+		ordered = append(ordered, spans[path])
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].begin < ordered[j].begin })
+	var patches []invoiceXMLPatch
+	for i, s := range ordered {
+		raw := []byte(nil)
+		if i == 0 {
+			raw = combined
+		}
+		patches = append(patches, invoiceXMLPatch{s.begin, s.end, raw})
+	}
+	if len(ordered) == 0 && len(combined) > 0 {
+		var p invoiceXMLPatch
+		var err error
+		if value.Standard == "EInvoice" {
+			p, err = invoiceWriteOrderedInsert(data, spans, parent, "", name, strings.Fields("SellerInformation BuyerInformation BasicInformation IssuItemInformation SpecificInformation AdditionalInformation"), combined)
+		} else {
+			p, err = invoiceWriteInsert(spans[parent.path], combined, data)
+		}
+		if err != nil {
+			return nil, err
+		}
+		patches = append(patches, p)
+	}
+	return patches, nil
+}
+
+// invoiceWriteOrderedInsert 在后继已知元素前插入，未知节点不移动
+// 入参: data 原文，spans 边界，parent 父节点，space 命名空间，name 新节点名，names 规范顺序，raw 新内容
+// 返回: 插入修改及错误
+func invoiceWriteOrderedInsert(data []byte, spans map[string]invoiceXMLSpan, parent *invoiceXMLNode, space, name string, names []string, raw []byte) (invoiceXMLPatch, error) {
+	position := -1
+	following := false
+	for _, known := range names {
+		if known == name {
+			following = true
+			continue
+		}
+		if !following {
+			continue
+		}
+		for _, node := range invoiceChildren(parent, space, known) {
+			offset := spans[node.path].begin
+			if position < 0 || offset < position {
+				position = offset
+			}
+		}
+	}
+	if position >= 0 {
+		return invoiceXMLPatch{position, position, raw}, nil
+	}
+	return invoiceWriteInsert(spans[parent.path], raw, data)
+}
+
+// invoiceWriteCreation 检查官方元组序列中的必有字段，不虚构缺失业务值
+// 入参: value 发票
+// 返回: 缺少元组字段错误
+func invoiceWriteCreation(value Invoice) error {
+	if value.Standard == "EInvoice" {
+		return nil
+	}
+	for i, item := range value.Items {
+		required := strings.Fields("NatureOfInvoiceLine NameOfTaxableGoodsOrServices AmountExcludingTax TaxRate TaxAmount")
+		if value.Kind == "atr" {
+			required = strings.Fields("DepartureStation DestinationStation FlightSegment Carrier Flight Class FareBasis FreeBaggageAllowance")
+		}
+		for _, name := range required {
+			p := invoiceItemField(&item, value.Kind, name)
+			present := p != nil && *p != ""
+			for _, f := range item.Fields {
+				if f.Name == name && (f.Nil || f.Value != "") {
+					present = true
+				}
+			}
+			if !present {
+				return fmt.Errorf("invoice item %d requires %s", i, name)
+			}
+		}
+	}
+	return nil
+}
+
+// invoiceWriteKnownFact 限制新建事实为已核实的分类标准概念
+// 入参: kind 票种，name 概念名
+// 返回: 是否支持新建
+func invoiceWriteKnownFact(kind, name string) bool {
+	if invoiceWriteContains(invoiceWriteHeader(Invoice{Kind: kind}), name) {
+		return true
+	}
+	if (kind == "inv" || kind == "atr") && invoiceWriteContains(invoiceWriteItemNames(kind), name) {
+		return true
+	}
+	var extras string
+	switch kind {
+	case "inv":
+		extras = "TypeOfInvoice UniqueCodeOfInvoice LocationOfInvoice IdentifyingCode NumberOfInvoiceMachine SecurityCode TaxIncludedAmountInWords Payee Reviewer Issuer AddressPhoneNumberOfPurchaser DepositBankAndAccountNumberOfPurchaser AddressPhoneNumberOfSeller DepositBankAndAccountNumberOfSeller"
+	case "atr":
+		extras = "PassengerName ValidIdNumber Endorsement NumberOfGpOrder Fare FuelSurcharge VatRate CivilAviationDevelopmentFund OtherTaxes ETicketNumber VerificationCode PromptInformation Insurance AgentCode IssueParty MarkingOfDomesticOrInternational"
+	case "rai":
+		extras = "TypeOfVoucher ETicketNumber IssueParty IssuePartyCode TypeOfBusiness DepartureStation PhonicsOfDepartureStation DestinationStation PhonicsOfDestinationStation TrainNumber TravelDate DepartureTime AirConditioningCharacteristics SeatLevel Carriage Seat TypeOfRailwayTicket IdNumber Name TaxRate AddressPhoneNumberOfPurchaser DepositBankAndAccountNumberOfPurchaser AddressPhoneNumberOfSeller DepositBankAndAccountNumberOfSeller"
+	}
+	return invoiceWriteContains(strings.Fields(extras), name)
+}
+
+// invoiceWriteDateFact 识别规范中的日期类型，而非自由文本日期时间
+// 入参: kind 票种，name 概念名
+// 返回: 是否为日期事实
+func invoiceWriteDateFact(kind, name string) bool {
+	return kind == "inv" && name == "DateOfIssue" || kind == "atr" && invoiceWriteContains(strings.Fields("IssueDate CarrierDate EffectiveDate ExpirationDate"), name) || kind == "rai" && (name == "DateOfIssue" || name == "TravelDate")
+}
+
+// invoiceWritePlainSections 接入调用方提供的官方头部、认证及签名片段，不生成税务签名
+// 入参: ctx 上下文，data 生成XML，options 显式业务片段
+// 返回: XML及片段错误
+func invoiceWritePlainSections(ctx context.Context, data []byte, options InvoiceEncodingOptions) ([]byte, error) {
+	root, spans, err := invoiceWriteSpans(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	var patches []invoiceXMLPatch
+	for _, section := range []struct {
+		name string
+		data []byte
+	}{{"Header", options.HeaderXML}, {"SellerAuthentication", options.SellerAuthenticationXML}, {"TaxSupervisionInfo", options.TaxSupervisionXML}, {"TaxBureauSignature", options.TaxBureauSignatureXML}} {
+		if len(section.data) == 0 {
+			continue
+		}
+		n, err := invoiceXMLTree(ctx, section.data)
+		if err != nil {
+			return nil, err
+		}
+		if n.name != (xml.Name{Local: section.name}) {
+			return nil, fmt.Errorf("invalid invoice section %s", section.name)
+		}
+		if section.name == "Header" {
+			vs := invoiceChildren(n, "", "Version")
+			if len(vs) != 1 || vs[0].text.String() != "0.3" {
+				return nil, fmt.Errorf("invalid invoice header version")
+			}
+		}
+		old := invoiceChildren(root, "", section.name)
+		if len(old) > 0 {
+			s := spans[old[0].path]
+			patches = append(patches, invoiceXMLPatch{s.begin, s.end, section.data})
+		} else {
+			pos := spans[root.path].close
+			if section.name == "SellerAuthentication" {
+				pos = spans[invoiceChildren(root, "", "TaxSupervisionInfo")[0].path].begin
+			}
+			patches = append(patches, invoiceXMLPatch{pos, pos, section.data})
+		}
+	}
+	return invoiceApplyXMLPatches(ctx, data, patches)
+}
