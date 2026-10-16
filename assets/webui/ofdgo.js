@@ -6422,7 +6422,7 @@ async function commitInvoice(draft, request) {
 		if (!settingsElements.Panel.open || !settings.invoice || invoicePanel.key !== key) return;
 		if (result?.source?.kind) invoicePanel.key = JSON.stringify([invoiceSourceKey(result.source), draft.entry?.index || 0]);
 		await loadDocumentSettings();
-		const warning = invoiceIssues(result?.issues);
+		const warning = invoiceIssues(result?.issues).replaceAll("\n", "，");
 		if (warning) {
 			const status = "已保存；" + warning;
 			if (invoiceCurrent()) invoiceCurrent().status = status;
