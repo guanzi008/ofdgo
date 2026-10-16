@@ -58,9 +58,12 @@ type InvoiceFieldDescriptor struct {
 
 // InvoiceFieldChange 修改已有叶节点，Revision为源XML的SHA256十六进制摘要
 // 未提供Revision时必须提供ExpectedValue，ExpectedNil缺省表示原节点非空值
+// Font和FontData仅用于图元引用字段的票面字体替换，FontData优先，不改变字号
 type InvoiceFieldChange struct {
 	Source        InvoiceSource `json:"source"`
 	Value         string        `json:"value"`
+	Font          string        `json:"font,omitempty"`
+	FontData      []byte        `json:"fontData,omitempty"`
 	Nil           bool          `json:"nil,omitempty"`
 	Delete        bool          `json:"delete,omitempty"`
 	Revision      string        `json:"revision,omitempty"`
@@ -984,6 +987,9 @@ func PatchInvoice(ctx context.Context, data []byte, changes []InvoiceFieldChange
 	seen := map[string]bool{}
 	var patches []invoiceXMLPatch
 	for _, change := range changes {
+		if change.Font != "" || len(change.FontData) != 0 {
+			return nil, fmt.Errorf("invoice font replacement requires object references")
+		}
 		path := change.Source.NodePath
 		s, ok := spans[path]
 		if !ok || !allowed[path] || len(s.node.children) > 0 || seen[path] {

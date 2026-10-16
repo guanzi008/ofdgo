@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // InvoiceLayout 指定发票信息页的字体资源及毫米尺寸，不代表税务机关的固定票样
@@ -535,6 +536,306 @@ func invoiceLayoutText(text *TextObject, value string, metrics FontMetrics) (flo
 		text.TextCode[i].X, text.TextCode[i].Y = ofdNumber(x-left), ofdNumber(y-top)
 	}
 	return math.Ceil((bottom-top)*1e6) / 1e6, nil
+}
+
+// layoutInvoiceReferenceSlots 按原图元框和基线分配变长字段，空TextCode保留原ID和原框，不借用跨列空间或改变引用
+// 入参: ctx 取消上下文, bindings 有序图元槽位, before 原文字, value 新文字, font 字体覆盖, fontData 字体数据
+// 返回: error 引用、字体、布局或容量错误
+func (e *Editor) layoutInvoiceReferenceSlots(ctx context.Context, bindings []InvoiceBinding, before, value, font string, fontData []byte) error {
+	if len(bindings) == 0 || !utf8.ValidString(value) || !invoiceWriteText(value) || strings.ContainsAny(value, "\r\n\t") {
+		return fmt.Errorf("invoice slot layout requires valid single-flow text and existing references")
+	}
+	type slot struct {
+		binding InvoiceBinding
+		object  GraphicObject
+		box     Box
+		x, y    float64
+		right   float64
+		visible Box
+	}
+	slots := make([]slot, len(bindings))
+	mappings := make(map[string]map[rune]uint16)
+	var original strings.Builder
+	for i, binding := range bindings {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if binding.Page != bindings[0].Page {
+			return fmt.Errorf("invoice slot layout cannot infer flow across pages")
+		}
+		page, err := e.page(binding.Page)
+		if err != nil {
+			return err
+		}
+		matches := 0
+		for _, layer := range page.Content.Layer {
+			for _, object := range layer.Objects {
+				if sameResourceID(editorObjectID(object), binding.ObjectID) {
+					matches++
+				}
+			}
+		}
+		object, err := e.Object(binding.Page, binding.ObjectID)
+		if err != nil || matches != 1 || object.Type != "TextObject" {
+			return fmt.Errorf("invoice slot requires one direct text object")
+		}
+		text := &object.TextObject
+		if text.CTM != "" || text.Clips != nil || text.ReadDirection != 0 || text.CharDirection != 0 || text.Italic || text.Weight > 400 || text.VScale != 0 || text.Decoration != "" || text.DrawParam != "" || text.Stroke != nil && *text.Stroke || !finite(text.HScale) || text.HScale < 0 || len(text.TextCode) == 0 {
+			return fmt.Errorf("invoice slot requires plain horizontal text without transforms")
+		}
+		box, err := creationBox(text.Boundary)
+		if err != nil {
+			return err
+		}
+		x, err := strconv.ParseFloat(text.TextCode[0].X, 64)
+		if err != nil || !finite(x) || x < 0 || x > box.W {
+			return fmt.Errorf("invoice slot has an invalid horizontal origin")
+		}
+		y, err := strconv.ParseFloat(text.TextCode[0].Y, 64)
+		if err != nil || !finite(y) || y < 0 || y > box.H || !finite(text.Size) || text.Size <= 0 {
+			return fmt.Errorf("invoice slot has an invalid baseline or size")
+		}
+		for _, code := range text.TextCode {
+			if code.Index != "" || code.DeltaY != "" || code.Y != "" && code.Y != text.TextCode[0].Y {
+				return fmt.Errorf("invoice slot has unsupported glyph indexes or multiple baselines")
+			}
+		}
+		old := text.Text()
+		if strings.ContainsAny(old, "\r\n\t") {
+			return fmt.Errorf("invoice slot contains multiple text lines")
+		}
+		original.WriteString(old)
+		if font == "" && len(fontData) == 0 {
+			if err := validateTextGlyphs(*text, 1<<16); err != nil {
+				return err
+			}
+			if mappings[text.Font] == nil {
+				mappings[text.Font] = make(map[rune]uint16)
+			}
+			runes := []rune(old)
+			for _, transform := range text.CGTransform {
+				glyphs := strings.Fields(transform.Glyphs)
+				if transform.CodeCount != transform.GlyphCount || len(glyphs) != transform.CodeCount {
+					return fmt.Errorf("invoice combined glyph layout requires explicit Font or FontData")
+				}
+				for j, encoded := range glyphs {
+					glyph, err := strconv.ParseUint(encoded, 10, 16)
+					at := transform.CodePosition + j
+					if err != nil || glyph == 0 || at < 0 || at >= len(runes) {
+						return fmt.Errorf("invalid invoice glyph mapping")
+					}
+					if previous, exists := mappings[text.Font][runes[at]]; exists && previous != uint16(glyph) {
+						return fmt.Errorf("ambiguous invoice glyph mapping requires explicit Font or FontData")
+					}
+					mappings[text.Font][runes[at]] = uint16(glyph)
+				}
+			}
+		}
+		slots[i] = slot{binding: binding, object: object, box: box, x: x, y: y, right: box.W}
+		if i == 0 {
+			continue
+		}
+		previous := &slots[i-1]
+		step := math.Max(previous.object.TextObject.Size, text.Size)
+		if math.Abs(box.Y+y-previous.box.Y-previous.y) <= step*.1 {
+			start := box.X + x
+			if start <= previous.box.X+previous.x || start-(previous.box.X+previous.box.W) > step {
+				return fmt.Errorf("invoice references cross columns or reverse reading order")
+			}
+			previous.right = math.Min(previous.right, start-previous.box.X)
+		} else if math.Abs(box.X+x-slots[0].box.X-slots[0].x) > step*.25 || box.Y < previous.box.Y+previous.box.H-1e-6 || box.Y-(previous.box.Y+previous.box.H) > step*.5 {
+			return fmt.Errorf("invoice references do not form adjacent aligned text rows")
+		}
+	}
+	if original.String() != before {
+		return fmt.Errorf("invoice slot text changed")
+	}
+	reader, err := e.ReaderContext(ctx)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	renderer := e.newRenderer(reader)
+	selected := make(map[string]int, len(slots))
+	for i, current := range slots {
+		selected[editorResourceID(current.binding.ObjectID)] = i
+	}
+	var obstacles []Box
+	page, err := e.page(bindings[0].Page)
+	if err != nil {
+		return err
+	}
+	for _, layer := range page.Content.Layer {
+		for _, object := range layer.Objects {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if object.Type != "TextObject" && object.Type != "ImageObject" && object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
+				continue
+			}
+			box, err := renderer.ObjectBounds(object, layer.DrawParam)
+			if err != nil {
+				return fmt.Errorf("cannot verify invoice slot neighbours: %w", err)
+			}
+			if index, ok := selected[editorResourceID(editorObjectID(object))]; ok {
+				slots[index].visible = box
+			} else if box.W > 0 && box.H > 0 {
+				obstacles = append(obstacles, box)
+			}
+		}
+	}
+	if len(fontData) != 0 {
+		var err error
+		font, err = e.AddFont(FontFile{Data: fontData}, 0)
+		if err != nil {
+			return err
+		}
+	}
+	runes, offset := []rune(value), 0
+	boundaries := richTextBoundaries(value)
+	var missing error
+	for i := range slots {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		current := &slots[i]
+		text := &current.object.TextObject
+		if font != "" {
+			text.Font = font
+		}
+		metrics, err := e.editorFont(text.Font)
+		if err != nil {
+			return err
+		}
+		end := len(runes)
+		if i == 0 && (text.Text() == "¥" || text.Text() == "￥") && offset < end && string(runes[offset]) == text.Text() {
+			end = offset + 1
+		}
+		count, glyphErr, err := invoiceSlotText(ctx, text, runes[offset:end], offset, boundaries, current.x, current.y, current.right, current.box, current.visible, obstacles, metrics, mappings[text.Font])
+		if err != nil {
+			return err
+		}
+		if count > 0 {
+			missing = nil
+		}
+		if glyphErr != nil {
+			missing = glyphErr
+		}
+		offset += count
+	}
+	if offset != len(runes) {
+		if missing != nil {
+			return fmt.Errorf("invoice slot requires Font or FontData with the missing characters: %w", missing)
+		}
+		return fmt.Errorf("invoice text exceeds original reference slot capacity")
+	}
+	layers := copyEditorPage(e.pages[bindings[0].Page]).Content.Layer
+	for _, current := range slots {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := validateEditorGeometry(current.object); err != nil {
+			return err
+		}
+		if current.object.TextObject.Text() != "" {
+			checked := cloneEditorData(current.object.TextObject)
+			if err := e.prepareText(&checked); err != nil {
+				return err
+			}
+		}
+		for i := range layers {
+			for j := range layers[i].Objects {
+				if sameResourceID(editorObjectID(layers[i].Objects[j]), current.binding.ObjectID) {
+					layers[i].Objects[j] = current.object
+				}
+			}
+		}
+	}
+	e.replaceLayers(bindings[0].Page, layers)
+	return ctx.Err()
+}
+
+// invoiceSlotText 用字体步进及轮廓填充单一原基线槽，保留可搜索文字和显式字形映射
+// 入参: ctx 取消上下文, text 目标对象, value 剩余文字, offset 原文偏移, boundaries 字素边界, x和y 原点, right 右界, box 原框, visible 原可见范围, obstacles 外部障碍, metrics 字体, mapping 原映射
+// 返回: int 已容纳码点数, error 可递延缺字, error 度量错误
+func invoiceSlotText(ctx context.Context, text *TextObject, value []rune, offset int, boundaries map[int]bool, x, y, right float64, box, visible Box, obstacles []Box, metrics FontMetrics, mapping map[rune]uint16) (int, error, error) {
+	if metrics.UnitsPerEm() == 0 {
+		return 0, nil, fmt.Errorf("invalid invoice font units")
+	}
+	unit, cursor := text.Size/float64(metrics.UnitsPerEm()), x
+	scale := text.HScale
+	if scale == 0 {
+		scale = 1
+	}
+	count := 0
+	var missing error
+	var advances, glyphs []string
+	for i, char := range value {
+		if err := ctx.Err(); err != nil {
+			return 0, nil, err
+		}
+		glyph := mapping[char]
+		if glyph == 0 {
+			glyph = metrics.GlyphIndex(char)
+		}
+		if glyph == 0 {
+			missing = missingGlyphError(text.Font, []rune{char})
+			break
+		}
+		var bounds Box
+		var err error
+		if provider, ok := metrics.(FontGlyphBounds); ok {
+			bounds, err = provider.GlyphBounds(glyph, text.Size)
+		} else if outlines, ok := metrics.(FontOutlines); ok {
+			var outline GeometryPath
+			outline, err = outlines.GlyphOutline(glyph, text.Size)
+			if err == nil {
+				bounds, err = outline.Bounds()
+			}
+		} else {
+			return 0, nil, fmt.Errorf("invoice slot requires glyph outline metrics")
+		}
+		if err != nil {
+			return 0, nil, err
+		}
+		advance := float64(metrics.GlyphAdvance(glyph)) * unit * scale
+		bounds.X, bounds.W = bounds.X*scale, bounds.W*scale
+		if !finite(advance) || advance < 0 || !finite(bounds.X) || !finite(bounds.Y) || !finite(bounds.W) || !finite(bounds.H) {
+			return 0, nil, fmt.Errorf("invalid invoice glyph geometry")
+		}
+		if cursor+advance > right+1e-6 || cursor+bounds.X < -1e-6 || cursor+bounds.X+bounds.W > right+1e-6 || y+bounds.Y < -1e-6 || y+bounds.Y+bounds.H > box.H+1e-6 {
+			break
+		}
+		blocked := false
+		if bounds.W > 0 && bounds.H > 0 {
+			for _, obstacle := range obstacles {
+				left := math.Max(box.X+cursor+bounds.X, obstacle.X)
+				top := math.Max(box.Y+y+bounds.Y, obstacle.Y)
+				right := math.Min(box.X+cursor+bounds.X+bounds.W, obstacle.X+obstacle.W)
+				bottom := math.Min(box.Y+y+bounds.Y+bounds.H, obstacle.Y+obstacle.H)
+				if right > left+1e-6 && bottom > top+1e-6 && (visible.W <= 0 || visible.H <= 0 || left < visible.X-1e-6 || top < visible.Y-1e-6 || right > visible.X+visible.W+1e-6 || bottom > visible.Y+visible.H+1e-6) {
+					blocked = true
+					break
+				}
+			}
+		}
+		if blocked {
+			break
+		}
+		advances = append(advances, ofdNumber(advance))
+		glyphs = append(glyphs, strconv.Itoa(int(glyph)))
+		cursor += advance
+		if boundaries[offset+i+1] {
+			count = i + 1
+		}
+	}
+	text.TextCode = []TextCode{{X: text.TextCode[0].X, Y: text.TextCode[0].Y, Value: escapeOFDText(string(value[:count]))}}
+	text.CGTransform, text.layout = nil, nil
+	if count > 0 {
+		text.TextCode[0].DeltaX = strings.Join(advances[:count-1], " ")
+		text.CGTransform = []CGTransform{{CodePosition: 0, CodeCount: count, GlyphCount: count, Glyphs: strings.Join(glyphs[:count], " ")}}
+	}
+	return count, missing, nil
 }
 
 // invoiceCheckReflowReferences 检查当前文档快照中指向待重排页的标准导航及已识别标引

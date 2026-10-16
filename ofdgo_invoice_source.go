@@ -161,7 +161,7 @@ func (r *Reader) readInvoiceXML(ctx context.Context, data []byte, source Invoice
 				value := strings.TrimSpace(fact.Value)
 				if numeric {
 					value = strings.TrimSpace(strings.TrimLeft(value, "¥￥"))
-					if invoiceDecimal(value) == nil {
+					if value != "" && invoiceDecimal(value) == nil {
 						report.Issues = append(report.Issues, InvoiceIssue{Code: "invalid-decimal", Message: "invalid invoice amount", Source: factSource, Field: nodePath})
 						return nil
 					}
@@ -656,6 +656,7 @@ func (e *Editor) editInvoiceReferences(ctx context.Context, source InvoiceSource
 		var selected []InvoiceBinding
 		var singles []InvoiceBinding
 		joint := make(map[int][]InvoiceBinding)
+		flow := make(map[int]InvoiceFieldChange)
 		editable := invoiceReferenceEditability(invoice)
 		seen := make(map[int]bool)
 		for _, change := range changes {
@@ -667,7 +668,7 @@ func (e *Editor) editInvoiceReferences(ctx context.Context, source InvoiceSource
 				return fmt.Errorf("object reference edit requires a unique fact and matching expected text")
 			}
 			seen[index] = true
-			if change.Value == invoice.Facts[index].Value {
+			if change.Value == invoice.Facts[index].Value && change.Font == "" && len(change.FontData) == 0 {
 				continue
 			}
 			if !editable[index] {
@@ -678,13 +679,13 @@ func (e *Editor) editInvoiceReferences(ctx context.Context, source InvoiceSource
 			if err != nil {
 				return err
 			}
-			if binding >= 0 {
+			if binding >= 0 && change.Font == "" && len(change.FontData) == 0 && value != "" {
 				selected = append(selected, bindings[binding])
 				singles = append(singles, bindings[binding])
 			} else {
 				fact := invoice.Facts[index]
-				if utf8.RuneCountInString(value) != utf8.RuneCountInString(fact.Value) || value == "" {
-					return fmt.Errorf("multiple invoice references require equal-length positioned replacement")
+				if utf8.RuneCountInString(value) != utf8.RuneCountInString(fact.Value) || value == "" || change.Font != "" || len(change.FontData) != 0 {
+					flow[index] = change
 				}
 				for _, ref := range fact.References {
 					page := slices.IndexFunc(next.pages, func(page PageContent) bool { return sameResourceID(page.ID, ref.PageID) })
@@ -740,6 +741,12 @@ func (e *Editor) editInvoiceReferences(ctx context.Context, source InvoiceSource
 		}
 		for i, fact := range report.Invoices[0].Facts {
 			if len(joint[i]) == 0 {
+				continue
+			}
+			if change, ok := flow[i]; ok {
+				if err := next.layoutInvoiceReferenceSlots(ctx, joint[i], fact.Value, invoice.Facts[i].Value, change.Font, change.FontData); err != nil {
+					return err
+				}
 				continue
 			}
 			value := []rune(invoice.Facts[i].Value)
@@ -813,6 +820,9 @@ func (e *Editor) editInvoiceReferences(ctx context.Context, source InvoiceSource
 // 入参: invoice 原发票, fact 原事实, value 新业务值
 // 返回: string 显示文字, error 值格式错误
 func invoiceReferenceDisplay(invoice Invoice, fact InvoiceFact, value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
 	binding, ok := invoiceEDRMFactBinding(invoice, fact)
 	if !ok {
 		return value, nil

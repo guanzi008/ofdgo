@@ -3755,6 +3755,7 @@ async function changeDocument(name, item, ...args) {
 	} catch (err) {
 		refreshManagement = false;
 		if (name === "ofdgoChangeFontBinding") err.message = fontBindingError(err.message);
+		if (name === "ofdgoChangeInvoice") err.message = invoiceIssues([err.message]);
 		if (openSeq === state.openSeq) {
 			if (settingsElements.Panel.open) {
 				settingsElements.Status.textContent = err.message;
@@ -5386,7 +5387,7 @@ function settingsButton(label, action, disabled = false, id = "", container = se
 	if (id) button.id = `settings${id}`;
 	button.addEventListener("click", async () => {
 		try { await action(); }
-		catch (error) { settingsElements.Status.textContent = error.message; }
+		catch (error) { settingsElements.Status.textContent = settings.invoice ? invoiceIssues([error.message]) : error.message; }
 	});
 	container.append(button);
 	return button;
@@ -5728,13 +5729,18 @@ function invoiceIssues(issues, details = false) {
 		"unsupported invoice XML root or version": "暂不支持此发票格式或版本",
 		"unsupported eInvoice namespace or version": "暂不支持此发票格式或版本",
 		"unsupported EInvoice version": "暂不支持此发票版本",
-		"EInvoice requires a unique versioned Header": "发票头信息不完整"
+		"EInvoice requires a unique versioned Header": "发票头信息不完整",
+		"invoice text exceeds original reference slot capacity": "原框空间不足，请缩短文字",
+		"invoice slot requires Font or FontData with the missing characters:": "字体缺字，请更换字体",
+		"invoice references cross columns or reverse reading order": "图元跨列，无法重排",
+		"invoice references do not form adjacent aligned text rows": "图元未对齐，无法重排"
 	};
 	return [...new Set((issues || []).map(issue => {
 		const message = typeof issue === "string" ? issue : issue.message || issue.code;
-		if (typeof issue === "string") return details ? message : messages[message] || message;
+		const translated = messages[message] || Object.entries(messages).find(([prefix]) => prefix.endsWith(":") && message?.startsWith(prefix))?.[1] || message;
+		if (typeof issue === "string") return details ? message : translated;
 		if (details) return [issue.source?.fileLoc || issue.source?.id || issue.source?.kind, issue.source?.nodePath, issue.field, message].filter(Boolean).join("：");
-		return [issue.field, codes[issue.code] || messages[message] || message].filter(Boolean).join("：");
+		return [issue.field, codes[issue.code] || translated].filter(Boolean).join("：");
 	}).filter(Boolean))].join("\n");
 }
 
@@ -6109,6 +6115,12 @@ function renderInvoiceFields(container, draft) {
 		invoiceDirty(draft, "fields");
 	};
 	invoiceInput(container, "数值", "FactValue", change?.value ?? fact.value, value => update("value", value), !writable, "textarea");
+	if (writable && !fresh && draft.invoice.standard === invoiceReferenceStandard) {
+		const fonts = state.doc.fonts || [];
+		const libraryFonts = fontManager.editorFonts().filter(font => !font.disabled);
+		settingsSelect(container, "字体", "InvoiceFactFont", [["", "原字体"], ...fonts.map(font => [font.id, font.fontName || font.familyName || font.id]), ...libraryFonts.map(font => [`file:${font.id}`, font.fullName || font.name])], change?.font || "", value => update("font", value));
+		settingsButton("添加", () => openFontFile(el.fontInput), false, "InvoiceFactAddFont", container);
+	}
 	invoiceInput(container, "空值", "FactNil", change?.nil ?? fact.nil, value => update("nil", value), !writable || draft.invoice.standard === invoiceReferenceStandard, "checkbox");
 	if (!fresh) invoiceInput(container, "删除", "FactDelete", change?.delete || false, value => update("delete", value), !writable || draft.invoice.standard === invoiceReferenceStandard, "checkbox");
 	else if (state.editing) settingsButton("删除", () => {
@@ -6350,23 +6362,41 @@ async function applyInvoiceDraft(draft, synchronize = draft.synchronize) {
 }
 
 async function prepareInvoiceRequest(draft, request) {
-	if (request.operation !== "create" || draft.invoice.standard !== invoiceReferenceStandard) return true;
-	if (!draft.layout.font && !draft.fontChoice?.startsWith("file:")) {
+	if (draft.invoice.standard !== invoiceReferenceStandard) return true;
+	const creating = request.operation === "create";
+	const patches = (request.operation === "batch" ? request.operations : [request]).filter(operation => operation.operation === "patch");
+	if (!creating && !patches.length) return true;
+	if (creating && !draft.layout.font && !draft.fontChoice?.startsWith("file:")) {
 		invoicePanel.tab = "appearance";
 		draft.layoutOpen = true;
 		renderDocumentSettings();
 		throw new Error("请选择标引票面字体");
 	}
 	const sequence = settings.sequence, openSeq = state.openSeq;
+	const doc = state.doc, scope = JSON.stringify(invoiceScope());
 	const snapshot = JSON.stringify(request), fontChoice = draft.fontChoice;
+	for (const patch of patches) patch.changes = structuredClone(patch.changes);
 	settingsElements.Form.inert = true;
 	try {
-		if (fontChoice?.startsWith("file:")) {
+		if (creating && fontChoice?.startsWith("file:")) {
 			const font = fontManager.editorFonts().find(value => `file:${value.id}` === fontChoice && !value.disabled);
 			if (!font) throw new Error("所选字体不可用");
 			request.fontData = invoiceBase64(await readTextFont(font));
 		}
-		if (sequence !== settings.sequence || openSeq !== state.openSeq || invoiceCurrent() !== draft || !settingsElements.Panel.open || !settings.invoice) return false;
+		const fonts = new Map();
+		for (const patch of patches) {
+			for (const change of patch.changes) {
+				if (!change.font?.startsWith("file:")) continue;
+				if (!fonts.has(change.font)) {
+					const font = fontManager.editorFonts().find(value => `file:${value.id}` === change.font && !value.disabled);
+					if (!font) throw new Error("所选字体不可用");
+					fonts.set(change.font, invoiceBase64(await readTextFont(font)));
+				}
+				change.fontData = fonts.get(change.font);
+				delete change.font;
+			}
+		}
+		if (sequence !== settings.sequence || openSeq !== state.openSeq || doc !== state.doc || scope !== JSON.stringify(invoiceScope()) || invoiceCurrent() !== draft || !settingsElements.Panel.open || !settings.invoice) return false;
 		if (draft.fontChoice !== fontChoice || JSON.stringify(buildInvoiceRequest(draft)) !== snapshot) throw new Error("内容已变更，请重新应用");
 		return true;
 	} finally {
@@ -6395,7 +6425,7 @@ function buildInvoiceRequest(draft) {
 		else {
 			const operations = [];
 			if (draft.dirty.has("model")) operations.push({ operation: "set", index: draft.entry.index, invoice: draft.invoice });
-			if (draft.dirty.has("fields")) operations.push({ operation: "patch", index: draft.entry.index, changes: [...draft.changes.values()] });
+			if (draft.dirty.has("fields")) operations.push({ operation: "patch", index: draft.entry.index, changes: structuredClone([...draft.changes.values()]) });
 			if (draft.dirty.has("bindings")) operations.push({ operation: "bindings", index: draft.entry.index, bindings: draft.bindings });
 			Object.assign(request, operations.length === 1 ? operations[0] : { operation: "batch", operations });
 		}
