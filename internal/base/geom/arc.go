@@ -116,7 +116,7 @@ func centerArc(start Point, arc Segment) (geometryArc, error) {
 	}
 	angle := math.Mod(arc.Rotation, 360) * math.Pi / 180
 	sine, cosine := math.Sincos(angle)
-	dx, dy := (start.X-arc.End.X)/2, (start.Y-arc.End.Y)/2
+	dx, dy := arcCoordinateMean(start.X, -arc.End.X), arcCoordinateMean(start.Y, -arc.End.Y)
 	x, y := cosine*dx+sine*dy, -sine*dx+cosine*dy
 	scale := math.Hypot(x/rx, y/ry)
 	if scale > 1 {
@@ -139,11 +139,22 @@ func centerArc(start Point, arc Segment) (geometryArc, error) {
 	if !arc.Sweep && delta > 0 {
 		delta -= 2 * math.Pi
 	}
-	center := Point{cosine*cx - sine*cy + (start.X+arc.End.X)/2, sine*cx + cosine*cy + (start.Y+arc.End.Y)/2}
+	center := Point{cosine*cx - sine*cy + arcCoordinateMean(start.X, arc.End.X), sine*cx + cosine*cy + arcCoordinateMean(start.Y, arc.End.Y)}
 	if !finite(center.X) || !finite(center.Y) || !finite(rx) || !finite(ry) || !finite(delta) || !finite(theta) || delta == 0 {
 		return geometryArc{}, fmt.Errorf("invalid arc extent")
 	}
 	return geometryArc{center, Point{rx * cosine, rx * sine}, Point{-ry * sine, ry * cosine}, theta, delta}, nil
+}
+
+// arcCoordinateMean 计算有限坐标均值，仅在求和溢出时先减半，避免微小坐标提前下溢
+// 入参: a 第一个坐标, b 第二个坐标
+// 返回: float64 坐标均值
+func arcCoordinateMean(a, b float64) float64 {
+	value := (a + b) / 2
+	if math.IsInf(value, 0) {
+		return a/2 + b/2
+	}
+	return value
 }
 
 // point 计算椭圆参数对应的坐标

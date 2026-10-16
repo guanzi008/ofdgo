@@ -172,6 +172,8 @@ func (r *Renderer) RenderToText(page *PageContent, writer io.Writer) error {
 	if err != nil {
 		return err
 	}
+	var written int64
+	writer = convertWriter{context: ctx, writer: writer, count: &written}
 	_, err = text.WriteTo(writer)
 	if err != nil {
 		return err
@@ -201,6 +203,8 @@ func (r *Renderer) RenderToMultiPageText(writer io.Writer, indices ...int) error
 	if err := r.exportProgress(0, len(indices)); err != nil {
 		return err
 	}
+	var count int64
+	writer = convertWriter{context: ctx, writer: writer, count: &count}
 	written := false
 	for i, index := range indices {
 		text, err := r.PageTextByIndexContext(ctx, index)
@@ -235,11 +239,13 @@ func (r *Renderer) RenderToImage(page *PageContent) (image.Image, error) {
 
 // RenderToPNG 渲染为PNG，像素尺寸由DPI决定
 // 入参: page 页面内容, writer 输出流
-// 返回: error 错误信息
+// 返回: error 渲染、写入或取消错误
 func (r *Renderer) RenderToPNG(page *PageContent, writer io.Writer) error {
 	if err := r.Compression.Validate(); err != nil {
 		return err
 	}
+	var written int64
+	writer = convertWriter{context: r.outputContext(), writer: writer, count: &written}
 	img, err := r.RenderToImage(page)
 	if err != nil {
 		return err
@@ -262,11 +268,13 @@ func (r *Renderer) RenderToPNG(page *PageContent, writer io.Writer) error {
 
 // RenderToJPEG 渲染为白底JPEG，像素尺寸由DPI决定
 // 入参: page 页面内容, writer 输出流, options 编码选项，nil使用标准库默认值
-// 返回: error 错误信息
+// 返回: error 渲染、写入或取消错误
 func (r *Renderer) RenderToJPEG(page *PageContent, writer io.Writer, options *jpeg.Options) error {
 	if err := r.Compression.Validate(); err != nil {
 		return err
 	}
+	var written int64
+	writer = convertWriter{context: r.outputContext(), writer: writer, count: &written}
 	img, err := r.RenderToImage(page)
 	if err != nil {
 		return err
@@ -320,7 +328,7 @@ func (r *Renderer) RenderToPDF(page *PageContent, writer io.Writer) error {
 
 // RenderToEPS 渲染为EPS
 // 入参: page 页面内容, writer 输出流
-// 返回: error 错误信息
+// 返回: error 渲染、写入或取消错误
 func (r *Renderer) RenderToEPS(page *PageContent, writer io.Writer) error {
 	if err := r.Compression.Validate(); err != nil {
 		return err
@@ -328,6 +336,8 @@ func (r *Renderer) RenderToEPS(page *PageContent, writer io.Writer) error {
 	if r.backends.EPS == nil {
 		return fmt.Errorf("eps: %w", ErrBackendUnavailable)
 	}
+	var written int64
+	writer = convertWriter{context: r.outputContext(), writer: writer, count: &written}
 	return r.backends.EPS.RenderEPS(r, page, writer)
 }
 

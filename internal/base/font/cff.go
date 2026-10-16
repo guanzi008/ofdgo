@@ -1036,6 +1036,9 @@ func getCFFCharsetInfo(data []byte, numGlyphs int) ([]int, string, string, int, 
 	if topDictData == nil {
 		return nil, "", "", 0, false
 	}
+	if _, _, _, err := scanCFFIndex(data, stringIndexOff); err != nil {
+		return nil, "", "", 0, false
+	}
 	td := parseCFFDict(topDictData)
 	registry, ordering := getCFFROS(data, stringIndexOff, td)
 	actual, err := parseCFFAndCountGlyphs(data)
@@ -1067,7 +1070,18 @@ func getCmapFromCFF(data []byte, numGlyphs int) map[rune]uint16 {
 	if !ok {
 		return nil
 	}
-	mapping := make(map[rune]uint16)
+	return cffCharsetMapping(data, sids, registry, ordering, stringIndexOff)
+}
+
+// cffCharsetMapping 根据已解析的CFF字符集恢复Unicode映射
+// 入参: data CFF数据, sids 字符标识, registry 注册机构, ordering 字符集, stringIndexOff 字符串索引偏移
+// 返回: map[rune]uint16 恢复的映射表
+func cffCharsetMapping(data []byte, sids []int, registry, ordering string, stringIndexOff int) map[rune]uint16 {
+	capacity := max(0, len(sids)-1)
+	if registry == "" || registry == "Adobe" && ordering == "GB1" {
+		capacity *= 2
+	}
+	mapping := make(map[rune]uint16, capacity)
 	if registry == "Adobe" && ordering == "GB1" {
 		for gid, cid := range sids {
 			if gid == 0 {
@@ -1100,7 +1114,7 @@ func getCmapFromCFF(data []byte, numGlyphs int) map[rune]uint16 {
 			}
 		} else {
 			idx := sid - 391
-			name = readStringIndexItem(data, stringIndexOff, idx)
+			name = string(readStringIndexItem(data, stringIndexOff, idx))
 		}
 		r := rune(0)
 		if name != "" {
@@ -1127,11 +1141,11 @@ func GetCFFCIDRuneMap(data []byte) map[uint16]rune {
 	if err != nil {
 		return nil
 	}
-	sids, registry, _, _, ok := getCFFCharsetInfo(cffData, numGlyphs)
+	sids, registry, ordering, stringIndexOff, ok := getCFFCharsetInfo(cffData, numGlyphs)
 	if !ok || registry == "" {
 		return nil
 	}
-	mapping := getCmapFromCFF(cffData, numGlyphs)
+	mapping := cffCharsetMapping(cffData, sids, registry, ordering, stringIndexOff)
 	if len(mapping) == 0 {
 		return nil
 	}
@@ -1187,7 +1201,7 @@ func getCFFData(data []byte) []byte {
 		}
 		offset := int(binary.BigEndian.Uint32(data[pos+8 : pos+12]))
 		length := int(binary.BigEndian.Uint32(data[pos+12 : pos+16]))
-		if offset < 0 || length < 0 || offset+length > len(data) {
+		if offset < 0 || length < 0 || offset > len(data) || length > len(data)-offset {
 			return nil
 		}
 		return data[offset : offset+length]
@@ -1269,31 +1283,29 @@ func parseCFFCharset(data []byte, offset, count int) ([]int, error) {
 
 // readStringIndexItem 读取CFF字符串索引项
 // 入参: data CFF数据, offset 索引偏移, idx 索引号
-// 返回: string 读取的字符串
-func readStringIndexItem(data []byte, offset int, idx int) string {
-	if offset >= len(data) {
-		return ""
+// 返回: []byte 共享原始数据的只读字符串，索引无效时为nil
+func readStringIndexItem(data []byte, offset int, idx int) []byte {
+	if offset < 0 || offset > len(data)-2 || idx < 0 {
+		return nil
 	}
 	count := int(binary.BigEndian.Uint16(data[offset:]))
+	if idx >= count || offset > len(data)-3 {
+		return nil
+	}
 	offSize := int(data[offset+2])
-	if idx >= count {
-		return ""
+	if offSize < 1 || offSize > 4 || count+1 > (len(data)-offset-3)/offSize {
+		return nil
 	}
 	offArrayStart := offset + 3
 	p1 := offArrayStart + idx*offSize
 	p2 := p1 + offSize
-	if p2+offSize > len(data) {
-		return ""
-	}
 	loc1 := readCFFOffset(data, p1, offSize)
 	loc2 := readCFFOffset(data, p2, offSize)
 	dataStart := offArrayStart + (count+1)*offSize
-	start := dataStart + loc1 - 1
-	length := loc2 - loc1
-	if start < 0 || start+length > len(data) {
-		return ""
+	if loc1 < 1 || loc2 < loc1 || loc2-1 > len(data)-dataStart {
+		return nil
 	}
-	return string(data[start : start+length])
+	return data[dataStart+loc1-1 : dataStart+loc2-1]
 }
 
 // getCFFROS 读取CID字体ROS信息
@@ -1317,7 +1329,7 @@ func getCFFSIDString(data []byte, stringIndexOff int, sid int) string {
 		return cffStandardStrings[sid]
 	}
 	if sid > 390 {
-		return readStringIndexItem(data, stringIndexOff, sid-391)
+		return string(readStringIndexItem(data, stringIndexOff, sid-391))
 	}
 	return ""
 }

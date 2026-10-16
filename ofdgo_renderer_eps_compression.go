@@ -63,20 +63,38 @@ func (r *epsImageRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 	var encoded bytes.Buffer
 	compressor, _ := zlib.NewWriterLevel(&encoded, zlib.BestCompression)
 	opaque := true
+	native, _ := img.(image.RGBA64Image)
 	for y := 0; y < height; y++ {
 		if r.err = r.ctx.Err(); r.err != nil {
 			return
 		}
 		clear(pixels)
 		for x := 0; x < width; x++ {
-			red, green, blue, alpha := img.At(bounds.Min.X+x, bounds.Min.Y+y).RGBA()
+			if x&4095 == 0 {
+				if r.err = r.ctx.Err(); r.err != nil {
+					return
+				}
+			}
+			var red, green, blue, alpha uint32
+			if native != nil {
+				pixel := native.RGBA64At(bounds.Min.X+x, bounds.Min.Y+y)
+				red, green, blue, alpha = uint32(pixel.R), uint32(pixel.G), uint32(pixel.B), uint32(pixel.A)
+			} else {
+				red, green, blue, alpha = img.At(bounds.Min.X+x, bounds.Min.Y+y).RGBA()
+			}
 			if alpha != 65535 {
 				opaque = false
 			}
-			if alpha != 0 {
+			if alpha == 65535 {
+				offset := x * 3
+				pixels[offset], pixels[offset+1], pixels[offset+2] = byte(red>>8), byte(green>>8), byte(blue>>8)
+			} else if alpha != 0 {
 				offset := x * 3
 				pixels[offset], pixels[offset+1], pixels[offset+2] = byte(red*65535/alpha>>8), byte(green*65535/alpha>>8), byte(blue*65535/alpha>>8)
 			}
+		}
+		if r.err = r.ctx.Err(); r.err != nil {
+			return
 		}
 		if _, r.err = compressor.Write(pixels); r.err != nil {
 			return
@@ -100,6 +118,9 @@ func (r *epsImageRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 		if len(optimized) < len(data) {
 			data, filter = optimized, "DCTDecode"
 		}
+	}
+	if r.err = r.ctx.Err(); r.err != nil {
+		return
 	}
 	m := matrix.Scale(float64(width), float64(height))
 	_, r.err = fmt.Fprintf(r.writer, " gsave /DeviceRGB setcolorspace [%s %s %s %s %s %s] concat <</ImageType 1 /BitsPerComponent 8 /Decode [0 1 0 1 0 1] /Interpolate true /Width %d /Height %d /ImageMatrix [%d 0 0 -%d 0 %d] /DataSource currentfile /ASCII85Decode filter /%s filter>>image\n", ofdNumber(m[0][0]), ofdNumber(m[1][0]), ofdNumber(m[0][1]), ofdNumber(m[1][1]), ofdNumber(m[0][2]), ofdNumber(m[1][2]), width, height, width, height, height, filter)

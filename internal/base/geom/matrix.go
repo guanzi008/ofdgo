@@ -125,7 +125,7 @@ func (m Matrix) Invert() (Matrix, bool) {
 	return n, true
 }
 
-// matrixProductDifference 计算两个乘积之差，检查溢出、下溢及相消造成的精度损失
+// matrixProductDifference 补偿乘积相减的舍入残差，检查溢出、下溢及严重相消
 // 入参: a 第一个乘数, b 第二个乘数, c 第三个乘数, d 第四个乘数
 // 返回: float64 乘积之差, bool 是否可直接用于求逆
 func matrixProductDifference(a, b, c, d float64) (float64, bool) {
@@ -133,6 +133,9 @@ func matrixProductDifference(a, b, c, d float64) (float64, bool) {
 	value := x - y
 	if !finite(value) || x == 0 && a != 0 && b != 0 || y == 0 && c != 0 && d != 0 {
 		return value, false
+	}
+	if x != 0 && y != 0 {
+		value = math.FMA(a, b, -y) + math.FMA(-c, d, y)
 	}
 	return value, x == 0 && y == 0 || math.Abs(value) >= 0x1p-1022 && math.Abs(value) >= 0x1p-48*math.Max(math.Abs(x), math.Abs(y))
 }
@@ -169,7 +172,7 @@ func TranslationMatrix(x, y float64) Matrix {
 // YScale 获取Y轴缩放比例
 // 返回: float64 缩放比例
 func (m Matrix) YScale() float64 {
-	return math.Sqrt(m.c*m.c + m.d*m.d)
+	return math.Hypot(m.c, m.d)
 }
 
 // Equal 比较毫米坐标，使用固定绝对误差，不受绘图库全局精度影响

@@ -231,6 +231,8 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 	}
 	var uniformValues [4]float64
 	var uniformPoint pdfgo.Point
+	uniformChannels := pdfTransferChannels
+	selectChannels := (c.channels != nil || transfer != nil && c.transferModel == "DeviceCMYK") && (compatible || marked != nil || patternChannels != nil)
 	uniformReady := false
 	var sampler *pdfCompositeColorSampler
 	if g := paint.Axial; (node.image == nil || node.image.Image.ImageMask) && shading == nil && g != nil && g.Bounds == nil && g.Background == nil {
@@ -259,8 +261,14 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 		if err := c.importer.ctx.Err(); err != nil {
 			return err
 		}
+		row := pdfCoverageRow(coverage, y, region.Min.X, region.Max.X)
 		for x := region.Min.X; x < region.Max.X; x++ {
-			a := baseimage.AlphaAt(coverage, x, y)
+			var a uint32
+			if row != nil {
+				a = uint32(row[4*(x-region.Min.X)+3]) * 257
+			} else {
+				a = baseimage.AlphaAt(coverage, x, y)
+			}
 			if a == 0 {
 				continue
 			}
@@ -324,6 +332,14 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 						uniformValues = nativePaint.Values
 					} else {
 						uniformValues, _, err = codecpdf.CompositeColor(paint, pdfgo.Point{}, space, style.RenderingIntent, style.ColorConversion)
+					}
+					if selectChannels {
+						uniformChannels = 0
+						for j, selected := range codecpdf.PaintChannels(uniformValues, compatible, marked) {
+							if selected {
+								uniformChannels |= 1 << j
+							}
+						}
 					}
 					uniformReady = true
 				}
@@ -391,11 +407,15 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 			}
 			pixels[index].Shape += shape * (1 - pixels[index].Shape)
 			bits := pdfTransferChannels
-			if (c.channels != nil || transfer != nil && c.transferModel == "DeviceCMYK") && (compatible || marked != nil || patternChannels != nil) {
-				bits = 0
-				for j, selected := range codecpdf.PaintChannels(values, compatible, marked) {
-					if selected {
-						bits |= 1 << j
+			if selectChannels {
+				if uniformReady {
+					bits = uniformChannels
+				} else {
+					bits = 0
+					for j, selected := range codecpdf.PaintChannels(values, compatible, marked) {
+						if selected {
+							bits |= 1 << j
+						}
 					}
 				}
 				if patternChannels != nil {

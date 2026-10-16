@@ -64,7 +64,7 @@ func (r *Renderer) RenderToSVGWithObjects(page *PageContent, writer io.Writer) (
 
 // renderSVG 将SVG输出及对象分组交给指定后端
 // 入参: page 页面内容, writer 输出流, mode 资源封装方式
-// 返回: SVGResources 字体和图片资源, error 输出错误
+// 返回: SVGResources 字体和图片资源, error 渲染、写入或取消错误
 func (r *Renderer) renderSVG(page *PageContent, writer io.Writer, mode SVGMode) (SVGResources, error) {
 	if err := r.Compression.Validate(); err != nil {
 		return SVGResources{}, err
@@ -72,5 +72,7 @@ func (r *Renderer) renderSVG(page *PageContent, writer io.Writer, mode SVGMode) 
 	if r.backends.SVG == nil {
 		return SVGResources{}, fmt.Errorf("svg: %w", ErrBackendUnavailable)
 	}
+	var written int64
+	writer = convertWriter{context: r.outputContext(), writer: writer, count: &written}
 	return r.backends.SVG.RenderSVG(r, page, writer, mode)
 }

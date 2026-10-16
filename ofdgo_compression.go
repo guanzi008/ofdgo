@@ -130,12 +130,7 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 		return nil, err
 	}
 	snapshot := *e
-	snapshot.OnWriteProgress = func(stage string, completed, total int) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		return editorProgress(e.OnWriteProgress).report(stage, completed, total)
-	}
+	snapshot.OnWriteProgress = editorProgress(e.OnWriteProgress).withContext(ctx)
 	snapshot.output = &outputOptimization{ctx: ctx, options: options.Compression}
 	if options.Compression.Mode == CompressionUnchanged {
 		return &snapshot, nil

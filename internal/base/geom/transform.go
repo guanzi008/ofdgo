@@ -33,10 +33,7 @@ func (p Path) Transform(matrix Matrix) (Path, error) {
 		}
 	}
 	matrixScale := math.Max(math.Max(math.Abs(matrix.a), math.Abs(matrix.b)), math.Max(math.Abs(matrix.c), math.Abs(matrix.d)))
-	determinant := 0.0
-	if matrixScale != 0 {
-		determinant = (matrix.a/matrixScale)*(matrix.d/matrixScale) - (matrix.b/matrixScale)*(matrix.c/matrixScale)
-	}
+	determinant, _ := matrixProductSum(matrix.a, matrix.d, -matrix.b, matrix.c)
 	transform := func(p Point) Point {
 		x, y := matrix.Transform(p.X, p.Y)
 		return Point{x, y}

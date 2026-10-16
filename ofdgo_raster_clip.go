@@ -21,6 +21,8 @@ import (
 	"image"
 	"image/color"
 	"math"
+
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // rasterClipKey 区分页面尺寸、分辨率和裁剪路径
@@ -102,9 +104,10 @@ func rasterClipMask(backend RasterBackend, page *RasterPage, path []RasterSegmen
 			return nil, err
 		}
 		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-			for x := bounds.Min.X; x < bounds.Max.X; x++ {
-				_, _, _, alpha := pixels.At(x-bounds.Min.X, y-bounds.Min.Y).RGBA()
-				mask.SetAlpha(x, y, color.Alpha{uint8(alpha >> 8)})
+			start := mask.PixOffset(bounds.Min.X, y)
+			row := mask.Pix[start : start+bounds.Dx()]
+			for x := range row {
+				row[x] = uint8(baseimage.AlphaAt(pixels, x, y-bounds.Min.Y) >> 8)
 			}
 		}
 	}

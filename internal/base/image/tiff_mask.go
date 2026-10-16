@@ -49,6 +49,36 @@ func (s *maskedTIFFImage) Bounds() image.Rectangle { return s.bounds }
 // 返回: color.Model 颜色模型
 func (s *maskedTIFFImage) ColorModel() color.Model { return color.NRGBA64Model }
 
+// samplePoint 将显示坐标映射到主图或蒙版的像素中心
+// 入参: bounds 采样图像范围, x 横坐标, y 纵坐标
+// 返回: image.Point 采样坐标
+func (s *maskedTIFFImage) samplePoint(bounds image.Rectangle, x, y int) image.Point {
+	size := s.bounds.Size()
+	x, y = x-s.bounds.Min.X, y-s.bounds.Min.Y
+	if bounds.Size() == size {
+		return bounds.Min.Add(image.Pt(x, y))
+	}
+	return image.Pt(
+		bounds.Min.X+int((uint64(x)*uint64(bounds.Dx())+uint64(bounds.Dx()/2))/uint64(size.X)),
+		bounds.Min.Y+int((uint64(y)*uint64(bounds.Dy())+uint64(bounds.Dy()/2))/uint64(size.Y)),
+	)
+}
+
+// alphaAt 读取蒙版与主图透明度，不解算主图颜色
+// 入参: x 横坐标, y 纵坐标
+// 返回: uint32 十六位透明度
+func (s *maskedTIFFImage) alphaAt(x, y int) uint32 {
+	if !image.Pt(x, y).In(s.bounds) {
+		return 0
+	}
+	mask := s.samplePoint(s.mask.Bounds(), x, y)
+	if NRGBA64At(s.mask, mask.X, mask.Y).R == 0 {
+		return 0
+	}
+	source := s.samplePoint(s.source.Bounds(), x, y)
+	return AlphaAt(s.source, source.X, source.Y)
+}
+
 // NRGBA64At 按像素中心读取主图及蒙版，零位隐藏原图并保留隐藏颜色
 // 入参: x 横坐标, y 纵坐标
 // 返回: color.NRGBA64 非预乘十六位颜色
@@ -56,16 +86,10 @@ func (s *maskedTIFFImage) NRGBA64At(x, y int) color.NRGBA64 {
 	if !image.Pt(x, y).In(s.bounds) {
 		return color.NRGBA64{}
 	}
-	size := s.bounds.Size()
-	x, y = x-s.bounds.Min.X, y-s.bounds.Min.Y
-	b := s.source.Bounds()
-	sx := b.Min.X + int((uint64(x)*uint64(b.Dx())+uint64(b.Dx()/2))/uint64(size.X))
-	sy := b.Min.Y + int((uint64(y)*uint64(b.Dy())+uint64(b.Dy()/2))/uint64(size.Y))
-	pixel := NRGBA64At(s.source, sx, sy)
-	b = s.mask.Bounds()
-	mx := b.Min.X + int((uint64(x)*uint64(b.Dx())+uint64(b.Dx()/2))/uint64(size.X))
-	my := b.Min.Y + int((uint64(y)*uint64(b.Dy())+uint64(b.Dy()/2))/uint64(size.Y))
-	if NRGBA64At(s.mask, mx, my).R == 0 {
+	source := s.samplePoint(s.source.Bounds(), x, y)
+	pixel := NRGBA64At(s.source, source.X, source.Y)
+	mask := s.samplePoint(s.mask.Bounds(), x, y)
+	if NRGBA64At(s.mask, mask.X, mask.Y).R == 0 {
 		pixel.A = 0
 	}
 	return pixel

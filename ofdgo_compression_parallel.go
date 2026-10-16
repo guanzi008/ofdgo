@@ -84,11 +84,14 @@ func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, e
 		if err := e.output.ctx.Err(); err != nil {
 			return err
 		}
-		if err := editorProgress(e.OnWriteProgress).report("compress", e.output.completed, 0); err != nil {
+		if err := editorProgress(e.OnWriteProgress).withContext(e.output.ctx).report("compress", e.output.completed, 0); err != nil {
 			return err
 		}
 		data, err := load(key)
 		if err != nil {
+			return err
+		}
+		if err := e.output.ctx.Err(); err != nil {
 			return err
 		}
 		if len(data) == 0 {

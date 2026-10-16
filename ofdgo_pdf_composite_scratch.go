@@ -30,6 +30,18 @@ type pdfCompositeScratch struct {
 	rasters  [8]*image.RGBA
 }
 
+// pdfCoverageRow 读取完整范围内的原生覆盖行，其他类型沿用逐点采样
+// 入参: coverage 覆盖图像, y 行坐标, left 起始列, right 结束列
+// 返回: []byte RGBA像素或空值
+func pdfCoverageRow(coverage image.Image, y, left, right int) []byte {
+	buffer, ok := coverage.(*image.RGBA)
+	if !ok || y < buffer.Rect.Min.Y || y >= buffer.Rect.Max.Y || left < buffer.Rect.Min.X || right > buffer.Rect.Max.X || left >= right {
+		return nil
+	}
+	start := buffer.PixOffset(left, y)
+	return buffer.Pix[start : start+4*(right-left)]
+}
+
 // acquireCoverage 借用当前块的独占画布，保留活动画布供嵌套合成读取
 // 返回: *image.RGBA 未清空画布，不支持缓冲绘制的后端返回nil, error 无效绘制区域
 func (c *pdfCompositor) acquireCoverage() (*image.RGBA, error) {

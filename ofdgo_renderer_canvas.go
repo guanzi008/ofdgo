@@ -99,6 +99,7 @@ func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Ima
 	}
 	r := rasterizer.FromImage(img, canvas.DPMM(page.DPI/25.4), space)
 	masks := renderCache[[32]byte, *image.Alpha]{limit: 16 << 20}
+	var pathData []float64
 	for i, cmd := range page.Commands {
 		if cmd.Image != nil {
 			source, err := baseimage.PixelData(cmd.Image)
@@ -119,23 +120,11 @@ func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Ima
 			}
 			continue
 		}
-		p := &canvas.Path{}
-		for _, s := range cmd.Path {
-			switch s.Verb {
-			case RasterMove:
-				p.MoveTo(s.End.X, s.End.Y)
-			case RasterLine:
-				p.LineTo(s.End.X, s.End.Y)
-			case RasterQuad:
-				p.QuadTo(s.Control1.X, s.Control1.Y, s.End.X, s.End.Y)
-			case RasterCubic:
-				p.CubeTo(s.Control1.X, s.Control1.Y, s.Control2.X, s.Control2.Y, s.End.X, s.End.Y)
-			case RasterClose:
-				p.Close()
-			default:
-				return nil, fmt.Errorf("canvas command %d: unsupported path verb %d", i, s.Verb)
-			}
+		p, err := rasterCanvasPath(cmd.Path, pathData)
+		if err != nil {
+			return nil, fmt.Errorf("canvas command %d: %w", i, err)
 		}
+		pathData = p.Data()[:0]
 		paint := canvas.Paint{Color: cmd.Paint.Color}
 		var sampled rasterGradientCanvas
 		if g := cmd.Paint.Gradient; g != nil {
@@ -218,6 +207,44 @@ func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Ima
 	}
 	r.Close()
 	return img, nil
+}
+
+// rasterCanvasPath 预留路径容量，保留光栅指令的构建及闭合规则
+// 入参: path 只读光栅路径, buffer 可复用的独占路径缓冲
+// 返回: *canvas.Path 使用独占缓冲的绘制路径, error 不支持的指令
+func rasterCanvasPath(path []RasterSegment, buffer []float64) (*canvas.Path, error) {
+	capacity := 0
+	for _, segment := range path {
+		switch segment.Verb {
+		case RasterQuad:
+			capacity += 6
+		case RasterCubic:
+			capacity += 8
+		default:
+			capacity += 4
+		}
+	}
+	if cap(buffer) < capacity {
+		buffer = make([]float64, 0, capacity)
+	}
+	p := canvas.NewPathFromData(buffer[:0])
+	for _, s := range path {
+		switch s.Verb {
+		case RasterMove:
+			p.MoveTo(s.End.X, s.End.Y)
+		case RasterLine:
+			p.LineTo(s.End.X, s.End.Y)
+		case RasterQuad:
+			p.QuadTo(s.Control1.X, s.Control1.Y, s.End.X, s.End.Y)
+		case RasterCubic:
+			p.CubeTo(s.Control1.X, s.Control1.Y, s.Control2.X, s.Control2.Y, s.End.X, s.End.Y)
+		case RasterClose:
+			p.Close()
+		default:
+			return nil, fmt.Errorf("unsupported path verb %d", s.Verb)
+		}
+	}
+	return p, nil
 }
 
 // At 返回原局部坐标的描边渐变颜色

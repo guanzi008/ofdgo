@@ -451,13 +451,11 @@ func GrayAt(img image.Image, x, y int) color.Gray {
 	case *colorImage:
 		return GrayAt(src.source, x, y)
 	case *maskedTIFFImage:
-		if src.NRGBA64At(x, y).A == 0 {
+		if src.alphaAt(x, y) == 0 {
 			return color.Gray{}
 		}
-		bounds, size := src.source.Bounds(), src.bounds.Size()
-		sx := bounds.Min.X + int((uint64(x-src.bounds.Min.X)*uint64(bounds.Dx())+uint64(bounds.Dx()/2))/uint64(size.X))
-		sy := bounds.Min.Y + int((uint64(y-src.bounds.Min.Y)*uint64(bounds.Dy())+uint64(bounds.Dy()/2))/uint64(size.Y))
-		return GrayAt(src.source, sx, sy)
+		point := src.samplePoint(src.source.Bounds(), x, y)
+		return GrayAt(src.source, point.X, point.Y)
 	case *transparentEdgeImage:
 		if x <= src.rect.Min.X || y <= src.rect.Min.Y || x >= src.rect.Max.X-1 || y >= src.rect.Max.Y-1 {
 			return color.Gray{}
@@ -534,6 +532,39 @@ func NRGBAAt(img image.Image, x, y int) color.NRGBA {
 // 返回: uint32 十六位透明度
 func AlphaAt(img image.Image, x, y int) uint32 {
 	switch source := img.(type) {
+	case *maskedTIFFImage:
+		return source.alphaAt(x, y)
+	case *image.YCbCr, *image.CMYK, *image.Gray, *image.Gray16:
+		return 65535
+	case *image.NYCbCrA:
+		if !image.Pt(x, y).In(source.Rect) {
+			return 0
+		}
+		return uint32(source.A[source.AOffset(x, y)]) * 257
+	case *orientedTIFFImage:
+		point, ok := source.sourcePoint(x, y)
+		if !ok {
+			return 0
+		}
+		return AlphaAt(source.source, point.X, point.Y)
+	case *planarTIFFImage:
+		if !image.Pt(x, y).In(source.bounds) {
+			return 0
+		}
+		if source.alpha != 0 {
+			index := 3
+			if source.cmyk {
+				index = 4
+			} else if source.gray || len(source.palette) != 0 {
+				index = 1
+			}
+			return uint32(source.sampleAt(index, x, y))
+		}
+		if len(source.palette) != 0 {
+			index := uint32(source.sampleAt(0, x, y)) * uint32(len(source.palette)-1) / 65535
+			return uint32(source.palette[index].A)
+		}
+		return 65535
 	case *image.RGBA:
 		if !(image.Point{X: x, Y: y}).In(source.Rect) {
 			return 0

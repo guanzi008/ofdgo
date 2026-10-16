@@ -151,10 +151,9 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	if !finite(renderer.DPI) || renderer.DPI <= 0 {
 		return nil, PDFImportReport{}, fmt.Errorf("invalid PDF raster DPI")
 	}
-	if options.OnProgress != nil {
-		if err := options.OnProgress("open", 0, 0); err != nil {
-			return nil, PDFImportReport{}, err
-		}
+	progress := editorProgress(options.OnProgress).withContext(ctx)
+	if err := progress.report("open", 0, 0); err != nil {
+		return nil, PDFImportReport{}, err
 	}
 	editor := NewEditor()
 	editor.SetRenderBackends(renderer.Backends())
@@ -168,7 +167,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		readWarning = func(diagnostic pdfgo.Diagnostic) { diagnostics = append(diagnostics, diagnostic) }
 		readOptions.Warning = func(diagnostic pdfgo.Diagnostic) { readWarning(diagnostic) }
 	}
-	reader, err := pdfgo.NewReaderWithOptions(source, size, readOptions)
+	reader, err := pdfgo.NewReaderWithOptions(convertReader{context: ctx, source: source}, size, readOptions)
 	if err != nil {
 		return nil, PDFImportReport{}, err
 	}
@@ -206,10 +205,8 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		}
 		readWarning = importer.warning
 	}
-	if options.OnProgress != nil {
-		if err := options.OnProgress("pages", 0, 0); err != nil {
-			return nil, PDFImportReport{}, err
-		}
+	if err := progress.report("pages", 0, 0); err != nil {
+		return nil, PDFImportReport{}, err
 	}
 	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
 		_, width, height := codecpdf.PageMatrix(page)
@@ -220,10 +217,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		importer.pageOrder = append(importer.pageOrder, page)
 		importer.pageIDs[page.Reference] = editor.pages[index].ID
 		importer.pageIndexes[page.Reference] = index
-		if options.OnProgress != nil {
-			return options.OnProgress("pages", index+1, 0)
-		}
-		return nil
+		return progress.report("pages", index+1, 0)
 	})
 	if err != nil {
 		return nil, PDFImportReport{}, err
@@ -241,10 +235,8 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		}
 		importer.page = 0
 	}
-	if options.OnProgress != nil {
-		if err := options.OnProgress("convert", 0, len(editor.pages)); err != nil {
-			return nil, PDFImportReport{}, err
-		}
+	if err := progress.report("convert", 0, len(editor.pages)); err != nil {
+		return nil, PDFImportReport{}, err
 	}
 	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
 		matrix, width, height := codecpdf.PageMatrix(page)
@@ -284,13 +276,13 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
 		importer.report.Pages++
-		if options.OnProgress != nil {
-			if err := options.OnProgress("convert", index+1, len(editor.pages)); err != nil {
-				return err
-			}
+		if err := progress.report("convert", index+1, len(editor.pages)); err != nil {
+			return err
 		}
 		if options.Progress != nil {
-			return options.Progress(index + 1)
+			if err := options.Progress(index + 1); err != nil {
+				return err
+			}
 		}
 		return ctx.Err()
 	})

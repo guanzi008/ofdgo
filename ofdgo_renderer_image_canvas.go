@@ -267,12 +267,18 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 	}
 	if baseimage.HighPrecision(img) || baseimage.HighPrecision(result) {
 		out := image.NewNRGBA64(bounds)
+		source64, _ := img.(*image.NRGBA64)
 		maskBounds := result.Bounds()
 		opaque := true
 		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 			if err := work.Err(); err != nil {
 				r.renderError = err
 				return img
+			}
+			row := out.Pix[(y-bounds.Min.Y)*out.Stride:][:w*8]
+			if source64 != nil {
+				start := source64.PixOffset(bounds.Min.X, y)
+				copy(row, source64.Pix[start:start+len(row)])
 			}
 			for x := bounds.Min.X; x < bounds.Max.X; x++ {
 				if (x-bounds.Min.X)&255 == 0 {
@@ -281,9 +287,15 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 						return img
 					}
 				}
-				pixel := baseimage.NRGBA64At(img, x, y)
 				alpha := baseimage.AlphaAt(result, maskBounds.Min.X+x-bounds.Min.X, maskBounds.Min.Y+y-bounds.Min.Y)
 				opaque = opaque && alpha == 65535
+				if source64 != nil {
+					i := (x-bounds.Min.X)*8 + 6
+					a := (uint32(row[i])<<8 | uint32(row[i+1])) * alpha / 65535
+					row[i], row[i+1] = byte(a>>8), byte(a)
+					continue
+				}
+				pixel := baseimage.NRGBA64At(img, x, y)
 				pixel.A = uint16(uint32(pixel.A) * alpha / 65535)
 				out.SetNRGBA64(x, y, pixel)
 			}

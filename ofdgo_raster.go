@@ -130,15 +130,14 @@ func (m RasterMatrix) Apply(p RasterPoint) RasterPoint {
 	return RasterPoint{m[0]*p.X + m[2]*p.Y + m[4], m[1]*p.X + m[3]*p.Y + m[5]}
 }
 
-// Inverse 求逆矩阵，退化或行列式非有限时返回错误
+// Inverse 求有限逆矩阵，复用几何变换的溢出、下溢及相消处理
 // 返回: RasterMatrix 逆矩阵, error 无效矩阵
 func (m RasterMatrix) Inverse() (RasterMatrix, error) {
-	det := m[0]*m[3] - m[1]*m[2]
-	if det == 0 || math.IsNaN(det) || math.IsInf(det, 0) {
+	inverse, ok := MatrixFromValues([6]float64(m)).Invert()
+	if !ok {
 		return RasterMatrix{}, fmt.Errorf("invalid raster transform")
 	}
-	return RasterMatrix{m[3] / det, -m[1] / det, -m[2] / det, m[0] / det,
-		(m[2]*m[5] - m[3]*m[4]) / det, (m[1]*m[4] - m[0]*m[5]) / det}, nil
+	return RasterMatrix(inverse.Values()), nil
 }
 
 // At 采样局部坐标下的渐变，使用预乘颜色插值

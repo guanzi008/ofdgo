@@ -353,17 +353,21 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 	return report, err
 }
 
-// ReadAt 读取指定位置的数据并响应取消
+// ReadAt 读取前后响应取消，保留读取字节数和源错误
 // 入参: data 目标缓冲, offset 源偏移
 // 返回: int 读取字节数, error 读取错误
 func (r convertReader) ReadAt(data []byte, offset int64) (int, error) {
 	if err := r.context.Err(); err != nil {
 		return 0, err
 	}
-	return r.source.ReadAt(data, offset)
+	n, err := r.source.ReadAt(data, offset)
+	if err == nil {
+		err = r.context.Err()
+	}
+	return n, err
 }
 
-// Write 写出数据并响应取消及短写
+// Write 写入前后响应取消，保留写入及短写错误
 // 入参: data 待写数据
 // 返回: int 写入字节数, error 写入错误
 func (w convertWriter) Write(data []byte) (int, error) {
@@ -374,6 +378,27 @@ func (w convertWriter) Write(data []byte) (int, error) {
 	*w.count += int64(n)
 	if err == nil && n != len(data) {
 		err = io.ErrShortWrite
+	}
+	if err == nil {
+		err = w.context.Err()
+	}
+	return n, err
+}
+
+// WriteString 写入字符串并保留底层原生写入能力，前后响应取消
+// 入参: data 待写文本
+// 返回: int 写入字节数, error 写入、短写或取消错误
+func (w convertWriter) WriteString(data string) (int, error) {
+	if err := w.context.Err(); err != nil {
+		return 0, err
+	}
+	n, err := io.WriteString(w.writer, data)
+	*w.count += int64(n)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err == nil {
+		err = w.context.Err()
 	}
 	return n, err
 }

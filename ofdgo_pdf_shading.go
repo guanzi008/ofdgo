@@ -21,6 +21,7 @@ import (
 	"strconv"
 
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -612,7 +613,7 @@ func (c *pdfCompositor) gradient(paint pdfgo.Paint, space *pdfgo.ColorSpace, nod
 				for sx := range samples {
 					weight := 1.0
 					if coverage != nil {
-						_, _, _, a := coverage.At(x*samples+sx, y*samples+sy).RGBA()
+						a := baseimage.AlphaAt(coverage, x*samples+sx, y*samples+sy)
 						weight = float64(a) / 65535
 						if weight == 0 {
 							continue
