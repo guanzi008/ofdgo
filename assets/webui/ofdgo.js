@@ -6154,12 +6154,16 @@ async function openResourceManagement() {
 	await resourceTask(loadManagedResources);
 }
 
-async function resourceTask(action) {
+async function resourceTask(action, delay = 0) {
 	if (resourceManager.busy) return;
 	resourceManager.busy = true;
-	resourceElements.List.inert = true;
+	resourceElements.List.inert = !delay;
 	updateResourceControls();
-	resourceElements.Status.textContent = "处理中";
+	const showBusy = () => {
+		resourceElements.Status.textContent = "处理中";
+	};
+	const timer = delay ? setTimeout(showBusy, delay) : null;
+	if (!delay) showBusy();
 	resourceElements.Panel.setAttribute("aria-busy", "true");
 	try {
 		await action();
@@ -6167,6 +6171,7 @@ async function resourceTask(action) {
 	} catch (err) {
 		resourceElements.Status.textContent = resourceError(err.message);
 	} finally {
+		if (timer !== null) clearTimeout(timer);
 		resourceManager.busy = false;
 		resourceElements.List.inert = false;
 		resourceElements.Panel.removeAttribute("aria-busy");
@@ -6213,13 +6218,13 @@ async function renderResourceList() {
 			span.textContent = value;
 			button.append(span);
 		}
-		button.addEventListener("click", () => resourceTask(() => selectManagedResource(item)));
+		button.addEventListener("click", () => chooseManagedResource(item));
 		button.addEventListener("keydown", event => {
 			const index = items.indexOf(item);
 			const target = { ArrowDown: Math.min(items.length - 1, index + 1), ArrowUp: Math.max(0, index - 1), Home: 0, End: items.length - 1 }[event.key];
 			if (target == null) return;
 			event.preventDefault();
-			resourceTask(() => selectManagedResource(items[target])).then(() => {
+			chooseManagedResource(items[target]).then(() => {
 				if (resourceElements.Panel.open && resourceManager.selected === items[target]) resourceElements.List.children[target]?.focus();
 			});
 		});
@@ -6233,6 +6238,14 @@ async function renderResourceList() {
 	}
 	resourceElements.List.append(fragment);
 	await selectManagedResource(selected);
+}
+
+async function chooseManagedResource(item) {
+	if (item === resourceManager.selected) return;
+	await resourceTask(() => {
+		resourceElements.Status.textContent = "";
+		return selectManagedResource(item);
+	}, 150);
 }
 
 async function selectManagedResource(item) {
