@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // InvoiceDigest 计算原始导出数据的SHA256摘要
@@ -31,6 +32,158 @@ import (
 func InvoiceDigest(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// ReadInvoice 读取当前文档及版本声明的发票，标引按对象引用提取文本
+// 入参: ctx 取消上下文, source 精确来源
+// 返回: InvoiceReport 发票及诊断, error 来源或读取错误
+func (r *Reader) ReadInvoice(ctx context.Context, source InvoiceSource) (InvoiceReport, error) {
+	ctx = invoiceWriteContext(ctx)
+	data, err := r.ExportInvoice(ctx, source)
+	if err != nil {
+		return InvoiceReport{}, err
+	}
+	report, err := r.readInvoiceXML(ctx, data, source)
+	report.DocumentIndex = r.DocumentIndex()
+	if r.versionInfo != nil {
+		report.Version = r.versionInfo.ID
+	}
+	return report, err
+}
+
+// readInvoiceXML 在当前文档作用域解析业务载荷或对象引用标引
+// 入参: ctx 取消上下文, data 原始XML, source 来源
+// 返回: InvoiceReport 发票及诊断, error 读取错误
+func (r *Reader) readInvoiceXML(ctx context.Context, data []byte, source InvoiceSource) (InvoiceReport, error) {
+	report, err := parseInvoiceXML(ctx, data, source)
+	if err != nil || source.Kind != "tag" || len(report.Invoices) != 0 {
+		return report, err
+	}
+	root, err := invoiceXMLTree(ctx, data)
+	if err != nil {
+		return report, err
+	}
+	if root.name.Space != ofdNamespace2016 || root.name.Local != "root" || !invoiceObjectReferences(root) {
+		return report, nil
+	}
+	structure, err := parseStructure(ctx, data, CustomTag{TypeID: structureTypeOfficial, NameSpace: ofdNamespace2016})
+	if err != nil {
+		return report, err
+	}
+	known := false
+	for _, node := range structure.Children {
+		known = known || node.Namespace == ofdNamespace2016 && node.Name == "InvoiceNo"
+	}
+	if !known {
+		return report, nil
+	}
+	doc, err := r.DocContext(ctx)
+	if err != nil {
+		return report, err
+	}
+	pages := signaturePageNumbers(doc)
+	cache := make(map[int]map[string][]string)
+	inv := Invoice{Kind: "inv", Standard: ofdNamespace2016, Version: "1.0", Sources: []InvoiceSource{source}}
+	assigned := make(map[string]bool)
+	total := 0
+	var visit func(*StructureNode, string, string) error
+	visit = func(node *StructureNode, nodePath, fieldPath string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if node.Namespace != ofdNamespace2016 {
+			return nil
+		}
+		var refs []StructureReference
+		for _, child := range node.Children {
+			refs = append(refs, child.References...)
+		}
+		if len(refs) != 0 {
+			factSource := source
+			factSource.NodePath = nodePath
+			fact := InvoiceFact{Name: node.Name, Namespace: node.Namespace, Source: factSource, References: refs}
+			valid := true
+			for _, ref := range refs {
+				page, _ := resourceValue(pages, ref.PageID)
+				if page != 0 && cache[page] == nil {
+					content, err := r.PageContentByIndexContext(ctx, page-1)
+					if err != nil {
+						return err
+					}
+					texts := make(map[string][]string)
+					var collect func(GraphicObject)
+					collect = func(object GraphicObject) {
+						if object.Type == "TextObject" {
+							id := editorResourceID(object.TextObject.ID)
+							texts[id] = append(texts[id], object.TextObject.Text())
+						}
+						if object.Type == "CompositeGraphicUnit" {
+							for child := range object.CompositeGraphicUnit.objects() {
+								collect(child)
+							}
+						}
+					}
+					for _, layer := range content.Content.Layer {
+						for _, object := range layer.Objects {
+							collect(object)
+						}
+					}
+					cache[page] = texts
+				}
+				for _, id := range ref.ObjectIDs {
+					values := cache[page][editorResourceID(id)]
+					if len(values) != 1 {
+						valid = false
+						report.Issues = append(report.Issues, InvoiceIssue{Code: "invalid-reference", Message: "invoice text reference is missing or ambiguous", Source: factSource, Field: nodePath})
+						continue
+					}
+					if len(values[0]) > invoiceXMLLimit-total {
+						return fmt.Errorf("invoice extraction limit exceeded")
+					}
+					total += len(values[0])
+					fact.Value += values[0]
+				}
+			}
+			inv.Facts = append(inv.Facts, fact)
+			dst, numeric := invoiceEDRMField(&inv, nil, fieldPath)
+			if dst != nil && valid {
+				value := strings.TrimSpace(fact.Value)
+				if numeric {
+					value = strings.TrimSpace(strings.TrimLeft(value, "¥￥"))
+					if invoiceDecimal(value) == nil {
+						report.Issues = append(report.Issues, InvoiceIssue{Code: "invalid-decimal", Message: "invalid invoice amount", Source: factSource, Field: nodePath})
+						return nil
+					}
+				}
+				if assigned[fieldPath] {
+					*dst = ""
+					report.Issues = append(report.Issues, InvoiceIssue{Code: "ambiguous-field", Message: "multiple invoice field references", Source: factSource, Field: nodePath})
+				} else {
+					*dst = value
+					assigned[fieldPath] = true
+				}
+			}
+			return nil
+		}
+		counts := make(map[string]int)
+		for i := range node.Children {
+			child := &node.Children[i]
+			counts[child.Name]++
+			if err := visit(child, fmt.Sprintf("%s/%s[%d]", nodePath, child.Name, counts[child.Name]), fieldPath+"/"+child.Name); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := visit(structure, "/root[1]", "/eInvoice"); err != nil {
+		return InvoiceReport{}, err
+	}
+	if date, err := time.Parse("2006年01月02日", inv.Date); err == nil {
+		inv.Date = date.Format("2006-01-02")
+	}
+	invoiceAmountCheck(&inv, &report, source)
+	report.Invoices = append(report.Invoices, inv)
+	return report, ctx.Err()
 }
 
 // ExportInvoice 导出当前文档及版本声明的发票，内联内容补齐继承的命名空间
@@ -111,6 +264,15 @@ func (e *Editor) changeInvoiceSource(ctx context.Context, source InvoiceSource, 
 	}
 	if InvoiceDigest(old) != digest {
 		return InvoiceSource{}, fmt.Errorf("invoice source has changed")
+	}
+	if source.Kind == "tag" {
+		root, err := invoiceXMLTree(ctx, old)
+		if err != nil {
+			return InvoiceSource{}, err
+		}
+		if root.name.Space == ofdNamespace2016 && root.name.Local == "root" && invoiceObjectReferences(root) {
+			return InvoiceSource{}, fmt.Errorf("object reference invoice is read-only")
+		}
 	}
 	if !remove {
 		if len(data) > invoiceXMLLimit {

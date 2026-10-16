@@ -1062,6 +1062,9 @@ func invoicePlainXML(ctx context.Context, root *invoiceXMLNode, source InvoiceSo
 			report.Issues = append(report.Issues, InvoiceIssue{Code: "invalid-value", Field: f.Name, Message: "nil fact contains a value", Source: s})
 			return nil
 		}
+		if numeric && inv.Standard == invoiceEDRM && strings.TrimSpace(f.Value) == "" && !f.Nil {
+			return nil
+		}
 		if numeric && !f.Nil && invoiceDecimal(f.Value) == nil {
 			report.Issues = append(report.Issues, InvoiceIssue{Code: "invalid-decimal", Field: f.Name, Message: "invalid decimal lexical value", Source: s})
 			return nil

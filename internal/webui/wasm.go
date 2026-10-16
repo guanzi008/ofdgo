@@ -994,6 +994,9 @@ func documentInvoice(args []js.Value) (any, error) {
 		return nil, err
 	}
 	report, err := ofdgo.DecodeInvoices(ctx, data)
+	if request.Source.Kind == "tag" && len(report.Invoices) == 0 {
+		report, err = r.ReadInvoice(ctx, request.Source)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1114,20 +1117,23 @@ func validateInvoiceDraft(ctx context.Context, request invoiceRequest) (any, err
 	if source.Kind == "" {
 		source = request.Source
 	}
-	data, err := editor.ExportInvoice(ctx, source)
-	if err != nil {
-		return nil, err
-	}
-	report, err := ofdgo.DecodeInvoices(ctx, data)
-	if err != nil {
-		return nil, err
-	}
-	issues = append(issues, report.Issues...)
 	view, err := editor.ReaderContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer view.Close()
+	data, err := view.ExportInvoice(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	report, err := ofdgo.DecodeInvoices(ctx, data)
+	if source.Kind == "tag" && len(report.Invoices) == 0 {
+		report, err = view.ReadInvoice(ctx, source)
+	}
+	if err != nil {
+		return nil, err
+	}
+	issues = append(issues, report.Issues...)
 	for index, invoice := range report.Invoices {
 		validation, err := ofdgo.ValidateInvoice(ctx, invoice)
 		if err != nil {
@@ -1273,6 +1279,14 @@ func applyInvoiceBatch(ctx context.Context, editor *ofdgo.Editor, request invoic
 		return result, fmt.Errorf("invalid invoice batch size")
 	}
 	report, err := ofdgo.DecodeInvoices(ctx, data)
+	if request.Source.Kind == "tag" && len(report.Invoices) == 0 {
+		view, viewErr := editor.ReaderContext(ctx)
+		if viewErr != nil {
+			return result, viewErr
+		}
+		defer view.Close()
+		report, err = view.ReadInvoice(ctx, request.Source)
+	}
 	if err != nil {
 		return result, err
 	}

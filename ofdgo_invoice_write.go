@@ -148,7 +148,7 @@ func InvoiceFields(value Invoice) []InvoiceFieldDescriptor {
 		if strings.HasPrefix(field.field, "facts.") || strings.HasPrefix(field.field, "items.fields.") {
 			continue
 		}
-		d := InvoiceFieldDescriptor{Field: field.field, Label: field.label, Group: "basic", Type: "text", Item: field.item, Value: field.value, Bindable: true}
+		d := InvoiceFieldDescriptor{Field: field.field, Label: field.label, Group: "basic", Type: "text", Item: field.item, Value: field.value, Bindable: value.Standard != ofdNamespace2016}
 		binding := InvoiceBinding{Field: field.field, Item: field.item}
 		if field.item >= 0 {
 			binding.Item = 0
@@ -178,7 +178,7 @@ func InvoiceFields(value Invoice) []InvoiceFieldDescriptor {
 		result = append(result, d)
 	}
 	appendFact := func(fact InvoiceFact, field string, item int) {
-		d := InvoiceFieldDescriptor{Field: field, Label: fact.Name, Group: "facts", Type: "text", Item: item, Value: fact.Value, Bindable: true}
+		d := InvoiceFieldDescriptor{Field: field, Label: fact.Name, Group: "facts", Type: "text", Item: item, Value: fact.Value, Bindable: value.Standard != ofdNamespace2016}
 		if item >= 0 {
 			d.Group = "items"
 		}
@@ -210,6 +210,7 @@ func InvoiceFields(value Invoice) []InvoiceFieldDescriptor {
 func InvoiceFormats() []InvoiceFormat {
 	result := []InvoiceFormat{{Kind: "einv", Standard: "EInvoice", Version: "0.3", Read: true, Create: true, Edit: true, Items: true}}
 	result = append(result, InvoiceFormat{Kind: "inv", Standard: invoiceEDRM, Version: "1.0", Read: true, Items: true})
+	result = append(result, InvoiceFormat{Kind: "inv", Standard: ofdNamespace2016, Version: "1.0", Read: true})
 	for _, kind := range []string{"inv", "einv", "atr", "rai"} {
 		result = append(result, InvoiceFormat{Kind: kind, Standard: "http://xbrl.mof.gov.cn/taxonomy/2023-12-31/" + kind, Version: "2023-12-31", Read: true, Create: true, Edit: true, Items: kind == "inv" || kind == "atr"})
 	}
@@ -269,7 +270,7 @@ func ValidateInvoice(ctx context.Context, value Invoice) ([]InvoiceIssue, error)
 		return issues, nil
 	}
 	for _, field := range []invoiceWriteField{{"Number", value.Number}, {"Date", value.Date}, {"TotalAmount", value.TotalAmount}} {
-		if strings.TrimSpace(field.value) == "" {
+		if value.Standard != ofdNamespace2016 && strings.TrimSpace(field.value) == "" {
 			add("required", field.name, "missing invoice field")
 		}
 	}

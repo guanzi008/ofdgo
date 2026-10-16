@@ -95,12 +95,18 @@ func (r *Reader) InvoiceCapabilities(ctx context.Context, source InvoiceSource, 
 	if err != nil {
 		return result, err
 	}
-	report, err := parseInvoiceXML(ctx, data, source)
+	report, err := r.readInvoiceXML(ctx, data, source)
 	if err != nil {
 		return result, err
 	}
 	if index < 0 || index >= len(report.Invoices) {
 		return result, fmt.Errorf("invoice index out of range")
+	}
+	if report.Invoices[index].Standard == ofdNamespace2016 {
+		for _, operation := range []string{"create", "edit", "items", "bind", "generate", "sync", "delete"} {
+			result.Reasons[operation] = "对象引用标引仅支持读取和导出"
+		}
+		return result, nil
 	}
 	format, known := invoiceWriteFormat(report.Invoices[index])
 	result.Create = known && format.Create
@@ -669,7 +675,7 @@ func (r *Reader) InvoiceBindings(ctx context.Context, source InvoiceSource, inde
 	if err != nil {
 		return nil, err
 	}
-	report, err := parseInvoiceXML(ctx, data, source)
+	report, err := r.readInvoiceXML(ctx, data, source)
 	if err != nil {
 		return nil, err
 	}
@@ -699,7 +705,7 @@ func (r *Reader) CheckInvoiceAppearance(ctx context.Context, source InvoiceSourc
 	if err != nil {
 		return nil, err
 	}
-	report, err := parseInvoiceXML(ctx, data, source)
+	report, err := r.readInvoiceXML(ctx, data, source)
 	if err != nil {
 		return nil, err
 	}

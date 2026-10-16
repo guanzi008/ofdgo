@@ -103,17 +103,19 @@ type InvoiceIssue struct {
 }
 
 // InvoiceFact 保存命名空间限定的业务事实、原始数值及精度属性，Nil与空文本分别表达
+// References保留对象引用标引的原始页标识和有序图元标识，不推测明细归属
 type InvoiceFact struct {
-	Name       string             `json:"name"`
-	Namespace  string             `json:"namespace,omitempty"`
-	Value      string             `json:"value"`
-	Context    string             `json:"context,omitempty"`
-	Unit       string             `json:"unit,omitempty"`
-	Decimals   string             `json:"decimals,omitempty"`
-	Precision  string             `json:"precision,omitempty"`
-	Nil        bool               `json:"nil,omitempty"`
-	Source     InvoiceSource      `json:"source"`
-	Dimensions []InvoiceDimension `json:"dimensions,omitempty"`
+	Name       string               `json:"name"`
+	Namespace  string               `json:"namespace,omitempty"`
+	Value      string               `json:"value"`
+	Context    string               `json:"context,omitempty"`
+	Unit       string               `json:"unit,omitempty"`
+	Decimals   string               `json:"decimals,omitempty"`
+	Precision  string               `json:"precision,omitempty"`
+	Nil        bool                 `json:"nil,omitempty"`
+	Source     InvoiceSource        `json:"source"`
+	Dimensions []InvoiceDimension   `json:"dimensions,omitempty"`
+	References []StructureReference `json:"references,omitempty"`
 }
 
 // InvoiceDimension 保存上下文维度，名称和成员的命名空间不依赖XML前缀
@@ -165,7 +167,7 @@ func (r *Reader) InvoicesContext(ctx context.Context) (InvoiceReport, error) {
 			report.Issues = append(report.Issues, InvoiceIssue{Code: "read-error", Message: readErr.Error(), Source: source})
 			return nil
 		}
-		parsed, err := parseInvoiceXML(ctx, data, source)
+		parsed, err := r.readInvoiceXML(ctx, data, source)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -266,6 +268,19 @@ func (r *Reader) InvoicesContext(ctx context.Context) (InvoiceReport, error) {
 	if err := ctx.Err(); err != nil {
 		return InvoiceReport{}, err
 	}
+	payloads := make(map[[3]string]bool)
+	for _, value := range report.Invoices {
+		if value.Standard != ofdNamespace2016 && value.Number != "" {
+			payloads[[3]string{value.Kind, value.Code, value.Number}] = true
+		}
+	}
+	filtered := report.Invoices[:0]
+	for _, value := range report.Invoices {
+		if value.Standard != ofdNamespace2016 || !payloads[[3]string{value.Kind, value.Code, value.Number}] {
+			filtered = append(filtered, value)
+		}
+	}
+	report.Invoices = filtered
 	invoiceSourceConflicts(&report)
 	if err := ctx.Err(); err != nil {
 		return InvoiceReport{}, err
