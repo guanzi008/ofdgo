@@ -6158,7 +6158,7 @@ function renderInvoiceAppearance(container, draft) {
 		draft.object = "";
 		renderDocumentSettings();
 	});
-	const object = settingsSelect(container, "图元", "InvoiceObject", [[draft.object, draft.object || "选择图元"]], draft.object, value => {
+	const object = settingsSelect(container, "图元", "InvoiceObject", [[draft.object, draft.object || "选择"]], draft.object, value => {
 		draft.object = value;
 		renderDocumentSettings();
 	});
@@ -6206,7 +6206,7 @@ function renderInvoiceAppearance(container, draft) {
 		details.addEventListener("toggle", () => { draft.layoutOpen = details.open; });
 		const fonts = state.doc.fonts || [];
 		const libraryFonts = fontManager.editorFonts().filter(font => !font.disabled);
-		settingsSelect(details, "字体", "InvoiceFont", [["", "选择字体"], ...fonts.map(font => [font.id, font.fontName || font.familyName || font.id]), ...libraryFonts.map(font => [`file:${font.id}`, font.fullName || font.name])], draft.fontChoice || draft.layout.font, value => {
+		settingsSelect(details, "字体", "InvoiceFont", [["", "选择"], ...fonts.map(font => [font.id, font.fontName || font.familyName || font.id]), ...libraryFonts.map(font => [`file:${font.id}`, font.fullName || font.name])], draft.fontChoice || draft.layout.font, value => {
 			draft.fontChoice = value;
 			draft.layout.font = value.startsWith("file:") ? "" : value;
 			renderDocumentSettings();
@@ -6264,7 +6264,7 @@ async function loadInvoiceObjects(draft) {
 	const data = await loadPageData(page);
 	if (invoiceCurrent() !== draft || draft.page !== page || sequence !== settings.sequence || !field.isConnected) return;
 	const objects = (data.objects || []).filter(item => !item.scoped && item.type === "TextObject");
-	field.replaceChildren(new Option("选择图元", ""), ...objects.map(item => new Option(`${item.id} · ${(item.text || "文字").slice(0, 60)}`, item.id)));
+	field.replaceChildren(new Option("选择", ""), ...objects.map(item => new Option(`${item.id} · ${(item.text || "文字").slice(0, 60)}`, item.id)));
 	field.value = draft.object;
 }
 
@@ -6664,7 +6664,7 @@ function renderStyleResourceSettings(kind) {
 	if (!existing) return;
 	const group = settingsSection("绑定"), binding = group.section;
 	settingsPages(binding, "TargetPage", settings.page, value => { settings.page = Number(value); loadSettingsObjects(); });
-	const objects = settingsSelect(binding, "图元", "TargetObject", [["", "选择图元"], ...(settings.data.objects || []).map(item => [item.id, `${item.id} · ${item.text || "图元"}`])], settings.object);
+	const objects = settingsSelect(binding, "图元", "TargetObject", [["", "选择"], ...(settings.data.objects || []).map(item => [item.id, `${item.id} · ${item.text || "图元"}`])], settings.object);
 	settingsPickControl(objects, "style");
 	if (kind === "ColorSpace") {
 		settingsSelect(binding, "应用", "PaintTarget", [["fill", "填充"], ["stroke", "描边"]], "fill");
@@ -6684,7 +6684,7 @@ async function loadSettingsObjects() {
 	try {
 		const data = await loadPageData(page);
 		if (sequence !== settings.sequence || page !== settings.page || openSeq !== state.openSeq) return;
-		field.replaceChildren(new Option("选择图元", ""), ...(data.objects || []).filter(item => ["TextObject", "PathObject", "CompositeObject", "CompositeGraphicUnit"].includes(item.type) && !item.scoped).map(item => new Option(`${item.id} · ${item.text || "图元"}`, item.id)));
+		field.replaceChildren(new Option("选择", ""), ...(data.objects || []).filter(item => ["TextObject", "PathObject", "CompositeObject", "CompositeGraphicUnit"].includes(item.type) && !item.scoped).map(item => new Option(`${item.id} · ${item.text || "图元"}`, item.id)));
 	} catch (error) { if (sequence === settings.sequence) settingsElements.Status.textContent = error.message; }
 	finally { if (sequence === settings.sequence) { field.disabled = false; field.dispatchEvent(new Event("change")); } }
 }
@@ -7152,7 +7152,7 @@ async function loadResourceTargets(preferred) {
 		preferred = resourceElements.Object.value || (reference?.page === Number(resourceElements.Page.value) ? reference.object : "");
 	}
 	resourceManager.targets = [];
-	resourceElements.Object.replaceChildren(new Option("选择图元", ""));
+	resourceElements.Object.replaceChildren(new Option("选择", ""));
 	if (!state.editing || !resource || !["Audio", "Video", "Attachment"].includes(resource.kind)) return;
 	const page = Number(resourceElements.Page.value), sequence = state.openSeq;
 	const items = await callWASM("ofdgoResourceTargets", page, resource.kind, resource.id);
@@ -10747,7 +10747,7 @@ function addStructureReference(reference = {}) {
 			const index = state.doc.pages.findIndex(item => item.id === value);
 			const targets = await callWASM("ofdgoStructureObjects", index);
 			if (!row.isConnected || sequence !== state.openSeq || value !== page.value) return;
-			object.replaceChildren(new Option("选择图元", ""));
+			object.replaceChildren(new Option("选择", ""));
 			for (const target of targets || []) object.add(new Option(`${target.id} · ${(target.text || "图元").slice(0, 60)}`, target.id));
 			add.disabled = false;
 		} catch (err) {
@@ -11263,7 +11263,7 @@ async function openFontBinding(font) {
 	fontBindingElements.Name.textContent = font.fontName || font.familyName || font.id;
 	fontBindingElements.SourceRow.hidden = font.embedded;
 	fontBindingElements.Source.disabled = font.embedded;
-	fontBindingElements.Source.replaceChildren(new Option("请选择", ""), ...fontBinding.choices.map((choice, i) => new Option(choice.fullName || choice.name, String(i))), new Option("添加字体", "file"));
+	fontBindingElements.Source.replaceChildren(new Option("选择", ""), ...fontBinding.choices.map((choice, i) => new Option(choice.fullName || choice.name, String(i))), new Option("添加", "file"));
 	fontBindingElements.Hint.hidden = !font.embedded;
 	fontBindingElements.Status.textContent = "";
 	fontBindingElements.Submit.textContent = font.embedded ? "外置" : "嵌入";
