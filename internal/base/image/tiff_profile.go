@@ -104,7 +104,6 @@ func applyImageColorProfile(ctx context.Context, source image.Image, profile *pd
 	var previous [4]float64
 	var previousPixel color.NRGBA64
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		misses := 0
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			if (x-bounds.Min.X)&255 == 0 {
 				if err := ctx.Err(); err != nil {
@@ -155,17 +154,13 @@ func applyImageColorProfile(ctx context.Context, source image.Image, profile *pd
 				alpha = pixel.A
 				values = [4]float64{float64(pixel.R) / 65535, float64(pixel.G) / 65535, float64(pixel.B) / 65535}
 			}
-			if misses < 32 {
-				if previousPixel.A != 0 && values == previous {
-					pixel := previousPixel
-					pixel.A = alpha
-					result.SetNRGBA64(x, y, pixel)
-					misses = 0
-					continue
-				}
-				previous = values
-				misses++
+			if previousPixel.A != 0 && values == previous {
+				pixel := previousPixel
+				pixel.A = alpha
+				result.SetNRGBA64(x, y, pixel)
+				continue
 			}
+			previous = values
 			if linearSRGB {
 				for i := range 3 {
 					if values[i] <= 0.04045 {
@@ -183,11 +178,7 @@ func applyImageColorProfile(ctx context.Context, source image.Image, profile *pd
 			for i, value := range rgb {
 				channels[i] = uint16(math.Round(max(0, min(1, value)) * 65535))
 			}
-			if misses < 32 {
-				previousPixel = color.NRGBA64{R: channels[0], G: channels[1], B: channels[2], A: 65535}
-			} else {
-				previousPixel.A = 0
-			}
+			previousPixel = color.NRGBA64{R: channels[0], G: channels[1], B: channels[2], A: 65535}
 			if slot >= 0 {
 				table[slot] = color.NRGBA64{R: channels[0], G: channels[1], B: channels[2], A: 65535}
 			}
