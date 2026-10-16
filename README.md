@@ -261,5 +261,38 @@ func main() {
 }
 ```
 
+# 提取发票
+```go
+package main
+
+import (
+	"encoding/json"
+	"log"
+	"os"
+
+	"github.com/xiaoqidun/ofdgo"
+)
+
+func main() {
+	// 1. 打开OFD文件
+	reader, err := ofdgo.Open("invoice.ofd")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer reader.Close()
+	// 2. 提取发票信息
+	report, err := reader.Invoices()
+	if err != nil {
+		log.Fatal(err)
+	}
+	// 3. 输出提取结果
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(report); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
 # 授权协议
 本项目使用 [Apache License 2.0](https://github.com/xiaoqidun/ofdgo/blob/main/LICENSE) 授权协议

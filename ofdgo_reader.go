@@ -674,17 +674,27 @@ func (r *Reader) CustomDatas() ([]CustomData, error) {
 // 返回的文件路径可直接传入ResData读取
 // 返回: []Extension 扩展项列表, error 错误信息
 func (r *Reader) Extensions() ([]Extension, error) {
-	doc, err := r.docStructure()
+	return r.ExtensionsContext(context.Background())
+}
+
+// ExtensionsContext 读取当前文档及版本的扩展项，取消或失败时不缓存未完成清单
+// 入参: ctx 取消上下文
+// 返回: []Extension 扩展项列表, error 读取、解析或取消错误
+func (r *Reader) ExtensionsContext(ctx context.Context) ([]Extension, error) {
+	doc, err := r.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(doc.Extensions.Path) != "" && doc.Extensions.Extension == nil {
 		var extensions Extensions
-		partPath, err := r.readDocumentPart(doc.Extensions.Path, &extensions)
+		partPath, err := r.readDocumentPartContext(ctx, doc.Extensions.Path, &extensions)
 		if err != nil {
 			return nil, err
 		}
 		for i := range extensions.Extension {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			extension := &extensions.Extension[i]
 			for j := range extension.ExtendData {
 				extension.ExtendData[j] = r.resourceLocation(partPath, "", extension.ExtendData[j])
@@ -693,7 +703,13 @@ func (r *Reader) Extensions() ([]Extension, error) {
 		if extensions.Extension == nil {
 			extensions.Extension = []Extension{}
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		doc.Extensions.Extension = extensions.Extension
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return doc.Extensions.Extension, nil
 }
