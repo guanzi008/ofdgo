@@ -1088,6 +1088,11 @@ func invoiceBindingCoverage(before, after Invoice, bindings []InvoiceBinding) er
 			if a.Name != b.Name || a.Namespace != b.Namespace || a.Context != b.Context || a.Unit != b.Unit {
 				return fmt.Errorf("bound invoice fact identity changed")
 			}
+			if mapped, ok := invoiceEDRMFactBinding(before, a); ok {
+				if next, valid := invoiceEDRMFactBinding(after, b); valid && mapped.Field == next.Field && mapped.Item == next.Item {
+					bound[fieldKey{mapped.Field, mapped.Item}] = true
+				}
+			}
 		}
 	}
 	for key, value := range old {

@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // InvoiceLayout 指定发票信息页的字体资源及毫米尺寸，不代表税务机关的固定票样
@@ -123,6 +124,18 @@ func invoiceLayoutFactVisible(invoice Invoice, fact InvoiceFact) bool {
 	if fact.Nil || fact.Value == "" || fact.Namespace == invoiceXBRL && (fact.Name == "context" || fact.Name == "unit") {
 		return false
 	}
+	if binding, ok := invoiceEDRMFactBinding(invoice, fact); ok {
+		value, err := invoiceBindingValue(invoice, binding)
+		raw := fact.Value
+		if binding.Field == "date" {
+			if date, err := time.Parse("2006年01月02日", raw); err == nil {
+				raw = date.Format("2006-01-02")
+			}
+		}
+		if err == nil && value == raw {
+			return false
+		}
+	}
 	kind, _ := invoiceTaxonomy(fact.Namespace)
 	if kind != "" && kind == invoice.Kind {
 		if field := invoiceXMLField(&invoice, kind, fact.Name); field != nil && *field == fact.Value {
@@ -161,6 +174,46 @@ func invoiceLayoutFactVisible(invoice Invoice, fact InvoiceFact) bool {
 		}
 	}
 	return true
+}
+
+// invoiceEDRMFactBinding 按2019版完整路径识别摘要与原始字段的同一语义
+// 入参: value 发票，fact 原始字段
+// 返回: 公共字段关联及是否明确映射
+func invoiceEDRMFactBinding(value Invoice, fact InvoiceFact) (InvoiceBinding, bool) {
+	if value.Standard != invoiceEDRM || fact.Namespace != invoiceEDRM {
+		return InvoiceBinding{}, false
+	}
+	var path strings.Builder
+	for _, segment := range strings.Split(strings.TrimPrefix(strings.ReplaceAll(fact.Source.NodePath, "{"+invoiceEDRM+"}", "{}"), "/"), "/") {
+		name, index, ok := strings.Cut(segment, "[")
+		if !ok || !strings.HasPrefix(name, "{}") || !strings.HasSuffix(index, "]") {
+			return InvoiceBinding{}, false
+		}
+		path.WriteByte('/')
+		path.WriteString(strings.TrimPrefix(name, "{}"))
+	}
+	probe := Invoice{Items: []InvoiceItem{{}}}
+	field, _ := invoiceEDRMField(&probe, &probe.Items[0], path.String())
+	if field == nil {
+		return InvoiceBinding{}, false
+	}
+	*field = "mapped"
+	for _, candidate := range invoiceLayoutFields(probe) {
+		if candidate.value != "mapped" {
+			continue
+		}
+		if candidate.item < 0 {
+			return InvoiceBinding{Field: candidate.field, Item: -1}, true
+		}
+		for i, item := range value.Items {
+			for _, existing := range item.Fields {
+				if existing.Source.NodePath == fact.Source.NodePath {
+					return InvoiceBinding{Field: candidate.field, Item: i}, true
+				}
+			}
+		}
+	}
+	return InvoiceBinding{}, false
 }
 
 // invoiceBindingValue 读取明确字段与明细索引，不接受未知字段或隐式索引

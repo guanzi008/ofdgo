@@ -27,6 +27,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -117,7 +118,13 @@ type invoiceXMLPatch struct {
 func InvoiceFields(value Invoice) []InvoiceFieldDescriptor {
 	format, supported := invoiceWriteFormat(value)
 	probe := Invoice{Items: []InvoiceItem{{}}}
-	if value.Standard == InvoiceStandardEInvoice {
+	if value.Standard == invoiceEDRM {
+		for _, path := range invoiceEDRMPaths() {
+			if p, _ := invoiceEDRMField(&probe, &probe.Items[0], path); p != nil {
+				*p = "editable"
+			}
+		}
+	} else if value.Standard == InvoiceStandardEInvoice {
 		probe.Number, probe.Date = "editable", "editable"
 		for _, group := range invoicePlainGroups() {
 			for _, name := range strings.Fields(group.value) {
@@ -209,7 +216,7 @@ func InvoiceFields(value Invoice) []InvoiceFieldDescriptor {
 // 返回: 已适配格式列表
 func InvoiceFormats() []InvoiceFormat {
 	result := []InvoiceFormat{{Kind: "einv", Standard: InvoiceStandardEInvoice, Version: "0.3", Read: true, Create: true, Edit: true, Items: true}}
-	result = append(result, InvoiceFormat{Kind: "inv", Standard: invoiceEDRM, Version: "1.0", Read: true, Items: true})
+	result = append(result, InvoiceFormat{Kind: "inv", Standard: invoiceEDRM, Version: "1.0", Read: true, Edit: true, Items: true})
 	result = append(result, InvoiceFormat{Kind: "inv", Standard: ofdNamespace2016, Version: "1.0", Read: true})
 	for _, standard := range []string{InvoiceStandardVAT2023, InvoiceStandardDigital2023, InvoiceStandardAir2023, InvoiceStandardRail2023} {
 		kind, version := invoiceTaxonomy(standard)
@@ -1058,14 +1065,20 @@ func invoiceWriteXMLProblems(ctx context.Context, data []byte, tuples bool) (map
 		empty := nilValue == "true" || nilValue == "1"
 		date := kind != "" && invoiceWriteDateFact(kind, n.name.Local)
 		plainDate := root.name == (xml.Name{Local: "EInvoice"}) && path == "/EInvoice/TaxSupervisionInfo/IssueTime"
-		if len(n.children) == 0 && !empty && (date || plainDate) {
+		edrmDate := n.parent == root && n.name == (xml.Name{Space: invoiceEDRM, Local: "IssueDate"})
+		if len(n.children) == 0 && !empty && (date || plainDate || edrmDate) {
 			value := n.text.String()
 			parseValue := value
 			if plainDate {
 				parseValue = strings.Replace(value, " ", "T", 1)
 			}
+			if edrmDate {
+				if d, err := time.Parse("2006年01月02日", value); err == nil {
+					parseValue = d.Format("2006-01-02")
+				}
+			}
 			_, valid := invoicePeriodTime(parseValue)
-			if !valid || date && strings.ContainsAny(value, "T ") {
+			if !valid || date && strings.ContainsAny(value, "T ") || edrmDate && len(parseValue) != 10 {
 				add(InvoiceIssue{Code: "invalid-date", Field: n.name.Local, Message: "invalid invoice date", Source: InvoiceSource{NodePath: n.path}}, value)
 			}
 		}
@@ -1091,6 +1104,18 @@ func invoiceWriteXMLProblems(ctx context.Context, data []byte, tuples bool) (map
 	}
 	if err := walk(root, ""); err != nil {
 		return nil, err
+	}
+	for _, value := range report.Invoices {
+		if value.Standard != invoiceEDRM {
+			continue
+		}
+		issues, err := ValidateInvoice(ctx, value)
+		if err != nil {
+			return nil, err
+		}
+		for _, issue := range issues {
+			add(issue, "")
+		}
 	}
 	for _, issue := range report.Issues {
 		value := ""
@@ -1211,6 +1236,9 @@ func UpdateInvoiceXML(ctx context.Context, data []byte, invoiceIndex int, value 
 	}
 	if err = invoiceWriteNewIssues(filter(oldIssues), filter(newIssues)); err != nil {
 		return nil, err
+	}
+	if value.Standard == invoiceEDRM {
+		return invoiceUpdateEDRM(ctx, data, old, value)
 	}
 	root, spans, err := invoiceWriteSpans(ctx, data)
 	if err != nil {
@@ -1453,6 +1481,180 @@ func UpdateInvoiceXML(ctx context.Context, data []byte, invoiceIndex int, value 
 	return result, nil
 }
 
+// invoiceEDRMPaths 列出2019版摘要与明细的映射路径
+// 入参: 无
+// 返回: 2019版可映射字段路径
+func invoiceEDRMPaths() []string {
+	return strings.Fields("/eInvoice/InvoiceCode /eInvoice/InvoiceNo /eInvoice/IssueDate /eInvoice/Buyer/BuyerName /eInvoice/Buyer/BuyerTaxID /eInvoice/Seller/SellerName /eInvoice/Seller/SellerTaxID /eInvoice/TaxInclusiveTotalAmount /eInvoice/Note /eInvoice/TaxTotalAmount /eInvoice/TaxExclusiveTotalAmount /eInvoice/GoodsInfos/GoodsInfo/Item /eInvoice/GoodsInfos/GoodsInfo/Specification /eInvoice/GoodsInfos/GoodsInfo/MeasurementDimension /eInvoice/GoodsInfos/GoodsInfo/Quantity /eInvoice/GoodsInfos/GoodsInfo/Price /eInvoice/GoodsInfos/GoodsInfo/Amount /eInvoice/GoodsInfos/GoodsInfo/TaxScheme /eInvoice/GoodsInfos/GoodsInfo/TaxAmount")
+}
+
+// invoiceUpdateEDRM 按2019版原节点写回摘要及明细，保留扩展与未修改字节
+// 入参: ctx 上下文，data 原文，old 原发票，value 目标发票
+// 返回: 修改后XML及错误
+func invoiceUpdateEDRM(ctx context.Context, data []byte, old, value Invoice) ([]byte, error) {
+	if err := invoiceWriteUnmapped(old.Facts, value.Facts); err != nil {
+		return nil, err
+	}
+	root, spans, err := invoiceWriteSpans(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range []string{"Buyer", "Seller", "GoodsInfos"} {
+		changed := name == "GoodsInfos" && !reflect.DeepEqual(old.Items, value.Items) || name == "Buyer" && old.Buyer != value.Buyer || name == "Seller" && old.Seller != value.Seller
+		groups := invoiceChildren(root, invoiceEDRM, name)
+		if len(groups) > 1 {
+			return nil, fmt.Errorf("ambiguous invoice group %s", name)
+		}
+		if changed && len(groups) == 1 && spans[groups[0].path].empty {
+			patch, err := invoiceWriteInsert(spans[groups[0].path], nil, data)
+			if err != nil {
+				return nil, err
+			}
+			normalized, err := invoiceApplyXMLPatches(ctx, data, []invoiceXMLPatch{patch})
+			if err != nil {
+				return nil, err
+			}
+			return invoiceUpdateEDRM(ctx, normalized, old, value)
+		}
+	}
+	var patches []invoiceXMLPatch
+	order := strings.Fields("DocID InvoiceCode InvoiceNo TypeCode IssueDate InvoiceCheckCode MachineNo TaxControlCode Buyer Tpvn Seller TaxInclusiveTotalAmount Note InvoiceClerk Payee Checker TaxTotalAmount TaxExclusiveTotalAmount GraphCode InvoiceSIA1 InvoiceSIA2 Signature GoodsInfos")
+	for _, group := range []string{"", "Buyer", "Seller"} {
+		parent := root
+		if group != "" {
+			parents := invoiceChildren(root, invoiceEDRM, group)
+			if len(parents) > 0 {
+				parent = parents[0]
+			} else {
+				parent = nil
+			}
+		}
+		desired := &invoiceXMLNode{name: xml.Name{Space: invoiceEDRM, Local: group}}
+		var names []string
+		for _, path := range invoiceEDRMPaths() {
+			parts := strings.Split(path, "/")
+			if group == "" && len(parts) != 3 || group != "" && (len(parts) != 4 || parts[2] != group) {
+				continue
+			}
+			previous, _ := invoiceEDRMField(&old, nil, path)
+			target, _ := invoiceEDRMField(&value, nil, path)
+			if *previous == *target {
+				continue
+			}
+			name := parts[len(parts)-1]
+			names = append(names, name)
+			node := &invoiceXMLNode{name: xml.Name{Space: invoiceEDRM, Local: name}}
+			text := *target
+			if name == "IssueDate" && parent != nil {
+				existing := invoiceChildren(parent, invoiceEDRM, name)
+				if len(existing) == 1 && strings.Contains(existing[0].text.String(), "年") && text != "" {
+					date, err := time.Parse("2006-01-02", text)
+					if err != nil {
+						return nil, err
+					}
+					text = date.Format("2006年01月02日")
+				}
+			}
+			node.text.WriteString(text)
+			node.parts = []invoiceXMLPart{{text: text}}
+			desired.children = append(desired.children, node)
+			desired.parts = append(desired.parts, invoiceXMLPart{child: node})
+		}
+		if len(names) == 0 {
+			continue
+		}
+		if parent == nil {
+			raw, err := invoiceWriteNode(desired)
+			if err != nil {
+				return nil, err
+			}
+			patch, err := invoiceWriteOrderedInsert(data, spans, root, invoiceEDRM, group, order, raw)
+			if err != nil {
+				return nil, err
+			}
+			patches = append(patches, patch)
+		} else {
+			for _, name := range names {
+				if len(invoiceChildren(parent, invoiceEDRM, name)) == 0 && group == "" {
+					raw, err := invoiceWriteNode(invoiceChildren(desired, invoiceEDRM, name)[0])
+					if err != nil {
+						return nil, err
+					}
+					patch, err := invoiceWriteOrderedInsert(data, spans, parent, invoiceEDRM, name, order, raw)
+					if err != nil {
+						return nil, err
+					}
+					patches = append(patches, patch)
+					continue
+				}
+				changes, err := invoiceWriteMergeChildren(data, spans, parent, desired, invoiceEDRM, []string{name})
+				if err != nil {
+					return nil, err
+				}
+				patches = append(patches, changes...)
+			}
+		}
+	}
+	if !reflect.DeepEqual(old.Items, value.Items) {
+		generated := &invoiceXMLNode{name: xml.Name{Space: invoiceEDRM, Local: "GoodsInfos"}}
+		for _, item := range value.Items {
+			node := &invoiceXMLNode{name: xml.Name{Space: invoiceEDRM, Local: "GoodsInfo"}}
+			for _, path := range invoiceEDRMPaths() {
+				if !strings.HasPrefix(path, "/eInvoice/GoodsInfos/GoodsInfo/") {
+					continue
+				}
+				p, _ := invoiceEDRMField(&value, &item, path)
+				leaf := &invoiceXMLNode{name: xml.Name{Space: invoiceEDRM, Local: path[strings.LastIndexByte(path, '/')+1:]}}
+				leaf.text.WriteString(*p)
+				leaf.parts = []invoiceXMLPart{{text: *p}}
+				node.children = append(node.children, leaf)
+				node.parts = append(node.parts, invoiceXMLPart{child: leaf})
+			}
+			generated.children = append(generated.children, node)
+			generated.parts = append(generated.parts, invoiceXMLPart{child: node})
+		}
+		parents := invoiceChildren(root, invoiceEDRM, "GoodsInfos")
+		if len(parents) == 0 {
+			raw, err := invoiceWriteNode(generated)
+			if err != nil {
+				return nil, err
+			}
+			patch, err := invoiceWriteInsert(spans[root.path], raw, data)
+			if err != nil {
+				return nil, err
+			}
+			patches = append(patches, patch)
+		} else {
+			changes, err := invoiceWriteMergeItems(ctx, data, spans, parents[0], generated, old, value)
+			if err != nil {
+				return nil, err
+			}
+			patches = append(patches, changes...)
+		}
+	}
+	result, err := invoiceApplyXMLPatches(ctx, data, patches)
+	if err != nil {
+		return nil, err
+	}
+	report, err := DecodeInvoices(ctx, result)
+	if err != nil {
+		return nil, err
+	}
+	if len(report.Invoices) != 1 {
+		return nil, fmt.Errorf("invoice update changed candidate count")
+	}
+	if err := invoiceWriteRepresented(value, report.Invoices[0]); err != nil {
+		return nil, err
+	}
+	if err := invoiceWriteRepresented(report.Invoices[0], value); err != nil {
+		return nil, err
+	}
+	if err := invoiceValidateXMLWrite(ctx, data, result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // invoiceWriteContains 判断字段是否位于已知顺序表
 // 入参: names 字段列表，name 字段
 // 返回: 是否存在
@@ -1685,7 +1887,10 @@ func invoiceWriteMergeItems(ctx context.Context, data []byte, spans map[string]i
 	}
 	space, name := value.Standard, invoiceWriteTuple(value.Kind)
 	names := invoiceWriteItemNames(value.Kind)
-	if value.Standard == InvoiceStandardEInvoice {
+	if value.Standard == invoiceEDRM {
+		name = "GoodsInfo"
+		names = strings.Fields("Item Specification MeasurementDimension Quantity Price Amount TaxScheme TaxAmount")
+	} else if value.Standard == InvoiceStandardEInvoice {
 		space = ""
 		name = "IssuItemInformation"
 		names = strings.Fields("ItemName SpecMod MeaUnits Quantity UnPrice Amount TaxRate ComTaxAm")
@@ -1695,6 +1900,7 @@ func invoiceWriteMergeItems(ctx context.Context, data []byte, spans map[string]i
 		return nil, fmt.Errorf("unsupported invoice item shape")
 	}
 	original := map[string]*invoiceXMLNode{}
+	originalItems := map[string]InvoiceItem{}
 	for _, item := range old.Items {
 		for _, f := range item.Fields {
 			s := spans[f.Source.NodePath]
@@ -1706,6 +1912,7 @@ func invoiceWriteMergeItems(ctx context.Context, data []byte, spans map[string]i
 					}
 				}
 				original[s.node.parent.path] = s.node.parent
+				originalItems[s.node.parent.path] = item
 				break
 			}
 		}
@@ -1732,7 +1939,7 @@ func invoiceWriteMergeItems(ctx context.Context, data []byte, spans map[string]i
 		if path == "" {
 			for _, f := range item.Fields {
 				mapped := invoiceItemField(&InvoiceItem{}, value.Kind, f.Name)
-				if value.Standard == InvoiceStandardEInvoice || !invoiceWriteContains(names, f.Name) {
+				if value.Standard == InvoiceStandardEInvoice || value.Standard == invoiceEDRM || !invoiceWriteContains(names, f.Name) {
 					return nil, fmt.Errorf("unsupported new invoice item fact %s", f.Name)
 				}
 				if mapped != nil {
@@ -1763,6 +1970,29 @@ func invoiceWriteMergeItems(ctx context.Context, data []byte, spans map[string]i
 			}
 		}
 		n := original[path]
+		if value.Standard == invoiceEDRM {
+			previous := originalItems[path]
+			if err := invoiceWriteUnmapped(previous.Fields, item.Fields); err != nil {
+				return nil, err
+			}
+			var retained []*invoiceXMLNode
+			for _, child := range targets[i].children {
+				field := "/eInvoice/GoodsInfos/GoodsInfo/" + child.name.Local
+				before, _ := invoiceEDRMField(&old, &previous, field)
+				after, _ := invoiceEDRMField(&value, &item, field)
+				if before != nil && after != nil && *before == *after {
+					children := invoiceChildren(n, invoiceEDRM, child.name.Local)
+					if len(children) == 0 {
+						continue
+					}
+					if len(children) == 1 {
+						child = children[0]
+					}
+				}
+				retained = append(retained, child)
+			}
+			targets[i].children = retained
+		}
 		ps, err := invoiceWriteMergeChildren(data, spans, n, targets[i], space, names)
 		if err != nil {
 			return nil, err
