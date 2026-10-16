@@ -600,13 +600,13 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	textControls: [el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.fontInput, document.querySelector("#textReflow")],
 	keepTextFocus: () => fontPicker.open || canvasEditor.input?.fontDialog,
 	textClipboardScope: () => `${state.wasmSeq}:${state.fileName}:${state.doc?.documents?.[state.doc.documentIndex || 0]?.root}:${state.doc?.documentIndex || 0}:${state.doc?.documentVersion || ""}`,
-	busy: () => document.body.hasAttribute("aria-busy"),
+	busy: () => document.body.hasAttribute("data-busy"),
 	rotation: () => state.rotation,
 	canInsert: (index) => pageCan("insert", index),
 	onSelect: (item, previous) => {
 		updateObjectControls(item);
 		const reason = objectEditReason(item), previousReason = objectEditReason(previous);
-		if (state.editing && state.doc && !document.body.hasAttribute("aria-busy")
+		if (state.editing && state.doc && !document.body.hasAttribute("data-busy")
 			&& (reason || previousReason && el.statusText.textContent === previousReason)) {
 			setStatus(reason || pageStatus(state.pageIndex, state.doc.pageCount));
 		}
@@ -716,7 +716,7 @@ function editorClick(button, action) {
 }
 
 editorClick(el.selectObjectButton, () => {
-	if (document.body.hasAttribute("aria-busy")) {
+	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	state.selectObjects = !state.selectObjects || state.panMode || Boolean(canvasEditor.tool);
@@ -733,7 +733,7 @@ editorClick(el.deleteObjectButton, () => {
 });
 editorClick(el.multiSelectButton, () => {
 	canvasEditor.multiple = !canvasEditor.multiple;
-	el.multiSelectButton.setAttribute("aria-pressed", String(canvasEditor.multiple));
+	el.multiSelectButton.setAttribute("data-pressed", String(canvasEditor.multiple));
 });
 editorClick(el.compositeBackButton, exitCompositeScope);
 editorClick(el.editObjectButton, () => {
@@ -835,7 +835,7 @@ for (const [button, action] of [[el.versionAdd, "add"], [el.versionRename, "rena
 }
 el.versionList.addEventListener("keydown", event => {
 	const manager = state.versionManagement;
-	if (!manager?.entries || manager.loading || document.body.hasAttribute("aria-busy")) return;
+	if (!manager?.entries || manager.loading || document.body.hasAttribute("data-busy")) return;
 	let index = manager.entries.findIndex(entry => entry.id === manager.id);
 	if (event.key === "ArrowUp") index--;
 	else if (event.key === "ArrowDown") index++;
@@ -902,7 +902,6 @@ function addCustomDataRow(field = {Name: "", Value: ""}, sourceIndex) {
 		const input = document.createElement("input");
 		input.type = "text";
 		input.value = field[key];
-		input.setAttribute("aria-label", label);
 		input.placeholder = label;
 		row.append(input);
 	}
@@ -911,7 +910,6 @@ function addCustomDataRow(field = {Name: "", Value: ""}, sourceIndex) {
 	remove.className = "icon-button";
 	remove.textContent = "×";
 	remove.title = "删除字段";
-	remove.setAttribute("aria-label", "删除字段");
 	remove.addEventListener("click", () => row.remove());
 	row.append(remove);
 	el.infoCustomRows.append(row);
@@ -980,7 +978,7 @@ annotationFields.Scope.addEventListener("change", updateAnnotationFields);
 annotationFields.CreateForm.addEventListener("submit", async event => {
 	event.preventDefault();
 	const entry = state.annotationCreate;
-	if (!entry || !annotationFields.CreateForm.reportValidity() || document.body.hasAttribute("aria-busy")) return;
+	if (!entry || !annotationFields.CreateForm.reportValidity() || document.body.hasAttribute("data-busy")) return;
 	const openSeq = state.openSeq;
 	const value = key => annotationFields[key].value;
 	const image = entry.kind === "stamp" || entry.kind === "watermark" && value("Content") === "image";
@@ -1021,7 +1019,7 @@ el.annotationForm.addEventListener("submit", async event => {
 });
 el.paragraphForm.addEventListener("submit", async event => {
 	event.preventDefault();
-	if (document.body.hasAttribute("aria-busy") || !el.paragraphForm.reportValidity()) return;
+	if (document.body.hasAttribute("data-busy") || !el.paragraphForm.reportValidity()) return;
 	const item = currentTextStyle();
 	const indents = Object.fromEntries(["leftIndent", "rightIndent", "firstLineIndent"].map(key => [key, Number(el[key].value)]));
 	if (item === state.textDefaults) {
@@ -1096,7 +1094,7 @@ for (const [select, method] of [[el.objectRotate, "ofdgoRotateObjects"], [el.obj
 	});
 }
 el.cropImageButton.addEventListener("click", () => {
-	if (document.body.hasAttribute("aria-busy")) return;
+	if (document.body.hasAttribute("data-busy")) return;
 	if (canvasEditor.crop) return canvasEditor.commitCrop();
 	const item = canvasEditor.selected;
 	if (item?.type === "ImageObject") return startImageCrop(item);
@@ -1107,7 +1105,7 @@ el.imageFit.addEventListener("change", () => {
 	if (mode && item?.type === "ImageObject" && !canvasEditor.crop) return changeDocument("ofdgoFitImage", item, mode);
 });
 el.resetCropButton.addEventListener("click", () => {
-	if (document.body.hasAttribute("aria-busy")) return;
+	if (document.body.hasAttribute("data-busy")) return;
 	if (canvasEditor.crop) {
 		canvasEditor.closeCrop();
 		return;
@@ -1164,7 +1162,7 @@ el.importRange.addEventListener("change", () => {
 });
 el.importForm.addEventListener("submit", async event => {
 	event.preventDefault();
-	if (document.body.hasAttribute("aria-busy") || !state.importPageCount || !el.importForm.reportValidity()) return;
+	if (document.body.hasAttribute("data-busy") || !state.importPageCount || !el.importForm.reportValidity()) return;
 	const position = { before:state.pageIndex, after:state.pageIndex+1, first:0, last:state.doc.pageCount }[el.importPosition.value];
 	const options = [];
 	if (state.importEncrypted) {
@@ -1197,7 +1195,7 @@ el.batchPageAction.addEventListener("change", () => {
 });
 el.batchPagesForm.addEventListener("submit", async event => {
 	event.preventDefault();
-	if (document.body.hasAttribute("aria-busy") || !el.batchPagesForm.reportValidity()) return;
+	if (document.body.hasAttribute("data-busy") || !el.batchPagesForm.reportValidity()) return;
 	const args = [el.batchPageAction.value, el.batchPageRange.value];
 	if (args[0] === "save") {
 		const seq = state.openSeq;
@@ -1324,7 +1322,7 @@ document.querySelector("#structureSelection").addEventListener("click", () => {
 });
 el.structureForm.addEventListener("submit", async event => {
 	event.preventDefault();
-	if (!state.editing || document.body.hasAttribute("aria-busy")) return;
+	if (!state.editing || document.body.hasAttribute("data-busy")) return;
 	const index = Number(el.structureEntry.value), path = JSON.parse(el.structureNodeSelect.value || "[]");
 	if (state.doc.structures?.[index]?.internal) return;
 	const action = index < 0 ? "create" : el.structureAction.value;
@@ -1405,7 +1403,7 @@ fontBindingElements.File.addEventListener("change", async () => {
 fontBindingElements.Form.addEventListener("submit", async event => {
 	event.preventDefault();
 	const font = fontBinding.font, sequence = fontBinding.sequence, openSeq = state.openSeq;
-	if (!font || document.body.hasAttribute("aria-busy") || !fontBindingElements.Form.reportValidity()) return;
+	if (!font || document.body.hasAttribute("data-busy") || !fontBindingElements.Form.reportValidity()) return;
 	fontBindingElements.Form.inert = true;
 	try {
 		let data = null;
@@ -1441,7 +1439,7 @@ el.textFontAdd.addEventListener("click", () => openFontFile(el.fontInput));
 el.saveButton.addEventListener("click", () => exportFile(true, null, "ofd"));
 editorClick(el.encryptSaveButton, openEncryptionPanel);
 el.signButton.addEventListener("click", () => {
-	if (!state.doc || document.body.hasAttribute("aria-busy")) return;
+	if (!state.doc || document.body.hasAttribute("data-busy")) return;
 	el.signForm.reset();
 	el.signPages.value = state.editing && state.pageSelection.size ? selectedPageRange() : String(state.pageIndex + 1);
 	el.signStatus.textContent = "";
@@ -1471,7 +1469,7 @@ el.viewerPanel.addEventListener("pointermove", moveSealDrag, true);
 el.viewerPanel.addEventListener("pointerup", confirmSealPosition, true);
 el.viewerPanel.addEventListener("pointercancel", () => { if (sealPreview) finishSealPosition(); }, true);
 el.verifyButton.addEventListener("click", () => {
-	if (!state.doc || document.body.hasAttribute("aria-busy")) return;
+	if (!state.doc || document.body.hasAttribute("data-busy")) return;
 	el.verifyForm.reset();
 	el.verifyStatus.textContent = "";
 	el.verifyPanel.showModal();
@@ -1676,7 +1674,7 @@ el.viewerPanel.addEventListener("dblclick", openOFDFromViewer);
 document.addEventListener("dragover", (event) => {
 	if (event.dataTransfer.types.includes("Files")) {
 		event.preventDefault();
-		event.dataTransfer.dropEffect = document.body.hasAttribute("aria-busy") ? "none" : "copy";
+		event.dataTransfer.dropEffect = document.body.hasAttribute("data-busy") ? "none" : "copy";
 	}
 });
 document.addEventListener("drop", openOFDFromDrop);
@@ -1708,18 +1706,18 @@ function handleKeyDown(event) {
 	if ((event.ctrlKey || event.metaKey) && !event.shiftKey && key.toLowerCase() === "s" && state.doc
 		&& (state.editorInfo || state.ofdBytes)) {
 		event.preventDefault();
-		if (!document.body.hasAttribute("aria-busy") && !formDialogOpen()) exportFile(true, null, "ofd");
+		if (!document.body.hasAttribute("data-busy") && !formDialogOpen()) exportFile(true, null, "ofd");
 		return;
 	}
 	if ((event.ctrlKey || event.metaKey) && !event.shiftKey && key.toLowerCase() === "a" && state.doc
 		&& el.viewerPanel.contains(target) && !target.closest("input, textarea, select, [contenteditable]")) {
 		event.preventDefault();
-		if (!document.body.hasAttribute("aria-busy") && !formDialogOpen()) {
+		if (!document.body.hasAttribute("data-busy") && !formDialogOpen()) {
 			selectDocumentText();
 		}
 		return;
 	}
-	if (document.body.hasAttribute("aria-busy") || formDialogOpen()) {
+	if (document.body.hasAttribute("data-busy") || formDialogOpen()) {
 		return;
 	}
 	if (state.pageWindow && (!event.shiftKey || key === " ") && el.viewerPanel.contains(target)
@@ -2065,7 +2063,6 @@ function addGradientStop(position, color, transparency, source) {
 		if (type === "color") input.className = "color-input";
 		input.value = value;
 		input.disabled = el.gradientKind.value === "keep";
-		input.setAttribute("aria-label", label);
 		input.title = label;
 		if (type === "number") { input.min = "0"; input.max = "100"; input.step = "any"; input.required = true; }
 		row.append(input);
@@ -2075,7 +2072,6 @@ function addGradientStop(position, color, transparency, source) {
 	remove.className = "icon-button";
 	remove.textContent = "×";
 	remove.title = "删除色标";
-	remove.setAttribute("aria-label", "删除色标");
 	remove.addEventListener("click", () => row.remove());
 	row.append(remove);
 	el.gradientStops.append(row);
@@ -2153,7 +2149,7 @@ function remapOutlineExpansion(name, args, next) {
 }
 
 function openImportPanel() {
-	if (!state.editing || document.body.hasAttribute("aria-busy")) return;
+	if (!state.editing || document.body.hasAttribute("data-busy")) return;
 	state.importPageCount = 0;
 	el.importForm.reset();
 	el.importStatus.textContent = "";
@@ -2193,7 +2189,7 @@ async function loadImportFile() {
 }
 
 function openPagePanel() {
-	if (!state.editing || document.body.hasAttribute("aria-busy")) {
+	if (!state.editing || document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	const pages = selectedPageIndexes().map(index => state.doc.pages[index]);
@@ -2247,7 +2243,7 @@ function setEditorInfo(doc) {
 }
 
 async function openVersionManagement() {
-	if (!state.doc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy")) return;
+	if (!state.doc || !state.ready || state.exporting || document.body.hasAttribute("data-busy")) return;
 	state.versionManagement = { id: state.doc.documentVersion || "", entries: null, loading: false, failed: false };
 	el.versionList.replaceChildren();
 	el.versionName.value = "";
@@ -2272,8 +2268,7 @@ async function refreshVersionManagement(focus = false) {
 			const button = document.createElement("button");
 			button.type = "button";
 			button.className = "document-entry";
-			button.setAttribute("role", "option");
-			button.setAttribute("aria-current", String(entry.id === (state.doc.documentVersion || "")));
+			button.setAttribute("data-current", String(entry.id === (state.doc.documentVersion || "")));
 			const name = document.createElement("span"), marker = document.createElement("span");
 			name.className = "document-name";
 			name.textContent = entry.id ? entry.name || `版本 ${entry.index}` : "主文档";
@@ -2302,13 +2297,13 @@ async function refreshVersionManagement(focus = false) {
 
 function selectManagedVersion(id, focus = false) {
 	const manager = state.versionManagement;
-	if (!manager || manager.loading || document.body.hasAttribute("aria-busy")) return;
+	if (!manager || manager.loading || document.body.hasAttribute("data-busy")) return;
 	const index = manager.entries?.findIndex(entry => entry.id === id) ?? -1;
 	if (index < 0) return;
 	manager.id = id;
 	el.versionName.value = manager.entries[index].name;
 	Array.from(el.versionList.children).forEach((button, position) => {
-		button.setAttribute("aria-selected", String(position === index));
+		button.setAttribute("data-selected", String(position === index));
 		button.tabIndex = position === index ? 0 : -1;
 	});
 	updateVersionControls();
@@ -2317,7 +2312,7 @@ function selectManagedVersion(id, focus = false) {
 
 async function changeVersion(action) {
 	const manager = state.versionManagement;
-	if (!state.ready || state.exporting || !state.editing && action !== "select" || !manager?.entries || manager.loading || manager.failed || document.body.hasAttribute("aria-busy")) return;
+	if (!state.ready || state.exporting || !state.editing && action !== "select" || !manager?.entries || manager.loading || manager.failed || document.body.hasAttribute("data-busy")) return;
 	const entry = manager.entries.find(entry => entry.id === manager.id);
 	if (!entry) return;
 	if (!state.editing) {
@@ -2337,7 +2332,7 @@ async function changeVersion(action) {
 }
 
 async function switchReadingVersion(id) {
-	if (!state.doc || state.editing || !state.ready || state.exporting || document.body.hasAttribute("aria-busy")) return;
+	if (!state.doc || state.editing || !state.ready || state.exporting || document.body.hasAttribute("data-busy")) return;
 	if (id === (state.doc.documentVersion || "")) return true;
 	const dirty = state.dirty;
 	const before = state.editorInfo ? editorLocation() : null, revision = state.editorInfo?.revision;
@@ -2374,12 +2369,10 @@ async function switchReadingVersion(id) {
 }
 
 function updateVersionControls() {
-	const manager = state.versionManagement, busy = document.body.hasAttribute("aria-busy");
+	const manager = state.versionManagement, busy = document.body.hasAttribute("data-busy");
 	const disabled = !state.doc || !state.ready || state.exporting || busy;
 	const title = state.editing ? "版本管理" : "版本浏览";
 	el.versionManageButton.hidden = !state.editing && !(state.doc?.versionCount > 0);
-	el.versionManageButton.title = title;
-	el.versionManageButton.setAttribute("aria-label", title);
 	el.versionTitle.textContent = title;
 	el.versionManageButton.disabled = disabled;
 	el.versionNotice.textContent = state.editing ? state.editorInfo?.editWarnings?.join(" · ") || "" : "";
@@ -2401,7 +2394,7 @@ function updateVersionControls() {
 async function exportManagedVersion() {
 	const manager = state.versionManagement;
 	const entry = manager?.entries?.find(item => item.id === manager.id);
-	if (!entry?.id || !state.ready || state.exporting || manager.loading || manager.failed || document.body.hasAttribute("aria-busy")) return;
+	if (!entry?.id || !state.ready || state.exporting || manager.loading || manager.failed || document.body.hasAttribute("data-busy")) return;
 	if (state.doc.signatureCount && !window.confirm("版本副本可能使原签名失效，是否继续？")) return;
 	const openSeq = state.openSeq;
 	const name = `${baseFileName()}_${entry.name || `版本${entry.index}`}`.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_") + ".ofd";
@@ -2434,7 +2427,7 @@ function documentEntryKey(entry) {
 }
 
 async function openDocumentManagement() {
-	if (!state.editing || !state.ready || state.exporting || document.body.hasAttribute("aria-busy")) return;
+	if (!state.editing || !state.ready || state.exporting || document.body.hasAttribute("data-busy")) return;
 	const index = state.doc.documentIndex || 0;
 	state.documentManagement = { index, key: documentEntryKey(state.doc.documents[index]), entries: null, loading: false, failed: false };
 	renderDocumentManagement();
@@ -2481,8 +2474,7 @@ function renderDocumentManagement() {
 		const button = document.createElement("button");
 		button.type = "button";
 		button.className = "document-entry";
-		button.setAttribute("role", "option");
-		button.setAttribute("aria-selected", String(entry.index === manager.index));
+		button.setAttribute("data-selected", String(entry.index === manager.index));
 		button.tabIndex = entry.index === manager.index ? 0 : -1;
 		const name = document.createElement("span");
 		name.className = "document-name";
@@ -2501,11 +2493,11 @@ function renderDocumentManagement() {
 
 function selectManagedDocument(index, focus = false) {
 	const manager = state.documentManagement;
-	if (!manager || manager.loading || document.body.hasAttribute("aria-busy") || index < 0 || index >= state.doc.documents.length) return;
+	if (!manager || manager.loading || document.body.hasAttribute("data-busy") || index < 0 || index >= state.doc.documents.length) return;
 	manager.index = index;
 	manager.key = documentEntryKey(state.doc.documents[index]);
 	for (const [i, button] of [...el.documentList.children].entries()) {
-		button.setAttribute("aria-selected", String(i === index));
+		button.setAttribute("data-selected", String(i === index));
 		button.tabIndex = i === index ? 0 : -1;
 	}
 	updateDocumentControls();
@@ -2513,7 +2505,7 @@ function selectManagedDocument(index, focus = false) {
 }
 
 async function switchDocument(index) {
-	if (!state.doc || document.body.hasAttribute("aria-busy") || state.exporting || formDialogOpen()) return;
+	if (!state.doc || document.body.hasAttribute("data-busy") || state.exporting || formDialogOpen()) return;
 	const previous = state.doc.documentIndex || 0;
 	if (index === previous) return;
 	if (!await canvasEditor.commitNudge() || !await canvasEditor.commitText() || !await canvasEditor.commitCrop()) {
@@ -2568,7 +2560,7 @@ function pageCan(capability, index = state.pageIndex) {
 }
 
 async function toggleEditor() {
-	if (!state.doc || !state.ready || document.body.hasAttribute("aria-busy") || formDialogOpen()) return;
+	if (!state.doc || !state.ready || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
 	if (state.editorInfo) {
 		if (!await canvasEditor.commitText() || !await canvasEditor.commitCrop()) return;
 		const anchor = scaleAnchor(0);
@@ -2641,7 +2633,7 @@ function confirmTextReflow(item) {
 }
 
 function openCreatePanel(insert = false, packageDocument = false) {
-	if (document.body.hasAttribute("aria-busy")) {
+	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	el.createForm.reset();
@@ -2650,7 +2642,6 @@ function openCreatePanel(insert = false, packageDocument = false) {
 	state.createDocumentAt = state.createPackage ? managedDocumentIndex() + 1 : null;
 	el.createMode.value = state.createInsert ? "images" : "blank";
 	el.createSubmit.textContent = state.createInsert ? "插入" : state.createPackage ? "新增" : "新建";
-	el.createPanel.setAttribute("aria-label", state.createInsert ? "插入图片" : state.createPackage ? "新增文档" : "新建文档");
 	el.createCancel.disabled = false;
 	updateCreateOptions();
 	el.createStatus.textContent = "";
@@ -2699,7 +2690,7 @@ async function createDocument(event) {
 		if (await changeDocument("ofdgoImportImages", null, ...imagePageRequest(), at, "", state.renderAnnotations)) el.createPanel.close();
 		return;
 	}
-	if (document.body.hasAttribute("aria-busy") || !discardChanges()) {
+	if (document.body.hasAttribute("data-busy") || !discardChanges()) {
 		return;
 	}
 	const title = el.createName.value.trim() || "未命名";
@@ -2816,7 +2807,6 @@ function openAnnotationCreate(kind, index, box = null, item = null, info = null)
 	annotationFields.Old.replaceChildren(...(info?.texts || []).map(text => new Option(text, text)));
 	if (kind === "replace") annotationFields.Text.value = info?.texts[0] || "";
 	el.annotationCreateStatus.textContent = "";
-	el.annotationCreate.setAttribute("aria-label", {note:"添加批注",watermark:"添加水印",stamp:"添加印章",link: item ? "修改链接" : "添加链接",replace:"替换文字"}[kind]);
 	updateAnnotationFields();
 	el.annotationCreate.showModal();
 	const focus = [annotationFields.Text, annotationFields.Image, annotationFields.Address].find(input => !input.disabled);
@@ -2885,7 +2875,7 @@ function updateAnnotationFields() {
 }
 
 async function editCanvasObject(item) {
-	if (!state.editing || document.body.hasAttribute("aria-busy") || canvasEditor.input) return;
+	if (!state.editing || document.body.hasAttribute("data-busy") || canvasEditor.input) return;
 	if (item.items) {
 		if (!item.items.every(member => member.type === "TextObject" && !member.richText)) return;
 		const openSeq = state.openSeq;
@@ -3037,13 +3027,12 @@ async function startImageCrop(item) {
 }
 
 function openInsertPanel(item = null) {
-	if (!state.editing || document.body.hasAttribute("aria-busy")) {
+	if (!state.editing || document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	el.insertForm.reset();
 	state.insertObject = item;
 	el.insertFitRow.hidden = !item || Boolean(item.scoped);
-	el.insertPanel.setAttribute("aria-label", item ? "替换图片" : "添加图片");
 	el.insertSubmit.textContent = item ? "替换" : "添加";
 	el.insertStatus.textContent = "";
 	el.insertPanel.showModal();
@@ -3091,7 +3080,7 @@ async function ensureRichInput() {
 
 async function reflowCanvasText() {
 	const editing = canvasEditor.input;
-	if (document.body.hasAttribute("aria-busy") || !editing?.source || editing.composing || editing.saving || !canEditObject(editing.item, "reflow")) return;
+	if (document.body.hasAttribute("data-busy") || !editing?.source || editing.composing || editing.saving || !canEditObject(editing.item, "reflow")) return;
 	if (!window.confirm("将重新排版原文，是否继续？")) return;
 	editing.reflow = true;
 	canvasEditor.recordSourceText();
@@ -3100,7 +3089,7 @@ async function reflowCanvasText() {
 }
 
 async function changeRangeFormat(key, value) {
-	if (!state.ready || document.body.hasAttribute("aria-busy") || canvasEditor.input?.composing) return;
+	if (!state.ready || document.body.hasAttribute("data-busy") || canvasEditor.input?.composing) return;
 	try {
 		if (!canvasEditor.selected && !canvasEditor.input) {
 			state.textDefaults[key] = value ?? (key === "background" ? state.textDefaults.background ? "" : textBackground.value : !state.textDefaults[key]);
@@ -3171,7 +3160,7 @@ function textIndents(item) {
 }
 
 async function toggleTextTool() {
-	if (!state.editing || !pageCan("insert") || document.body.hasAttribute("aria-busy")) return;
+	if (!state.editing || !pageCan("insert") || document.body.hasAttribute("data-busy")) return;
 	if (canvasEditor.tool === "text") {
 		canvasEditor.setTool("");
 		return;
@@ -3314,7 +3303,7 @@ function updateTextFonts(item, refresh = false) {
 async function changeTextFont() {
 	const item = selectedText(canvasEditor.selected);
 	const font = state.textFonts[Number(fontPicker.value)];
-	if (!state.ready || document.body.hasAttribute("aria-busy") || !font || font.disabled) return;
+	if (!state.ready || document.body.hasAttribute("data-busy") || !font || font.disabled) return;
 	if (item?.richText && !canvasEditor.input) {
 		try { if (!await ensureRichInput()) return; } catch (error) { showError(error, false); return; }
 	}
@@ -3360,7 +3349,7 @@ async function changeTextFont() {
 
 async function insertObject(event) {
 	event.preventDefault();
-	if (!state.editing || document.body.hasAttribute("aria-busy") || el.insertSubmit.disabled) {
+	if (!state.editing || document.body.hasAttribute("data-busy") || el.insertSubmit.disabled) {
 		return;
 	}
 	let openSeq = state.openSeq;
@@ -3428,7 +3417,7 @@ async function changeParagraph(wrap) {
 	const item = currentTextStyle();
 	const explicitWrap = wrap !== undefined;
 	wrap ??= item.wrap;
-	if (document.body.hasAttribute("aria-busy") || item.draft) return;
+	if (document.body.hasAttribute("data-busy") || item.draft) return;
 	if (!el.textLineHeight.checkValidity()) {
 		updateObjectControls(item, true);
 		return;
@@ -3456,7 +3445,7 @@ async function changeParagraph(wrap) {
 
 async function changeTextStyle(color) {
 	const item = currentTextStyle();
-	if (!state.ready || state.exporting || document.body.hasAttribute("aria-busy")) {
+	if (!state.ready || state.exporting || document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	if (!color && !el.textSize.checkValidity()) {
@@ -3528,7 +3517,7 @@ function selectedPath(item) {
 
 async function changeShapeStyle({ target }) {
 	const item = selectedPath(canvasEditor.selected);
-	if (!state.editing || document.body.hasAttribute("aria-busy")) {
+	if (!state.editing || document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	if (canvasEditor.selected && (!item || !canEditObject(item, "paint"))) return;
@@ -3551,7 +3540,7 @@ async function changeShapeStyle({ target }) {
 }
 
 function toggleDrawingTool(tool) {
-	if (!state.editing || document.body.hasAttribute("aria-busy")) return;
+	if (!state.editing || document.body.hasAttribute("data-busy")) return;
 	const next = canvasEditor.tool === tool ? "" : tool;
 	state.selectObjects = true;
 	setPan(false);
@@ -3562,7 +3551,7 @@ function toggleDrawingTool(tool) {
 function updateDrawingControls() {
 	const tool = canvasEditor.tool;
 	const path = selectedPath(canvasEditor.selected);
-	el.insertTextButton.setAttribute("aria-pressed", String(tool === "text"));
+	el.insertTextButton.setAttribute("data-pressed", String(tool === "text"));
 	const line = lineShape(tool) || tool.startsWith("pen-") || !tool && lineShape(path?.shape);
 	if (line) {
 		el.shapeFill.checked = false;
@@ -3577,11 +3566,11 @@ function updateDrawingControls() {
 	el.annotationTool.disabled = disabled;
 	for (const [button, name] of [[el.drawLineButton, "line"], [el.drawRectangleButton, "rectangle"], [el.drawEllipseButton, "ellipse"]]) {
 		button.disabled = disabled || !pageCan("insert");
-		button.setAttribute("aria-pressed", String(tool === name));
+		button.setAttribute("data-pressed", String(tool === name));
 	}
 	el.eraseButton.disabled = el.eraseMode.disabled = disabled;
-	el.eraseButton.setAttribute("aria-pressed", String(tool.startsWith("erase-")));
-	el.selectObjectButton.setAttribute("aria-pressed", String(canvasEditor.enabled && !tool));
+	el.eraseButton.setAttribute("data-pressed", String(tool.startsWith("erase-")));
+	el.selectObjectButton.setAttribute("data-pressed", String(canvasEditor.enabled && !tool));
 	const styleDisabled = disabled || (canvasEditor.selected ? !path || !canEditObject(path, "paint") : !pageCan("insert"));
 	el.shapeFill.disabled = el.shapeStroke.disabled = styleDisabled || line;
 	el.shapeFillColor.disabled = styleDisabled || line || !el.shapeFill.checked && !el.shapeFill.indeterminate;
@@ -3589,7 +3578,7 @@ function updateDrawingControls() {
 }
 
 async function changeDocument(name, item, ...args) {
-	if (!state.editing || document.body.hasAttribute("aria-busy")) {
+	if (!state.editing || document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	let openSeq = state.openSeq;
@@ -3607,7 +3596,7 @@ async function changeDocument(name, item, ...args) {
 	if (importing) state.importing = true;
 	setBusy(true, importing ? "正在导入页面" : "", null);
 	const progressTimer = changingFont ? window.setTimeout(() => {
-		if (openSeq === state.openSeq && document.body.hasAttribute("aria-busy")) {
+		if (openSeq === state.openSeq && document.body.hasAttribute("data-busy")) {
 			el.progressPanel.hidden = false;
 			setProgress("正在处理字体", null);
 		}
@@ -3758,7 +3747,7 @@ async function changeDocument(name, item, ...args) {
 		}
 		if (openSeq === state.openSeq) {
 			if (!restoring) rememberEditorView(before, revision, reindex);
-			if (el.annotationsTab.getAttribute("aria-selected") === "true") await loadAnnotationSummary();
+			if (el.annotationsTab.getAttribute("data-selected") === "true") await loadAnnotationSummary();
 			if (!toolbarFocus && !changingFont) canvasEditor.focus();
 			return true;
 		}
@@ -3936,7 +3925,7 @@ function releasePageResources() {
 }
 
 async function openOFDFile() {
-	if (document.body.hasAttribute("aria-busy")) {
+	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	await requestLocalFontsBeforeOpen();
@@ -3945,7 +3934,7 @@ async function openOFDFile() {
 }
 
 async function openOFDFromViewer() {
-	if (state.doc || document.body.hasAttribute("aria-busy")) {
+	if (state.doc || document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	await openOFDFile();
@@ -3956,7 +3945,7 @@ async function openOFDFromDrop(event) {
 		return;
 	}
 	event.preventDefault();
-	if (document.body.hasAttribute("aria-busy")) {
+	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	if (event.dataTransfer.files.length > 1) {
@@ -3971,7 +3960,7 @@ async function openOFDFromDrop(event) {
 }
 
 function openFontFile(input) {
-	if (document.body.hasAttribute("aria-busy")) {
+	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	const editing = canvasEditor.input;
@@ -4015,8 +4004,8 @@ function updateSidebarState() {
 	document.body.toggleAttribute("data-hide-meta", !state.showMeta);
 	el.pageListPanel.inert = !state.showPages;
 	el.metaPanel.inert = !state.showMeta;
-	el.togglePagesButton.setAttribute("aria-pressed", String(state.showPages));
-	el.toggleMetaButton.setAttribute("aria-pressed", String(state.showMeta));
+	el.togglePagesButton.setAttribute("data-pressed", String(state.showPages));
+	el.toggleMetaButton.setAttribute("data-pressed", String(state.showMeta));
 	if (openingPages) {
 		updatePageListCurrent(true);
 	}
@@ -4196,7 +4185,7 @@ function requestOffline(worker, type) {
 }
 
 async function refreshApplication() {
-	if (document.body.hasAttribute("aria-busy")) {
+	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	const temporaryFonts = fontManager.userFonts.some((font) => font.source === "upload");
@@ -4444,8 +4433,6 @@ async function downloadRemoteDocument(options) {
 	remoteDownload = controller;
 	el.cancelExportButton.hidden = false;
 	el.cancelExportButton.disabled = false;
-	el.cancelExportButton.title = "取消下载";
-	el.cancelExportButton.setAttribute("aria-label", "取消下载");
 	setProgress("正在下载文档", null);
 	try {
 		const response = await fetch(options.url, { mode: "cors", credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store", signal: controller.signal });
@@ -4596,7 +4583,7 @@ function isDocumentFile(file) {
 }
 
 async function openSelectedFonts(event) {
-	if (document.body.hasAttribute("aria-busy")) {
+	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	const input = event.currentTarget;
@@ -4631,7 +4618,7 @@ async function openSelectedFonts(event) {
 }
 
 async function loadLocalFonts() {
-	if (document.body.hasAttribute("aria-busy")) {
+	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	if (!fontManager.canReadLocal()) {
@@ -4750,7 +4737,7 @@ function scheduleFontSync() {
 }
 
 async function syncUserFonts() {
-	if (!state.ready || !state.fontSyncPending || state.fontSyncing || document.hidden || document.body.hasAttribute("aria-busy") || document.activeElement?.classList.contains("font-name-input")) {
+	if (!state.ready || !state.fontSyncPending || state.fontSyncing || document.hidden || document.body.hasAttribute("data-busy") || document.activeElement?.classList.contains("font-name-input")) {
 		return;
 	}
 	state.fontSyncPending = false;
@@ -4812,12 +4799,12 @@ async function refreshFontPreview(fontsChanged) {
 }
 
 async function refreshPendingFonts() {
-	if (!state.fontRenderPending || !state.ready || document.body.hasAttribute("aria-busy") || canvasEditor.input || canvasEditor.crop) return;
+	if (!state.fontRenderPending || !state.ready || document.body.hasAttribute("data-busy") || canvasEditor.input || canvasEditor.crop) return;
 	await refreshFontPreview(false);
 }
 
 async function toggleAnnotations() {
-	if (document.body.hasAttribute("aria-busy")) {
+	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	state.renderAnnotations = !state.renderAnnotations;
@@ -4838,12 +4825,10 @@ function displayMode() {
 }
 
 function updateDisplayControls() {
-	const disabled = !state.ready || !state.doc || state.exporting || document.body.hasAttribute("aria-busy");
+	const disabled = !state.ready || !state.doc || state.exporting || document.body.hasAttribute("data-busy");
 	el.renderVectorButton.disabled = el.renderRasterButton.disabled = disabled || state.editing;
-	el.renderVectorButton.setAttribute("aria-pressed", String(displayMode() === "svg"));
-	el.renderRasterButton.setAttribute("aria-pressed", String(displayMode() === "raster"));
-	el.renderVectorButton.title = state.editing ? "编辑使用矢量显示" : "矢量显示";
-	el.renderRasterButton.title = state.editing ? "阅读时可用" : "位图显示";
+	el.renderVectorButton.setAttribute("data-pressed", String(displayMode() === "svg"));
+	el.renderRasterButton.setAttribute("data-pressed", String(displayMode() === "raster"));
 	updateDPIControl();
 }
 
@@ -4857,7 +4842,7 @@ async function refreshPageDisplay(anchor = scaleAnchor(0)) {
 }
 
 async function changeDisplayMode(mode = state.renderMode) {
-	if (document.body.hasAttribute("aria-busy")) {
+	if (document.body.hasAttribute("data-busy")) {
 		el.imageDPI.value = String(state.renderDPI);
 		updateDPIControl();
 		return;
@@ -4884,7 +4869,7 @@ async function changeDisplayMode(mode = state.renderMode) {
 }
 
 async function changeFont(font, changes) {
-	if (document.body.hasAttribute("aria-busy")) {
+	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	setBusy(true, "正在更新字体", null, STATUS.fonts);
@@ -4986,7 +4971,6 @@ function fontSourceText(source) {
 function updateLocalFontButton() {
 	const supported = fontManager.canReadLocal();
 	el.localFontButton.disabled = !supported;
-	el.localFontButton.title = supported ? "读取系统字体" : "浏览器不支持系统字体";
 	updateFontPermissionHint();
 }
 
@@ -5283,7 +5267,7 @@ async function loadDocumentDetails(openSeq) {
 				const missingFonts = info.fonts?.some(font => font.used > 0 && font.status === "missing" && !knownFonts.has(font.id));
 				Object.assign(state.doc, info, { detailsPending: false, detailsError: "" });
 				renderMeta();
-				if (missingFonts && fontManager.permission === "granted" && !state.editorInfo && !document.body.hasAttribute("aria-busy")) {
+				if (missingFonts && fontManager.permission === "granted" && !state.editorInfo && !document.body.hasAttribute("data-busy")) {
 					setBusy(true);
 					try {
 						if (await autoLoadDocumentLocalFonts(openSeq) && openSeq === state.openSeq) await applyFontChange();
@@ -5304,7 +5288,7 @@ async function loadDocumentDetails(openSeq) {
 }
 
 async function renderPage(index, options = {}) {
-	if (!state.doc || (state.editorInfo && document.body.hasAttribute("aria-busy") && !options.keepBusy)) {
+	if (!state.doc || (state.editorInfo && document.body.hasAttribute("data-busy") && !options.keepBusy)) {
 		return null;
 	}
 	const openSeq = options.openSeq || state.openSeq;
@@ -5361,7 +5345,6 @@ function settingsField(container, label, id, value = "", type = "text", unit = "
 	title.textContent = label;
 	const field = document.createElement(type === "textarea" ? "textarea" : "input");
 	field.id = `settings${id}`;
-	field.setAttribute("aria-label", label);
 	if (type === "textarea") field.rows = 3;
 	else field.type = type;
 	if (type === "number") field.step = "any";
@@ -5384,7 +5367,6 @@ function settingsSelect(container, label, id, choices, value, change) {
 	row.className = "form-row";
 	title.textContent = label;
 	field.id = `settings${id}`;
-	field.setAttribute("aria-label", label);
 	field.replaceChildren(...choices.map(([value, text]) => new Option(text, String(value))));
 	if (value != null && choices.some(([key]) => String(key) === String(value))) field.value = String(value);
 	if (change) field.addEventListener("change", () => { rememberSettingsDraft(); change(field.value); });
@@ -5499,7 +5481,7 @@ function settingsValue(id) {
 }
 
 async function openDocumentSettings(invoice = false) {
-	if (!state.doc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy")) return;
+	if (!state.doc || !state.ready || state.exporting || document.body.hasAttribute("data-busy")) return;
 	if (resourceManager.pick?.settings) { finishResourcePick(); return; }
 	invoicePanel.drafts.clear();
 	invoicePanel.key = "";
@@ -5525,7 +5507,7 @@ async function openDocumentSettings(invoice = false) {
 }
 
 async function openResourceSettings(kind, id) {
-	if (!state.doc || !state.ready || document.body.hasAttribute("aria-busy")) return;
+	if (!state.doc || !state.ready || document.body.hasAttribute("data-busy")) return;
 	settings.invoice = false;
 	settingsElements.Kind.closest("label").hidden = false;
 	settings.resource = {kind, id};
@@ -5790,13 +5772,9 @@ function renderInvoiceSettings() {
 	}
 	const tabs = document.createElement("div");
 	tabs.className = "invoice-tabs";
-	tabs.setAttribute("role", "tablist");
-	tabs.setAttribute("aria-label", "发票信息");
 	for (const [key, label, id] of [["basic", "基本", "Basic"], ["items", "明细", "Items"], ["fields", "字段", "Fields"], ["appearance", "票面", "Appearance"], ["xml", "原文", "XML"]]) {
 		const button = settingsButton(label, () => { invoicePanel.tab = key; renderDocumentSettings(); }, false, `InvoiceTab${id}`, tabs);
-		button.setAttribute("role", "tab");
-		button.setAttribute("aria-selected", String(invoicePanel.tab === key));
-		button.setAttribute("aria-controls", "invoiceTabContent");
+		button.setAttribute("data-selected", String(invoicePanel.tab === key));
 		button.tabIndex = invoicePanel.tab === key ? 0 : -1;
 		button.addEventListener("keydown", event => {
 			const buttons = [...tabs.children];
@@ -5813,8 +5791,6 @@ function renderInvoiceSettings() {
 	content.append(tabs);
 	const body = document.createElement("div");
 	body.id = "invoiceTabContent";
-	body.setAttribute("role", "tabpanel");
-	body.setAttribute("aria-labelledby", tabs.querySelector('[aria-selected="true"]').id);
 	content.append(body);
 	if (invoicePanel.tab === "basic") renderInvoiceBasic(body, draft);
 	else if (invoicePanel.tab === "items") renderInvoiceItems(body, draft);
@@ -5822,7 +5798,7 @@ function renderInvoiceSettings() {
 	else if (invoicePanel.tab === "appearance") renderInvoiceAppearance(body, draft);
 	else renderInvoiceXML(body, draft);
 	settingsButton("校验", () => validateInvoiceDraft(draft), false, "InvoiceValidate");
-	settingsButton("导出", () => downloadBytes(new TextEncoder().encode(JSON.stringify(draft.invoice, null, 2)), "application/json", "invoice.json"), false, "InvoiceExportJSON").title = "导出JSON";
+	settingsButton("导出", () => downloadBytes(new TextEncoder().encode(JSON.stringify(draft.invoice, null, 2)), "application/json", "invoice.json"), false, "InvoiceExportJSON");
 	if (state.editing) {
 		settingsButton("应用", () => applyInvoiceDraft(draft), !draft.dirty.size, "InvoiceApply");
 		settingsButton("还原", () => resetInvoiceDraft(draft), !draft.dirty.size, "InvoiceReset");
@@ -5923,7 +5899,7 @@ function renderInvoiceAdvanced(container, draft) {
 			encoding.units.push({ id: "", namespace: "", name: "" });
 			invoiceDirty(draft, "model");
 			renderDocumentSettings();
-		}, false, "InvoiceUnitAdd", details).title = "添加单位";
+		}, false, "InvoiceUnitAdd", details);
 	}
 	for (const [key, label] of [["headerXML", "票头"], ["sellerAuthenticationXML", "认证"], ["taxSupervisionXML", "监制"], ["taxBureauSignatureXML", "签名"]]) {
 		invoiceInput(details, label, `Fragment_${key}`, draft.fragments[key], value => {
@@ -5934,7 +5910,7 @@ function renderInvoiceAdvanced(container, draft) {
 			draft.fragments[key] = text;
 			invoiceDirty(draft, "model");
 			renderDocumentSettings();
-		}), false, `InvoiceFragmentImport_${key}`, details).title = `导入${label}XML`;
+		}), false, `InvoiceFragmentImport_${key}`, details);
 	}
 }
 
@@ -5960,7 +5936,6 @@ function renderInvoiceItems(container, draft) {
 		radio.type = "radio";
 		radio.name = "invoiceItem";
 		radio.checked = index === draft.item;
-		radio.setAttribute("aria-label", `明细${index + 1}`);
 		radio.addEventListener("change", () => {
 			draft.item = index;
 			renderDocumentSettings();
@@ -5971,7 +5946,6 @@ function renderInvoiceItems(container, draft) {
 			input.type = "text";
 			input.value = item[key] || "";
 			input.id = `settingsInvoiceItem_${index}_${key}`;
-			input.setAttribute("aria-label", `${label}${index + 1}`);
 			const descriptor = draft.detail.fields?.find(field => field.field === `items.${key}` && field.item === index);
 			input.disabled = !editable || !descriptor?.editable;
 			input.addEventListener("input", () => {
@@ -6191,7 +6165,7 @@ function renderInvoiceAppearance(container, draft) {
 			draft.bindings = [];
 			invoiceDirty(draft, "bindings");
 			renderDocumentSettings();
-		}, !writable || !draft.bindings.length, "InvoiceUnbindAll", actions).title = "解除全部绑定";
+		}, !writable || !draft.bindings.length, "InvoiceUnbindAll", actions);
 	}
 	if (writable) {
 		const details = document.createElement("details"), summary = document.createElement("summary");
@@ -6208,7 +6182,7 @@ function renderInvoiceAppearance(container, draft) {
 			draft.layout.font = value.startsWith("file:") ? "" : value;
 			renderDocumentSettings();
 		});
-		settingsButton("添加", () => openFontFile(el.fontInput), false, "InvoiceAddFont", details).title = "添加字体";
+		settingsButton("添加", () => openFontFile(el.fontInput), false, "InvoiceAddFont", details);
 		settingsButton("嵌入", async () => {
 			const font = fonts.find(value => value.id === draft.layout.font);
 			if (!font) throw new Error("请选择字体");
@@ -6308,7 +6282,7 @@ function renderInvoiceXML(container, draft) {
 	settingsButton("导出", async () => {
 		const result = await callWASM("ofdgoExportInvoice", JSON.stringify({ ...draft.scope, source: draft.entry.source, index: draft.entry.index }));
 		downloadBytes(result.bytes, "application/xml", (draft.entry.source.fileLoc?.split("/").at(-1) || "invoice.xml"));
-	}, !draft.entry, "InvoiceExportXML", actions).title = "导出来源原文";
+	}, !draft.entry, "InvoiceExportXML", actions);
 }
 
 function readInvoiceFile(accept) {
@@ -6380,7 +6354,7 @@ function invoiceBase64(bytes) {
 }
 
 async function commitInvoice(draft, request) {
-	if (!state.editing || settings.busy || document.body.hasAttribute("aria-busy")) return;
+	if (!state.editing || settings.busy || document.body.hasAttribute("data-busy")) return;
 	if (!settingsElements.Panel.open || !settings.invoice || invoiceCurrent() !== draft) return;
 	const scope = invoiceScope();
 	if (draft.scope.documentIndex !== scope.documentIndex || draft.scope.version !== scope.version || draft.scope.revision !== scope.revision) throw new Error("文档已变更，请重新打开发票");
@@ -6531,7 +6505,7 @@ function destinationFromSettings() {
 }
 
 async function commitSettings(name, ...args) {
-	if (!state.editing || settings.busy || document.body.hasAttribute("aria-busy")) return false;
+	if (!state.editing || settings.busy || document.body.hasAttribute("data-busy")) return false;
 	rememberSettingsDraft();
 	const pending = settings.drafts.get(settings.view), baseline = settings.baseline;
 	settings.busy = true;
@@ -6811,7 +6785,6 @@ function renderTemplateSettings() {
 	}
 	settingsPages(source, "SourcePage", settings.page);
 	document.querySelector("#settingsSourcePage").closest("label").firstElementChild.textContent = "来源";
-	document.querySelector("#settingsSourcePage").setAttribute("aria-label", "来源页");
 	const write = async (operation, order = 0) => {
 		if (operation === "replace" && !window.confirm("替换模板内容？当前文档中引用此模板的页面将同步更新。")) return;
 		const selected = settings.selected;
@@ -6965,7 +6938,7 @@ async function locateSettingsPage(page) {
 }
 
 async function openResourceManagement() {
-	if (resourceManager.busy || !state.doc || !state.ready || document.body.hasAttribute("aria-busy")) return;
+	if (resourceManager.busy || !state.doc || !state.ready || document.body.hasAttribute("data-busy")) return;
 	if (resourceManager.pick) { finishResourcePick(); return; }
 	resourceElements.Panel.showModal();
 	resourceElements.Page.replaceChildren(...state.doc.pages.map((page, index) => new Option(`第${index + 1}页`, String(index))));
@@ -6983,7 +6956,7 @@ async function resourceTask(action, delay = 0) {
 	};
 	const timer = delay ? setTimeout(showBusy, delay) : null;
 	if (!delay) showBusy();
-	resourceElements.Panel.setAttribute("aria-busy", "true");
+	resourceElements.Panel.setAttribute("data-busy", "true");
 	try {
 		await action();
 		if (resourceElements.Status.textContent === "处理中") resourceElements.Status.textContent = "";
@@ -6993,7 +6966,7 @@ async function resourceTask(action, delay = 0) {
 		if (timer !== null) clearTimeout(timer);
 		resourceManager.busy = false;
 		resourceElements.List.inert = false;
-		resourceElements.Panel.removeAttribute("aria-busy");
+		resourceElements.Panel.removeAttribute("data-busy");
 		updateResourceControls();
 	}
 }
@@ -7028,8 +7001,7 @@ async function renderResourceList() {
 		const button = document.createElement("button");
 		button.type = "button";
 		button.className = "resource-option";
-		button.setAttribute("role", "option");
-		button.setAttribute("aria-selected", String(item === selected));
+		button.setAttribute("data-selected", String(item === selected));
 		button.tabIndex = item === selected ? 0 : -1;
 		button.title = item.file || item.name;
 		for (const value of [item.name, item.missing ? "缺失" : item.file ? formatBytes(item.size) : item.kind === "Font" ? "外部" : "-", item.complete ? String(item.referenceCount || 0) : "未知"]) {
@@ -7073,10 +7045,10 @@ async function selectManagedResource(item) {
 	releaseResourcePreview();
 	resourceManager.selected = item || null;
 	const items = resourceManager.items.filter(entry => entry.kind === resourceElements.Kind.value);
-	const previous = resourceElements.List.querySelector('[aria-selected="true"]');
-	if (previous) { previous.setAttribute("aria-selected", "false"); previous.tabIndex = -1; }
+	const previous = resourceElements.List.querySelector('[data-selected="true"]');
+	if (previous) { previous.setAttribute("data-selected", "false"); previous.tabIndex = -1; }
 	const current = resourceElements.List.children[items.indexOf(item)];
-	if (current) { current.setAttribute("aria-selected", "true"); current.tabIndex = 0; }
+	if (current) { current.setAttribute("data-selected", "true"); current.tabIndex = 0; }
 	await loadManagedReferences(same ? Number(reference) : 0);
 }
 
@@ -7107,7 +7079,7 @@ async function loadManagedReferences(index = 0) {
 
 function updateResourceControls() {
 	const item = resourceManager.selected, editing = state.editing;
-	const disabled = resourceManager.busy || !state.doc || document.body.hasAttribute("aria-busy");
+	const disabled = resourceManager.busy || !state.doc || document.body.hasAttribute("data-busy");
 	resourceElements.Kind.disabled = resourceElements.Page.disabled = resourceElements.Object.disabled = disabled;
 	const referenceCount = item?.referenceCount || 0;
 	resourceElements.ReferenceGroup.hidden = referenceCount <= 100;
@@ -7125,7 +7097,7 @@ function updateResourceControls() {
 	resourceElements.Replace.disabled = disabled || !item || item.kind !== "Attachment" && !item.complete;
 	resourceElements.Replace.textContent = style ? "修改" : item?.kind === "Font" ? item.file ? "外置" : "嵌入" : "替换";
 	resourceElements.Delete.disabled = disabled || !item || item.kind !== "Attachment" && (!item.complete || Boolean(referenceCount));
-	resourceElements.Delete.title = item?.kind === "Attachment" ? "删除附件" : referenceCount ? "资源仍被引用" : "删除资源";
+	resourceElements.Delete.title = item?.kind !== "Attachment" && referenceCount ? "资源仍被引用" : "";
 	resourceElements.Locate.disabled = disabled || !referenceCount;
 	resourceElements.Binding.hidden = !editing || !actionable;
 	const actions = resourceElements.Binding.hidden ? resourceElements.Actions : resourceElements.BindingActions;
@@ -7222,7 +7194,7 @@ function finishResourcePick(reopen = true) {
 	}
 	if (picking.sequence === state.openSeq) {
 		updateEditorTools();
-		setBusy(document.body.hasAttribute("aria-busy"));
+		setBusy(document.body.hasAttribute("data-busy"));
 		setStatus(picking.status);
 		if (picking.settings) {
 			if (reopen) {
@@ -7243,7 +7215,7 @@ function pickResourceObject(event) {
 	if (!picking || event.button !== 0) return;
 	event.preventDefault();
 	event.stopImmediatePropagation();
-	if (resourceManager.busy || document.body.hasAttribute("aria-busy")) return;
+	if (resourceManager.busy || document.body.hasAttribute("data-busy")) return;
 	if (picking.settings) { pickSettingsObject(event, picking).catch(error => { finishResourcePick(); settingsElements.Status.textContent = error.message; }); return; }
 	const items = canvasEditor.itemsAt(event).filter(item => !item.scoped && !item.draft);
 	if (!items.length) { setStatus("未选中图元"); return; }
@@ -7364,7 +7336,7 @@ el.attachmentForm.addEventListener("submit", async event => {
 });
 
 function openAttachmentDialog(action, attachment) {
-	if (!state.editing || !state.ready || state.exporting || document.body.hasAttribute("aria-busy")) return;
+	if (!state.editing || !state.ready || state.exporting || document.body.hasAttribute("data-busy")) return;
 	const rename = action === "rename";
 	el.attachmentForm.reset();
 	el.attachmentDialog.attachmentEdit = {action, id: attachment?.id || "", openSeq: state.openSeq};
@@ -7381,7 +7353,7 @@ function openAttachmentDialog(action, attachment) {
 }
 
 async function saveDocumentImage(resource) {
-	if (!resource || !state.doc || document.body.hasAttribute("aria-busy")) return;
+	if (!resource || !state.doc || document.body.hasAttribute("data-busy")) return;
 	const seq = state.openSeq;
 	try {
 		const image = await callWASM("ofdgoImages", resource);
@@ -7395,7 +7367,7 @@ async function saveDocumentImage(resource) {
 el.saveImageButton.addEventListener("click", () => saveDocumentImage(canvasEditor.selected?.imageResource));
 
 async function downloadResource(attachment, api, label) {
-	if (!state.doc || document.body.hasAttribute("aria-busy")) {
+	if (!state.doc || document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	if (state.doc.encryption?.encrypted && !window.confirm(`${label}将按明文下载，是否继续？`)) return;
@@ -7443,7 +7415,7 @@ function encryptionMode() {
 }
 
 function openEncryptionPanel() {
-	if (!state.doc || document.body.hasAttribute("aria-busy")) return;
+	if (!state.doc || document.body.hasAttribute("data-busy")) return;
 	clearEncryptionForm();
 	el.encryptionType.value = encryptionMode();
 	el.encryptionKeep.hidden = el.encryptionType.value !== "keep";
@@ -7474,7 +7446,7 @@ function updateEncryptionType() {
 
 async function applyEncryption(event) {
 	event.preventDefault();
-	if (!state.doc || document.body.hasAttribute("aria-busy") || el.encryptionSubmit.disabled) return;
+	if (!state.doc || document.body.hasAttribute("data-busy") || el.encryptionSubmit.disabled) return;
 	const mode = el.encryptionType.value;
 	if (mode === encryptionMode() && !state.encryptionChanged) {
 		el.encryptionPanel.close();
@@ -7554,7 +7526,7 @@ function renderSecurity() {
 	el.securitySchemeRow.hidden = !encryption?.encrypted;
 	el.securityMethod.textContent = scheme ? "SM4-CBC" : "";
 	el.securityMethodRow.hidden = !encryption?.encrypted || !scheme;
-	el.encryptSaveButton.disabled = !state.doc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy");
+	el.encryptSaveButton.disabled = !state.doc || !state.ready || state.exporting || document.body.hasAttribute("data-busy");
 	el.verifyButton.disabled = el.encryptSaveButton.disabled;
 	el.signButton.disabled = el.encryptSaveButton.disabled;
 }
@@ -7580,14 +7552,14 @@ function finishSealPosition(returnToForm = true) {
 		Object.assign(state, preview.sidebar);
 		updateSidebarState();
 	}
-	setBusy(document.body.hasAttribute("aria-busy"));
+	setBusy(document.body.hasAttribute("data-busy"));
 	if (returnToForm && preview.sequence === state.openSeq && !el.signPanel.open) el.signPanel.showModal();
 	if (preview.sequence === state.openSeq) setStatus(preview.status);
 }
 
 async function openSealPosition() {
 	const file = el.signSeal.files?.[0];
-	if (!file || !state.doc || document.body.hasAttribute("aria-busy")) return;
+	if (!file || !state.doc || document.body.hasAttribute("data-busy")) return;
 	const sequence = state.openSeq;
 	let preview;
 	setBusy(true);
@@ -7701,12 +7673,11 @@ function updateSignPlacement() {
 		input.required = stamp;
 	}
 	document.querySelector('label[for="signX"]').textContent = el.signPlacement.value === "seam" ? "右侧内缩" : "横向";
-	el.signX.setAttribute("aria-label", el.signPlacement.value === "seam" ? "右侧内缩（毫米）" : "横坐标（毫米）");
 }
 
 async function signDocument(event) {
 	event.preventDefault();
-	if (!state.doc || document.body.hasAttribute("aria-busy")) return;
+	if (!state.doc || document.body.hasAttribute("data-busy")) return;
 	if (!el.signCertificate.files?.length || !el.signKey.files?.length || !el.signRoots.files?.length) {
 		el.signStatus.textContent = "请选择证书、私钥和信任根";
 		return;
@@ -7772,7 +7743,7 @@ async function securityFiles(input) {
 
 async function verifyDocument(event) {
 	event.preventDefault();
-	if (!state.doc || document.body.hasAttribute("aria-busy")) return;
+	if (!state.doc || document.body.hasAttribute("data-busy")) return;
 	const openSeq = state.openSeq;
 	setBusy(true, "正在验证签名", null, "正在验证签名");
 	el.verifyForm.inert = true;
@@ -7799,7 +7770,7 @@ async function verifyDocument(event) {
 }
 
 function openExportPanel() {
-	if (!state.doc || document.body.hasAttribute("aria-busy")) {
+	if (!state.doc || document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	el.exportForm.reset();
@@ -7817,7 +7788,7 @@ async function updateExportRange() {
 	const openSeq = state.openSeq;
 	state.exportPages = null;
 	el.exportRangeRow.hidden = !specified;
-	el.exportRange.removeAttribute("aria-invalid");
+	el.exportRange.removeAttribute("data-invalid");
 	el.exportSubmit.disabled = specified;
 	el.exportRangeStatus.textContent = specified && value ? "正在校验页码" : "";
 	if (!specified || !value) {
@@ -7834,7 +7805,7 @@ async function updateExportRange() {
 		}
 	} catch {
 		if (current()) {
-			el.exportRange.setAttribute("aria-invalid", "true");
+			el.exportRange.setAttribute("data-invalid", "true");
 			el.exportRangeStatus.textContent = "页码无效";
 		}
 	}
@@ -7872,7 +7843,6 @@ function renderBatchList() {
 			const messages = document.createElement("ul");
 			messages.className = "convert-messages";
 			messages.tabIndex = 0;
-			messages.setAttribute("aria-label", `${item.file.name}的转换提示`);
 			for (const message of item.details) {
 				const entry = document.createElement("li");
 				entry.textContent = message;
@@ -7895,7 +7865,6 @@ function renderBatchList() {
 		pages.type = "text";
 		pages.placeholder = "全部";
 		pages.title = "如1-3,5；留空为全部";
-		pages.setAttribute("aria-label", `${item.file.name}的输出页码`);
 		pages.value = item.pages;
 		pages.disabled = batch.running;
 		pages.addEventListener("change", () => { item.pages = pages.value; reset(); });
@@ -7905,7 +7874,6 @@ function renderBatchList() {
 		const formatControl = document.createElement("span");
 		formatControl.className = "convert-format";
 		const format = document.createElement("select");
-		format.setAttribute("aria-label", `${item.file.name}的输出格式`);
 		format.append(new Option("默认", ""), ...batch.formats.map(value => new Option(value.label, value.value)));
 		format.value = item.format;
 		format.disabled = batch.running;
@@ -7922,7 +7890,6 @@ function renderBatchList() {
 		remove.className = "icon-button";
 		remove.textContent = "×";
 		remove.title = "移除";
-		remove.setAttribute("aria-label", `移除${item.file.name}`);
 		remove.disabled = batch.running;
 		remove.addEventListener("click", () => { batch.items.splice(batch.items.indexOf(item), 1); renderBatchList(); });
 		action.append(remove);
@@ -7984,7 +7951,6 @@ function updateBatchProgress() {
 	const seconds = Math.floor((performance.now() - started) / 1000);
 	if (item) batchStatus(item, "running", stage);
 	batchElements.Status.textContent = `${progress.phase === "pack" ? "" : `文件 ${position + 1}/${count} · `}正在${stage}${detail ? ` · ${detail}` : ""}${seconds ? ` · ${seconds}秒` : ""}`;
-	batchElements.Progress.setAttribute("aria-label", "阶段进度");
 	batchElements.Progress.max = progress.total || 1;
 	if (progress.total > 0) batchElements.Progress.value = Math.min(progress.completed, progress.total);
 	else batchElements.Progress.removeAttribute("value");
@@ -8170,7 +8136,6 @@ async function runBatch() {
 				options.credentials?.keyPassword?.fill(0);
 			}
 			batchElements.Progress.max = jobs.length;
-			batchElements.Progress.setAttribute("aria-label", "转换进度");
 			batchElements.Progress.value = position + 1;
 		}
 		if (archive && entries.length && !batch.canceled) {
@@ -8212,7 +8177,7 @@ function compressionOptions(value) {
 }
 
 async function exportFile(whole, indices = null, value = el.exportFormat.value) {
-	if (!state.doc || document.body.hasAttribute("aria-busy")) {
+	if (!state.doc || document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	const saving = value === "ofd";
@@ -8811,7 +8776,6 @@ function placeMediaPlayer(id, entry) {
 			const dialog = document.createElement("dialog");
 			dialog.className = "form-dialog media-dialog";
 			const label = entry.kind === "Video" ? "视频" : "音频";
-			dialog.setAttribute("aria-label", `${label}播放`);
 			const header = document.createElement("div");
 			header.className = "form-title";
 			const title = document.createElement("span");
@@ -8821,7 +8785,6 @@ function placeMediaPlayer(id, entry) {
 			close.className = "small-button";
 			close.textContent = "关闭";
 			close.title = `关闭${label}`;
-			close.setAttribute("aria-label", `关闭${label}`);
 			close.addEventListener("click", () => releaseMediaPlayer(id, entry));
 			dialog.addEventListener("keydown", event => {
 				if (event.key !== "Escape") return;
@@ -8981,7 +8944,7 @@ function mountPageLinks(page, surface) {
 		} else {
 			anchor.addEventListener("click", async event => {
 				event.preventDefault();
-				if (document.body.hasAttribute("aria-busy")) return;
+				if (document.body.hasAttribute("data-busy")) return;
 				state.openActionTask = null;
 				const openSeq = state.openSeq;
 				let actions = targets;
@@ -8999,7 +8962,6 @@ function mountPageLinks(page, surface) {
 				}
 			});
 		}
-		anchor.setAttribute("aria-label", anchor.title);
 		anchor.style.left = `${link.x / page.width * 100}%`;
 		anchor.style.top = `${link.y / page.height * 100}%`;
 		anchor.style.width = `${link.width / page.width * 100}%`;
@@ -9008,7 +8970,6 @@ function mountPageLinks(page, surface) {
 			anchor.classList.add("page-region-link");
 			const region = document.createElementNS("http://www.w3.org/2000/svg", "svg");
 			region.setAttribute("viewBox", `${link.x} ${link.y} ${link.width} ${link.height}`);
-			region.setAttribute("aria-hidden", "true");
 			const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
 			path.setAttribute("d", link.path);
 			region.append(path);
@@ -9026,7 +8987,7 @@ function destinationPoint(page, x, y) {
 }
 
 async function navigateDestination(dest, openAction) {
-	if (document.body.hasAttribute("aria-busy")) return;
+	if (document.body.hasAttribute("data-busy")) return;
 	if (openAction && state.openActionTask !== openAction) return false;
 	const index = pageIndexByID(state.doc.pages, dest.pageID);
 	if (index < 0) {
@@ -9115,7 +9076,7 @@ function syncSelection() {
 	const selection = document.getSelection();
 	if (state.documentSelection && (!selection.rangeCount || !isDocumentSelection(selection.getRangeAt(0)))) {
 		state.documentSelection = null;
-		if (state.doc && !document.body.hasAttribute("aria-busy")) {
+		if (state.doc && !document.body.hasAttribute("data-busy")) {
 			setStatus(pageStatus(state.pageIndex, state.doc.pageCount));
 		}
 	}
@@ -9170,7 +9131,7 @@ async function selectDocumentText() {
 
 function copyEditorSelection(event) {
 	if (!state.editing || !canvasEditor.enabled || !canvasEditor.selected || !el.viewerPanel.contains(event.target)
-		|| canvasEditor.input || canvasEditor.crop || canvasEditor.drag || document.body.hasAttribute("aria-busy")) return false;
+		|| canvasEditor.input || canvasEditor.crop || canvasEditor.drag || document.body.hasAttribute("data-busy")) return false;
 	const items = canvasEditor.items().slice().sort((a, b) => a.order - b.order);
 	const cut = event.type === "cut";
 	if (state.composite && items.some(item => item.container !== items[0].container)) {
@@ -9230,7 +9191,7 @@ async function pasteEditorContent(event) {
 	const files = Array.from(event.clipboardData.files);
 	const value = event.clipboardData.getData("text/plain").replace(/\t/g, "    ");
 	if ((canvasEditor.nudge || canvasEditor.nudgeCommit) && !await canvasEditor.commitNudge()) return;
-	if (document.body.hasAttribute("aria-busy") || canvasEditor.input || canvasEditor.crop || canvasEditor.drag) return;
+	if (document.body.hasAttribute("data-busy") || canvasEditor.input || canvasEditor.crop || canvasEditor.drag) return;
 	const index = state.pageIndex, page = state.doc.pages[index];
 	if (token) {
 		const clipboard = state.objectClipboard;
@@ -9467,12 +9428,12 @@ function updatePageListCurrent(force = false) {
 		state.pageListCurrent = state.pageIndex;
 		if (state.showPages && !el.pageList.hidden) revealThumbnail(state.pageIndex);
 	}
-	const current = el.pageList.querySelector(".page-list-item[aria-current]");
+	const current = el.pageList.querySelector(".page-list-item[data-current]");
 	if (current) {
 		if (!force && Number.parseInt(current.dataset.pageIndex, 10) === state.pageIndex) {
 			return;
 		}
-		current.removeAttribute("aria-current");
+		current.removeAttribute("data-current");
 	}
 	const next = el.pageList.querySelector(`.page-list-item[data-page-index="${state.pageIndex}"]`);
 	if (next) {
@@ -9491,10 +9452,10 @@ function updatePageListCurrent(force = false) {
 
 function setPageItemCurrent(item, current) {
 	if (current) {
-		item.setAttribute("aria-current", "page");
+		item.setAttribute("data-current", "page");
 		return;
 	}
-	item.removeAttribute("aria-current");
+	item.removeAttribute("data-current");
 }
 
 function layoutPages() {
@@ -9610,12 +9571,12 @@ function focusSearch() {
 function showNavigation(selected) {
 	const scrollTop = el.navigationContent.scrollTop;
 	for (const [tab, panel] of [[el.pagesTab, el.pageList], [el.outlinesTab, el.outlineList], [el.annotationsTab, el.annotationsPanel], [el.searchTab, el.searchPanel]]) {
-		if (tab.getAttribute("aria-selected") === "true") {
+		if (tab.getAttribute("data-selected") === "true") {
 			state.navigationScroll.set(tab, scrollTop);
 		}
 		const active = tab === selected;
 		panel.hidden = !active;
-		tab.setAttribute("aria-selected", String(active));
+		tab.setAttribute("data-selected", String(active));
 		tab.tabIndex = active ? 0 : -1;
 	}
 	el.pageSelectionTools.hidden = !state.editing || !state.pageMultiSelect || selected !== el.pagesTab;
@@ -9668,7 +9629,6 @@ function renderAnnotationSummary() {
 		const target = document.createElement("button");
 		target.type = "button";
 		target.className = "annotation-summary-target";
-		target.title = "定位注解";
 		const heading = document.createElement("span"), content = document.createElement("span");
 		heading.textContent = `第${item.page}页 · ${labels[annotationKind(item)] || item.type}${item.visible ? "" : " · 隐藏"}`;
 		content.textContent = item.remark || item.id;
@@ -9683,7 +9643,7 @@ function renderAnnotationSummary() {
 			edit.className = "small-button";
 			edit.textContent = "修改";
 			edit.addEventListener("click", () => {
-				if (!state.editing || document.body.hasAttribute("aria-busy") || summary.seq !== state.openSeq) return;
+				if (!state.editing || document.body.hasAttribute("data-busy") || summary.seq !== state.openSeq) return;
 				editAnnotationDetails({...item, id: `annotation:${item.id}`, index: item.page - 1, type: "Annotation", fromSummary: true});
 			});
 			row.append(edit);
@@ -9693,7 +9653,7 @@ function renderAnnotationSummary() {
 }
 
 function renderOutlines(reset = true) {
-	const selected = !reset && [el.pagesTab, el.outlinesTab, el.annotationsTab, el.searchTab].find(tab => tab.getAttribute("aria-selected") === "true");
+	const selected = !reset && [el.pagesTab, el.outlinesTab, el.annotationsTab, el.searchTab].find(tab => tab.getAttribute("data-selected") === "true");
 	const scrollTop = reset ? 0 : el.navigationContent.scrollTop;
 	if (reset) {
 		state.navigationScroll.clear();
@@ -9742,7 +9702,7 @@ function resetSearch(clearInput = true) {
 }
 
 async function searchDocument() {
-	if (!state.doc || document.body.hasAttribute("aria-busy")) {
+	if (!state.doc || document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	const query = el.searchInput.value.trim();
@@ -9816,14 +9776,14 @@ function renderSearchResults() {
 		el.searchResults.append(button);
 	}
 	for (const button of el.searchResults.children) {
-		button.setAttribute("aria-current", String(Number(button.dataset.matchIndex) === state.searchIndex));
+		button.setAttribute("data-current", String(Number(button.dataset.matchIndex) === state.searchIndex));
 	}
 	updateSearchCount();
 }
 
 async function selectSearchMatch(index) {
 	const count = state.searchMatches.length;
-	if (!count || document.body.hasAttribute("aria-busy")) {
+	if (!count || document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	index = (index + count) % count;
@@ -9865,7 +9825,7 @@ async function selectSearchMatch(index) {
 			updateControls();
 		} else canvasEditor.select(null);
 	}
-	const button = el.searchResults.querySelector("[aria-current=true]");
+	const button = el.searchResults.querySelector("[data-current=true]");
 	const row = button.getBoundingClientRect();
 	const panel = el.searchResults.getBoundingClientRect();
 	if (row.top < panel.top) {
@@ -9911,7 +9871,7 @@ function scheduleOpenActions() {
 }
 
 async function activateOpenActions() {
-	if (!state.openActionEnabled || !state.doc || state.editing || state.exporting || document.body.hasAttribute("aria-busy")) return;
+	if (!state.openActionEnabled || !state.doc || state.editing || state.exporting || document.body.hasAttribute("data-busy")) return;
 	const pageID = state.doc.pages[state.pageIndex]?.id;
 	if (!pageID || !state.openActionDocument && state.openActionPage === pageID) return;
 	const task = { sequence: state.openSeq, seen: new Set(), navigating: false };
@@ -9960,7 +9920,7 @@ async function activateOpenActions() {
 }
 
 async function activateOutline(path) {
-	if (document.body.hasAttribute("aria-busy") || state.editing) return;
+	if (document.body.hasAttribute("data-busy") || state.editing) return;
 	state.openActionTask = null;
 	const sequence = state.openSeq;
 	const request = ++state.outlineSeq;
@@ -10000,7 +9960,6 @@ function createOutlineList(outlines, path = []) {
 			const page = document.createElement("span");
 			page.className = "outline-page";
 			page.textContent = String(outline.page);
-			page.setAttribute("aria-label", `第${outline.page}页`);
 			link.append(page);
 		}
 		if (outline.actionCount || outline.page || state.editing) {
@@ -10010,7 +9969,7 @@ function createOutlineList(outlines, path = []) {
 					|| !["ArrowUp", "ArrowDown"].includes(event.key)) return;
 				event.preventDefault();
 				const target = index + (event.key === "ArrowUp" ? -1 : 1);
-				if (event.repeat || document.body.hasAttribute("aria-busy") || target < 0 || target >= outlines.length) return;
+				if (event.repeat || document.body.hasAttribute("data-busy") || target < 0 || target >= outlines.length) return;
 				if (await changeDocument("ofdgoMoveOutline", null, current, path, target)) {
 					const selected = el.outlineList.querySelector(".outline-link.selected");
 					selected?.focus({ preventScroll: true });
@@ -10094,16 +10053,14 @@ function syncPageSelection() {
 	el.pageSelectionCount.textContent = `已选${state.pageSelection.size}页`;
 	const allSelected = state.pageSelection.size === state.doc?.pageCount;
 	el.selectAllPages.textContent = allSelected ? "取消" : "全选";
-	el.selectAllPages.title = allSelected ? "取消全选" : "全选页面";
-	el.selectAllPages.setAttribute("aria-label", el.selectAllPages.title);
 	for (const button of el.pageList.children) {
-		if (state.editing) button.setAttribute("aria-pressed", String(state.pageSelection.has(state.doc.pages[Number(button.dataset.pageIndex)].id)));
-		else button.removeAttribute("aria-pressed");
+		if (state.editing) button.setAttribute("data-pressed", String(state.pageSelection.has(state.doc.pages[Number(button.dataset.pageIndex)].id)));
+		else button.removeAttribute("data-pressed");
 	}
 }
 
 function selectThumbnailPage(event, index) {
-	if (document.body.hasAttribute("aria-busy")) return;
+	if (document.body.hasAttribute("data-busy")) return;
 	if (event.pointerId === state.pageTouchPointer) {
 		state.pageTouchPointer = null;
 		return;
@@ -10128,7 +10085,7 @@ function selectThumbnailPage(event, index) {
 }
 
 el.selectAllPages.addEventListener("click", () => {
-	if (document.body.hasAttribute("aria-busy")) return;
+	if (document.body.hasAttribute("data-busy")) return;
 	state.pageSelection = new Set(state.pageSelection.size === state.doc.pageCount ? [] : state.doc.pages.map(page => page.id));
 	syncPageSelection();
 	updateControls();
@@ -10143,12 +10100,12 @@ el.finishPageSelection.addEventListener("click", () => {
 el.pageList.addEventListener("pointerdown", event => {
 	cancelPageTouch?.();
 	state.pageTouchPointer = null;
-	if (!state.editing || event.pointerType !== "touch" || !event.isPrimary || document.body.hasAttribute("aria-busy")) return;
+	if (!state.editing || event.pointerType !== "touch" || !event.isPrimary || document.body.hasAttribute("data-busy")) return;
 	const button = event.target.closest(".page-list-item");
 	if (!button || event.target.closest(".thumb-grip")) return;
 	const seq = state.openSeq, pointer = event.pointerId;
 	const timer = setTimeout(() => {
-		if (seq !== state.openSeq || !state.editing || document.body.hasAttribute("aria-busy")) return;
+		if (seq !== state.openSeq || !state.editing || document.body.hasAttribute("data-busy")) return;
 		if (!state.pageMultiSelect) state.pageSelection.clear();
 		state.pageMultiSelect = true;
 		state.pageTouchPointer = pointer;
@@ -10194,7 +10151,7 @@ el.pageList.addEventListener("keydown", event => {
 			return;
 		}
 	}
-	if (!state.editing || event.isComposing || document.body.hasAttribute("aria-busy")) return;
+	if (!state.editing || event.isComposing || document.body.hasAttribute("data-busy")) return;
 	if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "a") {
 		state.pageSelection = new Set(state.doc.pages.map(page => page.id));
 	} else if (event.key === "Escape") {
@@ -10232,16 +10189,13 @@ function createThumbnail(page) {
 	button.type = "button";
 	button.className = "page-list-item";
 	button.dataset.pageIndex = String(page.index);
-	button.setAttribute("aria-posinset", String(page.index + 1));
-	button.setAttribute("aria-setsize", String(state.doc.pageCount));
-	if (state.editing) button.setAttribute("aria-pressed", String(state.pageSelection.has(page.id)));
+	if (state.editing) button.setAttribute("data-pressed", String(state.pageSelection.has(page.id)));
 	button.title = `${formatSize(page.width)} x ${formatSize(page.height)} mm`;
 	setPageItemCurrent(button, page.index === state.pageIndex);
 	layoutThumbnail(button, page);
 
 	const thumb = document.createElement("span");
 	thumb.className = "thumb-paper";
-	thumb.setAttribute("aria-hidden", "true");
 	setThumbnailContent(thumb, state.pageCache.get(page.index)?.svg, page.index, openSeq);
 
 	const label = document.createElement("span");
@@ -10344,11 +10298,10 @@ function enablePageDrag(button, index) {
 	const grip = document.createElement("span");
 	grip.className = "thumb-grip";
 	grip.title = "拖动排序";
-	grip.setAttribute("aria-hidden", "true");
 	button.append(grip);
 	grip.addEventListener("click", event => event.stopPropagation());
 	grip.addEventListener("pointerdown", event => {
-		if (event.button !== 0 || document.body.hasAttribute("aria-busy")) return;
+		if (event.button !== 0 || document.body.hasAttribute("data-busy")) return;
 		event.preventDefault();
 		event.stopPropagation();
 		const seq = state.openSeq, pointer = event.pointerId;
@@ -10414,7 +10367,7 @@ function enablePageDrag(button, index) {
 		frame = requestAnimationFrame(tick);
 	});
 	button.addEventListener("keydown", async event => {
-		if (!event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key) || document.body.hasAttribute("aria-busy")) return;
+		if (!event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key) || document.body.hasAttribute("data-busy")) return;
 		event.preventDefault();
 		const indexes = selectDragPages(index), direction = event.key === "ArrowUp" ? -1 : 1;
 		const target = direction < 0 ? indexes[0] - 1 : indexes.at(-1) + 1;
@@ -10454,7 +10407,6 @@ function setThumbnailContent(container, svgText, index, openSeq = state.openSeq)
 	try {
 		const svg = parseSVG(svgText, `t${openSeq}-${index}`);
 		svg.classList.add("thumb-svg");
-		svg.setAttribute("aria-hidden", "true");
 		container.classList.remove("pending", "error");
 		container.append(svg);
 		container.dataset.renderKey = renderKey;
@@ -10581,7 +10533,7 @@ function renderMeta(keepDetails = false) {
 		}));
 	});
 	el.documentSelect.value = String(doc.documentIndex || 0);
-	el.metaPanel.setAttribute("aria-busy", String(!!doc.detailsPending));
+	el.metaPanel.setAttribute("data-busy", String(!!doc.detailsPending));
 	document.title = `OFDGo WebUI - ${state.fileName}`;
 	el.metaFile.textContent = state.fileName;
 	el.metaTitle.textContent = doc.title || "-";
@@ -10616,7 +10568,7 @@ function renderMetaContent(node, value, render) {
 }
 
 function openStructureDialog() {
-	if (!state.editing || !state.doc || document.body.hasAttribute("aria-busy")) return;
+	if (!state.editing || !state.doc || document.body.hasAttribute("data-busy")) return;
 	el.structureEntry.replaceChildren();
 	for (const [index, structure] of (state.doc.structures || []).entries()) {
 		if (structure.internal) continue;
@@ -10687,7 +10639,6 @@ function addStructureAttribute(attribute = {}) {
 		input.name = name;
 		input.value = attribute[name] || "";
 		input.placeholder = label;
-		input.setAttribute("aria-label", label);
 		input.required = name === "name";
 		if (name === "value") input.className = "structure-attribute-value";
 		row.append(input);
@@ -10697,7 +10648,6 @@ function addStructureAttribute(attribute = {}) {
 	remove.className = "icon-button";
 	remove.textContent = "×";
 	remove.title = "删除属性";
-	remove.setAttribute("aria-label", remove.title);
 	remove.addEventListener("click", () => row.remove());
 	row.append(remove);
 	el.structureAttributes.append(row);
@@ -10719,7 +10669,6 @@ function addStructureReference(reference = {}) {
 		button.className = "icon-button";
 		button.textContent = text;
 		button.title = label;
-		button.setAttribute("aria-label", label);
 	}
 	remove.addEventListener("click", () => row.remove());
 	add.addEventListener("click", () => {
@@ -10729,7 +10678,6 @@ function addStructureReference(reference = {}) {
 		const line = document.createElement("div"), title = document.createElement("label"), unit = document.createElement("div");
 		line.className = "form-row";
 		title.textContent = label;
-		control.setAttribute("aria-label", label);
 		unit.className = "form-unit";
 		unit.append(control);
 		if (button) unit.append(button);
@@ -10775,7 +10723,7 @@ function renderStructures() {
 
 function updateStructureControls() {
 	renderMetaContent(el.structureList, [state.doc?.structures, state.doc?.structureError, state.doc?.documentIndex, state.doc?.documentVersion, state.openSeq, state.editorInfo?.revision, state.editing], renderStructures);
-	el.structureManage.disabled = !state.ready || state.exporting || document.body.hasAttribute("aria-busy") || Boolean(state.doc?.detailsPending);
+	el.structureManage.disabled = !state.ready || state.exporting || document.body.hasAttribute("data-busy") || Boolean(state.doc?.detailsPending);
 }
 
 function structureNode(node, index, path) {
@@ -10802,7 +10750,6 @@ function structureNode(node, index, path) {
 		const pending = document.createElement("div");
 		pending.className = "panel-detail";
 		pending.textContent = "读取中";
-		pending.setAttribute("role", "status");
 		content.append(pending);
 		const sequence = state.openSeq;
 		try {
@@ -10831,7 +10778,7 @@ function structureNode(node, index, path) {
 				for (const region of pages.values()) {
 					const button = document.createElement("button");
 					button.type = "button"; button.className = "signature-stamp-link";
-					button.textContent = `第${region.page}页`; button.title = "定位原文";
+					button.textContent = `第${region.page}页`;
 					button.addEventListener("click", () => focusPageRegion(region, node.name));
 					links.append(button);
 				}
@@ -11077,7 +11024,7 @@ function appendSignaturePolicy(row, label, checked, ok) {
 
 async function focusPageRegion(region, label, alignment = "nearest") {
 	const pageIndex = region.page - 1;
-	if (!state.doc || pageIndex < 0 || document.body.hasAttribute("aria-busy")) {
+	if (!state.doc || pageIndex < 0 || document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	const openSeq = state.openSeq;
@@ -11158,12 +11105,10 @@ function mountAnnotationNotes(index, surface, annotations) {
 		note.classList.toggle("no-rotate", !!annotation.noRotate);
 		note.textContent = "\u24d8";
 		note.title = "查看注解";
-		note.setAttribute("aria-label", "查看注解");
-		note.setAttribute("aria-haspopup", "dialog");
 		note.style.left = `${Math.max(22 / MM_TO_PX, Math.min(page.width, region.x + region.width)) * MM_TO_PX}px`;
 		note.style.top = `${Math.max(0, Math.min(page.height - 22 / MM_TO_PX, region.y)) * MM_TO_PX}px`;
 		note.addEventListener("click", () => {
-			if (state.editing || document.body.hasAttribute("aria-busy")) return;
+			if (state.editing || document.body.hasAttribute("data-busy")) return;
 			el.annotationDetail.replaceChildren();
 			el.annotationFields.hidden = el.annotationSubmit.hidden = true;
 			el.annotationDetail.hidden = false;
@@ -11234,8 +11179,6 @@ function renderDocumentFonts() {
 			action.type = "button";
 			action.className = "small-button font-binding-action";
 			action.textContent = font.embedded ? "外置" : "嵌入";
-			action.title = font.embedded ? "外置字体" : "嵌入字体";
-			action.setAttribute("aria-label", action.title);
 			action.addEventListener("click", () => openFontBinding(font));
 			head.append(action);
 		}
@@ -11248,7 +11191,7 @@ function renderDocumentFonts() {
 }
 
 async function openFontBinding(font) {
-	if (!state.editing || document.body.hasAttribute("aria-busy")) return;
+	if (!state.editing || document.body.hasAttribute("data-busy")) return;
 	if (!font.embedded && font.status === "matched") {
 		await changeDocument("ofdgoChangeFontBinding", null, font.id, 1);
 		return;
@@ -11356,7 +11299,7 @@ function fontMeta(font) {
 function setContinuous(continuous) {
 	state.continuous = continuous;
 	el.pageFrame.classList.toggle("continuous", state.continuous);
-	el.continuousButton.setAttribute("aria-pressed", String(state.continuous));
+	el.continuousButton.setAttribute("data-pressed", String(state.continuous));
 }
 
 function toggleContinuous() {
@@ -11376,7 +11319,7 @@ function toggleContinuous() {
 }
 
 function rotatePages() {
-	if (document.body.hasAttribute("aria-busy")) {
+	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	state.rotation = (state.rotation + 90) % 360;
@@ -11397,7 +11340,7 @@ function pageViewSize(page) {
 }
 
 function togglePan() {
-	if (document.body.hasAttribute("aria-busy")) {
+	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	setPan(!state.panMode);
@@ -11407,12 +11350,12 @@ function setPan(enabled) {
 	endPan();
 	state.panMode = enabled;
 	el.viewerPanel.classList.toggle("pan-mode", state.panMode);
-	el.panButton.setAttribute("aria-pressed", String(state.panMode));
+	el.panButton.setAttribute("data-pressed", String(state.panMode));
 	updateEditorTools();
 }
 
 function startPan(event) {
-	if (!state.panMode || !state.doc || event.pointerType !== "mouse" || event.button !== 0 || document.body.hasAttribute("aria-busy") || event.target.closest("a, button")) {
+	if (!state.panMode || !state.doc || event.pointerType !== "mouse" || event.button !== 0 || document.body.hasAttribute("data-busy") || event.target.closest("a, button")) {
 		return;
 	}
 	const rect = el.viewerPanel.getBoundingClientRect();
@@ -11666,7 +11609,7 @@ function updateInvoiceControl(disabled) {
 
 function updateDocumentControls() {
 	const count = state.doc?.documents?.length || 0, index = managedDocumentIndex(), manager = state.documentManagement;
-	const busy = document.body.hasAttribute("aria-busy");
+	const busy = document.body.hasAttribute("data-busy");
 	const disabled = !state.doc || !state.ready || state.exporting || busy;
 	el.documentManageButton.hidden = !state.editing;
 	el.documentManageButton.disabled = disabled;
@@ -11707,8 +11650,8 @@ function updateControls() {
 	el.rotateButton.disabled = !hasDoc;
 	el.panButton.disabled = !hasDoc;
 	el.continuousButton.disabled = !hasDoc;
-	el.fitButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "width");
-	el.fitHeightButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "height");
+	el.fitButton.toggleAttribute("data-pressed", hasDoc && state.fitMode === "width");
+	el.fitHeightButton.toggleAttribute("data-pressed", hasDoc && state.fitMode === "height");
 	updateAnnotationButton();
 	el.exportFormat.disabled = !hasDoc || state.exporting || !state.exportFormats.length;
 	el.outputCompression.disabled = !hasDoc || state.exporting;
@@ -11719,10 +11662,9 @@ function updateControls() {
 
 function updateEditorTools() {
 	el.viewerPanel.classList.toggle("editing", state.editing);
-	el.editButton.disabled = !state.doc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy");
-	el.editButton.setAttribute("aria-pressed", String(state.editing));
+	el.editButton.disabled = !state.doc || !state.ready || state.exporting || document.body.hasAttribute("data-busy");
+	el.editButton.setAttribute("data-pressed", String(state.editing));
 	el.editButton.title = state.editing ? "阅读" : "编辑";
-	el.editButton.setAttribute("aria-label", el.editButton.title);
 	el.editNotice.textContent = state.editorInfo?.editWarnings?.join(" · ") || "";
 	el.editNotice.hidden = !state.editing || !el.editNotice.textContent;
 	el.editorTools.hidden = !state.editing;
@@ -11763,18 +11705,14 @@ function updateObjectControls(item, reset = false) {
 	el.saveImageButton.disabled = disabled || !item.imageResource;
 	el.imageFit.disabled = el.cropImageButton.disabled || cropping || Boolean(item.scoped && !canEditObject(item, "fitImage"));
 	el.cropImageButton.textContent = cropping ? "完成" : "裁剪";
-	el.cropImageButton.setAttribute("aria-label", cropping ? "完成裁剪" : "裁剪图片");
-	el.cropImageButton.setAttribute("aria-pressed", String(cropping));
+	el.cropImageButton.setAttribute("data-pressed", String(cropping));
 	el.resetCropButton.textContent = cropping ? "取消" : "还原";
-	el.resetCropButton.setAttribute("aria-label", cropping ? "取消裁剪" : "还原图片");
 	el.resetCropButton.disabled = canEditObject(item, "resetCrop") ? disabled : el.cropImageButton.disabled || !cropping && (item.scoped ? !item.cropped : !item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
 	el.objectDistribute.disabled = el.objectAlign.disabled || !item.items || item.items.length < 3;
 	el.editObjectButton.disabled = disabled || (item.items ? !item.items.every(member => member.type === "TextObject" && !member.richText)
 		: !canEditObject(item, "enter") && (item.type === "PathObject"
 		|| !(item.type === "TextObject" && canEditObject(item, "rewriteText")) && !canEditObject(item, item.type === "TextObject" ? "textContent" : item.type === "ImageObject" ? "replaceImage" : "update")));
 	el.editObjectButton.textContent = canEditObject(item, "enter") ? "进入" : item?.type === "ImageObject" ? "替换" : "修改";
-	el.editObjectButton.title = canEditObject(item, "enter") ? item?.type === "Annotation" ? "进入注解" : "进入组合" : item?.type === "ImageObject" ? "替换图片" : item?.type === "Annotation" ? "修改注解" : "修改对象";
-	el.editObjectButton.setAttribute("aria-label", el.editObjectButton.title);
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const selection = selectedText(item);
 	const text = selection ? currentTextStyle() : state.textDefaults;
@@ -11787,7 +11725,7 @@ function updateObjectControls(item, reset = false) {
 	for (const button of textFormatButtons) {
 		button.disabled = formatsDisabled;
 		const key = button.dataset.textFormat;
-		button.setAttribute("aria-pressed", text[key] === undefined && (canvasEditor.input?.rich || item?.richText) ? "mixed" : String(Boolean(text[key])));
+		button.setAttribute("data-pressed", text[key] === undefined && (canvasEditor.input?.rich || item?.richText) ? "mixed" : String(Boolean(text[key])));
 	}
 	textBackground.disabled = formatsDisabled;
 	textBackground.classList.toggle("mixed-color", Boolean((canvasEditor.input?.rich || item?.richText) && text.background === undefined));
@@ -11811,7 +11749,7 @@ function updateObjectControls(item, reset = false) {
 	el.textAlign.value = layoutKnown ? text.align || "left" : "";
 	el.textLineHeight.placeholder = layoutKnown ? "自动" : "原文";
 	el.textSpacing.placeholder = layoutKnown ? "0" : "原文";
-	el.textWrap.setAttribute("aria-pressed", String(Boolean(text.wrap)));
+	el.textWrap.setAttribute("data-pressed", String(Boolean(text.wrap)));
 	if (reset || document.activeElement !== el.textLineHeight) {
 		el.textLineHeight.value = text.paragraphHeight ? String(displayPoints(text.paragraphHeight)) : "";
 	}
@@ -11861,9 +11799,7 @@ function updateObjectControls(item, reset = false) {
 }
 
 function updateAnnotationButton() {
-	el.annotationButton.setAttribute("aria-pressed", String(state.renderAnnotations));
-	el.annotationButton.title = state.renderAnnotations ? "隐藏注解" : "显示注解";
-	el.annotationButton.setAttribute("aria-label", el.annotationButton.title);
+	el.annotationButton.setAttribute("data-pressed", String(state.renderAnnotations));
 }
 
 async function callWASM(name, ...args) {
@@ -11889,8 +11825,6 @@ async function callWASM(name, ...args) {
 			state.exportRequestID = id;
 			el.cancelExportButton.hidden = false;
 			el.cancelExportButton.disabled = false;
-			el.cancelExportButton.title = { ofdgoImportImages: "取消导入", ofdgoConvertPDF: "取消转换", ofdgoSaveDocument: "取消保存", ofdgoSaveSigned: "取消签署", ofdgoImportPages: "取消导入", ofdgoExportAttachment: "取消下载" }[name] || "取消导出";
-			el.cancelExportButton.setAttribute("aria-label", el.cancelExportButton.title);
 		}
 		try {
 			const transfer = [];
@@ -11916,7 +11850,7 @@ function showError(err, empty = !state.doc) {
 }
 
 function setBusy(busy, text = "", percent = 0, status = "") {
-	document.body.toggleAttribute("aria-busy", busy);
+	document.body.toggleAttribute("data-busy", busy);
 	updateStructureControls();
 	updateDocumentControls();
 	renderSecurity();
@@ -11974,7 +11908,6 @@ function setProgress(text = "", percent = 0, status = "") {
 	}
 	const value = Math.max(0, Math.min(100, percent));
 	el.progressBar.style.width = `${value}%`;
-	el.progressBar.setAttribute("aria-valuenow", String(value));
 }
 
 function setStatus(text) {
@@ -12025,7 +11958,7 @@ function exportFormatUsesDPI(value) {
 }
 
 function updateDPIControl() {
-	el.imageDPI.disabled = state.exporting || !state.doc || document.body.hasAttribute("aria-busy") || (displayMode() !== "raster" && !exportFormatUsesDPI(el.exportFormat.value));
+	el.imageDPI.disabled = state.exporting || !state.doc || document.body.hasAttribute("data-busy") || (displayMode() !== "raster" && !exportFormatUsesDPI(el.exportFormat.value));
 	el.imageDPI.title = `输出精度：${currentImageDPI()} DPI`;
 	el.dpiValue.textContent = String(currentImageDPI());
 	const format = exportFormatInfo(el.exportFormat.value);

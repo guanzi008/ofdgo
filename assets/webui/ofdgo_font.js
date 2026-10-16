@@ -14,10 +14,10 @@ export class FontPicker {
 			else { input.focus(); this.show(); }
 		});
 		list.addEventListener("pointerdown", event => {
-			if (event.target.closest("[role=option]")) event.preventDefault();
+			if (event.target.closest(".font-option")) event.preventDefault();
 		});
 		list.addEventListener("click", event => {
-			const option = event.target.closest("[role=option]");
+			const option = event.target.closest(".font-option");
 			if (option) this.choose(Number(option.dataset.index));
 		});
 		window.addEventListener("resize", () => this.close());
@@ -46,8 +46,6 @@ export class FontPicker {
 		this.input.value = font?.fullName || font?.name || "";
 		this.input.scrollLeft = 0;
 		this.input.title = font ? [this.input.value, this.sourceLabel(font)].filter(Boolean).join(" · ") : "";
-		this.input.setAttribute("aria-expanded", String(this.open));
-		this.input.removeAttribute("aria-activedescendant");
 	}
 
 	sourceLabel(font) {
@@ -67,10 +65,10 @@ export class FontPicker {
 		this.list.replaceChildren();
 		for (const { font, index } of this.matches) {
 			const option = document.createElement("div");
+			option.className = "font-option";
 			option.id = `${this.list.id}-${index}`;
 			option.dataset.index = String(index);
-			option.setAttribute("role", "option");
-			option.setAttribute("aria-disabled", String(Boolean(font.disabled)));
+			option.setAttribute("data-disabled", String(Boolean(font.disabled)));
 			const name = document.createElement("span");
 			name.textContent = font.fullName || font.name;
 			option.append(name);
@@ -92,7 +90,6 @@ export class FontPicker {
 		}
 		if (!this.open) this.list.showPopover();
 		this.open = true;
-		this.input.setAttribute("aria-expanded", "true");
 		this.position();
 		const selected = this.matches.findIndex(({ font, index }) => !font.disabled && String(index) === this.value);
 		this.activate(selected < 0 ? this.matches.findIndex(({ font }) => !font.disabled) : selected);
@@ -110,12 +107,11 @@ export class FontPicker {
 
 	activate(index) {
 		this.active = index;
-		[...this.list.children].forEach((option, i) => option.setAttribute("aria-selected", String(i === index)));
+		[...this.list.children].forEach((option, i) => option.setAttribute("data-selected", String(i === index)));
 		const option = this.list.children[index];
 		if (option) {
-			this.input.setAttribute("aria-activedescendant", option.id);
 			option.scrollIntoView({ block: "nearest" });
-		} else this.input.removeAttribute("aria-activedescendant");
+		}
 	}
 
 	choose(index) {

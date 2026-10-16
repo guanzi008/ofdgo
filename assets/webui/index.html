@@ -16,73 +16,73 @@
 			<input id="fontInput" class="file-input" type="file" accept=".ttf,.otf,.ttc,font/*" multiple>
 			<input id="fontDirectoryInput" class="file-input" type="file" webkitdirectory multiple>
 			<div class="tool-group">
-				<button id="ofdButton" class="icon-button" type="button" title="打开" aria-label="打开" aria-keyshortcuts="Control+O Meta+O"><span class="open-icon" aria-hidden="true"></span></button>
-				<button id="newButton" class="icon-button" type="button" title="新建" aria-label="新建"><span class="new-icon" aria-hidden="true"></span></button>
-				<button id="saveButton" class="icon-button" type="button" title="保存" aria-label="保存" aria-keyshortcuts="Control+S Meta+S" disabled><span class="save-icon" aria-hidden="true"></span></button>
-				<button id="editButton" class="icon-button" type="button" title="编辑" aria-label="编辑" aria-pressed="false" disabled><span class="edit-icon" aria-hidden="true"></span></button>
-				<button id="convertButton" class="icon-button" type="button" title="转换" aria-label="转换" aria-haspopup="dialog" aria-controls="convertPanel"><span aria-hidden="true">&#8644;</span></button>
-				<button id="togglePagesButton" class="icon-button" type="button" title="页面栏" aria-label="页面栏" aria-pressed="true">&#9776;</button>
-				<button id="toggleMetaButton" class="icon-button" type="button" title="信息栏" aria-label="信息栏" aria-pressed="true">&#9432;</button>
+				<button id="ofdButton" class="icon-button" type="button" title="打开"><span class="open-icon"></span></button>
+				<button id="newButton" class="icon-button" type="button" title="新建"><span class="new-icon"></span></button>
+				<button id="saveButton" class="icon-button" type="button" title="保存" disabled><span class="save-icon"></span></button>
+				<button id="editButton" class="icon-button" type="button" title="编辑" data-pressed="false" disabled><span class="edit-icon"></span></button>
+				<button id="convertButton" class="icon-button" type="button" title="转换"><span>&#8644;</span></button>
+				<button id="togglePagesButton" class="icon-button" type="button" title="页面栏" data-pressed="true">&#9776;</button>
+				<button id="toggleMetaButton" class="icon-button" type="button" title="信息栏" data-pressed="true">&#9432;</button>
 			</div>
 			<div class="toolbar-space"></div>
 			<div class="tool-group">
-				<button id="prevButton" class="icon-button arrow-prev" type="button" title="上一页" aria-label="上一页" aria-keyshortcuts="ArrowLeft" disabled></button>
+				<button id="prevButton" class="icon-button arrow-prev" type="button" title="上一页" disabled></button>
 				<label class="page-control">
 					<input id="pageInput" type="number" min="1" value="0" disabled>
 					<span>/</span>
 					<span id="pageTotal">0</span>
 				</label>
-				<button id="nextButton" class="icon-button arrow-next" type="button" title="下一页" aria-label="下一页" aria-keyshortcuts="ArrowRight" disabled></button>
+				<button id="nextButton" class="icon-button arrow-next" type="button" title="下一页" disabled></button>
 			</div>
 			<div class="tool-group">
-				<button id="zoomOutButton" class="icon-button" type="button" title="缩小" aria-label="缩小" aria-keyshortcuts="-" disabled>-</button>
+				<button id="zoomOutButton" class="icon-button" type="button" title="缩小" disabled>-</button>
 				<span id="zoomLabel" class="zoom-label">100%</span>
-				<button id="zoomInButton" class="icon-button" type="button" title="放大" aria-label="放大" aria-keyshortcuts="= Shift+= Plus" disabled>+</button>
-				<button id="fitButton" class="button" type="button" data-short="宽" aria-label="适宽" disabled>适宽</button>
-				<button id="fitHeightButton" class="button" type="button" data-short="高" aria-label="适高" disabled>适高</button>
-				<button id="rotateButton" class="button" type="button" data-short="转" title="右转90°" aria-label="旋转" disabled>旋转</button>
-				<button id="panButton" class="button" type="button" data-short="拖" title="拖动页面" aria-label="拖动" aria-pressed="false" disabled>拖动</button>
-				<button id="continuousButton" class="button" type="button" data-short="连" title="连续显示" aria-label="连续显示" aria-pressed="false" disabled>连续</button>
-				<button id="annotationButton" class="button" type="button" data-short="注" title="隐藏注解" aria-label="隐藏注解" aria-pressed="true">注解</button>
+				<button id="zoomInButton" class="icon-button" type="button" title="放大" disabled>+</button>
+				<button id="fitButton" class="button" type="button" data-short="宽" disabled>适宽</button>
+				<button id="fitHeightButton" class="button" type="button" data-short="高" disabled>适高</button>
+				<button id="rotateButton" class="button" type="button" data-short="转" disabled>旋转</button>
+				<button id="panButton" class="button" type="button" data-short="拖" data-pressed="false" disabled>拖动</button>
+				<button id="continuousButton" class="button" type="button" data-short="连" data-pressed="false" disabled>连续</button>
+				<button id="annotationButton" class="button" type="button" data-short="注" data-pressed="true">注解</button>
 			</div>
-			<div class="tool-group" role="group" aria-label="显示">
-				<button id="renderVectorButton" class="button" type="button" data-short="矢" aria-label="矢量显示" aria-pressed="true" title="矢量显示" disabled>矢量</button>
-				<button id="renderRasterButton" class="button" type="button" data-short="位" aria-label="位图显示" aria-pressed="false" title="位图显示" disabled>位图</button>
+			<div class="tool-group">
+				<button id="renderVectorButton" class="button" type="button" data-short="矢" data-pressed="true" disabled>矢量</button>
+				<button id="renderRasterButton" class="button" type="button" data-short="位" data-pressed="false" disabled>位图</button>
 			</div>
-			<div class="tool-group" role="group" aria-label="导出">
-				<label class="toolbar-select"><select id="exportFormat" class="format-select" title="导出格式" aria-label="导出格式" disabled></select><span id="formatValue" aria-hidden="true"></span></label>
-				<label class="toolbar-select"><select id="imageDPI" class="format-select" title="输出精度" aria-label="输出精度" disabled>
+			<div class="tool-group">
+				<label class="toolbar-select"><select id="exportFormat" class="format-select" title="导出格式" disabled></select><span id="formatValue"></span></label>
+				<label class="toolbar-select"><select id="imageDPI" class="format-select" title="输出精度" disabled>
 					<option value="96">96 dpi</option>
 					<option value="150">150 dpi</option>
 					<option value="300" selected>300 dpi</option>
 					<option value="600">600 dpi</option>
-				</select><span id="dpiValue" aria-hidden="true">300</span></label>
-				<label class="toolbar-select"><select id="outputCompression" class="format-select" title="压缩模式" aria-label="压缩模式" disabled><option value="0">原始</option><option value="1">无损</option><option value="2">轻压</option><option value="3">均衡</option><option value="4">强压</option></select><span id="compressionValue" data-short="原" aria-hidden="true">原始</span></label>
-				<button id="exportPageButton" class="button" type="button" data-short="单" title="导出单页" aria-label="导出单页" disabled>单页</button>
-				<button id="exportButton" class="button" type="button" data-short="多" title="导出文档" aria-label="导出文档" aria-haspopup="dialog" aria-controls="exportPanel" disabled>文档</button>
+				</select><span id="dpiValue">300</span></label>
+				<label class="toolbar-select"><select id="outputCompression" class="format-select" title="压缩模式" disabled><option value="0">原始</option><option value="1">无损</option><option value="2">轻压</option><option value="3">均衡</option><option value="4">强压</option></select><span id="compressionValue" data-short="原">原始</span></label>
+				<button id="exportPageButton" class="button" type="button" data-short="单" disabled>单页</button>
+				<button id="exportButton" class="button" type="button" data-short="多" disabled>文档</button>
 			</div>
 		</header>
-		<div id="editorTools" class="editor-toolbar" role="toolbar" aria-label="编辑工具" hidden>
+		<div id="editorTools" class="editor-toolbar" hidden>
 			<div class="editor-group editor-actions">
 				<button id="undoButton" class="button" type="button" disabled>撤销</button>
 				<button id="redoButton" class="button" type="button" disabled>重做</button>
 				<span>操作</span>
 			</div>
 			<div class="editor-group editor-objects">
-				<button id="compositeBackButton" class="button" type="button" title="返回上层" hidden>返回</button>
-				<button id="selectObjectButton" class="button" type="button" aria-pressed="true">选择</button>
-				<button id="multiSelectButton" class="button" type="button" aria-pressed="false" title="多选对象">多选</button>
-				<button id="editObjectButton" class="button" type="button" aria-label="修改对象" disabled>修改</button>
-				<button id="copyObjectButton" class="button" type="button" aria-label="复制对象" disabled>复制</button>
+				<button id="compositeBackButton" class="button" type="button" hidden>返回</button>
+				<button id="selectObjectButton" class="button" type="button" data-pressed="true">选择</button>
+				<button id="multiSelectButton" class="button" type="button" data-pressed="false">多选</button>
+				<button id="editObjectButton" class="button" type="button" disabled>修改</button>
+				<button id="copyObjectButton" class="button" type="button" disabled>复制</button>
 				<button id="deleteObjectButton" class="button" type="button" disabled>删除</button>
-				<select id="objectOrder" class="order-select" aria-label="对象层级" disabled>
+				<select id="objectOrder" class="order-select" disabled>
 					<option value="" hidden>层级</option>
 					<option value="up">上移</option>
 					<option value="down">下移</option>
 					<option value="top">置顶</option>
 					<option value="bottom">置底</option>
 				</select>
-				<select id="objectAlign" class="order-select" aria-label="对象对齐" disabled>
+				<select id="objectAlign" class="order-select" disabled>
 					<option value="" hidden>对齐</option>
 					<option value="left">左侧</option>
 					<option value="center">水平</option>
@@ -91,102 +91,102 @@
 					<option value="middle">垂直</option>
 					<option value="bottom">底部</option>
 				</select>
-				<select id="objectDistribute" class="order-select" aria-label="对象分布" disabled>
+				<select id="objectDistribute" class="order-select" disabled>
 					<option value="" hidden>分布</option>
 					<option value="horizontal">水平</option>
 					<option value="vertical">垂直</option>
 				</select>
-				<button id="objectStyleButton" class="editor-group-action" type="button" title="对象样式" aria-label="对象样式" aria-haspopup="dialog" aria-controls="objectStylePanel" disabled>对象</button>
+				<button id="objectStyleButton" class="editor-group-action" type="button" disabled>对象</button>
 			</div>
 			<div class="editor-group">
-				<button id="insertTextButton" class="button" type="button" title="文字" aria-label="文字" aria-pressed="false">文字</button>
-				<button id="insertImageButton" class="button" type="button" title="图片" aria-label="图片">图片</button>
-				<button id="drawLineButton" class="button" type="button" title="直线" aria-label="直线" aria-pressed="false">直线</button>
-				<button id="drawRectangleButton" class="button" type="button" title="矩形" aria-label="矩形" aria-pressed="false">矩形</button>
-				<button id="drawEllipseButton" class="button" type="button" title="椭圆" aria-label="椭圆" aria-pressed="false">椭圆</button>
-				<select id="arrowTool" aria-label="箭头" title="箭头"><option value="" hidden>箭头</option><option value="line">直线</option><option value="arrow">单向</option><option value="double-arrow">双向</option></select>
-				<select id="penTool" aria-label="画笔" title="画笔"><option value="" hidden>画笔</option><option value="pen-round">圆笔</option><option value="pen-pressure">钢笔</option></select>
-				<select id="annotationTool" aria-label="注解" title="注解"><option value="" hidden>注解</option><option value="note">批注</option><option value="watermark">水印</option><option value="stamp">印章</option><option value="link">链接</option><option value="details">说明</option><option value="replace">替换</option><option value="objects">选取</option></select>
+				<button id="insertTextButton" class="button" type="button" data-pressed="false">文字</button>
+				<button id="insertImageButton" class="button" type="button">图片</button>
+				<button id="drawLineButton" class="button" type="button" data-pressed="false">直线</button>
+				<button id="drawRectangleButton" class="button" type="button" data-pressed="false">矩形</button>
+				<button id="drawEllipseButton" class="button" type="button" data-pressed="false">椭圆</button>
+				<select id="arrowTool" title="箭头"><option value="" hidden>箭头</option><option value="line">直线</option><option value="arrow">单向</option><option value="double-arrow">双向</option></select>
+				<select id="penTool" title="画笔"><option value="" hidden>画笔</option><option value="pen-round">圆笔</option><option value="pen-pressure">钢笔</option></select>
+				<select id="annotationTool" title="注解"><option value="" hidden>注解</option><option value="note">批注</option><option value="watermark">水印</option><option value="stamp">印章</option><option value="link">链接</option><option value="details">说明</option><option value="replace">替换</option><option value="objects">选取</option></select>
 				<span>插入</span>
 			</div>
 			<div class="editor-group">
-				<div class="text-font"><div class="font-picker"><input id="textFont" type="text" role="combobox" aria-label="字体" title="字体" aria-autocomplete="list" aria-controls="textFontList" aria-expanded="false" autocomplete="off" spellcheck="false" disabled><button id="textFontToggle" type="button" title="选择字体" aria-label="选择字体" tabindex="-1" disabled></button></div><button id="textFontAdd" class="icon-button" type="button" title="添加字体" aria-label="添加字体">+</button></div>
-				<div id="textFontList" class="font-listbox" role="listbox" aria-label="字体列表" popover="manual"></div>
-				<label class="editor-field"><span>字号</span><span class="editor-number"><input id="textSize" type="number" min="1" step="any" required aria-label="字号" disabled><span>pt</span></span></label>
-				<button id="textBold" class="button text-format-bold" data-text-format="bold" type="button" title="粗体" aria-label="粗体" aria-pressed="false" disabled>B</button>
-				<button id="textItalic" class="button text-format-italic" data-text-format="italic" type="button" title="斜体" aria-label="斜体" aria-pressed="false" disabled>I</button>
-				<button id="textUnderline" class="button text-format-underline" data-text-format="underline" type="button" title="下划线" aria-label="下划线" aria-pressed="false" disabled>U</button>
-				<button id="textStrikeout" class="button text-format-strikeout" data-text-format="strikeout" type="button" title="删除线" aria-label="删除线" aria-pressed="false" disabled>S</button>
-				<button id="textShadow" class="button text-format-shadow" data-text-format="shadow" type="button" title="阴影" aria-label="阴影" aria-pressed="false" disabled>A</button>
-				<div class="text-highlight"><button id="textHighlight" class="button" data-text-format="background" type="button" title="底色" aria-label="底色" aria-pressed="false" disabled><span aria-hidden="true">A</span></button><input id="textBackground" class="color-input" type="color" value="#ffff00" title="选择底色" aria-label="选择底色" disabled></div>
-				<input id="textColor" class="color-input" type="color" value="#000000" aria-label="文字颜色" title="文字颜色" disabled>
+				<div class="text-font"><div class="font-picker"><input id="textFont" type="text" title="字体" autocomplete="off" spellcheck="false" disabled><button id="textFontToggle" type="button" title="选择字体" tabindex="-1" disabled></button></div><button id="textFontAdd" class="icon-button" type="button" title="添加字体">+</button></div>
+				<div id="textFontList" class="font-listbox" popover="manual"></div>
+				<label class="editor-field"><span>字号</span><span class="editor-number"><input id="textSize" type="number" min="1" step="any" required disabled><span>pt</span></span></label>
+				<button id="textBold" class="button text-format-bold" data-text-format="bold" type="button" title="粗体" data-pressed="false" disabled>B</button>
+				<button id="textItalic" class="button text-format-italic" data-text-format="italic" type="button" title="斜体" data-pressed="false" disabled>I</button>
+				<button id="textUnderline" class="button text-format-underline" data-text-format="underline" type="button" title="下划线" data-pressed="false" disabled>U</button>
+				<button id="textStrikeout" class="button text-format-strikeout" data-text-format="strikeout" type="button" title="删除线" data-pressed="false" disabled>S</button>
+				<button id="textShadow" class="button text-format-shadow" data-text-format="shadow" type="button" title="阴影" data-pressed="false" disabled>A</button>
+				<div class="text-highlight"><button id="textHighlight" class="button" data-text-format="background" type="button" title="底色" data-pressed="false" disabled><span>A</span></button><input id="textBackground" class="color-input" type="color" value="#ffff00" title="选择底色" disabled></div>
+				<input id="textColor" class="color-input" type="color" value="#000000" title="文字颜色" disabled>
 				<span>文字</span>
 			</div>
 			<div class="editor-group editor-paragraph">
-				<select id="textAlign" aria-label="段落对齐" title="段落对齐" disabled>
+				<select id="textAlign" title="段落对齐" disabled>
 					<option value="" hidden>原文</option>
 					<option value="left">左齐</option>
 					<option value="center">居中</option>
 					<option value="right">右齐</option>
 					<option value="justify">两端</option>
 				</select>
-				<label class="editor-field"><span>行距</span><span class="editor-number"><input id="textLineHeight" type="number" min="0" step="any" placeholder="自动" aria-label="行距" title="行距，0为自动" disabled><span>pt</span></span></label>
-				<button id="textWrap" class="button" type="button" aria-label="自动折行" aria-pressed="false" disabled>折行</button>
-				<button id="textReflow" class="button" type="button" title="重新排版" hidden>重排</button>
-				<label class="editor-field"><span>字距</span><span class="editor-number"><input id="textSpacing" type="number" step="any" placeholder="0" aria-label="字距" title="字距" disabled><span>pt</span></span></label>
-				<button id="paragraphButton" class="editor-group-action" type="button" title="段落缩进" aria-label="段落缩进" aria-haspopup="dialog" aria-controls="paragraphPanel" disabled>段落</button>
+				<label class="editor-field"><span>行距</span><span class="editor-number"><input id="textLineHeight" type="number" min="0" step="any" placeholder="自动" title="行距，0为自动" disabled><span>pt</span></span></label>
+				<button id="textWrap" class="button" type="button" data-pressed="false" disabled>折行</button>
+				<button id="textReflow" class="button" type="button" hidden>重排</button>
+				<label class="editor-field"><span>字距</span><span class="editor-number"><input id="textSpacing" type="number" step="any" placeholder="0" title="字距" disabled><span>pt</span></span></label>
+				<button id="paragraphButton" class="editor-group-action" type="button" disabled>段落</button>
 			</div>
 			<div class="editor-group">
-				<div class="shape-paint"><label><input id="shapeFill" type="checkbox">填充</label><input id="shapeFillColor" class="color-input" type="color" value="#dcefeb" aria-label="填充颜色" title="填充颜色"></div>
-				<div class="shape-paint"><label><input id="shapeStroke" type="checkbox" checked>描边</label><input id="shapeStrokeColor" class="color-input" type="color" value="#000000" aria-label="描边颜色" title="描边颜色"></div>
-				<label class="editor-field"><span>线宽</span><span class="editor-number"><input id="shapeWidth" type="number" value="1" min="0" step="any" required aria-label="线宽" title="线宽"><span>pt</span></span></label>
+				<div class="shape-paint"><label><input id="shapeFill" type="checkbox">填充</label><input id="shapeFillColor" class="color-input" type="color" value="#dcefeb" title="填充颜色"></div>
+				<div class="shape-paint"><label><input id="shapeStroke" type="checkbox" checked>描边</label><input id="shapeStrokeColor" class="color-input" type="color" value="#000000" title="描边颜色"></div>
+				<label class="editor-field"><span>线宽</span><span class="editor-number"><input id="shapeWidth" type="number" value="1" min="0" step="any" required title="线宽"><span>pt</span></span></label>
 				<span>图形</span>
 			</div>
 			<div class="editor-group editor-image">
-				<select id="imageFit" aria-label="图片适应方式" disabled>
+				<select id="imageFit" disabled>
 					<option value="" hidden>缩放</option>
 					<option value="contain">适应</option>
 					<option value="cover">填充</option>
 				</select>
 				<button id="saveImageButton" class="button" type="button" disabled>另存</button>
-				<button id="cropImageButton" class="button" type="button" aria-label="裁剪图片" aria-pressed="false" disabled>裁剪</button>
-				<button id="resetCropButton" class="button" type="button" aria-label="还原图片" disabled>还原</button>
+				<button id="cropImageButton" class="button" type="button" data-pressed="false" disabled>裁剪</button>
+				<button id="resetCropButton" class="button" type="button" disabled>还原</button>
 				<span>图片</span>
 			</div>
 			<div class="editor-group editor-transform">
-				<select id="objectRotate" class="order-select" aria-label="对象旋转" disabled>
+				<select id="objectRotate" class="order-select" disabled>
 					<option value="" hidden>旋转</option>
 					<option value="90">右转90°</option>
 					<option value="-90">左转90°</option>
 				</select>
-				<select id="objectFlip" class="order-select" aria-label="对象翻转" disabled>
+				<select id="objectFlip" class="order-select" disabled>
 					<option value="" hidden>翻转</option>
 					<option value="horizontal">水平</option>
 					<option value="vertical">垂直</option>
 				</select>
-				<button id="objectBoundsButton" class="editor-group-action" type="button" title="位置尺寸" aria-label="位置尺寸" aria-haspopup="dialog" aria-controls="objectBoundsPanel" disabled>变换</button>
+				<button id="objectBoundsButton" class="editor-group-action" type="button" disabled>变换</button>
 			</div>
 			<div class="editor-group editor-erase">
-				<button id="eraseButton" class="button" type="button" title="擦除" aria-label="擦除" aria-pressed="false">擦除</button>
-				<select id="eraseMode" aria-label="擦除方式" title="擦除方式，矩形和套索为视觉裁剪"><option value="erase-object">对象</option><option value="erase-region">矩形</option><option value="erase-path">套索</option></select>
+				<button id="eraseButton" class="button" type="button" data-pressed="false">擦除</button>
+				<select id="eraseMode" title="擦除方式，矩形和套索为视觉裁剪"><option value="erase-object">对象</option><option value="erase-region">矩形</option><option value="erase-path">套索</option></select>
 				<span>擦除</span>
 			</div>
 			<div class="editor-group">
-				<select id="addPageButton" aria-label="新增页面" title="新增页面"><option value="" hidden>新增</option><option value="blank">空白</option><option value="import">插页</option><option value="images">图片</option></select>
-				<button id="copyPageButton" class="button" type="button" aria-label="复制页面">复制</button>
-				<button id="deletePageButton" class="button" type="button" aria-label="删除页面">删除</button>
-				<button id="movePagePrevButton" class="button" type="button" aria-label="页面前移">前移</button>
-				<button id="movePageNextButton" class="button" type="button" aria-label="页面后移">后移</button>
-				<button id="pageSettingsButton" class="button" type="button" aria-label="页面设置" aria-haspopup="dialog" aria-controls="pagePanel">设置</button>
-				<button id="batchPagesButton" class="editor-group-action" type="button" title="批量页面" aria-label="批量页面" aria-haspopup="dialog" aria-controls="batchPagesPanel">页面</button>
+				<select id="addPageButton" title="新增页面"><option value="" hidden>新增</option><option value="blank">空白</option><option value="import">插页</option><option value="images">图片</option></select>
+				<button id="copyPageButton" class="button" type="button">复制</button>
+				<button id="deletePageButton" class="button" type="button">删除</button>
+				<button id="movePagePrevButton" class="button" type="button">前移</button>
+				<button id="movePageNextButton" class="button" type="button">后移</button>
+				<button id="pageSettingsButton" class="button" type="button">设置</button>
+				<button id="batchPagesButton" class="editor-group-action" type="button">页面</button>
 			</div>
 		</div>
-		<dialog id="convertPanel" class="form-dialog convert-dialog" aria-labelledby="convertTitle">
+		<dialog id="convertPanel" class="form-dialog convert-dialog">
 			<form id="convertForm">
 				<h2 id="convertTitle" class="form-title">批量转换<span id="convertCount"></span></h2>
 				<input id="convertInput" class="file-input" type="file" accept=".pdf,.ofd" multiple>
 				<div class="convert-table"><table><thead><tr><th scope="col">文件</th><th scope="col">页码</th><th scope="col">格式</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead><tbody id="convertList"></tbody></table><div id="convertEmpty" class="convert-empty">暂无文件</div></div>
-				<div class="convert-progress"><progress id="convertProgress" max="1" value="0" aria-label="转换进度"></progress><div id="convertStatus" role="status" aria-live="polite"></div></div>
+				<div class="convert-progress"><progress id="convertProgress" max="1" value="0"></progress><div id="convertStatus"></div></div>
 				<div class="form-actions">
 					<button id="convertAdd" class="button" type="button">添加</button><button id="convertClear" class="button" type="button">清空</button>
 					<div class="convert-options">
@@ -200,25 +200,25 @@
 				</div>
 			</form>
 		</dialog>
-		<dialog id="batchPagesPanel" class="form-dialog" aria-label="批量页面">
+		<dialog id="batchPagesPanel" class="form-dialog">
 			<form id="batchPagesForm">
 				<div class="form-row"><label for="batchPageAction">操作</label><select id="batchPageAction"><option value="copy">复制</option><option value="move">移动</option><option value="delete">删除</option><option value="save">另存</option></select></div>
 				<div class="form-row"><label for="batchPageRange">页码</label><input id="batchPageRange" type="text" required autocomplete="off" spellcheck="false" autofocus></div>
 				<div id="batchPagePositionRow" class="form-row" hidden><label for="batchPagePosition">位置</label><select id="batchPagePosition"><option value="before">页前</option><option value="after">页后</option><option value="first">开头</option><option value="last">末尾</option></select></div>
-				<div class="form-actions"><div id="batchPagesStatus" class="form-status" role="status"></div><button id="batchPagesCancel" class="button" type="button">取消</button><button id="batchPagesSubmit" class="button" type="submit">复制</button></div>
+				<div class="form-actions"><div id="batchPagesStatus" class="form-status"></div><button id="batchPagesCancel" class="button" type="button">取消</button><button id="batchPagesSubmit" class="button" type="submit">复制</button></div>
 			</form>
 		</dialog>
-		<dialog id="objectStylePanel" class="form-dialog" aria-label="对象样式">
+		<dialog id="objectStylePanel" class="form-dialog">
 			<form id="objectStyleForm">
 				<div class="form-row"><span>组合</span><div class="form-format"><button id="groupObjectsButton" class="button" type="button">组合</button><button id="ungroupObjectButton" class="button" type="button">解组</button></div></div>
-				<div class="form-row"><span>格式</span><div class="form-format"><button id="copyStyleButton" class="button" type="button" aria-label="复制格式">复制</button><button id="pasteStyleButton" class="button" type="button" aria-label="粘贴格式">粘贴</button></div></div>
+				<div class="form-row"><span>格式</span><div class="form-format"><button id="copyStyleButton" class="button" type="button">复制</button><button id="pasteStyleButton" class="button" type="button">粘贴</button></div></div>
 				<details id="objectLinkFields" hidden>
 					<summary>链接</summary>
-					<div class="form-row"><label for="objectLinkKind">目标</label><div class="form-unit object-link-target"><select id="objectLinkKind"><option value="none">不设</option><option value="uri">网址</option><option value="page">页面</option><option value="keep">原有</option></select><button id="objectActionsButton" class="button" type="button" title="管理动作" aria-label="管理动作">动作</button></div></div>
+					<div class="form-row"><label for="objectLinkKind">目标</label><div class="form-unit object-link-target"><select id="objectLinkKind"><option value="none">不设</option><option value="uri">网址</option><option value="page">页面</option><option value="keep">原有</option></select><button id="objectActionsButton" class="button" type="button">动作</button></div></div>
 					<div class="form-row" id="objectLinkAddressRow" hidden><label for="objectLinkAddress">地址</label><input id="objectLinkAddress" type="text"></div>
 					<div class="form-row" id="objectLinkPageRow" hidden><label for="objectLinkPage">页码</label><input id="objectLinkPage" type="number" min="1" step="1"></div>
 				</details>
-				<div class="form-row"><label for="objectOpacity">透明</label><div class="form-unit"><input id="objectOpacity" type="number" min="0" max="100" step="any" aria-label="透明度" autofocus><span>%</span></div></div>
+				<div class="form-row"><label for="objectOpacity">透明</label><div class="form-unit"><input id="objectOpacity" type="number" min="0" max="100" step="any" autofocus><span>%</span></div></div>
 				<details id="objectBorderFields" hidden>
 					<summary>边框</summary>
 					<div class="form-row"><label for="borderEnabled">显示</label><input id="borderEnabled" type="checkbox"></div>
@@ -227,8 +227,8 @@
 						<div class="form-row"><label for="borderColor">颜色</label><input id="borderColor" class="color-input" type="color"><span id="borderColorOriginal" hidden>原样</span></div>
 					</div>
 					<div class="form-pair">
-						<div class="form-row"><label for="borderHorizontal">横径</label><div class="form-unit"><input id="borderHorizontal" type="number" min="0" step="any" aria-label="水平圆角半径"><span>mm</span></div></div>
-						<div class="form-row"><label for="borderVertical">纵径</label><div class="form-unit"><input id="borderVertical" type="number" min="0" step="any" aria-label="垂直圆角半径"><span>mm</span></div></div>
+						<div class="form-row"><label for="borderHorizontal">横径</label><div class="form-unit"><input id="borderHorizontal" type="number" min="0" step="any"><span>mm</span></div></div>
+						<div class="form-row"><label for="borderVertical">纵径</label><div class="form-unit"><input id="borderVertical" type="number" min="0" step="any"><span>mm</span></div></div>
 					</div>
 				</details>
 				<details id="objectGradientFields" hidden>
@@ -241,7 +241,7 @@
 						<div class="form-row"><label for="gradientAngle">角度</label><div class="form-unit"><input id="gradientAngle" type="number" step="any" value="0"><span>°</span></div></div>
 						<div class="gradient-stop-row gradient-stop-head"><span>颜色</span><span>位置%</span><span>透明%</span><span></span></div>
 						<div id="gradientStops"></div>
-						<button id="gradientAdd" class="icon-button" type="button" title="添加色标" aria-label="添加色标">+</button>
+						<button id="gradientAdd" class="icon-button" type="button" title="添加色标">+</button>
 					</div>
 				</details>
 				<details id="objectPatternFields" hidden>
@@ -266,10 +266,10 @@
 						<div class="form-row"><label for="objectJoin">转角</label><select id="objectJoin"><option value="mixed" hidden>混合</option><option value="Miter">尖角</option><option value="Round">圆角</option><option value="Bevel">斜角</option></select></div>
 					</div>
 				</div>
-				<div class="form-actions"><div id="objectStyleStatus" class="form-status" role="status"></div><button id="objectStyleCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
+				<div class="form-actions"><div id="objectStyleStatus" class="form-status"></div><button id="objectStyleCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="structureDialog" class="form-dialog structure-dialog" aria-label="管理标引">
+		<dialog id="structureDialog" class="form-dialog structure-dialog">
 			<form id="structureForm">
 				<div class="form-row"><label for="structureEntry">标引</label><select id="structureEntry"></select></div>
 				<div id="structureNodeRow" class="form-row"><label for="structureNodeSelect">节点</label><select id="structureNodeSelect"></select></div>
@@ -279,26 +279,26 @@
 					<div class="form-row"><label for="structureName">名称</label><input id="structureName" type="text" required></div>
 					<div class="form-row"><label for="structureNamespace">命名空间</label><input id="structureNamespace" type="text"></div>
 					<div class="form-row"><label for="structureText">内容</label><textarea id="structureText" rows="2"></textarea></div>
-					<div class="panel-row"><span>属性</span><button id="structureAttributeAdd" class="icon-button" type="button" title="添加属性" aria-label="添加属性">+</button></div>
+					<div class="panel-row"><span>属性</span><button id="structureAttributeAdd" class="icon-button" type="button" title="添加属性">+</button></div>
 					<div id="structureAttributes" class="structure-edit-list"></div>
 				</div>
 				<div id="structureBinding" hidden>
-					<div class="panel-row"><span>引用</span><div class="panel-actions"><button id="structureSelection" class="button" type="button" title="绑定选区" aria-label="绑定选区">选区</button><button id="structureReferenceAdd" class="icon-button" type="button" title="添加引用" aria-label="添加引用">+</button></div></div>
+					<div class="panel-row"><span>引用</span><div class="panel-actions"><button id="structureSelection" class="button" type="button">选区</button><button id="structureReferenceAdd" class="icon-button" type="button" title="添加引用">+</button></div></div>
 					<div id="structureReferences" class="structure-edit-list"></div>
 				</div>
-				<div class="form-actions"><div id="structureStatus" class="form-status" role="status"></div><button id="structureCancel" class="button" type="button">取消</button><button id="structureSubmit" class="button" type="submit">确定</button></div>
+				<div class="form-actions"><div id="structureStatus" class="form-status"></div><button id="structureCancel" class="button" type="button">取消</button><button id="structureSubmit" class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="outlinePanel" class="form-dialog" aria-label="编辑目录">
+		<dialog id="outlinePanel" class="form-dialog">
 			<form id="outlineForm">
 				<div class="form-row"><label for="outlineTitle">标题</label><input id="outlineTitle" type="text" required autofocus></div>
 				<div class="form-row"><label for="outlineParent">上级</label><select id="outlineParent"></select></div>
-				<div class="form-row"><label for="outlinePage">页码</label><input id="outlinePage" type="number" min="1" step="1" placeholder="无" aria-label="目标页码，留空表示无目标"></div>
+				<div class="form-row"><label for="outlinePage">页码</label><input id="outlinePage" type="number" min="1" step="1" placeholder="无"></div>
 				<div id="outlinePositionRow" class="form-row" hidden><label for="outlinePosition">顺序</label><input id="outlinePosition" type="number" min="1" step="1" required value="1"></div>
-				<div class="form-actions"><div id="outlineStatus" class="form-status" role="status"></div><button id="outlineCancel" class="button" type="button">取消</button><button id="outlineSubmit" class="button" type="submit">新增</button></div>
+				<div class="form-actions"><div id="outlineStatus" class="form-status"></div><button id="outlineCancel" class="button" type="button">取消</button><button id="outlineSubmit" class="button" type="submit">新增</button></div>
 			</form>
 		</dialog>
-		<dialog id="objectBoundsPanel" class="form-dialog" aria-label="位置尺寸">
+		<dialog id="objectBoundsPanel" class="form-dialog">
 			<form id="objectBoundsForm">
 				<div class="form-pair">
 					<div class="form-row"><label for="objectX">横向</label><div class="form-unit"><input id="objectX" type="number" step="any" required autofocus><span>mm</span></div></div>
@@ -309,10 +309,10 @@
 					<div class="form-row"><label for="objectHeight">高度</label><div class="form-unit"><input id="objectHeight" type="number" min="0" step="any" required><span>mm</span></div></div>
 				</div>
 				<div class="form-row"><span>比例</span><label class="form-check"><input id="objectAspect" type="checkbox" checked>锁定</label></div>
-				<div class="form-actions"><div id="objectBoundsStatus" class="form-status" role="status"></div><button id="objectBoundsCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
+				<div class="form-actions"><div id="objectBoundsStatus" class="form-status"></div><button id="objectBoundsCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="createPanel" class="form-dialog" aria-label="新建文档">
+		<dialog id="createPanel" class="form-dialog">
 			<form id="createForm">
 				<div id="createModeRow" class="form-row"><label for="createMode">来源</label><select id="createMode"><option value="blank">空白</option><option value="images">图片</option></select></div>
 				<div class="form-row">
@@ -334,52 +334,52 @@
 				<div id="createMarginRow" class="form-row" hidden><label for="createMargin">边距</label><div class="form-unit"><input id="createMargin" type="number" value="0" min="0" step="any" required disabled><span>mm</span></div></div>
 				<div id="createPositionRow" class="form-row" hidden><label for="createPosition">位置</label><select id="createPosition" disabled><option value="before">页前</option><option value="after" selected>页后</option><option value="first">开头</option><option value="last">末尾</option></select></div>
 				<div class="form-actions">
-					<div id="createStatus" class="form-status" role="status"></div>
+					<div id="createStatus" class="form-status"></div>
 					<button id="createCancel" class="button" type="button">取消</button>
 					<button id="createSubmit" class="button" type="submit">新建</button>
 				</div>
 			</form>
 		</dialog>
-		<dialog id="importPanel" class="form-dialog" aria-label="插入页面">
+		<dialog id="importPanel" class="form-dialog">
 			<form id="importForm">
 				<div class="form-row"><label for="importFile">文档</label><input id="importFile" type="file" accept=".ofd" required autofocus></div>
 				<div class="form-row"><label for="importRange">范围</label><select id="importRange"><option value="all">全部</option><option value="custom">指定</option></select></div>
 				<div id="importPagesRow" class="form-row" hidden><label for="importPages">页码</label><input id="importPages" type="text" autocomplete="off" spellcheck="false" disabled></div>
 				<div class="form-row"><label for="importPosition">位置</label><select id="importPosition"><option value="before">页前</option><option value="after" selected>页后</option><option value="first">开头</option><option value="last">末尾</option></select></div>
 				<div class="form-row"><label for="importOutlines">目录</label><input id="importOutlines" type="checkbox" title="导入对应目录"></div>
-				<div class="form-actions"><div id="importStatus" class="form-status" role="status"></div><button id="importCancel" class="button" type="button">取消</button><button id="importSubmit" class="button" type="submit" disabled>插入</button></div>
+				<div class="form-actions"><div id="importStatus" class="form-status"></div><button id="importCancel" class="button" type="button">取消</button><button id="importSubmit" class="button" type="submit" disabled>插入</button></div>
 			</form>
 		</dialog>
-		<dialog id="paragraphPanel" class="form-dialog" aria-label="段落缩进">
+		<dialog id="paragraphPanel" class="form-dialog">
 			<form id="paragraphForm">
 				<div class="form-row"><label for="firstLineIndent">首行</label><div class="form-unit"><input id="firstLineIndent" type="number" step="any" required autofocus><span>mm</span></div></div>
 				<div class="form-pair">
 					<div class="form-row"><label for="leftIndent">左侧</label><div class="form-unit"><input id="leftIndent" type="number" step="any" required><span>mm</span></div></div>
 					<div class="form-row"><label for="rightIndent">右侧</label><div class="form-unit"><input id="rightIndent" type="number" step="any" required><span>mm</span></div></div>
 				</div>
-				<div class="form-actions"><div id="paragraphStatus" class="form-status" role="status"></div><button id="paragraphCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
+				<div class="form-actions"><div id="paragraphStatus" class="form-status"></div><button id="paragraphCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="resourcePanel" class="form-dialog resource-dialog" aria-labelledby="resourceTitle">
+		<dialog id="resourcePanel" class="form-dialog resource-dialog">
 			<form id="resourceForm">
 				<h2 id="resourceTitle" class="form-title">资源管理</h2>
 				<div class="form-row"><label for="resourceKind">类型</label><select id="resourceKind"><option value="Font">字体</option><option value="Image">图片</option><option value="Audio">音频</option><option value="Video">视频</option><option value="Attachment">附件</option><option value="ColorSpace">色彩</option><option value="DrawParam">样式</option></select></div>
 				<div class="resource-list-container">
-					<div class="resource-heading" aria-hidden="true"><span>名称</span><span>大小</span><span>引用</span></div>
+					<div class="resource-heading"><span>名称</span><span>大小</span><span>引用</span></div>
 					<div class="resource-list-body">
-						<div id="resourceList" class="resource-list" role="listbox" aria-label="资源列表"></div>
+						<div id="resourceList" class="resource-list"></div>
 						<div id="resourceEmpty" class="resource-empty" hidden>暂无资源</div>
 					</div>
 				</div>
-				<div class="form-row"><label for="resourceReference">引用</label><div class="resource-target"><select id="resourceReference" aria-label="引用位置"></select><select id="resourceReferenceGroup" aria-label="引用分组" title="引用分组" hidden></select><button id="resourceLocate" class="button" type="button">定位</button></div></div>
+				<div class="form-row"><label for="resourceReference">引用</label><div class="resource-target"><select id="resourceReference"></select><select id="resourceReferenceGroup" title="引用分组" hidden></select><button id="resourceLocate" class="button" type="button">定位</button></div></div>
 				<div id="resourceActions" class="resource-actions">
-					<button id="resourceAdd" class="button" type="button" title="添加资源" aria-label="添加资源">添加</button>
+					<button id="resourceAdd" class="button" type="button">添加</button>
 					<button id="resourcePreview" class="button" type="button">预览</button>
 					<button id="resourceExport" class="button" type="button">导出</button>
 					<button id="resourceRename" class="button" type="button" hidden>改名</button>
 					<button id="resourceReplace" class="button" type="button">替换</button>
 					<button id="resourceDelete" class="button" type="button">删除</button>
-					<div id="resourceStatus" class="form-status" role="status"></div>
+					<div id="resourceStatus" class="form-status"></div>
 					<button id="resourceClose" class="button" type="button">关闭</button>
 				</div>
 				<div id="resourceBinding" class="resource-binding" hidden>
@@ -391,22 +391,22 @@
 				<input id="resourceFile" type="file" hidden>
 			</form>
 		</dialog>
-		<dialog id="documentPanel" class="form-dialog document-dialog" aria-labelledby="documentTitle">
+		<dialog id="documentPanel" class="form-dialog document-dialog">
 			<form id="documentForm">
 				<h2 id="documentTitle" class="form-title">文档管理</h2>
-				<div id="documentList" class="document-list" role="listbox" aria-label="文档列表"></div>
-				<div id="documentActions" class="document-actions" role="group" aria-label="文档操作">
-					<button id="documentAddButton" class="button" type="button" title="新增文档" aria-label="新增文档" aria-haspopup="dialog" aria-controls="createPanel">新增</button>
-					<button id="infoButton" class="button" type="button" title="修改文档" aria-label="修改文档" aria-haspopup="dialog" aria-controls="infoPanel">修改</button>
-					<button id="documentDeleteButton" class="button" type="button" title="删除文档" aria-label="删除文档">删除</button>
-					<button id="documentUpButton" class="button" type="button" title="前移文档" aria-label="前移文档">前移</button>
-					<button id="documentDownButton" class="button" type="button" title="后移文档" aria-label="后移文档">后移</button>
-					<div id="documentStatus" class="form-status" role="status"></div>
+				<div id="documentList" class="document-list"></div>
+				<div id="documentActions" class="document-actions">
+					<button id="documentAddButton" class="button" type="button">新增</button>
+					<button id="infoButton" class="button" type="button">修改</button>
+					<button id="documentDeleteButton" class="button" type="button">删除</button>
+					<button id="documentUpButton" class="button" type="button">前移</button>
+					<button id="documentDownButton" class="button" type="button">后移</button>
+					<div id="documentStatus" class="form-status"></div>
 					<button id="documentClose" class="button" type="button">关闭</button>
 				</div>
 			</form>
 		</dialog>
-		<dialog id="settingsPanel" class="form-dialog settings-dialog" aria-labelledby="settingsTitle">
+		<dialog id="settingsPanel" class="form-dialog settings-dialog">
 			<form id="settingsForm">
 				<header class="settings-header">
 					<h2 id="settingsTitle" class="form-title">文档配置</h2>
@@ -418,39 +418,39 @@
 					<div id="settingsContent"></div>
 				</div>
 				<div class="settings-footer">
-					<div id="settingsStatus" class="form-status" role="status"></div>
+					<div id="settingsStatus" class="form-status"></div>
 					<div id="settingsActions" class="form-actions"></div>
 				</div>
 			</form>
 		</dialog>
-		<dialog id="versionPanel" class="form-dialog document-dialog" aria-labelledby="versionTitle">
+		<dialog id="versionPanel" class="form-dialog document-dialog">
 			<form id="versionForm">
 				<h2 id="versionTitle" class="form-title">版本管理</h2>
-				<div id="versionNotice" class="font-permission-hint" role="status" hidden></div>
-				<div id="versionList" class="document-list" role="listbox" aria-label="版本列表"></div>
-				<label id="versionNameRow" class="form-row"><span>名称</span><input id="versionName" type="text" autocomplete="off" aria-label="版本名称"></label>
-				<div id="versionActions" class="document-actions" role="group" aria-label="版本操作">
-					<button id="versionAdd" class="button" type="button" title="新增版本" aria-label="新增版本">新增</button>
-					<button id="versionRename" class="button" type="button" title="修改名称" aria-label="修改名称">改名</button>
-					<button id="versionDefault" class="button" type="button" title="设为默认" aria-label="设为默认">默认</button>
-					<button id="versionDelete" class="button" type="button" title="删除版本" aria-label="删除版本">删除</button>
-					<button id="versionSelect" class="button" type="button" title="切换版本" aria-label="切换版本">切换</button>
-					<button id="versionExport" class="button" type="button" title="另存版本" aria-label="另存版本">另存</button>
-					<div id="versionStatus" class="form-status" role="status"></div>
+				<div id="versionNotice" class="font-permission-hint" hidden></div>
+				<div id="versionList" class="document-list"></div>
+				<label id="versionNameRow" class="form-row"><span>名称</span><input id="versionName" type="text" autocomplete="off"></label>
+				<div id="versionActions" class="document-actions">
+					<button id="versionAdd" class="button" type="button">新增</button>
+					<button id="versionRename" class="button" type="button">改名</button>
+					<button id="versionDefault" class="button" type="button">默认</button>
+					<button id="versionDelete" class="button" type="button">删除</button>
+					<button id="versionSelect" class="button" type="button">切换</button>
+					<button id="versionExport" class="button" type="button">另存</button>
+					<div id="versionStatus" class="form-status"></div>
 					<button id="versionClose" class="button" type="button">关闭</button>
 				</div>
 			</form>
 		</dialog>
-		<dialog id="infoPanel" class="form-dialog" aria-label="文档信息">
+		<dialog id="infoPanel" class="form-dialog">
 			<form id="infoForm">
 				<label class="form-row"><span>标题</span><input id="infoTitle" type="text" autofocus></label>
 				<label class="form-row"><span>主题</span><input id="infoSubject" type="text"></label>
 				<label class="form-row"><span>作者</span><input id="infoAuthor" type="text"></label>
-				<details class="info-custom"><summary>扩展</summary><div id="infoCustomRows"></div><button id="infoCustomAdd" class="icon-button" type="button" title="添加字段" aria-label="添加字段">+</button></details>
-				<div class="form-actions"><div id="infoStatus" class="form-status" role="status"></div><button id="infoCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
+				<details class="info-custom"><summary>扩展</summary><div id="infoCustomRows"></div><button id="infoCustomAdd" class="icon-button" type="button" title="添加字段">+</button></details>
+				<div class="form-actions"><div id="infoStatus" class="form-status"></div><button id="infoCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="annotationCreate" class="form-dialog" aria-label="添加注解">
+		<dialog id="annotationCreate" class="form-dialog">
 			<form id="annotationCreateForm">
 				<label class="form-row" data-annotation="watermark"><span>类型</span><select id="annotationContent"><option value="text">文字</option><option value="image">图片</option></select></label>
 				<label class="form-row" data-annotation="replace"><span>原文</span><select id="annotationOld"></select></label>
@@ -471,34 +471,34 @@
 				</div>
 				<div class="form-pair" data-annotation="watermark stamp">
 					<label class="form-row"><span>角度</span><span class="form-unit"><input id="annotationAngle" type="number" min="-180" max="180" step="any" value="-30" required><span>°</span></span></label>
-					<label class="form-row"><span>透明</span><span class="form-unit"><input id="annotationOpacity" type="number" min="0" max="100" step="any" value="80" aria-label="透明度" required><span>%</span></span></label>
+					<label class="form-row"><span>透明</span><span class="form-unit"><input id="annotationOpacity" type="number" min="0" max="100" step="any" value="80" required><span>%</span></span></label>
 				</div>
 				<label class="form-row" data-annotation="watermark"><span>排列</span><select id="annotationTile"><option value="single">单个</option><option value="tile">平铺</option></select></label>
 				<div class="form-row" data-annotation="watermark"><label id="annotationPlacementLabel" for="annotationPlacement">位置</label><div class="annotation-placement"><select id="annotationPlacement"><option value="page">居中</option><option value="custom">指定</option></select><button id="annotationPick" class="button" type="button">定位</button></div></div>
 				<label class="form-row" data-annotation="watermark"><span>应用</span><select id="annotationScope"><option value="current">本页</option><option value="all">全部</option><option value="custom">指定</option></select></label>
 				<label class="form-row" data-annotation="note watermark stamp link"><span>页码</span><input id="annotationPages" type="text" required></label>
-				<div class="form-actions"><div id="annotationCreateStatus" class="form-status" role="status"></div><button id="annotationCreateCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
+				<div class="form-actions"><div id="annotationCreateStatus" class="form-status"></div><button id="annotationCreateCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="objectPicker" class="form-dialog" aria-label="选取对象">
+		<dialog id="objectPicker" class="form-dialog">
 			<form method="dialog"><div id="objectPickerList" class="object-picker-list"></div><div class="form-actions"><button class="button" type="submit">关闭</button></div></form>
 		</dialog>
-		<dialog id="annotationNote" class="form-dialog" aria-label="注解">
+		<dialog id="annotationNote" class="form-dialog">
 			<form id="annotationForm" method="dialog">
 				<div id="annotationDetail" class="annotation-detail"></div>
 				<div id="annotationFields" hidden>
 					<div class="form-row"><label for="annotationRemark">说明</label><textarea id="annotationRemark" rows="4"></textarea></div>
 					<div class="form-row"><label for="annotationCreator">作者</label><input id="annotationCreator" type="text"></div>
 				</div>
-				<div class="form-actions"><div id="annotationStatus" class="form-status" role="status"></div><button id="annotationClose" class="button" type="button" autofocus>关闭</button><button id="annotationSubmit" class="button" type="submit" hidden>确定</button></div>
+				<div class="form-actions"><div id="annotationStatus" class="form-status"></div><button id="annotationClose" class="button" type="button" autofocus>关闭</button><button id="annotationSubmit" class="button" type="submit" hidden>确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="pagePanel" class="form-dialog" aria-label="页面设置">
+		<dialog id="pagePanel" class="form-dialog">
 			<form id="pageForm">
 				<div id="pageRangeRow" class="form-row" hidden><span>范围</span><output id="pageRange"></output></div>
 				<div class="form-row">
 					<span id="pageDirectionLabel">方向</span>
-					<div class="form-options" role="radiogroup" aria-labelledby="pageDirectionLabel">
+					<div class="form-options">
 						<label><input id="pagePortrait" type="radio" name="direction" value="portrait" autofocus><span>竖向</span></label>
 						<label><input id="pageLandscape" type="radio" name="direction" value="landscape"><span>横向</span></label>
 					</div>
@@ -514,23 +514,23 @@
 					</div>
 				</div>
 				<div class="form-actions">
-					<div id="pageStatus" class="form-status" role="status"></div>
+					<div id="pageStatus" class="form-status"></div>
 					<button id="pageCancel" class="button" type="button">取消</button>
 					<button class="button" type="submit">确定</button>
 				</div>
 			</form>
 		</dialog>
-		<dialog id="fontBindingPanel" class="form-dialog" aria-labelledby="fontBindingTitle">
+		<dialog id="fontBindingPanel" class="form-dialog">
 			<form id="fontBindingForm">
 				<h2 id="fontBindingTitle" class="form-title">嵌入字体</h2>
 				<div class="form-row"><span>字体</span><output id="fontBindingName"></output></div>
 				<div id="fontBindingSourceRow" class="form-row"><label for="fontBindingSource">来源</label><select id="fontBindingSource" required></select></div>
 				<input id="fontBindingFile" type="file" accept=".ttf,.otf,.ttc,.otc" hidden>
 				<div id="fontBindingHint" class="form-status">外置后，其他设备需具备此字体</div>
-				<div class="form-actions"><div id="fontBindingStatus" class="form-status" role="status"></div><button id="fontBindingCancel" class="button" type="button">取消</button><button id="fontBindingSubmit" class="button" type="submit">嵌入</button></div>
+				<div class="form-actions"><div id="fontBindingStatus" class="form-status"></div><button id="fontBindingCancel" class="button" type="button">取消</button><button id="fontBindingSubmit" class="button" type="submit">嵌入</button></div>
 			</form>
 		</dialog>
-		<dialog id="insertPanel" class="form-dialog" aria-label="添加图片">
+		<dialog id="insertPanel" class="form-dialog">
 			<form id="insertForm">
 				<div class="form-row">
 					<label for="insertImage">图片</label>
@@ -541,13 +541,13 @@
 					<select id="insertFit"><option value="contain">适应</option><option value="cover">填充</option></select>
 				</div>
 				<div class="form-actions">
-					<div id="insertStatus" class="form-status" role="status"></div>
+					<div id="insertStatus" class="form-status"></div>
 					<button id="insertCancel" class="button" type="button">取消</button>
 					<button id="insertSubmit" class="button" type="submit">添加</button>
 				</div>
 			</form>
 		</dialog>
-		<dialog id="signPanel" class="form-dialog security-dialog" aria-labelledby="signTitle">
+		<dialog id="signPanel" class="form-dialog security-dialog">
 			<form id="signForm" autocomplete="off">
 				<h2 id="signTitle" class="form-title">签署文档</h2>
 				<div class="form-row"><label for="signCertificate">证书</label><input id="signCertificate" type="file" accept=".pem,.cer,.crt,.der" required></div>
@@ -555,27 +555,27 @@
 				<div class="form-row"><label for="signKeyPassword">私钥口令</label><input id="signKeyPassword" type="password" autocomplete="off"></div>
 				<div class="form-row"><label for="signRoots">信任根</label><input id="signRoots" type="file" accept=".pem,.cer,.crt,.der" multiple required></div>
 				<div class="form-row"><label for="signIntermediates">中间证书</label><input id="signIntermediates" type="file" accept=".pem,.cer,.crt,.der" multiple></div>
-				<div class="form-row"><label for="signSeal">电子印章</label><input id="signSeal" type="file" accept=".esl,.ses,.der" aria-label="SES电子印章"></div>
+				<div class="form-row"><label for="signSeal">电子印章</label><input id="signSeal" type="file" accept=".esl,.ses,.der"></div>
 				<div id="signPlacementFields" hidden>
 					<div class="form-row"><span>预览</span><div class="seal-position-options"><button id="signPick" class="button" type="button">定位</button><label><input id="signKeepRatio" type="checkbox" checked>等比</label></div></div>
 					<div class="form-row"><label for="signPlacement">位置</label><select id="signPlacement"><option value="normal">页面</option><option value="seam">骑缝</option></select></div>
 					<div class="form-row"><label for="signPages">页码</label><input id="signPages" type="text" autocomplete="off" spellcheck="false"></div>
-					<div class="form-row"><label for="signX">横向</label><div class="form-unit"><input id="signX" type="number" min="0" step="any" value="10" aria-label="横坐标（毫米）"><span>mm</span></div></div>
-					<div class="form-row"><label for="signY">纵向</label><div class="form-unit"><input id="signY" type="number" min="0" step="any" value="10" aria-label="纵坐标（毫米）"><span>mm</span></div></div>
-					<div class="form-row"><label for="signWidth">宽度</label><div class="form-unit"><input id="signWidth" type="number" min="0.01" step="any" value="40" aria-label="宽度（毫米）"><span>mm</span></div></div>
-					<div class="form-row"><label for="signHeight">高度</label><div class="form-unit"><input id="signHeight" type="number" min="0.01" step="any" value="40" aria-label="高度（毫米）"><span>mm</span></div></div>
+					<div class="form-row"><label for="signX">横向</label><div class="form-unit"><input id="signX" type="number" min="0" step="any" value="10"><span>mm</span></div></div>
+					<div class="form-row"><label for="signY">纵向</label><div class="form-unit"><input id="signY" type="number" min="0" step="any" value="10"><span>mm</span></div></div>
+					<div class="form-row"><label for="signWidth">宽度</label><div class="form-unit"><input id="signWidth" type="number" min="0.01" step="any" value="40"><span>mm</span></div></div>
+					<div class="form-row"><label for="signHeight">高度</label><div class="form-unit"><input id="signHeight" type="number" min="0.01" step="any" value="40"><span>mm</span></div></div>
 				</div>
 				<div class="form-row"><label for="signMode">方式</label><select id="signMode"><option value="append">追加</option><option value="replace">替换</option></select></div>
-				<div class="form-row"><label for="signLock">禁止追加</label><input id="signLock" type="checkbox" aria-label="禁止追加签名"></div>
-				<div class="form-actions"><div id="signStatus" class="form-status" role="status" aria-live="polite"></div><button id="signCancel" class="button" type="button">取消</button><button class="button" type="submit" title="签署另存">签署</button></div>
+				<div class="form-row"><label for="signLock">禁止追加</label><input id="signLock" type="checkbox"></div>
+				<div class="form-actions"><div id="signStatus" class="form-status"></div><button id="signCancel" class="button" type="button">取消</button><button class="button" type="submit">签署</button></div>
 			</form>
 		</dialog>
 		<div hidden>
-			<div id="signPositionLayer" class="seal-position-layer" aria-hidden="true">
+			<div id="signPositionLayer" class="seal-position-layer">
 				<div id="signPositionStamp" class="seal-position-stamp" hidden><img id="signPositionImage" alt="" draggable="false"></div>
 			</div>
 		</div>
-		<dialog id="verifyPanel" class="form-dialog security-dialog" aria-labelledby="verifyTitle">
+		<dialog id="verifyPanel" class="form-dialog security-dialog">
 			<form id="verifyForm">
 				<h2 id="verifyTitle" class="form-title">验证签名</h2>
 				<div class="form-row"><label for="verifyRoots">信任根</label><input id="verifyRoots" type="file" accept=".pem,.cer,.crt,.der" multiple></div>
@@ -585,10 +585,10 @@
 				<div class="form-row"><label for="verifyCRLs">撤销表</label><input id="verifyCRLs" type="file" accept=".crl,.der" multiple></div>
 				<div class="form-row"><label for="verifyOCSP">OCSP响应</label><input id="verifyOCSP" type="file" accept=".ocsp,.der" multiple></div>
 				<div class="form-row"><span>要求</span><div class="form-options"><label><input id="verifyRequireTime" type="checkbox"><span>时间戳</span></label><label><input id="verifyRequireRevocation" type="checkbox"><span>撤销检查</span></label></div></div>
-				<div class="form-actions"><div id="verifyStatus" class="form-status" role="status" aria-live="polite"></div><button id="verifyCancel" class="button" type="button">取消</button><button class="button" type="submit">验签</button></div>
+				<div class="form-actions"><div id="verifyStatus" class="form-status"></div><button id="verifyCancel" class="button" type="button">取消</button><button class="button" type="submit">验签</button></div>
 			</form>
 		</dialog>
-		<dialog id="credentialsPanel" class="form-dialog security-dialog" aria-labelledby="credentialsTitle">
+		<dialog id="credentialsPanel" class="form-dialog security-dialog">
 			<form id="credentialsForm" autocomplete="off">
 				<h2 id="credentialsTitle" class="form-title">解锁文档</h2>
 				<div id="credentialsTypeRow" class="form-row"><label for="credentialsType">方式</label><select id="credentialsType"><option value="password">口令</option><option value="certificate">证书</option></select></div>
@@ -597,22 +597,22 @@
 				<div id="credentialsCertificateRow" class="form-row" hidden><label for="credentialsCertificate">证书</label><input id="credentialsCertificate" type="file" accept=".pem,.cer,.crt,.der"></div>
 				<div id="credentialsKeyRow" class="form-row" hidden><label for="credentialsKey">私钥</label><input id="credentialsKey" type="file" accept=".pem,.key,.der"></div>
 				<div id="credentialsKeyPasswordRow" class="form-row" hidden><label for="credentialsKeyPassword">私钥口令</label><input id="credentialsKeyPassword" type="password" autocomplete="off"></div>
-				<div class="form-actions"><div id="credentialsStatus" class="form-status" role="status" aria-live="polite"></div><button id="credentialsCancel" class="button" type="button">取消</button><button class="button" type="submit">解锁</button></div>
+				<div class="form-actions"><div id="credentialsStatus" class="form-status"></div><button id="credentialsCancel" class="button" type="button">取消</button><button class="button" type="submit">解锁</button></div>
 			</form>
 		</dialog>
-		<dialog id="attachmentDialog" class="form-dialog" aria-labelledby="attachmentTitle">
+		<dialog id="attachmentDialog" class="form-dialog">
 			<form id="attachmentForm">
 				<h2 id="attachmentTitle" class="form-title">添加附件</h2>
 				<div id="attachmentFileRow" class="form-row"><label for="attachmentFile">文件</label><input id="attachmentFile" type="file" multiple required></div>
 				<div id="attachmentNameRow" class="form-row" hidden><label for="attachmentName">名称</label><input id="attachmentName" type="text" autocomplete="off" spellcheck="false"></div>
 				<div class="form-actions">
-					<div id="attachmentStatus" class="form-status" role="status"></div>
+					<div id="attachmentStatus" class="form-status"></div>
 					<button id="attachmentCancel" class="button" type="button">取消</button>
 					<button id="attachmentSubmit" class="button" type="submit">添加</button>
 				</div>
 			</form>
 		</dialog>
-		<dialog id="encryptionPanel" class="form-dialog" aria-labelledby="encryptionTitle">
+		<dialog id="encryptionPanel" class="form-dialog">
 			<form id="encryptionForm">
 				<h2 id="encryptionTitle" class="form-title">加密文档</h2>
 				<div class="form-row"><label for="encryptionType">方式</label><select id="encryptionType" autofocus><option value="none">明文</option><option value="password">口令</option><option value="certificate">证书</option><option id="encryptionKeep" value="keep" hidden>保留</option></select></div>
@@ -621,25 +621,25 @@
 				<div id="encryptionPasswordRow" class="form-row"><label for="encryptionPassword">口令</label><input id="encryptionPassword" type="password" autocomplete="new-password"></div>
 				<div id="encryptionConfirmRow" class="form-row"><label for="encryptionConfirm">确认</label><input id="encryptionConfirm" type="password" autocomplete="new-password"></div>
 				<div id="encryptionCertificatesRow" class="form-row" hidden><label for="encryptionCertificates">证书</label><input id="encryptionCertificates" type="file" accept=".pem,.cer,.crt,.der" multiple></div>
-				<div class="form-actions"><div id="encryptionStatus" class="form-status" role="status" aria-live="polite"></div><button id="encryptionCancel" class="button" type="button">取消</button><button id="encryptionSubmit" class="button" type="submit">确定</button></div>
+				<div class="form-actions"><div id="encryptionStatus" class="form-status"></div><button id="encryptionCancel" class="button" type="button">取消</button><button id="encryptionSubmit" class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="exportPanel" class="form-dialog" aria-labelledby="exportTitle">
+		<dialog id="exportPanel" class="form-dialog">
 			<form id="exportForm">
 				<h2 id="exportTitle" class="form-title">导出文档</h2>
 				<div class="form-row">
 					<span id="exportScopeLabel">范围</span>
-					<div class="form-options" role="radiogroup" aria-labelledby="exportScopeLabel">
+					<div class="form-options">
 						<label><input id="exportAll" type="radio" name="scope" value="all" checked autofocus><span>全部</span></label>
 						<label><input id="exportSpecified" type="radio" name="scope" value="specified"><span>指定</span></label>
 					</div>
 				</div>
 				<div id="exportRangeRow" class="form-row" hidden>
 					<label for="exportRange">页码</label>
-					<input id="exportRange" type="text" aria-describedby="exportRangeStatus" autocomplete="off" spellcheck="false">
+					<input id="exportRange" type="text" autocomplete="off" spellcheck="false">
 				</div>
 				<div class="form-actions">
-					<div id="exportRangeStatus" class="form-status" role="status" aria-live="polite"></div>
+					<div id="exportRangeStatus" class="form-status"></div>
 					<button id="exportCancel" class="button" type="button">取消</button>
 					<button id="exportSubmit" class="button" type="submit">导出</button>
 				</div>
@@ -649,49 +649,49 @@
 		<main class="workspace">
 			<aside class="page-list-panel">
 				<div id="pageListTitle" class="panel-title">页面</div>
-				<div id="navigationTabs" class="navigation-tabs" role="tablist" aria-label="文档导航" hidden>
-					<button id="pagesTab" type="button" role="tab" aria-selected="true" aria-controls="pageList">页面</button>
-					<button id="outlinesTab" type="button" role="tab" aria-selected="false" aria-controls="outlineList" tabindex="-1">目录</button>
-					<button id="annotationsTab" type="button" role="tab" aria-selected="false" aria-controls="annotationsPanel" tabindex="-1">注解</button>
-					<button id="searchTab" type="button" role="tab" aria-keyshortcuts="Control+F Meta+F" aria-selected="false" aria-controls="searchPanel" tabindex="-1">搜索</button>
+				<div id="navigationTabs" class="navigation-tabs" hidden>
+					<button id="pagesTab" type="button" data-selected="true">页面</button>
+					<button id="outlinesTab" type="button" data-selected="false" tabindex="-1">目录</button>
+					<button id="annotationsTab" type="button" data-selected="false" tabindex="-1">注解</button>
+					<button id="searchTab" type="button" data-selected="false" tabindex="-1">搜索</button>
 				</div>
 				<div id="pageSelectionTools" class="page-selection-tools" hidden>
-					<span id="pageSelectionCount" role="status"></span>
-					<button id="selectAllPages" class="small-button" type="button" title="全选页面" aria-label="全选页面">全选</button>
+					<span id="pageSelectionCount"></span>
+					<button id="selectAllPages" class="small-button" type="button">全选</button>
 					<button id="finishPageSelection" class="small-button" type="button">完成</button>
 				</div>
 				<div id="navigationContent" class="navigation-content">
-					<div id="pageList" class="page-list" role="tabpanel" aria-label="页面"></div>
-					<div id="outlineList" role="tabpanel" aria-label="目录" hidden></div>
-					<div id="annotationsPanel" role="tabpanel" aria-label="注解" hidden>
-						<div class="search-form"><input id="annotationsFilter" type="search" aria-label="搜索文字" placeholder="搜索文字" autocomplete="off"><select id="annotationsKind" aria-label="注解类型"><option value="">全部</option></select></div>
-						<div id="annotationsStatus" class="form-status" role="status"></div>
+					<div id="pageList" class="page-list"></div>
+					<div id="outlineList" hidden></div>
+					<div id="annotationsPanel" hidden>
+						<div class="search-form"><input id="annotationsFilter" type="search" placeholder="搜索文字" autocomplete="off"><select id="annotationsKind"><option value="">全部</option></select></div>
+						<div id="annotationsStatus" class="form-status"></div>
 						<div id="annotationsList" class="annotation-summary-list"></div>
 					</div>
-					<div id="searchPanel" role="tabpanel" aria-label="搜索" hidden>
-						<form id="searchForm" class="search-form" role="search">
-							<input id="searchInput" type="search" aria-label="搜索文字" placeholder="搜索文字" autocomplete="off">
+					<div id="searchPanel" hidden>
+						<form id="searchForm" class="search-form">
+							<input id="searchInput" type="search" placeholder="搜索文字" autocomplete="off">
 							<button type="submit" class="button">搜索</button>
 						</form>
 						<div class="search-tools">
-							<span id="searchStatus" role="status" aria-live="polite"></span>
+							<span id="searchStatus"></span>
 							<span id="searchCount">0 / 0</span>
-							<button id="searchPrev" type="button" class="icon-button arrow-prev" title="上一处" aria-label="上一处" aria-keyshortcuts="Shift+F3" disabled></button>
-							<button id="searchNext" type="button" class="icon-button arrow-next" title="下一处" aria-label="下一处" aria-keyshortcuts="F3" disabled></button>
+							<button id="searchPrev" type="button" class="icon-button arrow-prev" title="上一处" disabled></button>
+							<button id="searchNext" type="button" class="icon-button arrow-next" title="下一处" disabled></button>
 						</div>
 						<div id="searchResults" class="search-results"></div>
 					</div>
 				</div>
 			</aside>
 
-			<section class="viewer-panel" tabindex="0" aria-label="阅读区">
+			<section class="viewer-panel" tabindex="0">
 				<div id="emptyState" class="empty-state">选择 OFD、PDF 文件</div>
-				<div id="progressPanel" class="progress-panel" role="status" aria-live="polite" hidden>
+				<div id="progressPanel" class="progress-panel" hidden>
 					<div class="progress-spinner"></div>
 					<div id="progressLabel" class="progress-label">加载中</div>
-					<button id="cancelExportButton" class="small-button" type="button" title="取消导出" aria-label="取消导出" hidden>取消</button>
+					<button id="cancelExportButton" class="small-button" type="button" hidden>取消</button>
 					<div class="progress-track">
-						<div id="progressBar" class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+						<div id="progressBar" class="progress-bar"></div>
 					</div>
 				</div>
 				<div id="pageFrame" class="page-frame" hidden>
@@ -700,28 +700,28 @@
 			</section>
 
 			<aside class="meta-panel">
-				<section id="appPanel" class="app-panel" aria-labelledby="appPanelTitle" hidden>
+				<section id="appPanel" class="app-panel" hidden>
 					<div class="panel-row">
 						<div id="appPanelTitle" class="panel-title compact">应用</div>
 						<div class="panel-actions">
-							<span id="offlineStatus" class="app-status" role="status">准备中</span>
-							<button id="refreshAppButton" class="small-button app-refresh" type="button" title="刷新应用" aria-label="刷新应用" disabled>&#8635;</button>
+							<span id="offlineStatus" class="app-status">准备中</span>
+							<button id="refreshAppButton" class="small-button app-refresh" type="button" title="刷新应用" disabled>&#8635;</button>
 						</div>
 					</div>
 				</section>
 				<div class="panel-row">
 					<div class="panel-title compact">文档</div>
 					<div class="panel-actions">
-						<button id="resourceManageButton" class="small-button" type="button" title="资源管理" aria-label="资源管理" aria-haspopup="dialog" aria-controls="resourcePanel" disabled>资源</button>
-						<button id="settingsButton" class="small-button" type="button" title="文档配置" aria-label="文档配置" aria-haspopup="dialog" aria-controls="settingsPanel" disabled>配置</button>
-						<button id="invoiceButton" class="small-button" type="button" title="电子发票" aria-label="电子发票" aria-haspopup="dialog" aria-controls="settingsPanel" hidden disabled>发票</button>
-						<button id="documentManageButton" class="small-button" type="button" title="文档管理" aria-label="文档管理" aria-haspopup="dialog" aria-controls="documentPanel" hidden>管理</button>
-						<button id="versionManageButton" class="small-button" type="button" title="版本管理" aria-label="版本管理" aria-haspopup="dialog" aria-controls="versionPanel" hidden>版本</button>
+						<button id="resourceManageButton" class="small-button" type="button" disabled>资源</button>
+						<button id="settingsButton" class="small-button" type="button" disabled>配置</button>
+						<button id="invoiceButton" class="small-button" type="button" hidden disabled>发票</button>
+						<button id="documentManageButton" class="small-button" type="button" hidden>管理</button>
+						<button id="versionManageButton" class="small-button" type="button" hidden>版本</button>
 					</div>
 				</div>
-				<div id="editNotice" class="font-permission-hint" role="status" hidden></div>
+				<div id="editNotice" class="font-permission-hint" hidden></div>
 				<div id="documentRow" class="document-row" hidden>
-					<select id="documentSelect" class="document-select" aria-label="选择文档" title="切换文档"></select>
+					<select id="documentSelect" class="document-select" title="切换文档"></select>
 				</div>
 				<dl class="meta-list">
 					<div>
@@ -773,36 +773,36 @@
 					<summary>提示</summary>
 					<div id="conversionWarnings" class="panel-detail"></div>
 				</details>
-				<section id="securityPanel" class="security-panel" aria-labelledby="securityPanelTitle" hidden>
-					<div class="panel-row"><div id="securityPanelTitle" class="panel-title compact">安全</div><div class="panel-actions"><button id="encryptSaveButton" class="small-button" type="button" title="加密文档" aria-label="加密文档" aria-haspopup="dialog" aria-controls="encryptionPanel" disabled>加密</button><button id="signButton" class="small-button" type="button" aria-haspopup="dialog" aria-controls="signPanel" disabled>签章</button><button id="verifyButton" class="small-button" type="button" aria-haspopup="dialog" aria-controls="verifyPanel" disabled>验签</button></div></div>
+				<section id="securityPanel" class="security-panel" hidden>
+					<div class="panel-row"><div id="securityPanelTitle" class="panel-title compact">安全</div><div class="panel-actions"><button id="encryptSaveButton" class="small-button" type="button" disabled>加密</button><button id="signButton" class="small-button" type="button" disabled>签章</button><button id="verifyButton" class="small-button" type="button" disabled>验签</button></div></div>
 					<dl class="meta-list"><div><dt>加密</dt><dd id="securityEncryption">未加密</dd></div><div id="securitySchemeRow" hidden><dt>方式</dt><dd id="securityScheme"></dd></div><div id="securityMethodRow" hidden><dt>算法</dt><dd id="securityMethod"></dd></div></dl>
 				</section>
-				<section id="structurePanel" class="structure-panel" aria-labelledby="structurePanelTitle" hidden>
-					<div class="panel-row"><div id="structurePanelTitle" class="panel-title compact">结构</div><div class="panel-actions"><span id="structureSummary" class="count-pill">0</span><button id="structureManage" class="small-button" type="button" title="管理标引" aria-haspopup="dialog" aria-controls="structureDialog" hidden>管理</button></div></div>
+				<section id="structurePanel" class="structure-panel" hidden>
+					<div class="panel-row"><div id="structurePanelTitle" class="panel-title compact">结构</div><div class="panel-actions"><span id="structureSummary" class="count-pill">0</span><button id="structureManage" class="small-button" type="button" hidden>管理</button></div></div>
 					<div id="structureList" class="structure-list"></div>
 				</section>
-				<section id="signaturePanel" class="signature-panel" aria-labelledby="signaturePanelTitle" hidden>
+				<section id="signaturePanel" class="signature-panel" hidden>
 					<div class="panel-row">
 						<div id="signaturePanelTitle" class="panel-title compact">签名</div>
 						<span id="signatureSummary" class="count-pill">0</span>
 					</div>
 					<div id="signatureList" class="signature-list"></div>
 				</section>
-				<section class="doc-font-panel" aria-labelledby="docFontPanelTitle">
+				<section class="doc-font-panel">
 					<div class="panel-row">
 						<div id="docFontPanelTitle" class="panel-title compact">文档字体</div>
 						<span id="docFontSummary" class="count-pill">0</span>
 					</div>
 					<div id="docFontList" class="doc-font-list"></div>
 				</section>
-				<section class="font-panel" aria-labelledby="fontPanelTitle">
+				<section class="font-panel">
 					<div class="panel-row">
 						<div id="fontPanelTitle" class="panel-title compact">可用字体</div>
 						<div class="panel-actions">
 							<span id="availableFontSummary" class="count-pill">0</span>
-							<button id="localFontButton" class="small-button" type="button" aria-label="系统字体">系统</button>
+							<button id="localFontButton" class="small-button" type="button">系统</button>
 							<button id="fontAddButton" class="small-button" type="button">添加</button>
-							<button id="fontDirectoryButton" class="small-button" type="button" title="添加字体目录" aria-label="添加字体目录">目录</button>
+							<button id="fontDirectoryButton" class="small-button" type="button">目录</button>
 						</div>
 					</div>
 						<div id="fontPermissionHint" class="font-permission-hint" hidden>系统字体未授权</div>
@@ -814,7 +814,7 @@
 		<footer class="app-footer app-bar">
 			<a class="footer-brand" href="https://github.com/xiaoqidun/ofdgo" target="_blank" rel="noreferrer">OFDGo</a>
 			<div id="statusText" class="status-text">正在准备引擎</div>
-			<nav class="footer-links" aria-label="相关链接">
+			<nav class="footer-links">
 				<a href="https://aite.me/" target="_blank" rel="noreferrer">官方网站</a>
 			</nav>
 		</footer>

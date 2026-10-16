@@ -610,14 +610,11 @@ export class CanvasEditor {
 				node.classList.add("edit-line");
 			}
 			node.tabIndex = 0;
-			node.setAttribute("role", "button");
-			node.setAttribute("aria-label", { ImageObject: "图片对象", TextObject: "文字对象", PathObject: "图形对象", CompositeObject: "复合对象", CompositeGraphicUnit: "复合对象", Annotation: "注解对象" }[object.type]);
 			const item = { ...object, index, page: { width: page.width, height: page.height }, node, surface };
 			item.artwork = artwork.get(object.id)?.node;
 			if (object.note) {
 				const icon = document.createElement("span");
 				icon.className = "edit-note-icon";
-				icon.setAttribute("aria-hidden", "true");
 				icon.textContent = "\u24d8";
 				node.append(icon);
 			}
@@ -625,7 +622,6 @@ export class CanvasEditor {
 				node.classList.add("edit-contour");
 				const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
 				svg.classList.add("edit-outline");
-				svg.setAttribute("aria-hidden", "true");
 				svg.setAttribute("preserveAspectRatio", "none");
 				let contour;
 				if (object.shape || object.oriented || !object.contours?.length) {
@@ -766,7 +762,7 @@ export class CanvasEditor {
 		if (this.selected?.items) this.selected.node.remove();
 		for (const item of this.items()) {
 			item.node.classList.remove("selected", "multi-selected");
-			item.node.setAttribute("aria-pressed", "false");
+			item.node.setAttribute("data-pressed", "false");
 			for (const handle of [...item.node.children]) {
 				if (handle.dataset.corner) handle.remove();
 			}
@@ -803,7 +799,7 @@ export class CanvasEditor {
 		for (const item of items) {
 			item.node.classList.add("selected");
 			item.node.classList.toggle("multi-selected", items.length > 1);
-			item.node.setAttribute("aria-pressed", "true");
+			item.node.setAttribute("data-pressed", "true");
 		}
 		this.options.onSelect(this.selected, previous);
 	}
@@ -1506,9 +1502,6 @@ export class CanvasEditor {
 		document.fonts.add(face);
 		const input = document.createElement("div");
 		input.className = "edit-text";
-		input.setAttribute("aria-label", "编辑文字");
-		input.setAttribute("role", "textbox");
-		input.setAttribute("aria-multiline", "true");
 		input.setAttribute("dir", "auto");
 		input.contentEditable = "true";
 		input.spellcheck = false;
@@ -1668,10 +1661,10 @@ export class CanvasEditor {
 		const previous = editing.error || "";
 		editing.error = error ? String(error.message || error) : "";
 		if (editing.error) {
-			editing.input.setAttribute("aria-invalid", "true");
+			editing.input.setAttribute("data-invalid", "true");
 			editing.input.title = editing.error;
 		} else {
-			editing.input.removeAttribute("aria-invalid");
+			editing.input.removeAttribute("data-invalid");
 			editing.input.removeAttribute("title");
 		}
 		if (editing.error || previous) this.options.onTextError?.(editing.error, previous);
