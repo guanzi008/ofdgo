@@ -5744,6 +5744,10 @@ function invoiceSetValue(invoice, field, item, value) {
 }
 
 function invoiceIssues(issues, details = false) {
+	const codes = {
+		"appearance-not-synchronized": "票面未同步",
+		"signature-review-required": "修改后需重新验签"
+	};
 	const messages = {
 		"unsupported invoice XML root or version": "暂不支持此发票格式或版本",
 		"unsupported eInvoice namespace or version": "暂不支持此发票格式或版本",
@@ -5754,7 +5758,7 @@ function invoiceIssues(issues, details = false) {
 		const message = typeof issue === "string" ? issue : issue.message || issue.code;
 		if (typeof issue === "string") return details ? message : messages[message] || message;
 		if (details) return [issue.source?.fileLoc || issue.source?.id || issue.source?.kind, issue.source?.nodePath, issue.field, message].filter(Boolean).join("：");
-		return [issue.field, messages[message] || message].filter(Boolean).join("：");
+		return [issue.field, codes[issue.code] || messages[message] || message].filter(Boolean).join("：");
 	}).filter(Boolean))].join("\n");
 }
 
@@ -6420,8 +6424,9 @@ async function commitInvoice(draft, request) {
 		await loadDocumentSettings();
 		const warning = invoiceIssues(result?.issues);
 		if (warning) {
-			if (invoiceCurrent()) invoiceCurrent().status = warning;
-			settingsElements.Status.textContent = warning;
+			const status = "已保存；" + warning;
+			if (invoiceCurrent()) invoiceCurrent().status = status;
+			settingsElements.Status.textContent = status;
 		}
 	} finally {
 		settings.busy = false;
