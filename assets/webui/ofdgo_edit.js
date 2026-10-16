@@ -1553,6 +1553,7 @@ export class CanvasEditor {
 			if (editing.rich) editing.rich.beforeCaret = editing.rich.selection();
 			this.rememberSourceSelection();
 			editing.composing = true;
+			if (editing.source) this.paintSourceDraft();
 		});
 		input.addEventListener("compositionend", () => {
 			editing.composing = false;
@@ -1755,7 +1756,9 @@ export class CanvasEditor {
 
 	async previewSourceText() {
 		const editing = this.input;
-		if (!editing?.source || editing.composing || editing.saving) return;
+		if (!editing?.source || editing.saving) return;
+		this.paintSourceDraft();
+		if (editing.composing) return;
 		const value = editTextValue(editing.input), font = editing.fontData, size = editing.style?.size || editing.item.size, reflow = !!editing.reflow;
 		if (value === "") {
 			this.setTextError(null);
@@ -1772,6 +1775,26 @@ export class CanvasEditor {
 			if (!current()) return;
 			this.setTextError(err);
 		}
+	}
+
+	paintSourceDraft() {
+		const editing = this.input, input = editing.input;
+		for (const span of input.querySelectorAll("[data-glyph]")) span.removeAttribute("data-glyph");
+		if (editing.composing) return;
+		const value = editTextValue(input), caret = editTextSelection(input, editing.range);
+		const fragment = document.createDocumentFragment(), positions = [];
+		let position = 0;
+		for (const text of value.split("\n")) {
+			const line = document.createElement("div"), node = document.createTextNode(text);
+			line.append(node);
+			if (!text) line.append(document.createElement("br"));
+			fragment.append(line);
+			positions.push({ node, start: position, end: position + text.length });
+			position += text.length + 1;
+		}
+		input.replaceChildren(fragment);
+		Object.assign(input.style, { width: "max-content", height: "auto", minWidth: `${(editing.style?.size || editing.item.size) * PX_PER_MM + 4}px` });
+		restoreTextSelection(positions, caret, editing.range);
 	}
 
 	paintSourceText(source) {
