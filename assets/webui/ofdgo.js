@@ -2398,7 +2398,7 @@ function updateVersionControls() {
 	el.versionManageButton.setAttribute("aria-label", title);
 	el.versionTitle.textContent = title;
 	el.versionManageButton.disabled = disabled;
-	el.versionNotice.textContent = state.editing ? state.editorInfo?.editWarnings?.join("；") || "" : "";
+	el.versionNotice.textContent = state.editing ? state.editorInfo?.editWarnings?.join(" · ") || "" : "";
 	el.versionNotice.hidden = !el.versionNotice.textContent;
 	el.versionNameRow.hidden = !state.editing;
 	el.versionActions.classList.toggle("version-readonly", !state.editing);
@@ -5746,7 +5746,7 @@ function invoiceSetValue(invoice, field, item, value) {
 function invoiceIssues(issues, details = false) {
 	const codes = {
 		"appearance-not-synchronized": "票面未同步",
-		"signature-review-required": "修改后需重新验签"
+		"signature-review-required": "需重新验签"
 	};
 	const messages = {
 		"unsupported invoice XML root or version": "暂不支持此发票格式或版本",
@@ -6422,9 +6422,9 @@ async function commitInvoice(draft, request) {
 		if (!settingsElements.Panel.open || !settings.invoice || invoicePanel.key !== key) return;
 		if (result?.source?.kind) invoicePanel.key = JSON.stringify([invoiceSourceKey(result.source), draft.entry?.index || 0]);
 		await loadDocumentSettings();
-		const warning = invoiceIssues(result?.issues).replaceAll("\n", "，");
+		const warning = invoiceIssues(result?.issues).replaceAll("\n", " · ");
 		if (warning) {
-			const status = "已保存；" + warning;
+			const status = "已保存 · " + warning;
 			if (invoiceCurrent()) invoiceCurrent().status = status;
 			settingsElements.Status.textContent = status;
 		}
@@ -11730,7 +11730,7 @@ function updateEditorTools() {
 	el.editButton.setAttribute("aria-pressed", String(state.editing));
 	el.editButton.title = state.editing ? "阅读" : "编辑";
 	el.editButton.setAttribute("aria-label", el.editButton.title);
-	el.editNotice.textContent = state.editorInfo?.editWarnings?.join("；") || "";
+	el.editNotice.textContent = state.editorInfo?.editWarnings?.join(" · ") || "";
 	el.editNotice.hidden = !state.editing || !el.editNotice.textContent;
 	el.editorTools.hidden = !state.editing;
 	const pagesDisabled = !state.editing || !state.ready || state.exporting;

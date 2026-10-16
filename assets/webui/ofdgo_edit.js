@@ -508,7 +508,7 @@ export function objectEditReason(item) {
 			: object.capabilities.delete ? "仍可删除" : "暂不可编辑";
 		return object.capabilities.missingGlyphs ? missingGlyphMessage(object.capabilities.missingGlyphs, available) : `${message}，${available}`;
 	});
-	return [...new Set(reasons.filter(Boolean))].join("；");
+	return [...new Set(reasons.filter(Boolean))].join(" · ");
 }
 
 export function selectedText(item) {
