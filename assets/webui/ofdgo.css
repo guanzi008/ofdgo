@@ -1619,10 +1619,6 @@ body[data-hide-meta] .meta-panel {
 	width: 600px;
 }
 
-.resource-dialog .form-status:not(:empty) {
-	margin-top: 12px;
-}
-
 .resource-heading,
 .resource-option {
 	display: grid;
@@ -1704,6 +1700,7 @@ body[data-hide-meta] .meta-panel {
 
 .resource-actions {
 	display: flex;
+	align-items: center;
 	flex-wrap: wrap;
 	gap: 6px;
 	margin-top: 12px;
@@ -1782,13 +1779,10 @@ body[data-hide-meta] .meta-panel {
 	width: 100%;
 }
 
-.document-dialog .form-status:not(:empty) {
-	margin-top: 8px;
-}
-
 .document-actions {
-	display: grid;
-	grid-template-columns: repeat(6, minmax(0, 1fr));
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
 	gap: 6px;
 }
 
@@ -1797,12 +1791,22 @@ body[data-hide-meta] .meta-panel {
 	padding-inline: 6px;
 }
 
-.document-actions.version-readonly {
-	grid-template-columns: repeat(3, minmax(0, 1fr));
+.document-actions > .button,
+.resource-actions > .button {
+	flex: 0 0 auto;
 }
 
-#versionActions:not(.version-readonly) {
-	grid-template-columns: repeat(7, minmax(0, 1fr));
+.document-actions > .form-status,
+.resource-actions > .form-status {
+	flex: 1 1 0;
+	min-width: 4em;
+	max-height: 6em;
+	overflow: auto;
+	white-space: pre-wrap;
+}
+
+.document-actions > button:last-child {
+	margin-left: auto;
 }
 
 .settings-dialog {

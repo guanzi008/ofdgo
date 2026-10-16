@@ -378,6 +378,7 @@
 					<button id="resourceRename" class="button" type="button" hidden>改名</button>
 					<button id="resourceReplace" class="button" type="button">替换</button>
 					<button id="resourceDelete" class="button" type="button">删除</button>
+					<div id="resourceStatus" class="form-status" role="status"></div>
 					<button id="resourceClose" class="button" type="button">关闭</button>
 				</div>
 				<div id="resourceBinding" class="resource-binding" hidden>
@@ -386,7 +387,6 @@
 					<div id="resourceBindingActions" class="form-actions"><button id="resourceUnbind" class="button" type="button">解绑</button><button id="resourceBind" class="button" type="button">绑定</button></div>
 				</div>
 				<div id="resourceViewer" class="resource-viewer" hidden></div>
-				<div id="resourceStatus" class="form-status" role="status"></div>
 				<input id="resourceFile" type="file" hidden>
 			</form>
 		</dialog>
@@ -400,9 +400,9 @@
 					<button id="documentDeleteButton" class="button" type="button" title="删除文档" aria-label="删除文档">删除</button>
 					<button id="documentUpButton" class="button" type="button" title="前移文档" aria-label="前移文档">前移</button>
 					<button id="documentDownButton" class="button" type="button" title="后移文档" aria-label="后移文档">后移</button>
+					<div id="documentStatus" class="form-status" role="status"></div>
 					<button id="documentClose" class="button" type="button">关闭</button>
 				</div>
-				<div id="documentStatus" class="form-status" role="status"></div>
 			</form>
 		</dialog>
 		<dialog id="settingsPanel" class="form-dialog settings-dialog" aria-labelledby="settingsTitle">
@@ -435,9 +435,9 @@
 					<button id="versionDelete" class="button" type="button" title="删除版本" aria-label="删除版本">删除</button>
 					<button id="versionSelect" class="button" type="button" title="切换版本" aria-label="切换版本">切换</button>
 					<button id="versionExport" class="button" type="button" title="另存版本" aria-label="另存版本">另存</button>
+					<div id="versionStatus" class="form-status" role="status"></div>
 					<button id="versionClose" class="button" type="button">关闭</button>
 				</div>
-				<div id="versionStatus" class="form-status" role="status"></div>
 			</form>
 		</dialog>
 		<dialog id="infoPanel" class="form-dialog" aria-label="文档信息">
