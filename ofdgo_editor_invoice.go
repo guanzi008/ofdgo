@@ -15,10 +15,13 @@
 package ofdgo
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"path"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -127,7 +130,10 @@ func (r *Reader) InvoiceCapabilities(ctx context.Context, source InvoiceSource, 
 		result.Sync = false
 		result.Generate = false
 		result.Bind = false
-		for _, operation := range []string{"sync", "generate", "bind"} {
+		result.Edit = false
+		result.Delete = false
+		result.Items = false
+		for _, operation := range []string{"edit", "delete", "items", "sync", "generate", "bind"} {
 			result.Reasons[operation] = "票面关联损坏，请先修复关联"
 		}
 		return result, nil
@@ -333,7 +339,7 @@ func (e *Editor) UpdateInvoice(ctx context.Context, source InvoiceSource, digest
 		if err != nil {
 			return err
 		}
-		previous, err := parseInvoiceXML(ctx, original, source)
+		previous, err := parseInvoiceXML(ctx, original, InvoiceSource{})
 		if err != nil {
 			return err
 		}
@@ -352,6 +358,16 @@ func (e *Editor) UpdateInvoice(ctx context.Context, source InvoiceSource, digest
 		}
 		if synchronize && len(entries) == 0 {
 			return fmt.Errorf("invoice has no appearance bindings")
+		}
+		pages := make(map[string]string)
+		for _, entry := range entries {
+			for _, binding := range entry.bindings {
+				page, err := next.Page(binding.Page)
+				if err != nil {
+					return err
+				}
+				pages[fmt.Sprintf("%d/%s", entry.index, binding.ObjectID)] = page.ID
+			}
 		}
 		updated, err := next.ReplaceInvoiceData(ctx, source, digest, data)
 		if err != nil {
@@ -374,11 +390,24 @@ func (e *Editor) UpdateInvoice(ctx context.Context, source InvoiceSource, digest
 				}
 				continue
 			}
-			if synchronize {
-				if entry.record.Invoice >= len(previous.Invoices) {
-					return fmt.Errorf("bound invoice no longer exists")
+			if entry.record.Invoice >= len(previous.Invoices) {
+				return fmt.Errorf("bound invoice no longer exists")
+			}
+			originalBindings := slices.Clone(entry.bindings)
+			entry.bindings, err = invoiceRemapBindings(previous.Invoices[entry.record.Invoice], report.Invoices[entry.record.Invoice], entry.bindings)
+			if err != nil {
+				return err
+			}
+			for i := range entry.bindings {
+				id := pages[fmt.Sprintf("%d/%s", entry.index, entry.bindings[i].ObjectID)]
+				page := slices.IndexFunc(next.pages, func(page PageContent) bool { return sameResourceID(page.ID, id) })
+				if page < 0 {
+					return fmt.Errorf("invoice appearance page no longer exists")
 				}
-				if err := invoiceBindingCoverage(previous.Invoices[entry.record.Invoice], report.Invoices[entry.record.Invoice], entry.bindings); err != nil {
+				entry.bindings[i].Page = page
+			}
+			if synchronize {
+				if err := invoiceBindingCoverage(previous.Invoices[entry.record.Invoice], report.Invoices[entry.record.Invoice], originalBindings); err != nil {
 					return err
 				}
 				if err := next.SyncInvoicePages(ctx, report.Invoices[entry.record.Invoice], entry.bindings); err != nil {
@@ -389,7 +418,29 @@ func (e *Editor) UpdateInvoice(ctx context.Context, source InvoiceSource, digest
 			if err != nil {
 				return err
 			}
-			if err := next.UpdateStructureNode(entry.index, nil, StructureNode{Name: "Invoice", Namespace: invoiceNamespace, Text: string(encoded)}); err != nil {
+			if err := next.editStructure(entry.index, func(data []byte, root *editorXML, _ CustomTag) ([]byte, error) {
+				var patches []editorXMLPatch
+				for i, binding := range entry.bindings {
+					if binding.Field == originalBindings[i].Field {
+						continue
+					}
+					patch, err := editorXMLAttributePatch(data, root.children[i], "Name", binding.Field)
+					if err != nil {
+						return nil, err
+					}
+					patches = append(patches, patch)
+				}
+				data = editorPatchXML(data, patches)
+				root, err := parseEditorXMLContext(ctx, data)
+				if err != nil {
+					return nil, err
+				}
+				var text bytes.Buffer
+				if err := xml.EscapeText(&text, encoded); err != nil {
+					return nil, err
+				}
+				return editorXMLDirectText(data, root, text.Bytes())
+			}); err != nil {
 				return err
 			}
 		}
@@ -941,6 +992,57 @@ func invoicePayloadSignature(ctx context.Context, data []byte) (bool, error) {
 		nodes = append(nodes, node.children...)
 	}
 	return false, nil
+}
+
+// invoiceRemapBindings 按唯一事实身份维护索引关联，不限制未关联业务字段的修改
+// 入参: before 原发票, after 新发票, bindings 原关联
+// 返回: []InvoiceBinding 更新后的关联, error 身份缺失或歧义错误
+func invoiceRemapBindings(before, after Invoice, bindings []InvoiceBinding) ([]InvoiceBinding, error) {
+	result := slices.Clone(bindings)
+	for i := range result {
+		binding := &result[i]
+		oldFacts, newFacts, prefix := before.Facts, after.Facts, "facts."
+		if strings.HasPrefix(binding.Field, "items.") {
+			if binding.Item < 0 || binding.Item >= len(before.Items) || binding.Item >= len(after.Items) {
+				return nil, fmt.Errorf("bound invoice item no longer exists")
+			}
+			if len(before.Items) != len(after.Items) && !reflect.DeepEqual(before.Items[binding.Item], after.Items[binding.Item]) {
+				return nil, fmt.Errorf("bound invoice item identity changed")
+			}
+			oldFacts, newFacts, prefix = before.Items[binding.Item].Fields, after.Items[binding.Item].Fields, "items.fields."
+		}
+		if !strings.HasPrefix(binding.Field, prefix) {
+			continue
+		}
+		index, err := strconv.Atoi(strings.TrimPrefix(binding.Field, prefix))
+		if err != nil || index < 0 || index >= len(oldFacts) {
+			return nil, fmt.Errorf("bound invoice fact no longer exists")
+		}
+		fact := oldFacts[index]
+		identity := func(candidate InvoiceFact) bool {
+			return candidate.Name == fact.Name && candidate.Namespace == fact.Namespace && candidate.Context == fact.Context && candidate.Unit == fact.Unit && slices.Equal(candidate.Dimensions, fact.Dimensions)
+		}
+		oldCount, match, count := 0, -1, 0
+		for _, candidate := range oldFacts {
+			if identity(candidate) {
+				oldCount++
+			}
+		}
+		for j, candidate := range newFacts {
+			if identity(candidate) {
+				count++
+				match = j
+			}
+		}
+		if oldCount != 1 || count != 1 || fact.Source.NodePath == "" || newFacts[match].Source.NodePath != fact.Source.NodePath {
+			if reflect.DeepEqual(oldFacts, newFacts) {
+				continue
+			}
+			return nil, fmt.Errorf("bound invoice fact identity is missing or ambiguous")
+		}
+		binding.Field = fmt.Sprintf("%s%d", prefix, match)
+	}
+	return result, nil
 }
 
 // invoiceBindingCoverage 拒绝将未关联的字段修改误报为已同步，不猜测缺失图元

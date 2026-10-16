@@ -5672,6 +5672,7 @@ async function loadInvoiceSettings(sequence, openSeq) {
 function invoiceDraft(detail, entry, scope) {
 	return {
 		detail, invoice: structuredClone(detail.invoice), entry, scope,
+		baselineFields: structuredClone(detail.fields || []),
 		dirty: new Set(), changes: new Map(),
 		addedItems: new Set(),
 		bindings: structuredClone(detail.bindings || []), xml: detail.xml || "", page: state.pageIndex, object: "", field: "",
@@ -5972,7 +5973,7 @@ function renderInvoiceItems(container, draft) {
 			draft.item = next;
 			invoiceDirty(draft, "model");
 			await invoiceRefreshFields(draft);
-			renderDocumentSettings();
+			if (invoiceCurrent() === draft) renderDocumentSettings();
 		};
 		settingsButton("添加", async () => {
 			const item = {};
@@ -5981,14 +5982,14 @@ function renderInvoiceItems(container, draft) {
 			draft.item = items.length - 1;
 			invoiceDirty(draft, "model");
 			await invoiceRefreshFields(draft);
-			renderDocumentSettings();
+			if (invoiceCurrent() === draft) renderDocumentSettings();
 		}, !editable, "InvoiceItemAdd", actions);
 		settingsButton("删除", async () => {
 			if (draft.changes.size) throw new Error("请先应用原字段修改，再删除明细");
 			items.splice(draft.item, 1);
 			invoiceDirty(draft, "model");
 			await invoiceRefreshFields(draft);
-			renderDocumentSettings();
+			if (invoiceCurrent() === draft) renderDocumentSettings();
 		}, !editable || !items.length, "InvoiceItemDelete", actions);
 		settingsButton("上移", () => reorder(-1), !editable || draft.item === 0 || !items.length, "InvoiceItemUp", actions);
 		settingsButton("下移", () => reorder(1), !editable || draft.item >= items.length - 1, "InvoiceItemDown", actions);
@@ -5998,7 +5999,7 @@ function renderInvoiceItems(container, draft) {
 async function invoiceRefreshFields(draft) {
 	const invoice = structuredClone(draft.invoice);
 	const detail = await callWASM("ofdgoInvoice", JSON.stringify({ invoice, ...draft.scope }));
-	if (invoiceCurrent() === draft && JSON.stringify(draft.invoice) === JSON.stringify(invoice)) draft.detail.fields = detail.fields;
+	if ([...invoicePanel.drafts.values()].includes(draft) && JSON.stringify(draft.invoice) === JSON.stringify(invoice)) draft.detail.fields = detail.fields;
 }
 
 function renderInvoiceFields(container, draft) {
@@ -6206,13 +6207,17 @@ function renderInvoiceAppearance(container, draft) {
 		settingsButton("生成", async () => {
 			if (draft.dirty.size) throw new Error("请先应用草稿");
 			if (!draft.layout.font && !draft.fontChoice?.startsWith("file:")) throw new Error("请选择字体");
+			const openSeq = state.openSeq, sequence = settings.sequence;
+			const fontChoice = draft.fontChoice, layout = structuredClone(draft.layout);
 			let fontData;
-			if (draft.fontChoice?.startsWith("file:")) {
-				const font = libraryFonts.find(value => `file:${value.id}` === draft.fontChoice);
+			if (fontChoice?.startsWith("file:")) {
+				const font = libraryFonts.find(value => `file:${value.id}` === fontChoice);
 				if (!font) throw new Error("所选字体不可用");
 				fontData = invoiceBase64(await readTextFont(font));
 			}
-			await commitInvoice(draft, { operation: "generate", layout: draft.layout, fontData });
+			if (openSeq !== state.openSeq || sequence !== settings.sequence || invoiceCurrent() !== draft || !settingsElements.Panel.open || settingsElements.Kind.value !== "invoices") return;
+			if (draft.dirty.size || draft.fontChoice !== fontChoice || JSON.stringify(draft.layout) !== JSON.stringify(layout)) throw new Error("内容已变更，请重新生成");
+			await commitInvoice(draft, { operation: "generate", layout, fontData });
 		}, !capabilities.generate, "InvoiceGenerate", details, capabilities.reasons?.generate || (draft.bindings.length ? "请先解除绑定" : ""));
 		settingsButton("同步", async () => {
 			if (draft.dirty.size) throw new Error("请先应用草稿");
@@ -6245,6 +6250,11 @@ function resetInvoiceDraft(draft) {
 	else if (section === "bindings") draft.bindings = structuredClone(draft.detail.bindings || []);
 	else {
 		draft.invoice = structuredClone(draft.detail.invoice);
+		draft.detail.fields = structuredClone(draft.baselineFields);
+		draft.addedItems.clear();
+		draft.item = 0;
+		draft.fact = 0;
+		draft.factOwner = -1;
 		draft.options = { name: "", encoding: { schemaRef: "", context: {}, units: [] } };
 		draft.fragments = {};
 	}
@@ -6309,6 +6319,7 @@ async function applyInvoiceDraft(draft) {
 
 function buildInvoiceRequest(draft) {
 	if (draft.dirty.has("xml") && draft.dirty.size > 1) throw new Error("原文替换与其他修改冲突，草稿已保留，请先还原其中一项");
+	if (draft.dirty.has("model") && draft.dirty.has("fields")) throw new Error("基本、明细与原字段不能同时应用，请先还原一项");
 	const section = draft.dirty.has("xml") ? "xml" : "model";
 	const request = { synchronize: draft.synchronize };
 	if (section === "xml") {
@@ -6338,6 +6349,10 @@ function invoiceBase64(bytes) {
 
 async function commitInvoice(draft, request) {
 	if (!state.editing || settings.busy || document.body.hasAttribute("aria-busy")) return;
+	if (!settingsElements.Panel.open || settingsElements.Kind.value !== "invoices" || invoiceCurrent() !== draft) return;
+	const scope = invoiceScope();
+	if (draft.scope.documentIndex !== scope.documentIndex || draft.scope.version !== scope.version || draft.scope.revision !== scope.revision) throw new Error("文档已变更，请重新打开配置");
+	const key = invoicePanel.key;
 	settings.busy = true;
 	settingsElements.Form.inert = true;
 	settingsElements.Status.textContent = "正在保存修改";
@@ -6348,7 +6363,7 @@ async function commitInvoice(draft, request) {
 			return;
 		}
 		const result = invoicePanel.result;
-		invoicePanel.drafts.delete(invoicePanel.key);
+		if (invoicePanel.drafts.get(key) === draft) invoicePanel.drafts.delete(key);
 		const currentScope = invoiceScope();
 		for (const [key, value] of invoicePanel.drafts) {
 			if (value.scope.documentIndex !== currentScope.documentIndex || value.scope.version !== currentScope.version) continue;
@@ -6365,6 +6380,7 @@ async function commitInvoice(draft, request) {
 				}
 			}
 		}
+		if (!settingsElements.Panel.open || settingsElements.Kind.value !== "invoices" || invoicePanel.key !== key) return;
 		if (result?.source?.kind) invoicePanel.key = JSON.stringify([invoiceSourceKey(result.source), draft.entry?.index || 0]);
 		await loadDocumentSettings();
 		const warning = invoiceIssues(result?.issues);
