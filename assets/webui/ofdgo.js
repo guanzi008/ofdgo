@@ -5801,6 +5801,19 @@ function renderInvoiceSettings() {
 	settingsButton("导出", () => downloadBytes(new TextEncoder().encode(JSON.stringify(draft.invoice, null, 2)), "application/json", "invoice.json"), false, "InvoiceExportJSON");
 	if (state.editing) {
 		settingsButton("应用", () => applyInvoiceDraft(draft), !draft.dirty.size, "InvoiceApply");
+		if (draft.entry) settingsButton("同步", async () => {
+			if (!draft.detail.capabilities?.sync || draft.dirty.has("bindings")) {
+				invoicePanel.tab = "appearance";
+				draft.status = draft.dirty.has("bindings") ? "请先应用票面绑定" : draft.bindings.length ? draft.detail.capabilities?.reasons?.sync || "票面关联不可用" : "票面未绑定，请选择字段和图元后绑定";
+				renderDocumentSettings();
+				return;
+			}
+			if (draft.dirty.size) {
+				await applyInvoiceDraft(draft, true);
+				return;
+			}
+			await commitInvoice(draft, { operation: "sync" });
+		}, false, "InvoiceSync");
 		settingsButton("还原", () => resetInvoiceDraft(draft), !draft.dirty.size, "InvoiceReset");
 		if (draft.entry) settingsButton("删除", async () => {
 			if (draft.dirty.size) throw new Error("请先应用或还原草稿");
@@ -5850,7 +5863,6 @@ function renderInvoiceBasic(container, draft) {
 			}, !state.editing || !(field.editable || !draft.entry && field.field === "currency" && draft.invoice.standard !== "EInvoice") || !!draft.entry && !draft.detail.capabilities?.edit).title = display !== value ? value : field.label;
 		}
 	}
-	if (draft.entry && state.editing) invoiceInput(container, "同步", "Synchronize", draft.synchronize, value => { draft.synchronize = value; }, !draft.detail.capabilities?.sync, "checkbox").title = draft.detail.capabilities?.reasons?.sync || "同步票面";
 	if (!draft.entry) renderInvoiceAdvanced(container, draft);
 }
 
@@ -6034,6 +6046,13 @@ function renderInvoiceFields(container, draft) {
 	const patchKey = invoiceSourceKey(fact.source);
 	const change = draft.changes.get(patchKey);
 	const descriptor = draft.detail.fields?.find(value => value.field === field && value.item === item);
+	if (descriptor?.bindable) {
+		draft.field = JSON.stringify([field, item]);
+		const binding = draft.bindings.find(value => value.field === field && value.item === item);
+		draft.binding = 0;
+		draft.page = binding?.page ?? state.pageIndex;
+		draft.object = binding?.objectId || "";
+	}
 	const fresh = !draft.entry || item >= 0 && draft.addedItems.has(draft.invoice.items[item]);
 	const writable = state.editing && (fresh || descriptor?.editable && !!fact.source?.nodePath);
 	for (const [key, label] of [["name", "名称"], ["namespace", "空间"], ["context", "语境"], ["unit", "单位"], ["decimals", "小数"], ["precision", "精度"]]) {
@@ -6220,10 +6239,6 @@ function renderInvoiceAppearance(container, draft) {
 			if (draft.dirty.size || draft.fontChoice !== fontChoice || JSON.stringify(draft.layout) !== JSON.stringify(layout)) throw new Error("内容已变更，请重新生成");
 			await commitInvoice(draft, { operation: "generate", layout, fontData });
 		}, !capabilities.generate, "InvoiceGenerate", details, capabilities.reasons?.generate || (draft.bindings.length ? "请先解除绑定" : ""));
-		settingsButton("同步", async () => {
-			if (draft.dirty.size) throw new Error("请先应用草稿");
-			await commitInvoice(draft, { operation: "sync" });
-		}, !capabilities.sync, "InvoiceSync", actions, capabilities.reasons?.sync);
 	}
 	loadInvoiceObjects(draft).catch(error => { if (invoiceCurrent() === draft) settingsElements.Status.textContent = error.message; });
 }
@@ -6316,9 +6331,10 @@ async function validateInvoiceDraft(draft) {
 	settingsElements.Status.textContent = draft.status;
 }
 
-async function applyInvoiceDraft(draft) {
+async function applyInvoiceDraft(draft, synchronize = draft.synchronize) {
 	if (!state.editing || !draft.dirty.size) return;
 	const request = buildInvoiceRequest(draft);
+	request.synchronize = synchronize;
 	if (request.operation === "replace" && !window.confirm("替换此来源中的全部发票原文？" + invoiceOtherDraftWarning(draft))) return;
 	await commitInvoice(draft, request);
 }
