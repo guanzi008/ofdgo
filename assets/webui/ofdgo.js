@@ -6306,7 +6306,11 @@ async function validateInvoiceDraft(draft) {
 	const request = draft.dirty.size ? buildInvoiceRequest(draft) : { invoice: draft.invoice };
 	const result = await callWASM("ofdgoValidateInvoice", JSON.stringify({ ...draft.scope, source: draft.entry?.source, index: draft.entry?.index, digest: draft.detail.digest, ...request }));
 	if (invoiceCurrent() !== draft) return;
-	draft.status = invoiceIssues([...(result.issues || []), ...(result.appearance || [])]);
+	const appearance = result.appearance || [];
+	const unbound = appearance.some(issue => issue.code === "appearance-unbound");
+	const issues = (result.issues || []).filter(issue => issue.code !== "appearance-not-synchronized");
+	draft.status = invoiceIssues([...issues, ...appearance.filter(issue => issue.code !== "appearance-unbound")])
+		|| (unbound ? "数据校验通过，票面未校验" : draft.entry ? "数据与票面校验通过" : "数据校验通过");
 	settingsElements.Status.textContent = draft.status;
 }
 
