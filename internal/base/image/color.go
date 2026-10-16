@@ -249,7 +249,7 @@ func jpegColorProfile(ctx context.Context, data []byte, model color.Model) ([]by
 	return profile, nil
 }
 
-// jpegDisplayImage 统一JPEG显示变换，保留源分量并使用文档内嵌ICC
+// jpegDisplayImage 统一JPEG显示变换，保留源分量并精确复用相邻同色的ICC结果
 // 入参: ctx 取消上下文, source 源像素, profile 颜色配置，可为nil
 // 返回: image.Image 显示像素, error 变换或取消错误
 func jpegDisplayImage(ctx context.Context, source image.Image, profile *pdfgo.ColorSpace) (image.Image, error) {
@@ -265,6 +265,12 @@ func jpegDisplayImage(ctx context.Context, source image.Image, profile *pdfgo.Co
 		return nil, fmt.Errorf("JPEG color image dimensions exceed capacity")
 	}
 	pixels := image.NewNRGBA64(bounds)
+	var intent pdfgo.Name
+	if profile != nil {
+		intent = profile.DefaultIntent()
+	}
+	var previous color.CMYK
+	var previousPixel color.NRGBA64
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			if (x-bounds.Min.X)&255 == 0 {
@@ -283,12 +289,18 @@ func jpegDisplayImage(ctx context.Context, source image.Image, profile *pdfgo.Co
 				})
 				continue
 			}
+			if previousPixel.A != 0 && ink == previous {
+				pixels.SetNRGBA64(x, y, previousPixel)
+				continue
+			}
 			values := [4]float64{float64(ink.C) / 255, float64(ink.M) / 255, float64(ink.Y) / 255, float64(ink.K) / 255}
-			rgb, err := profile.SRGB(values[:], profile.DefaultIntent())
+			rgb, err := profile.SRGB(values[:], intent)
 			if err != nil {
 				return nil, err
 			}
-			pixels.SetNRGBA64(x, y, color.NRGBA64{R: colorWord(rgb[0]), G: colorWord(rgb[1]), B: colorWord(rgb[2]), A: 65535})
+			previous = ink
+			previousPixel = color.NRGBA64{R: colorWord(rgb[0]), G: colorWord(rgb[1]), B: colorWord(rgb[2]), A: 65535}
+			pixels.SetNRGBA64(x, y, previousPixel)
 		}
 	}
 	return &colorImage{NRGBA64: pixels, source: source}, nil

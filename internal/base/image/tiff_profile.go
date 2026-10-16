@@ -99,6 +99,7 @@ func applyImageColorProfile(ctx context.Context, source image.Image, profile *pd
 	model := source.ColorModel()
 	premultiplied := model == color.RGBAModel || model == color.RGBA64Model
 	table := newTIFFProfileTable(source)
+	components, intent := profile.Components(), profile.DefaultIntent()
 	result := image.NewNRGBA64(bounds)
 	var previous [4]float64
 	var previousPixel color.NRGBA64
@@ -174,7 +175,7 @@ func applyImageColorProfile(ctx context.Context, source image.Image, profile *pd
 					}
 				}
 			}
-			rgb, err := profile.SRGB(values[:profile.Components()], profile.DefaultIntent())
+			rgb, err := profile.SRGB(values[:components], intent)
 			if err != nil {
 				return nil, err
 			}
