@@ -31,6 +31,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xiaoqidun/ofdgo"
@@ -406,6 +407,7 @@ type annotationOptions struct {
 // outputContext 定期让出浏览器线程，将取消请求传入库层长操作
 type outputContext struct {
 	context.Context
+	mu         sync.Mutex
 	cancel     context.CancelFunc
 	checkpoint func() error
 	checked    time.Time
@@ -7250,6 +7252,8 @@ func (c *outputContext) Err() error {
 	if err := c.Context.Err(); err != nil {
 		return err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.pending != 0 {
 		c.pending--
 		return nil

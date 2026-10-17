@@ -19,10 +19,12 @@ package webui
 import (
 	"bytes"
 	"context"
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"strings"
 	"sync"
@@ -38,6 +40,9 @@ const (
 	platformTypeObject
 	platformTypeFunction
 )
+
+// nativeFields 缓存可直接展开的JSON字段，空值使用标准编码
+var nativeFields sync.Map
 
 // NativeResolver 将授权标识解析为随机读取源，生命周期由宿主管理
 // 入参: token 资源授权标识
@@ -110,6 +115,13 @@ type platformValue struct{ value any }
 
 // nativeCallback 同步宿主回调
 type nativeCallback func(...any) (any, error)
+
+// nativeField 保存字段名称、位置及空值省略规则
+type nativeField struct {
+	name      string
+	index     int
+	omitEmpty bool
+}
 
 // NewNativeEngine 创建独立业务会话，resolver不接收未经授权的文件路径
 func NewNativeEngine(resolve NativeResolver) *NativeEngine { return &NativeEngine{Resolve: resolve} }
@@ -322,6 +334,26 @@ func nativePlain(value any) any {
 		return nativePlain(v.Elem().Interface())
 	}
 	if v.Kind() == reflect.Struct {
+		if fields := nativeStructFields(v.Type()); fields != nil {
+			result := make(map[string]any, len(fields))
+			for _, field := range fields {
+				item := v.Field(field.index)
+				if field.omitEmpty {
+					switch item.Kind() {
+					case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
+						if item.Len() == 0 {
+							continue
+						}
+					default:
+						if item.Kind() != reflect.Struct && item.IsZero() {
+							continue
+						}
+					}
+				}
+				result[field.name] = nativePlain(item.Interface())
+			}
+			return result
+		}
 		data, err := json.Marshal(value)
 		if err != nil {
 			panic(err)
@@ -360,7 +392,82 @@ func nativePlain(value any) any {
 		}
 		return result
 	}
+	if v.Kind() == reflect.Float32 || v.Kind() == reflect.Float64 {
+		if number := v.Float(); math.IsNaN(number) || math.IsInf(number, 0) {
+			_, err := json.Marshal(value)
+			panic(err)
+		}
+	}
 	return value
+}
+
+// nativeStructFields 按类型复用普通结构体字段，自定义编码和嵌入字段交给JSON处理
+// 入参: value 结构体类型
+// 返回: []nativeField 字段列表，nil表示使用标准编码
+func nativeStructFields(value reflect.Type) []nativeField {
+	if fields, ok := nativeFields.Load(value); ok {
+		return fields.([]nativeField)
+	}
+	var fields []nativeField
+	if nativePlainType(value, make(map[reflect.Type]bool)) {
+		fields = make([]nativeField, 0, value.NumField())
+		for i := 0; i < value.NumField(); i++ {
+			field := value.Field(i)
+			if !field.IsExported() || field.Tag.Get("json") == "-" {
+				continue
+			}
+			name, options, _ := strings.Cut(field.Tag.Get("json"), ",")
+			if name == "" {
+				name = field.Name
+			}
+			fields = append(fields, nativeField{name: name, index: i, omitEmpty: options == "omitempty"})
+		}
+	}
+	stored, _ := nativeFields.LoadOrStore(value, fields)
+	return stored.([]nativeField)
+}
+
+// nativePlainType 检查类型是否可直接展开，递归引用及复杂字段沿用标准编码
+// 入参: value 字段类型, visiting 当前类型路径
+// 返回: bool 是否可直接展开
+func nativePlainType(value reflect.Type, visiting map[reflect.Type]bool) bool {
+	if visiting[value] || value.Implements(reflect.TypeFor[json.Marshaler]()) || value.Implements(reflect.TypeFor[encoding.TextMarshaler]()) || reflect.PointerTo(value).Implements(reflect.TypeFor[json.Marshaler]()) || reflect.PointerTo(value).Implements(reflect.TypeFor[encoding.TextMarshaler]()) || value == reflect.TypeFor[json.Number]() {
+		return false
+	}
+	visiting[value] = true
+	defer delete(visiting, value)
+	switch value.Kind() {
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr, reflect.Float32, reflect.Float64, reflect.String:
+		return true
+	case reflect.Pointer, reflect.Slice, reflect.Array:
+		return nativePlainType(value.Elem(), visiting)
+	case reflect.Struct:
+		names := make(map[string]bool)
+		for i := 0; i < value.NumField(); i++ {
+			field := value.Field(i)
+			if field.Anonymous {
+				return false
+			}
+			if !field.IsExported() || field.Tag.Get("json") == "-" {
+				continue
+			}
+			name, options, _ := strings.Cut(field.Tag.Get("json"), ",")
+			if name == "" {
+				name = field.Name
+			}
+			if name == "-" || names[name] || options != "" && options != "omitempty" || !nativePlainType(field.Type, visiting) {
+				return false
+			}
+			for _, char := range name {
+				if char != '_' && char != '-' && (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') {
+					return false
+				}
+			}
+			names[name] = true
+		}
+		return true
+	}
+	return false
 }
 
 // nativeFailure 转换结构化业务错误
@@ -693,7 +800,8 @@ func (c *nativeCall) finish(name string, result map[string]any) error {
 		}
 		c.output = nil
 	} else {
-		data["blob"] = append([]byte(nil), c.buffer.Bytes()...)
+		data["blob"] = c.buffer.Bytes()
+		c.buffer = bytes.Buffer{}
 	}
 	data["size"] = c.size
 	c.committed = true

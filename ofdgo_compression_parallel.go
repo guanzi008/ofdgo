@@ -21,29 +21,46 @@ import (
 	"image"
 	"io"
 	"runtime"
+	"strconv"
 	"sync"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
-// outputImageBatchLimit 限制并行批次持有的原始编码，超限图片单独处理
+// outputImageBatchLimit 限制并行任务持有的原始编码，超限图片单独处理
 const outputImageBatchLimit = 16 << 20
 
-// outputImageWorkingSetLimit 限制并行批次的像素工作量估算，超限图片单独处理
-const outputImageWorkingSetLimit = 64 << 20
+// outputImageWorkingSetLimit 限制64位并行任务的像素工作量总估算，32位使用64MiB，超限图片单独处理
+const outputImageWorkingSetLimit = 256 << 20
 
 // outputImageJob 保存独立图片任务，不访问编辑文档或调用进度回调
 type outputImageJob struct {
-	key       outputImageKey
-	data      []byte
-	candidate []byte
-	err       error
+	key        outputImageKey
+	data       []byte
+	workingSet int
+	candidate  []byte
+	err        error
 }
 
 // outputImageSource 保存已读取资源的摘要和格式，不保留原始编码
 type outputImageSource struct {
 	key    outputImageKey
 	format string
+}
+
+// outputImageContext 保留调用方取消检查并支持提前结束并行任务
+type outputImageContext struct {
+	context.Context
+	parent context.Context
+}
+
+// Err 检查调用方及本次任务的取消状态
+// 返回: error 取消错误
+func (c outputImageContext) Err() error {
+	if err := c.Context.Err(); err != nil {
+		return err
+	}
+	return c.parent.Err()
 }
 
 // outputImageOptions 统一资源压缩及像素需求，受保护图片只进行无损编码
@@ -62,27 +79,51 @@ func (e *Editor) outputImageOptions(key string) (CompressionOptions, image.Point
 	return options, demand
 }
 
-// prepareOutputImages 有界并行优化独立图片，读取、缓存及进度仍在调用线程处理
+// prepareOutputImages 有界并行优化独立图片，完成后补入任务，读取、缓存及进度保持串行
 // 入参: keys 资源路径, load 串行读取方法，空值表示跳过, results 候选缓存, sources 原始资源摘要，可为空
 // 返回: error 读取、进度或取消错误
 func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, error), results map[outputImageKey][]byte, sources map[string]outputImageSource) error {
-	workers := min(2, runtime.GOMAXPROCS(0))
+	workers := min(4, runtime.GOMAXPROCS(0))
 	if workers < 2 || len(keys) < 2 {
 		return nil
 	}
-	batch := make([]outputImageJob, 0, workers)
-	size, workingSet := 0, 0
-	run := func() error {
-		if err := e.runOutputImages(batch, results); err != nil {
+	limit := outputImageWorkingSetLimit
+	if strconv.IntSize == 32 {
+		limit = 64 << 20
+	}
+	base, cancel := context.WithCancel(e.output.ctx)
+	ctx := outputImageContext{Context: base, parent: e.output.ctx}
+	var group sync.WaitGroup
+	defer func() {
+		cancel()
+		group.Wait()
+	}()
+	completed := make(chan outputImageJob, workers)
+	pending := make(map[outputImageKey]bool)
+	running, size, workingSet := 0, 0, 0
+	finish := func() error {
+		job := <-completed
+		running--
+		size -= len(job.data)
+		workingSet -= job.workingSet
+		delete(pending, job.key)
+		if err := e.output.ctx.Err(); err != nil {
 			return err
 		}
-		clear(batch)
-		batch, size, workingSet = batch[:0], 0, 0
+		results[job.key] = nil
+		if job.err == nil && len(job.candidate) < len(job.data) {
+			results[job.key] = job.candidate
+		}
 		return nil
 	}
 	for _, key := range keys {
 		if err := e.output.ctx.Err(); err != nil {
 			return err
+		}
+		for len(completed) != 0 || running == workers {
+			if err := finish(); err != nil {
+				return err
+			}
 		}
 		if err := editorProgress(e.OnWriteProgress).withContext(e.output.ctx).report("compress", e.output.completed, 0); err != nil {
 			return err
@@ -105,35 +146,43 @@ func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, e
 		if _, cached := results[cacheKey]; cached {
 			continue
 		}
-		duplicate := false
-		for _, job := range batch {
-			duplicate = duplicate || job.key == cacheKey
-		}
-		if duplicate {
+		if pending[cacheKey] {
 			continue
 		}
 		cost := outputImageWorkingSet(e.output.ctx, data)
-		if len(batch) != 0 && (len(data) > outputImageBatchLimit-size || cost > outputImageWorkingSetLimit-workingSet) {
-			if err := run(); err != nil {
+		for running != 0 && (len(data) > outputImageBatchLimit-size || cost > limit-workingSet) {
+			if err := finish(); err != nil {
 				return err
 			}
 		}
-		batch = append(batch, outputImageJob{key: cacheKey, data: data})
+		job := outputImageJob{key: cacheKey, data: data, workingSet: cost}
+		if len(data) >= outputImageBatchLimit || cost >= limit {
+			if err := e.runOutputImages([]outputImageJob{job}, results); err != nil {
+				return err
+			}
+			continue
+		}
+		pending[cacheKey] = true
+		running++
 		size += len(data)
 		workingSet += cost
-		if len(batch) == workers || size >= outputImageBatchLimit || workingSet >= outputImageWorkingSetLimit {
-			if err := run(); err != nil {
-				return err
-			}
+		group.Go(func() {
+			job.candidate, job.err = optimizeImageResource(ctx, job.data, job.key.options, job.key.size)
+			completed <- job
+		})
+	}
+	for running != 0 {
+		if err := finish(); err != nil {
+			return err
 		}
 	}
-	return run()
+	return e.output.ctx.Err()
 }
 
 // outputImageWorkingSet 按原图尺寸估算解码和重采样缓冲，不以降采样目标代替原图
 // 通常预留两份16位RGBA缓冲，TIFF另计分量、瓦片及蒙版存储；格式或尺寸不明时单独处理
 // 入参: ctx 取消上下文, data 原始图像编码
-// 返回: int 编码及像素缓冲的估算字节数，上限为单批预算
+// 返回: int 编码及像素缓冲的估算字节数，上限为outputImageWorkingSetLimit
 func outputImageWorkingSet(ctx context.Context, data []byte) int {
 	if len(data) >= outputImageWorkingSetLimit {
 		return outputImageWorkingSetLimit
