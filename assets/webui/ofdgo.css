@@ -845,6 +845,11 @@ button:not(:disabled):hover {
 	text-align: left;
 }
 
+.convert-table td[data-status] {
+	white-space: pre;
+	font-variant-numeric: tabular-nums;
+}
+
 .convert-table th:nth-child(2),
 .convert-table th:nth-child(3),
 .convert-table th:nth-child(4) {
@@ -1106,6 +1111,9 @@ button:not(:disabled):hover {
 		content: attr(data-label);
 		color: var(--text-muted);
 		font-size: 12px;
+	}
+	.convert-table td[data-status] {
+		grid-template-rows: auto minmax(var(--control-height), auto);
 	}
 	.convert-table input,
 	.convert-format,

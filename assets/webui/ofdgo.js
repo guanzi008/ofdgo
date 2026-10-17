@@ -8276,7 +8276,7 @@ function updateBatchProgress() {
 		if (item.status !== "running" || !item.progress) continue;
 		const progress = item.progress.progress;
 		const stage = progress.phase?.includes("compress") ? "压缩" : progress.phase?.startsWith("write") ? "写入" : { open: "读取", pages: "解析", convert: "转换", prepare: "准备", fonts: "字体", export: "导出" }[progress.phase] || "处理";
-		batchStatus(item, "running", `${stage}${progress.total > 0 ? ` ${progress.completed}/${progress.total}` : ""}`);
+		batchStatus(item, "running", `${stage}${progress.total > 0 ? `\n${progress.completed}/${progress.total}` : ""}`);
 	}
 	if (!batch.progress) {
 		const completed = batch.jobs.filter(item => ["done", "ready", "unchanged", "failed", "canceled"].includes(item.status)).length;
