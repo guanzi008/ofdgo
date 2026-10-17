@@ -4188,37 +4188,50 @@ async function prepareOffline() {
 	return true;
 }
 
+async function applicationChecksum(path, options) {
+	const response = await fetch(path, { ...options, signal: AbortSignal.timeout(10000) });
+	try {
+		return response.ok && !response.redirected ? response.headers.get("X-OFDGo-Checksum") : null;
+	} finally {
+		await response.body?.cancel();
+	}
+}
+
 function watchApplicationUpdates(checksum) {
 	let checking = false;
-	let checked = 0;
-	async function check() {
-		if (checking || document.hidden || !navigator.onLine || Date.now() - checked < 60000) {
+	let retry = false;
+	async function check(force = false) {
+		if (checking) {
+			if (force === true) retry = true;
+			return;
+		}
+		if (document.hidden || !navigator.onLine) {
 			return;
 		}
 		checking = true;
-		checked = Date.now();
 		try {
 			if (!checksum) {
 				if (!navigator.serviceWorker.controller) return;
-				const current = await fetch("./ofdgo.js", { signal: AbortSignal.timeout(10000) });
-				if (current.ok && !current.redirected) checksum = current.headers.get("X-OFDGo-Checksum");
-				await current.body?.cancel();
+				checksum = await applicationChecksum("./ofdgo.js");
 				if (!checksum) return;
 			}
-			const response = await fetch("./", { method: "HEAD", cache: "no-store", signal: AbortSignal.timeout(10000) });
-			const latest = response.headers.get("X-OFDGo-Checksum");
-			if (response.ok && !response.redirected && latest) {
+			const latest = await applicationChecksum("./", { method: "HEAD", cache: "no-store" });
+			if (latest) {
 				el.refreshAppButton.hidden = latest === checksum;
 			}
 		} catch {
 		} finally {
 			checking = false;
+			if (retry) {
+				retry = false;
+				check(true);
+			}
 		}
 	}
-	window.addEventListener("online", check);
+	window.addEventListener("online", () => check(true));
 	window.addEventListener("focus", check);
+	window.addEventListener("pageshow", check);
 	document.addEventListener("visibilitychange", check);
-	window.setInterval(check, 300000);
 	check();
 }
 
@@ -4229,18 +4242,19 @@ function waitForWorker(worker, target) {
 			return;
 		}
 		const timer = setTimeout(() => {
-			worker.removeEventListener("statechange", changed);
-			reject(new Error("更新等待超时"));
+			finish(new Error("更新等待超时"));
 		}, 30000);
+		function finish(error) {
+			clearTimeout(timer);
+			worker.removeEventListener("statechange", changed);
+			if (error) reject(error);
+			else resolve();
+		}
 		function changed() {
 			if (worker.state === target || worker.state === "activated") {
-				clearTimeout(timer);
-				worker.removeEventListener("statechange", changed);
-				resolve();
+				finish();
 			} else if (worker.state === "redundant") {
-				clearTimeout(timer);
-				worker.removeEventListener("statechange", changed);
-				reject(new Error("离线启动失败"));
+				finish(new Error("离线启动失败"));
 			}
 		}
 		worker.addEventListener("statechange", changed);
