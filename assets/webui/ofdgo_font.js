@@ -400,7 +400,7 @@ export class FontManager {
 		for (const font of fonts) {
 			if (disabled.has(this.localName(font))) continue;
 			const names = [this.localName(font), font.postscriptName && `${font.postscriptName}.ttf`,
-				font.family && `${[font.family, font.style].filter(Boolean).join(" ")}.ttf`];
+				font.family && `${[font.family, font.style].filter(Boolean).join(" ")}.ttf`, ...(font.names || []).map(name => `${name}.ttf`)];
 			for (const name of names) {
 				if (name && !entries.has(name)) entries.set(name, font);
 			}
