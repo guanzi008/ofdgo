@@ -20,8 +20,8 @@ const STATUS = {
 };
 const wasmRequests = new Map();
 const metaContents = new WeakMap();
-const batch = { items: [], formats: [], running: false, canceled: false, worker: null, requests: new Map(), sequence: 0, activeID: 0, progressTime: 0, progress: null };
-const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Compression", "FontRow", "FontMode", "Destination", "DPIRow", "DPI", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
+const batch = { items: [], formats: [], running: false, canceled: false, workers: new Set(), requests: new Map(), sequence: 0, progress: null, jobs: [], credentials: Promise.resolve() };
+const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Compression", "FontRow", "FontMode", "Destination", "DPIRow", "DPI", "Parallel", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
 const fontBinding = { font: null, choices: [], sequence: 0 };
 const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name", "SourceRow", "Source", "File", "Hint", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#fontBinding${name}`)]));
 const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Kind", "List", "Empty", "Reference", "ReferenceGroup", "Actions", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "BindingActions", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
@@ -8128,7 +8128,7 @@ function renderBatchList() {
 }
 
 function updateBatchControls() {
-	for (const name of ["Add", "Clear", "Format", "Compression", "FontMode", "Destination", "DPI"]) batchElements[name].disabled = batch.running;
+	for (const name of ["Add", "Clear", "Format", "Compression", "FontMode", "Destination", "DPI", "Parallel"]) batchElements[name].disabled = batch.running;
 	batchElements.FontRow.hidden = !(batch.items.length ? batch.items : [null]).some(item => (item?.format || batchElements.Format.value) === "ofd");
 	batchElements.Compression.disabled ||= (batch.items.length ? batch.items : [null]).every(item => (item?.format || batchElements.Format.value) === "txt");
 	batchElements.Clear.disabled ||= !batch.items.length;
@@ -8159,16 +8159,31 @@ function batchStatus(item, status, text) {
 function batchProgress(item, position, count, progress) {
 	if (batch.canceled) return;
 	const now = performance.now();
-	const previous = batch.progress;
+	const previous = item ? item.progress : batch.progress;
 	const sameStage = previous?.item === item && previous?.progress.phase === progress.phase;
-	if (sameStage && now - batch.progressTime < 80 && progress.completed !== progress.total) return;
-	batch.progressTime = now;
-	batch.progress = { item, position, count, progress, started: sameStage ? previous.started : now };
+	if (sameStage && now - previous.updated < 80 && progress.completed !== progress.total) return;
+	const current = { item, position, count, progress, started: sameStage ? previous.started : now, updated: now };
+	if (item) item.progress = current;
+	else batch.progress = current;
 	updateBatchProgress();
 }
 
 function updateBatchProgress() {
-	if (!batch.progress) return;
+	if (batch.canceled) return;
+	for (const item of batch.jobs) {
+		if (item.status !== "running" || !item.progress) continue;
+		const progress = item.progress.progress;
+		const stage = progress.phase?.includes("compress") ? "压缩" : progress.phase?.startsWith("write") ? "写入" : { open: "读取", pages: "解析", convert: "转换", prepare: "准备", fonts: "字体", export: "导出" }[progress.phase] || "处理";
+		batchStatus(item, "running", `${stage}${progress.total > 0 ? ` ${progress.completed}/${progress.total}` : ""}`);
+	}
+	if (!batch.progress) {
+		const completed = batch.jobs.filter(item => ["done", "ready", "unchanged", "failed", "canceled"].includes(item.status)).length;
+		const running = batch.jobs.filter(item => item.status === "running").length;
+		batchElements.Status.textContent = `完成 ${completed}/${batch.jobs.length} · 运行 ${running}`;
+		batchElements.Progress.max = batch.jobs.length || 1;
+		batchElements.Progress.value = completed;
+		return;
+	}
 	const { item, position, count, progress, started } = batch.progress;
 	const compressing = progress.phase === "compress" || progress.phase === "write.compress";
 	const fontMode = (item?.format || batchElements.Format.value) === "ofd" ? batchElements.FontMode.value : "0";
@@ -8182,29 +8197,29 @@ function updateBatchProgress() {
 	else batchElements.Progress.removeAttribute("value");
 }
 
-function batchCall(name, args, onProgress) {
+function batchCall(slot, name, args, onProgress) {
 	return new Promise((resolve, reject) => {
-		if (batch.workerError) { reject(batch.workerError); return; }
+		if (slot.error) { reject(slot.error); return; }
+		if (batch.canceled) { reject(new DOMException("已取消转换", "AbortError")); return; }
 		const id = ++batch.sequence;
-		batch.activeID = id;
-		batch.requests.set(id, { resolve, reject, onProgress, destination: name === "ofdgoConvertFile" ? args[3] : null });
-		try { batch.worker.postMessage({ id, name, args }); }
-		catch (err) { batch.requests.delete(id); batch.activeID = 0; reject(err); }
+		batch.requests.set(id, { slot, resolve, reject, onProgress, destination: name === "ofdgoConvertFile" ? args[3] : null });
+		try { slot.worker.postMessage({ id, name, args }); }
+		catch (err) { batch.requests.delete(id); reject(err); }
 	});
 }
 
 function startBatchWorker() {
-	batch.workerError = null;
 	return new Promise((resolve, reject) => {
 		const worker = createEngineWorker();
-		batch.worker = worker;
+		const slot = { worker, error: null };
+		batch.workers.add(slot);
 		const fail = async error => {
-			batch.workerError = error;
+			slot.error = error;
 			worker.terminate();
 			reject(error);
-			const requests = [...batch.requests.values()];
-			batch.requests.clear();
-			for (const request of requests) {
+			for (const [id, request] of batch.requests) {
+				if (request.slot !== slot) continue;
+				batch.requests.delete(id);
 				if (request.destination && request.outputName) {
 					try { await request.destination.removeEntry(request.outputName, { recursive: true }); }
 					catch (err) { error = new Error(`${error.message}；清理失败：${err.message}`); }
@@ -8215,7 +8230,7 @@ function startBatchWorker() {
 		worker.onerror = event => fail(new Error(event.message || "转换引擎异常"));
 		worker.onmessageerror = () => fail(new Error("转换数据传递失败"));
 		worker.onmessage = async ({ data }) => {
-			if (data.type === "ready") { resolve(); return; }
+			if (data.type === "ready") { resolve(slot); return; }
 			if (data.type === "exit") { fail(new Error(data.error)); return; }
 			if (data.type === "progress") {
 				if (!batch.canceled) batchElements.Status.textContent = { download: "正在下载", compile: "正在编译", start: "正在启动" }[data.phase] || "正在准备";
@@ -8237,8 +8252,8 @@ function startBatchWorker() {
 			}
 			if (data.type === "output") { request.outputName = data.name; return; }
 			if (data.type === "conversion") { request.onProgress?.(data); return; }
+			if (data.memory) slot.memory = data.memory;
 			batch.requests.delete(data.id);
-			if (batch.activeID === data.id) batch.activeID = 0;
 			if (data.ok) request.resolve(data.data);
 			else request.reject(Object.assign(new Error(data.error), { code: data.code, name: data.canceled ? "AbortError" : "Error" }));
 		};
@@ -8250,7 +8265,8 @@ function cancelBatch() {
 	batchElements.Cancel.disabled = true;
 	batch.progress = null;
 	batchElements.Status.textContent = "正在取消";
-	if (batch.activeID) batch.worker.postMessage({ type: "cancel", id: batch.activeID });
+	if (batch.unlocking) finishCredentials(null);
+	for (const [id, request] of batch.requests) request.slot.worker.postMessage({ type: "cancel", id });
 }
 
 function warnBatch(event) {
@@ -8286,6 +8302,8 @@ async function runBatch() {
 	batch.running = true;
 	batch.canceled = false;
 	batch.progress = null;
+	batch.jobs = jobs;
+	batch.credentials = Promise.resolve();
 	const progressTimer = window.setInterval(updateBatchProgress, 1000);
 	renderBatchList();
 	window.addEventListener("beforeunload", warnBatch);
@@ -8294,7 +8312,7 @@ async function runBatch() {
 	let storage = null;
 	let stagingName = "";
 	let packed = false;
-	const entries = [];
+	const results = new Array(jobs.length);
 	try {
 		if (archive) {
 			zipFile = await saveFilePicker({ suggestedName: "转换结果.zip", types: [{ description: "ZIP", accept: { "application/zip": [".zip"] } }] });
@@ -8313,59 +8331,93 @@ async function runBatch() {
 		batch.localFonts = fontManager.localEntries();
 		batch.fontData = new Map();
 		batchElements.Status.textContent = "正在准备";
-		await startBatchWorker();
+		const first = await startBatchWorker();
 		const fonts = await fontManager.files(fontManager.records());
 		const names = new Set();
-		for (const [position, item] of jobs.entries()) {
-			if (batch.canceled) break;
+		const plans = jobs.map(item => {
 			item.details = [];
 			const format = batch.formats.find(format => format.value === (item.format || defaultFormat.value));
 			const base = item.file.name.replace(/\.[^.]+$/, "").replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/g, "") || "document";
 			let unique = base;
 			const outputName = () => (format.paged ? unique : `${unique}.${format.extension}`).toLowerCase();
-			for (let suffix = 2; archive && names.has(outputName()); suffix++) unique = `${base} (${suffix})`;
+			for (let suffix = 2; names.has(outputName()); suffix++) unique = `${base} (${suffix})`;
 			names.add(outputName());
 			const options = { format: format.value, pages: pageRange(item), dpi, backend, archive, compression, base: unique, credentials: null,
 				fontNames: [...batch.localFonts.keys()], fontMode: format.value === "ofd" ? Number(batchElements.FontMode.value) : 0 };
-			try {
-				for (;;) {
-					try {
-						const result = await batchCall("ofdgoConvertFile", [item.file, options, fonts, destination], progress => batchProgress(item, position, jobs.length, progress));
-						for (const file of result.files) entries.push(file);
-						item.details = (result.pdf?.Warnings || []).map(warning => `${warning.Page ? `第${warning.Page}页：` : ""}${warning.Message}`);
-						for (const font of result.fonts || []) item.details.push(`${font.name}：${font.changed ? options.fontMode === 1 ? "已嵌入" : "已外置" : `未处理 · ${fontBindingError(font.reason)}`}`);
-						if (result.unchanged && !result.bytes) {
-							batchStatus(item, "unchanged", "原样");
-							item.details = ["无需转换，源文件未改动"];
-						} else batchStatus(item, archive ? "ready" : "done", archive ? "待存" : "完成");
-						break;
-					} catch (err) {
-						if (batch.canceled || !["credentialsRequired", "invalidCredentials", "pdfPassword"].includes(err.code)) throw err;
-						const code = err.code === "pdfPassword" ? options.credentials ? "invalidCredentials" : "credentialsRequired" : err.code;
-						options.credentials?.password?.fill(0);
-						options.credentials?.key?.fill(0);
-						options.credentials?.keyPassword?.fill(0);
-						options.credentials = await requestCredentials(code, state.openSeq, err.code === "pdfPassword");
-						if (!options.credentials) throw new DOMException("已取消解锁", "AbortError");
-						const preservesEncryption = err.code === "pdfPassword" && format.value === "pdf" && compression.mode !== 0 && !options.pages;
-						if (!preservesEncryption && !window.confirm("转换结果将不保留原加密，是否继续？")) throw new DOMException("已取消转换", "AbortError");
+			return { item, format, options };
+		});
+		const capacity = nativeHost ? (await nativeHost.call("batch", {})).parallelism : Math.max(1, (navigator.hardwareConcurrency || 2) - 1);
+		const automatic = nativeHost ? capacity : Math.min(capacity, Math.max(1, Math.floor((navigator.deviceMemory || 4) / 2)));
+		const parallel = Math.min(jobs.length, nativeHost ? capacity : jobs.length, Number(batchElements.Parallel.value) || automatic);
+		const workerMemory = (navigator.deviceMemory || 4) * 1024 ** 3 / 4 / parallel;
+		let next = 0;
+		const run = async initial => {
+			let slot = initial;
+			while (!batch.canceled && next < plans.length) {
+				const position = next++;
+				const { item, format, options } = plans[position];
+				batchStatus(item, "running", "准备");
+				updateBatchProgress();
+				try {
+					if (!slot || slot.error) slot = await startBatchWorker();
+					for (;;) {
+						try {
+							const result = await batchCall(slot, "ofdgoConvertFile", [item.file, options, fonts, destination], progress => batchProgress(item, position, jobs.length, progress));
+							results[position] = result.files;
+							item.details = (result.pdf?.Warnings || []).map(warning => `${warning.Page ? `第${warning.Page}页：` : ""}${warning.Message}`);
+							for (const font of result.fonts || []) item.details.push(`${font.name}：${font.changed ? options.fontMode === 1 ? "已嵌入" : "已外置" : `未处理 · ${fontBindingError(font.reason)}`}`);
+							if (result.unchanged && !result.bytes) {
+								batchStatus(item, "unchanged", "原样");
+								item.details = ["无需转换，源文件未改动"];
+							} else batchStatus(item, archive ? "ready" : "done", archive ? "待存" : "完成");
+							break;
+						} catch (err) {
+							if (batch.canceled || !["credentialsRequired", "invalidCredentials", "pdfPassword"].includes(err.code)) throw err;
+							const code = err.code === "pdfPassword" ? options.credentials ? "invalidCredentials" : "credentialsRequired" : err.code;
+							options.credentials?.password?.fill(0);
+							options.credentials?.key?.fill(0);
+							options.credentials?.keyPassword?.fill(0);
+							const unlock = batch.credentials.then(async () => {
+								if (batch.canceled) throw new DOMException("已取消转换", "AbortError");
+								batch.unlocking = true;
+								try { return await requestCredentials(code, state.openSeq, err.code === "pdfPassword"); }
+								finally { batch.unlocking = false; }
+							});
+							batch.credentials = unlock.then(() => {}, () => {});
+							options.credentials = await unlock;
+							if (!options.credentials) throw new DOMException("已取消解锁", "AbortError");
+							const preservesEncryption = err.code === "pdfPassword" && format.value === "pdf" && compression.mode !== 0 && !options.pages;
+							if (!preservesEncryption && !window.confirm("转换结果将不保留原加密，是否继续？")) throw new DOMException("已取消转换", "AbortError");
+						}
+					}
+				} catch (err) {
+					batchStatus(item, err.name === "AbortError" ? "canceled" : "failed", err.name === "AbortError" ? "取消" : "失败");
+					item.details = [err.message];
+				} finally {
+					item.progress = null;
+					options.credentials?.password?.fill(0);
+					options.credentials?.key?.fill(0);
+					options.credentials?.keyPassword?.fill(0);
+					if (!nativeHost && slot && (next >= plans.length || slot.memory >= workerMemory)) {
+						slot.worker.terminate();
+						batch.workers.delete(slot);
+						slot = null;
 					}
 				}
-			} catch (err) {
-				batchStatus(item, err.name === "AbortError" ? "canceled" : "failed", err.name === "AbortError" ? "取消" : "失败");
-				item.details = [err.message];
-				if (batch.workerError) throw err;
-			} finally {
-				batch.progress = null;
-				options.credentials?.password?.fill(0);
-				options.credentials?.key?.fill(0);
-				options.credentials?.keyPassword?.fill(0);
+				updateBatchProgress();
 			}
-			batchElements.Progress.max = jobs.length;
-			batchElements.Progress.value = position + 1;
-		}
+		};
+		const running = Array.from({ length: parallel }, (_, index) => (async () => {
+			if (index) await new Promise(resolve => window.setTimeout(resolve, index * 200));
+			await run(index === 0 ? first : null);
+		})());
+		const settled = await Promise.allSettled(running);
+		const failure = settled.find(result => result.status === "rejected");
+		if (failure) throw failure.reason;
+		const entries = results.flat().filter(Boolean);
 		if (archive && entries.length && !batch.canceled) {
-			const result = await batchCall("ofdgoPackFiles", [entries, zipFile, compression], progress => batchProgress(null, 0, 1, progress));
+			const slot = [...batch.workers].find(slot => !slot.error) || await startBatchWorker();
+			const result = await batchCall(slot, "ofdgoPackFiles", [entries, zipFile, compression], progress => batchProgress(null, 0, 1, progress));
 			if (result.blob) downloadBytes(result.blob, "application/zip", "转换结果.zip");
 			packed = true;
 			for (const item of jobs) if (item.status === "ready") batchStatus(item, "done", "完成");
@@ -8381,10 +8433,10 @@ async function runBatch() {
 		batch.progress = null;
 		if (!batchElements.Progress.hasAttribute("value")) batchElements.Progress.value = 0;
 		if (archive && !packed) for (const item of jobs) if (item.status === "ready") { item.status = "pending"; item.text = "待转"; }
-		batch.worker?.terminate();
-		batch.worker = null;
+		for (const slot of batch.workers) slot.worker.terminate();
+		batch.workers.clear();
 		batch.requests.clear();
-		batch.activeID = 0;
+		if (nativeHost) await nativeHost.release(results);
 		batch.fontData?.clear();
 		batch.localFonts?.clear();
 		if (storage && stagingName) {

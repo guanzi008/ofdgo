@@ -45,6 +45,7 @@ type ConvertProgress struct {
 // Input为空时识别源格式，Format为输出格式，Pages使用零基索引，nil表示全部页面
 // PageRange使用一基页码表达式，与Pages互斥，空字符串表示全部页面
 // SkipUnchanged仅在未压缩、源格式与目标相同且未选页时不写出数据
+// Pool可由多个独立转换共享，nil时不限制文件间并发
 // 整份PDF同格式压缩直接重写PDF对象，其余PDF先转换为OFD对象再输出
 // RendererOptions同时用于PDF局部合成和输出，在PDF.RendererOptions之后应用
 // Backends统一配置转换与输出，优先于PDF和RendererOptions中的后端设置
@@ -58,6 +59,7 @@ type ConvertOptions struct {
 	Pages           []int
 	PageRange       string
 	SkipUnchanged   bool
+	Pool            *ConversionPool
 	Compression     CompressionOptions
 	Fonts           FontMode
 	Backends        *RenderBackends
@@ -114,6 +116,13 @@ func OutputFormats() []OutputFormat {
 // 入参: ctx 取消上下文, source 源数据, size 源字节数, output 输出流, options 转换选项
 // 返回: ConvertReport 转换报告, error 错误信息
 func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writer, options ConvertOptions) (report ConvertReport, err error) {
+	if options.Pool != nil {
+		if err = options.Pool.acquire(ctx, false, 0); err != nil {
+			return report, err
+		}
+		defer options.Pool.release(false, 0)
+		ctx = context.WithValue(ctx, conversionPoolKey{}, options.Pool)
+	}
 	if err = options.Compression.Validate(); err != nil {
 		return report, err
 	}

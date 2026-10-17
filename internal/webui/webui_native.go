@@ -67,6 +67,8 @@ type NativeOutputTarget struct {
 // hooks应在首次Call前配置，Resolve返回的资源需保持有效直到相应会话关闭
 type NativeEngine struct {
 	businessEngine
+	// ConversionPool 协调不同会话的批量转换资源
+	ConversionPool *ofdgo.ConversionPool
 	// Resolve 按授权标识提供资源读取源
 	Resolve NativeResolver
 	// LoadFont 按名称读取系统字体数据
@@ -134,7 +136,11 @@ func NewNativeEngine(resolve NativeResolver) *NativeEngine { return &NativeEngin
 // 批量输出到非nil目标时必须同时提供ReserveOutput和CleanupOutput，避免误清理既有文件
 // 取消为协作式检查，不能抢占宿主阻塞的ReadAt、字体读取或加密库内部计算
 func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit func(any)) (result map[string]any) {
-	e.once.Do(func() { e.gate = make(chan struct{}, 1); e.resolveSource = e.source })
+	e.once.Do(func() {
+		e.gate = make(chan struct{}, 1)
+		e.resolveSource = e.source
+		e.conversionPool = e.ConversionPool
+	})
 	if ctx == nil {
 		ctx = context.Background()
 	}

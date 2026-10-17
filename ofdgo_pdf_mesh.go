@@ -17,7 +17,6 @@ package ofdgo
 import (
 	"fmt"
 	"math"
-	"runtime"
 	"slices"
 	"sync"
 
@@ -438,7 +437,7 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, 
 		}
 		return c.importer.ctx.Err()
 	}
-	workers := min(runtime.GOMAXPROCS(0), 4, max(1, c.height/32))
+	workers := min(conversionWorkers(c.importer.ctx, 4), max(1, c.height/32))
 	if workers == 1 {
 		if err := sampleRows(0, c.height); err != nil {
 			return nil, err

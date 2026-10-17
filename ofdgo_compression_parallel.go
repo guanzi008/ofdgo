@@ -20,7 +20,6 @@ import (
 	"crypto/sha256"
 	"image"
 	"io"
-	"runtime"
 	"strconv"
 	"sync"
 
@@ -83,11 +82,17 @@ func (e *Editor) outputImageOptions(key string) (CompressionOptions, image.Point
 // 入参: keys 资源路径, load 串行读取方法，空值表示跳过, results 候选缓存, sources 原始资源摘要，可为空
 // 返回: error 读取、进度或取消错误
 func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, error), results map[outputImageKey][]byte, sources map[string]outputImageSource) error {
-	workers := min(4, runtime.GOMAXPROCS(0))
+	workers := conversionWorkers(e.output.ctx, 4)
 	if workers < 2 || len(keys) < 2 {
 		return nil
 	}
-	limit := outputImageWorkingSetLimit
+	limit, encodedLimit := outputImageWorkingSetLimit, outputImageBatchLimit
+	if pool, _ := e.output.ctx.Value(conversionPoolKey{}).(*ConversionPool); pool != nil {
+		if available := pool.memoryLimit(); available > 0 {
+			limit = int(min(available, int64(int(^uint(0)>>1))))
+			encodedLimit = limit
+		}
+	}
 	if strconv.IntSize == 32 {
 		limit = 64 << 20
 	}
@@ -149,14 +154,14 @@ func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, e
 		if pending[cacheKey] {
 			continue
 		}
-		cost := outputImageWorkingSet(e.output.ctx, data)
-		for running != 0 && (len(data) > outputImageBatchLimit-size || cost > limit-workingSet) {
+		cost := imageWorkingSet(e.output.ctx, data, limit)
+		for running != 0 && (len(data) > encodedLimit-size || cost > limit-workingSet) {
 			if err := finish(); err != nil {
 				return err
 			}
 		}
 		job := outputImageJob{key: cacheKey, data: data, workingSet: cost}
-		if len(data) >= outputImageBatchLimit || cost >= limit {
+		if len(data) >= encodedLimit || cost >= limit {
 			if err := e.runOutputImages([]outputImageJob{job}, results); err != nil {
 				return err
 			}
@@ -167,7 +172,7 @@ func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, e
 		size += len(data)
 		workingSet += cost
 		group.Go(func() {
-			job.candidate, job.err = optimizeImageResource(ctx, job.data, job.key.options, job.key.size)
+			job.candidate, job.err = optimizeOutputImage(ctx, job)
 			completed <- job
 		})
 	}
@@ -184,24 +189,31 @@ func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, e
 // 入参: ctx 取消上下文, data 原始图像编码
 // 返回: int 编码及像素缓冲的估算字节数，上限为outputImageWorkingSetLimit
 func outputImageWorkingSet(ctx context.Context, data []byte) int {
-	if len(data) >= outputImageWorkingSetLimit {
-		return outputImageWorkingSetLimit
+	return imageWorkingSet(ctx, data, outputImageWorkingSetLimit)
+}
+
+// imageWorkingSet 按当前预算估算图像解码工作量
+// 入参: ctx 取消上下文, data 图像编码, limit 估算上限
+// 返回: int 工作量字节数
+func imageWorkingSet(ctx context.Context, data []byte, limit int) int {
+	if len(data) >= limit {
+		return limit
 	}
 	input := bytes.NewReader(data)
-	available := outputImageWorkingSetLimit - len(data)
+	available := limit - len(data)
 	if baseimage.IsTIFF(data) {
 		layout, err := baseimage.ReadTIFFLayoutContext(ctx, input)
 		if err != nil {
-			return outputImageWorkingSetLimit
+			return limit
 		}
 		return len(data) + tiffImageWorkingSet(layout, available)
 	}
 	config, _, err := baseimage.DecodeConfig(imageInput{ReadCloser: io.NopCloser(input), context: ctx})
 	if err != nil || config.Width <= 0 || config.Height <= 0 {
-		return outputImageWorkingSetLimit
+		return limit
 	}
 	if config.Width > available/16/config.Height {
-		return outputImageWorkingSetLimit
+		return limit
 	}
 	return len(data) + config.Width*config.Height*16
 }
@@ -239,7 +251,7 @@ func tiffImageWorkingSet(layout baseimage.TIFFLayout, limit int) int {
 func (e *Editor) runOutputImages(jobs []outputImageJob, results map[outputImageKey][]byte) error {
 	ctx := e.output.ctx
 	optimize := func(job *outputImageJob) {
-		job.candidate, job.err = optimizeImageResource(ctx, job.data, job.key.options, job.key.size)
+		job.candidate, job.err = optimizeOutputImage(ctx, *job)
 	}
 	if len(jobs) == 1 {
 		optimize(&jobs[0])
@@ -260,4 +272,24 @@ func (e *Editor) runOutputImages(jobs []outputImageJob, results map[outputImageK
 		}
 	}
 	return nil
+}
+
+// optimizeOutputImage 在共享预算内优化独立图像
+// 入参: ctx 转换上下文, job 图像任务
+// 返回: []byte 候选编码, error 转换错误
+func optimizeOutputImage(ctx context.Context, job outputImageJob) ([]byte, error) {
+	if pool, _ := ctx.Value(conversionPoolKey{}).(*ConversionPool); pool != nil {
+		if job.workingSet == 0 {
+			limit := outputImageWorkingSetLimit
+			if available := pool.memoryLimit(); available > 0 {
+				limit = int(min(available, int64(int(^uint(0)>>1))))
+			}
+			job.workingSet = imageWorkingSet(ctx, job.data, limit)
+		}
+		if err := pool.acquire(ctx, true, int64(job.workingSet)); err != nil {
+			return nil, err
+		}
+		defer pool.release(true, int64(job.workingSet))
+	}
+	return optimizeImageResource(ctx, job.data, job.key.options, job.key.size)
 }

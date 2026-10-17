@@ -294,7 +294,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 				candidate, cached := imageResults[cacheKey]
 				var err error
 				if !cached {
-					candidate, err = optimizeImageResource(e.output.ctx, data, options, demand)
+					candidate, err = optimizeOutputImage(e.output.ctx, outputImageJob{data: data, key: outputImageKey{options: options, size: demand}})
 					if err := e.output.ctx.Err(); err != nil {
 						return err
 					}

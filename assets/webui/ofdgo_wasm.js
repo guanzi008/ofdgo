@@ -4,6 +4,7 @@ let pending = Promise.resolve();
 const operations = new Map();
 const fontRequests = new Map();
 let fontSequence = 0;
+let engineMemory = null;
 
 function requestFont(id, signal, name, done) {
 	if (signal.aborted) { done(null, "", true); return; }
@@ -20,6 +21,11 @@ function requestFont(id, signal, name, done) {
 	self.postMessage({ id, type: "font", request, name });
 }
 self.onmessage = ({ data }) => {
+	if (data.type === "module") {
+		if (data.error) exitWASM(new Error(data.error));
+		else loadWASM(data.module).catch(exitWASM);
+		return;
+	}
 	if (data.type === "font") {
 		fontRequests.get(data.request)?.(data);
 		fontRequests.delete(data.request);
@@ -84,12 +90,15 @@ async function handleBatchMessage({ id, name, args }) {
 			if (!format) throw new Error("不支持此格式");
 			root = destination;
 			const base = options.base.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/g, "") || "document";
-			const target = root ? await availableOutput(root, base, format) : { stem: base, name: format.paged ? base : `${base}.${format.extension}` };
-			if (root && format.paged) {
-				directory = await root.getDirectoryHandle(target.name, { create: true });
+			const target = root ? await navigator.locks.request("ofdgo-convert-output", { signal }, async () => {
+				signal.throwIfAborted();
+				const target = await availableOutput(root, base, format);
+				if (format.paged) directory = await root.getDirectoryHandle(target.name, { create: true });
+				else { await root.getFileHandle(target.name, { create: true }); directory = root; }
 				created = target.name;
 				self.postMessage({ id, type: "output", name: created });
-			} else directory = root;
+				return target;
+			}) : { stem: base, name: format.paged ? base : `${base}.${format.extension}` };
 			const boundary = async (action, pageName) => {
 				signal.throwIfAborted();
 				if (action === "open") {
@@ -144,7 +153,7 @@ async function handleBatchMessage({ id, name, args }) {
 		}
 		result.data.size = size;
 		operations.delete(id);
-		self.postMessage({ id, ...result });
+		self.postMessage({ id, ...result, memory: engineMemory.buffer.byteLength });
 	} catch (err) {
 		await output?.abort().catch(() => {});
 		let message = signal.aborted ? "转换已取消" : err.message;
@@ -152,7 +161,7 @@ async function handleBatchMessage({ id, name, args }) {
 			try { await root.removeEntry(created, { recursive: true }); }
 			catch (cleanupError) { message += `；清理失败：${cleanupError.message}`; }
 		}
-		self.postMessage({ id, ok: false, error: message, code: err.code, canceled: signal.aborted });
+		self.postMessage({ id, ok: false, error: message, code: err.code, canceled: signal.aborted, memory: engineMemory.buffer.byteLength });
 	} finally {
 		credentials?.password?.fill(0);
 		credentials?.key?.fill(0);
@@ -301,12 +310,10 @@ function exitWASM(err) {
 	self.close();
 }
 
-async function loadWASM() {
+async function loadWASM(module) {
 	const go = new Go();
-	self.postMessage({ type: "progress", phase: "download", text: "正在下载引擎", percent: 16 });
-	const response = await fetch("./ofdgo.wasm");
-	self.postMessage({ type: "progress", phase: "compile", text: "正在编译引擎", percent: 35 });
-	const { instance } = await WebAssembly.instantiateStreaming(response, go.importObject);
+	const instance = await WebAssembly.instantiate(module, go.importObject);
+	engineMemory = instance.exports.mem;
 	self.postMessage({ type: "progress", phase: "start", text: "正在启动引擎", percent: 58 });
 	go.run(instance).then(exitWASM, exitWASM);
 	if (!go.exited) {
@@ -316,4 +323,4 @@ async function loadWASM() {
 	}
 }
 
-loadWASM().catch(exitWASM);
+self.postMessage({ type: "module" });

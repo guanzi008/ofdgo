@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build windows && amd64
+//go:build !js || !wasm
 
 package webview
 
@@ -44,17 +44,19 @@ const applicationID = "me.aite.ofdgo"
 
 // Host 连接桌面系统能力和共用文档业务
 type Host struct {
-	mu           sync.Mutex
-	window       *guigo.Window
-	files        *fileStore
-	engines      map[string]*webui.NativeEngine
-	engineStops  map[string]func() bool
-	cancels      map[string]context.CancelFunc
-	fontOnce     sync.Once
-	fonts        []map[string]any
-	fontFiles    map[string]string
-	fontError    error
-	pendingPaths []string
+	mu             sync.Mutex
+	window         *guigo.Window
+	files          *fileStore
+	engines        map[string]*webui.NativeEngine
+	engineStops    map[string]func() bool
+	conversionPool *ofdgo.ConversionPool
+	cancels        map[string]context.CancelFunc
+	batchResults   map[string]any
+	fontOnce       sync.Once
+	fonts          []map[string]any
+	fontFiles      map[string]string
+	fontError      error
+	pendingPaths   []string
 }
 
 // resourceReader 保存资源读取位置及关闭操作
@@ -76,9 +78,14 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 		return err
 	}
 	h := &Host{files: files, engines: make(map[string]*webui.NativeEngine), cancels: make(map[string]context.CancelFunc), fontFiles: make(map[string]string), pendingPaths: append([]string(nil), paths...)}
+	h.conversionPool, err = ofdgo.NewConversionPool(ofdgo.ConversionPoolOptions{AvailableMemory: conversionMemory})
+	if err != nil {
+		files.close()
+		return err
+	}
 	defer h.close()
 	bindings := make(map[string]guigo.HandlerFunc)
-	for _, name := range []string{"engine.open", "engine.close", "engine.call", "open", "save", "directory", "file", "release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title"} {
+	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title"} {
 		bindings["ofdgo.host."+name] = func(ctx context.Context, args any) (any, error) { return h.call(ctx, name, args) }
 	}
 	static := http.FileServerFS(webuiassets.NativeFS)
@@ -260,6 +267,7 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 	switch name {
 	case "engine.open":
 		engine := webui.NewNativeEngine(h.files.resolve)
+		engine.ConversionPool = h.conversionPool
 		engine.OpenWriter = h.openWriter
 		engine.ReserveOutput = h.reserveOutput
 		engine.CleanupOutput = h.cleanupOutput
@@ -273,8 +281,69 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		h.engineStops[id] = context.AfterFunc(guigo.PageContext(ctx), func() { _ = h.closeEngine(id) })
 		h.mu.Unlock()
 		return guigo.Result{Value: map[string]any{"engine": id}, Discard: func() { _ = h.closeEngine(id) }}, nil
+	case "batch":
+		return map[string]any{"parallelism": h.conversionPool.Parallelism()}, nil
 	case "engine.close":
 		return nil, h.closeEngine(text("engine"))
+	case "engine.finish":
+		key := text("engine") + "/" + fmt.Sprint(args["id"])
+		h.mu.Lock()
+		delete(h.batchResults, key)
+		h.mu.Unlock()
+		return nil, nil
+	case "engine.cancel":
+		key := text("engine") + "/" + fmt.Sprint(args["id"])
+		h.mu.Lock()
+		cancel := h.cancels[key]
+		h.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		return nil, nil
+	case "engine.start":
+		operationName := text("name")
+		if operationName != "ofdgoConvertFile" && operationName != "ofdgoPackFiles" {
+			return nil, fmt.Errorf("unsupported batch operation")
+		}
+		id := text("engine")
+		key := id + "/" + fmt.Sprint(args["id"])
+		page := guigo.PageContext(ctx)
+		operation, cancel := context.WithCancel(page)
+		h.mu.Lock()
+		engine := h.engines[id]
+		_, duplicate := h.cancels[key]
+		if engine == nil || duplicate {
+			h.mu.Unlock()
+			cancel()
+			return nil, fmt.Errorf("invalid batch operation")
+		}
+		h.cancels[key] = cancel
+		h.mu.Unlock()
+		values, _ := args["args"].([]any)
+		go func() {
+			defer cancel()
+			defer func() { h.mu.Lock(); delete(h.cancels, key); h.mu.Unlock() }()
+			result := engine.Call(operation, operationName, values, func(event any) {
+				if value, ok := event.(map[string]any); ok {
+					value["id"] = args["id"]
+					h.emit("ofdgo.engine."+id, value)
+				}
+			})
+			encoded := h.encode(page, result)
+			h.mu.Lock()
+			if page.Err() != nil || h.engines[id] != engine {
+				h.mu.Unlock()
+				h.discard(encoded)
+				return
+			}
+			if h.batchResults == nil {
+				h.batchResults = make(map[string]any)
+			}
+			h.batchResults[key] = encoded
+			h.mu.Unlock()
+			h.emit("ofdgo.engine."+id, map[string]any{"id": args["id"], "type": "result", "result": encoded})
+		}()
+		return guigo.Result{Value: true, Discard: cancel}, nil
 	case "engine.call":
 		id := text("engine")
 		key := id + "/" + fmt.Sprint(args["id"])
@@ -670,6 +739,7 @@ func (h *Host) loadFont(ctx context.Context, name string) ([]byte, error) {
 // 入参: id 会话标识
 // 返回: error 关闭错误
 func (h *Host) closeEngine(id string) error {
+	var results []any
 	h.mu.Lock()
 	engine := h.engines[id]
 	delete(h.engines, id)
@@ -682,7 +752,16 @@ func (h *Host) closeEngine(id string) error {
 			cancel()
 		}
 	}
+	for key, result := range h.batchResults {
+		if strings.HasPrefix(key, id+"/") {
+			results = append(results, result)
+			delete(h.batchResults, key)
+		}
+	}
 	h.mu.Unlock()
+	for _, result := range results {
+		h.discard(result)
+	}
 	if engine != nil {
 		return engine.Close()
 	}

@@ -424,6 +424,7 @@ type businessEngine struct {
 	copiedStyle    *ofdgo.GraphicObject
 	ctx            context.Context
 	resolveSource  func(context.Context, any) (io.ReaderAt, int64, error)
+	conversionPool *ofdgo.ConversionPool
 }
 
 // Open 打开浏览器内存中的OFD文档
@@ -1391,6 +1392,7 @@ func (e *businessEngine) convertFile(args []platformValue) (any, error) {
 	}
 	options := ofdgo.ConvertOptions{
 		Format: settings.Get("format").String(), PageRange: settings.Get("pages").String(),
+		Pool:            e.conversionPool,
 		SkipUnchanged:   true,
 		Backends:        &backends,
 		RendererOptions: []ofdgo.RendererOption{ofdgo.WithDPI(settings.Get("dpi").Float())},

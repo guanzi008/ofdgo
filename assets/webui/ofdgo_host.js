@@ -1,5 +1,15 @@
+let engineModule = null;
+
 export function createEngineWorker() {
-	return nativeHost ? nativeHost.worker() : new Worker("./ofdgo_wasm.js");
+	if (nativeHost) return nativeHost.worker();
+	const worker = new Worker("./ofdgo_wasm.js");
+	worker.addEventListener("message", event => {
+		if (event.data.type !== "module") return;
+		event.stopImmediatePropagation();
+		engineModule ||= WebAssembly.compileStreaming(fetch("./ofdgo.wasm")).catch(error => { engineModule = null; throw error; });
+		engineModule.then(module => worker.postMessage({ type: "module", module }), error => worker.postMessage({ type: "module", error: error.message }));
+	});
+	return worker;
 }
 
 export async function documentBytes(file) {
@@ -124,7 +134,11 @@ class NativeHost {
 		let unsubscribe;
 		let pending = Promise.resolve();
 		const requests = new Map();
-		const emit = data => { if (!closed) worker.onmessage?.({data}); };
+		const completions = new Map();
+		const emit = data => {
+			if (data.type === "result") { completions.get(data.id)?.(data.result); return; }
+			if (!closed) worker.onmessage?.({data});
+		};
 		const ready = host.call("engine.open", {}).then(({engine}) => {
 			if (closed) return engine;
 			unsubscribe = host.bridge.on(`ofdgo.engine.${engine}`, emit);
@@ -147,7 +161,21 @@ class NativeHost {
 					const engine = await ready;
 					if (closed) return;
 					controller.signal.throwIfAborted();
-					const result = await host.call("engine.call", {engine, id:data.id, name:data.name, args:data.args}, controller.signal);
+					const args = {engine, id:data.id, name:data.name, args:data.args};
+					let result;
+					if (data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles") {
+						const completed = new Promise(resolve => completions.set(data.id, resolve));
+						const cancel = () => host.call("engine.cancel", {engine, id:data.id}).catch(() => {});
+						controller.signal.addEventListener("abort", cancel, {once:true});
+						try {
+							await host.call("engine.start", args, controller.signal);
+							result = await completed;
+							await host.call("engine.finish", {engine, id:data.id});
+						} finally {
+							controller.signal.removeEventListener("abort", cancel);
+							completions.delete(data.id);
+						}
+					} else result = await host.call("engine.call", args, controller.signal);
 					if (closed) { await host.release(result); return; }
 					let decoded;
 					try {
@@ -163,9 +191,12 @@ class NativeHost {
 			terminate() {
 				if (closed) return;
 				closed = true;
-				unsubscribe?.();
 				for (const controller of requests.values()) controller.abort();
-				ready.then(engine => host.call("engine.close", {engine})).catch(() => {});
+				ready.then(engine => host.call("engine.close", {engine})).catch(() => {}).finally(() => {
+					unsubscribe?.();
+					for (const resolve of completions.values()) resolve({ok:false, canceled:true, error:"会话已关闭"});
+					completions.clear();
+				});
 			},
 		};
 		ready.catch(() => {});
