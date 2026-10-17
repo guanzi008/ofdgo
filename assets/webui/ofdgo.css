@@ -458,6 +458,7 @@ a:focus-visible {
 }
 
 .app-update {
+	order: 2;
 	flex: 0 0 auto;
 	align-self: center;
 	margin: 0 10px 0 0;
@@ -471,6 +472,17 @@ a:focus-visible {
 .app-update:not(:disabled):hover {
 	border-color: var(--accent);
 	background: #f2faf7;
+}
+
+.toolbar-frame:has(.app-update:not([hidden]))::before {
+	order: 1;
+	flex: 0 0 1px;
+	align-self: center;
+	width: 1px;
+	height: 22px;
+	margin: 0 12px 0 2px;
+	background: var(--line);
+	content: "";
 }
 
 .app-update[hidden] {
@@ -2295,22 +2307,6 @@ body[data-hide-meta] .meta-panel {
 .document-pages {
 	text-align: right;
 	font-variant-numeric: tabular-nums;
-}
-
-.app-panel {
-	margin-bottom: 12px;
-	padding-bottom: 12px;
-	border-bottom: 1px solid var(--line);
-}
-
-.app-panel .panel-row {
-	margin-bottom: 0;
-	flex-wrap: nowrap;
-}
-
-.app-status {
-	color: var(--text-muted);
-	font-size: 12px;
 }
 
 .navigation-tabs {
@@ -4156,7 +4152,8 @@ audio.page-media {
 		grid-template-columns: repeat(3, minmax(0, 1fr));
 	}
 
-	.tool-group + .tool-group::before {
+	.tool-group + .tool-group::before,
+	.toolbar-frame:has(.app-update:not([hidden]))::before {
 		display: none;
 	}
 

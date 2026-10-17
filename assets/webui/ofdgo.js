@@ -522,10 +522,8 @@ const el = {
 	searchNext: document.querySelector("#searchNext"),
 	searchResults: document.querySelector("#searchResults"),
 	metaPanel: document.querySelector(".meta-panel"),
-	appPanel: document.querySelector("#appPanel"),
 	renderVectorButton: document.querySelector("#renderVectorButton"),
 	renderRasterButton: document.querySelector("#renderRasterButton"),
-	offlineStatus: document.querySelector("#offlineStatus"),
 	refreshAppButton: document.querySelector("#refreshAppButton"),
 	metaFile: document.querySelector("#metaFile"),
 	metaTitle: document.querySelector("#metaTitle"),
@@ -4164,14 +4162,11 @@ async function registerOffline() {
 
 async function prepareOffline() {
 	if (nativeHost) {
-		el.appPanel.hidden = false;
-		el.offlineStatus.textContent = "可离线";
 		return true;
 	}
 	if (!window.isSecureContext || !("serviceWorker" in navigator) || !("caches" in window) || !("locks" in navigator)) {
 		return true;
 	}
-	el.appPanel.hidden = false;
 	setProgress("正在准备离线", null, "正在准备离线");
 	try {
 		const registration = await registerOffline();
@@ -4183,10 +4178,8 @@ async function prepareOffline() {
 		if (navigator.storage?.persist) {
 			navigator.storage.persist().catch(() => false);
 		}
-		el.offlineStatus.textContent = "可离线";
 		watchApplicationUpdates(result.checksum);
 	} catch {
-		el.offlineStatus.textContent = "未就绪";
 	}
 	el.refreshAppButton.disabled = false;
 	return true;
