@@ -460,7 +460,6 @@ a:focus-visible {
 .app-update {
 	flex: 0 0 auto;
 	align-self: center;
-	width: 62px;
 	margin: 0 10px 0 0;
 	border-color: var(--accent);
 	background: #e4f3ef;
@@ -470,6 +469,7 @@ a:focus-visible {
 }
 
 .app-update:not(:disabled):hover {
+	border-color: var(--accent);
 	background: #f2faf7;
 }
 
@@ -4138,6 +4138,10 @@ audio.page-media {
 }
 
 @media (max-width: 640px) {
+	.app-update {
+		margin-right: 8px;
+	}
+
 	:root {
 		--bar-height: 42px;
 		--control-height: 28px;

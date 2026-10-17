@@ -4301,7 +4301,7 @@ async function refreshApplication() {
 	}
 	setBusy(true, "正在更新应用", null, "正在更新应用");
 	el.refreshAppButton.disabled = true;
-	el.refreshAppButton.textContent = "更新中";
+	el.refreshAppButton.textContent = "更新";
 	const panels = document.querySelectorAll(".toolbar-frame, .workspace");
 	panels.forEach((panel) => { panel.inert = true; });
 	try {
