@@ -18,6 +18,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"embed"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"net/http"
@@ -25,6 +28,7 @@ import (
 	"time"
 
 	"github.com/xiaoqidun/ofdgo/assets/webui"
+	"github.com/xiaoqidun/ofdgo/assets/webui/wasm"
 )
 
 func main() {
@@ -39,16 +43,35 @@ func main() {
 // 返回: http.Handler HTTP处理器
 func serveWebUI() http.Handler {
 	files := http.FileServerFS(webuiassets.FS)
-	checksum := webuiassets.Checksum()
+	wasm := http.FileServerFS(wasmassets.FS)
+	checksum := resourceChecksum()
 	serviceWorker, _ := webuiassets.FS.ReadFile("ofdgo_work.js")
 	serviceWorker = append([]byte(fmt.Sprintf("const BUNDLE_CHECKSUM = %q;\n", checksum)), serviceWorker...)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-OFDGo-Checksum", checksum)
+		if r.URL.Path == "/ofdgo.wasm" {
+			wasm.ServeHTTP(w, r)
+			return
+		}
 		if r.URL.Path == "/ofdgo_work.js" {
 			http.ServeContent(w, r, "ofdgo_work.js", time.Time{}, bytes.NewReader(serviceWorker))
 			return
 		}
 		files.ServeHTTP(w, r)
 	})
+}
+
+// resourceChecksum 计算WebUI界面与WASM引擎的资源校验值
+// 返回: string SHA-256十六进制校验值
+func resourceChecksum() string {
+	hash := sha256.New()
+	for _, resources := range []embed.FS{webuiassets.FS, wasmassets.FS} {
+		entries, _ := resources.ReadDir(".")
+		for _, entry := range entries {
+			data, _ := resources.ReadFile(entry.Name())
+			hash.Write(data)
+		}
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }

@@ -53,7 +53,7 @@ docker run -d -p 80:80 ccr.ccs.tencentyun.com/xiaoqidun/ofdgo:latest
 :: 1. 编译OFDGo WASM
 set GOOS=js
 set GOARCH=wasm
-go build -o assets/webui/ofdgo.wasm -trimpath -ldflags "-s -w -buildid=" ./cmd/webui/wasm.go
+go build -o assets/webui/wasm/ofdgo.wasm -trimpath -ldflags "-s -w -buildid=" ./cmd/webui/wasm.go
 :: 2. 编译OFDGo WebUI
 set GOOS=windows
 set GOARCH=amd64
