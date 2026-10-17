@@ -377,9 +377,12 @@ func systemFontDirs() []string {
 	return nil
 }
 
-// indexSystemFonts 递归读取系统字体名称，保留集合索引
-// 返回: []basefont.FileCandidate 字体候选
-func indexSystemFonts() []basefont.FileCandidate {
+// FontSystemFiles 获取当前系统可访问的字体文件，不读取字体内容
+// 返回: []string 去重后的字体路径，浏览器WASM环境返回空列表
+func FontSystemFiles() []string {
+	if !canLoadSystemFonts() {
+		return nil
+	}
 	var files []string
 	seen := make(map[string]bool)
 	for _, dir := range systemFontDirs() {
@@ -391,6 +394,13 @@ func indexSystemFonts() []basefont.FileCandidate {
 			return nil
 		})
 	}
+	return files
+}
+
+// indexSystemFonts 递归读取系统字体名称，保留集合索引
+// 返回: []basefont.FileCandidate 字体候选
+func indexSystemFonts() []basefont.FileCandidate {
+	files := FontSystemFiles()
 	candidates := basefont.FileCandidates(files, filepath.Base)
 	for i, candidate := range candidates {
 		file, err := os.Open(candidate.Name)

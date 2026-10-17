@@ -1,5 +1,6 @@
 import { SVG_NAMESPACE, CanvasEditor, canEditObject, editTextValue, richTextModel, fontFaceStyle, missingGlyphMessage, objectEditReason, selectedText, lineShape, selectionBounds, pagePoint } from "./ofdgo_edit.js";
 import { FontManager, FontPicker } from "./ofdgo_font.js";
+import { nativeHost, createEngineWorker, documentBytes, saveFilePicker, directoryPicker } from "./ofdgo_host.js";
 
 const MM_TO_PX = 96 / 25.4;
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
@@ -595,6 +596,7 @@ const el = {
 };
 
 const fontManager = new FontManager({
+	host: nativeHost,
 	onChange: scheduleFontSync,
 	onPermissionChange: updateFontPermissionHint,
 });
@@ -1388,8 +1390,8 @@ batchElements.Cancel.addEventListener("click", cancelBatch);
 batchElements.Form.addEventListener("submit", event => { event.preventDefault(); runBatch(); });
 batchElements.Panel.addEventListener("dragover", event => { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = batch.running ? "none" : "copy"; });
 batchElements.Panel.addEventListener("drop", event => { event.preventDefault(); event.stopPropagation(); if (!batch.running) addBatchFiles(event.dataTransfer.files); });
-batchElements.Destination.querySelector('[value="directory"]').disabled = !window.showDirectoryPicker;
-batchElements.Destination.value = window.showDirectoryPicker ? "directory" : "archive";
+batchElements.Destination.querySelector('[value="directory"]').disabled = !nativeHost && !window.showDirectoryPicker;
+batchElements.Destination.value = nativeHost || window.showDirectoryPicker ? "directory" : "archive";
 fontBindingElements.Cancel.addEventListener("click", () => fontBindingElements.Panel.close());
 fontBindingElements.Panel.addEventListener("close", () => { fontBinding.font = null; fontBinding.choices = []; fontBinding.sequence++; fontBindingElements.File.value = ""; });
 fontBindingElements.Source.addEventListener("change", () => {
@@ -1703,6 +1705,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 el.fontDirectoryButton.disabled = !("webkitdirectory" in el.fontDirectoryInput);
+nativeHost?.installFileInputs(error => showError(error, false));
 updateSidebarState();
 boot();
 
@@ -2212,7 +2215,7 @@ async function loadImportFile() {
 	el.importStatus.textContent = "";
 	setBusy(true);
 	try {
-		const data = file ? new Uint8Array(await file.arrayBuffer()) : null;
+		const data = file ? await documentBytes(file) : null;
 		if (openSeq !== state.openSeq) return;
 		const info = data ? await openWithCredentials(null, openSeq, data, true) : await callWASM("ofdgoLoadImport", null);
 		if (openSeq !== state.openSeq || !el.importPanel.open) {
@@ -2461,7 +2464,7 @@ async function exportManagedVersion() {
 	setBusy(true, "正在另存版本");
 	el.versionStatus.textContent = "正在另存版本";
 	try {
-		const file = window.showSaveFilePicker ? await window.showSaveFilePicker({suggestedName: name, types: [{description: "OFD", accept: {"application/ofd": [".ofd"]}}]}) : null;
+		const file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({suggestedName: name, types: [{description: "OFD", accept: {"application/ofd": [".ofd"]}}]}) : null;
 		if (openSeq !== state.openSeq) return;
 		const result = await callWASM("ofdgoExportVersion", entry.id, file);
 		if (openSeq !== state.openSeq) return;
@@ -4126,6 +4129,12 @@ async function boot() {
 				}).catch((err) => showError(err, !state.doc));
 			});
 		}
+		if (nativeHost) await nativeHost.start(files => {
+			if (document.body.hasAttribute("data-busy")) { setStatus("请等待当前操作完成"); return; }
+			if (batchElements.Panel.open) addBatchFiles(files);
+			else if (files.length === 1) openOFD(files[0]);
+			else if (files.length) setStatus("请选择一个文档");
+		}, error => showError(error, !state.doc));
 		try {
 			const remote = remoteDocumentOptions(window.location.hash);
 			if (remote && openSeq === state.openSeq) await openOFD({ name: remote.name }, remote);
@@ -4154,6 +4163,11 @@ async function registerOffline() {
 }
 
 async function prepareOffline() {
+	if (nativeHost) {
+		el.appPanel.hidden = false;
+		el.offlineStatus.textContent = "可离线";
+		return true;
+	}
 	if (!window.isSecureContext || !("serviceWorker" in navigator) || !("caches" in window) || !("locks" in navigator)) {
 		return true;
 	}
@@ -4323,7 +4337,7 @@ async function loadWASM() {
 	state.ready = false;
 	state.wasmExited = false;
 	await new Promise((resolve, reject) => {
-		const worker = new Worker("./ofdgo_wasm.js");
+		const worker = createEngineWorker();
 		wasmWorker = worker;
 		const fail = (err) => {
 			markWASMExited(wasmSeq, err);
@@ -4557,7 +4571,7 @@ async function openOFD(file, remote = null) {
 		const source = downloaded ? downloaded.file : file;
 		const format = await callWASM("ofdgoDetectFormat", source);
 		if (openSeq !== state.openSeq) return;
-		let bytes = new Uint8Array(await source.arrayBuffer());
+		let bytes = await documentBytes(source);
 		const name = (downloaded ? downloaded.name : file.name) || `ofdgo.${format}`;
 		let warnings = [];
 		let convertedDoc;
@@ -5108,7 +5122,7 @@ async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, import
 					converted.doc = await callWASM("ofdgoOpen", converted.bytes, fonts, state.renderAnnotations, credentials);
 					return converted;
 				}
-				return importing ? await callWASM("ofdgoLoadImport", data.slice(), credentials)
+				return importing ? await callWASM("ofdgoLoadImport", data?.nativeFile ? data : data.slice(), credentials)
 					: await callWASM("ofdgoOpen", data, fonts, state.renderAnnotations, credentials);
 			} catch (err) {
 				if (openSeq !== state.openSeq || !(pdf ? err.code === "pdfPassword" : ["credentialsRequired", "invalidCredentials"].includes(err.code))) throw err;
@@ -7529,7 +7543,7 @@ async function downloadResource(attachment, api, label) {
 	updateControls();
 	setBusy(true, `正在读取${label}`, null, `正在读取${label}`);
 	try {
-		const file = window.showSaveFilePicker ? await window.showSaveFilePicker({ suggestedName: attachment.fileName }) : null;
+		const file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({ suggestedName: attachment.fileName }) : null;
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -7848,7 +7862,7 @@ async function signDocument(event) {
 	el.signForm.querySelectorAll("input, select, button[type=submit]").forEach(input => { input.disabled = true; });
 	try {
 		const name = `${baseFileName()}_签章.ofd`;
-		const file = window.showSaveFilePicker ? await window.showSaveFilePicker({suggestedName:name, types:[{description:"OFD",accept:{"application/ofd":[".ofd"]}}]}) : null;
+		const file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({suggestedName:name, types:[{description:"OFD",accept:{"application/ofd":[".ofd"]}}]}) : null;
 		if (openSeq !== state.openSeq || state.signCanceled) return;
 		if (canvasEditor.input || canvasEditor.crop || canvasEditor.nudge || canvasEditor.nudgeCommit) {
 			setBusy(false);
@@ -8123,7 +8137,7 @@ function batchCall(name, args, onProgress) {
 function startBatchWorker() {
 	batch.workerError = null;
 	return new Promise((resolve, reject) => {
-		const worker = new Worker("./ofdgo_wasm.js");
+		const worker = createEngineWorker();
 		batch.worker = worker;
 		const fail = async error => {
 			batch.workerError = error;
@@ -8224,13 +8238,13 @@ async function runBatch() {
 	const entries = [];
 	try {
 		if (archive) {
-			if (window.showSaveFilePicker) zipFile = await window.showSaveFilePicker({ suggestedName: "转换结果.zip", types: [{ description: "ZIP", accept: { "application/zip": [".zip"] } }] });
-			if (navigator.storage?.getDirectory) {
+			zipFile = await saveFilePicker({ suggestedName: "转换结果.zip", types: [{ description: "ZIP", accept: { "application/zip": [".zip"] } }] });
+			if (!nativeHost && navigator.storage?.getDirectory) {
 				storage = await navigator.storage.getDirectory();
 				stagingName = `ofdgo-convert-${crypto.randomUUID()}`;
 				destination = await storage.getDirectoryHandle(stagingName, { create: true });
 			}
-		} else destination = await window.showDirectoryPicker({ mode: "readwrite" });
+		} else destination = await directoryPicker();
 		if (batch.canceled) return;
 		if (jobs.some(item => /\.pdf$/i.test(item.file.name) || !["ofd", "txt"].includes(item.format || defaultFormat.value)
 			|| (item.format || defaultFormat.value) === "ofd" && batchElements.FontMode.value === "1")) {
@@ -8357,7 +8371,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 	updateControls();
 	setBusy(true, "正在生成文件", null, status);
 	try {
-		const file = window.showSaveFilePicker ? await window.showSaveFilePicker({
+		const file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({
 			suggestedName: fileName,
 			types: [{ description: label, accept: { [mime]: [`.${extension}`] } }],
 		}) : null;
@@ -11982,11 +11996,11 @@ async function callWASM(name, ...args) {
 		}
 		try {
 			const transfer = [];
-			if (name === "ofdgoOpen") {
+			if (name === "ofdgoOpen" && !nativeHost) {
 				args[0] = args[0].slice();
 				transfer.push(args[0].buffer);
 			}
-			if (name === "ofdgoLoadImport" && args[0]) transfer.push(args[0].buffer);
+			if (name === "ofdgoLoadImport" && args[0] && !nativeHost) transfer.push(args[0].buffer);
 			wasmWorker.postMessage({ id, name, args }, transfer);
 		} catch (err) {
 			wasmRequests.delete(id);
@@ -12081,6 +12095,7 @@ function formatSize(value) {
 }
 
 function downloadBytes(bytes, mime, name) {
+	if (nativeHost) return nativeHost.download(bytes, mime, name).catch(error => { if (error.name !== "AbortError") showError(error, false); });
 	const blob = new Blob([bytes], { type: mime });
 	const link = document.createElement("a");
 	const url = URL.createObjectURL(blob);

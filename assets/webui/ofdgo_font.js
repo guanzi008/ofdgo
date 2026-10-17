@@ -159,7 +159,8 @@ export class FontPicker {
 }
 
 export class FontManager {
-	constructor({ onChange, onPermissionChange }) {
+	constructor({ onChange, onPermissionChange, host = null }) {
+		this.host = host;
 		this.userFonts = [];
 		this.localFonts = [];
 		this.catalog = [];
@@ -267,7 +268,7 @@ export class FontManager {
 
 	async queryLocal() {
 		try {
-			const available = await window.queryLocalFonts();
+			const available = this.host ? await this.host.fonts() : await window.queryLocalFonts();
 			this.catalog = available;
 			this.catalogLoaded = true;
 			this.permission = "granted";
@@ -294,6 +295,7 @@ export class FontManager {
 	}
 
 	async read(font) {
+		if (font.nativeFile) return font.nativeFile;
 		if (font.blob) {
 			const blob = await font.blob();
 			return new Uint8Array(await blob.arrayBuffer());
@@ -407,10 +409,15 @@ export class FontManager {
 	}
 
 	canReadLocal() {
-		return typeof window.queryLocalFonts === "function";
+		return !!this.host || typeof window.queryLocalFonts === "function";
 	}
 
 	async refreshPermission() {
+		if (this.host) {
+			this.permission = "granted";
+			this.onPermissionChange();
+			return;
+		}
 		if (!this.canReadLocal() || !navigator.permissions?.query) {
 			this.onPermissionChange();
 			return;

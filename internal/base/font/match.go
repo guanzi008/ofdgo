@@ -174,7 +174,7 @@ func NormalizeName(name string) string {
 // 返回: bool 是否为字体文件
 func IsFontFileName(name string) bool {
 	switch strings.ToLower(path.Ext(name)) {
-	case ".ttf", ".otf", ".ttc":
+	case ".ttf", ".otf", ".ttc", ".otc":
 		return true
 	default:
 		return false
