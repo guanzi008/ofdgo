@@ -30,7 +30,7 @@ self.onmessage = ({ data }) => {
 		return;
 	}
 	if (data.name === "ofdgoResources") operations.set(data.id, new AbortController());
-	if (data.name === "ofdgoImportImages" || data.name === "ofdgoExportImages" || data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" || data.name === "ofdgoConvertPDF" || data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoExportResource" || data.name === "ofdgoExportMedia" || data.name === "ofdgoExportVersion" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoSaveSigned" || data.name === "ofdgoImportPages") {
+	if (data.name === "ofdgoImportDocuments" || data.name === "ofdgoImportImages" || data.name === "ofdgoExportImages" || data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" || data.name === "ofdgoConvertPDF" || data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoExportResource" || data.name === "ofdgoExportMedia" || data.name === "ofdgoExportVersion" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoSaveSigned" || data.name === "ofdgoImportPages") {
 		operations.set(data.id, new AbortController());
 	}
 	pending = pending.then(() => data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" ? handleBatchMessage(data) : handleMessage(data));
@@ -166,7 +166,7 @@ async function handleMessage({ id, name, args }) {
 	let output;
 	let channel;
 	const signal = operations.get(id)?.signal;
-	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages";
+	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages" || name === "ofdgoImportDocuments";
 	const converting = name === "ofdgoConvertPDF";
 	const saving = name === "ofdgoSaveDocument" || name === "ofdgoSaveSigned";
 	const resources = name === "ofdgoResources";

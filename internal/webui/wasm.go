@@ -302,6 +302,7 @@ func RunWASM() {
 	registerCallback("ofdgoResizeObjects", resizeObjects)
 	registerCallback("ofdgoLoadImport", loadImport)
 	registerAsyncCallback("ofdgoImportPages", importPages)
+	registerAsyncCallback("ofdgoImportDocuments", importDocuments)
 	registerCallback("ofdgoInsertText", insertText)
 	registerCallback("ofdgoUpdateText", updateText)
 	registerCallback("ofdgoPreviewText", previewText)
@@ -4640,7 +4641,7 @@ func objectStyle(value js.Value) ofdgo.ObjectStyle {
 	return style
 }
 
-// clearImport 释放待插页文档
+// clearImport 释放待导入文档
 func clearImport() {
 	if pendingImport != nil {
 		_ = pendingImport.Close()
@@ -4648,9 +4649,9 @@ func clearImport() {
 	}
 }
 
-// loadImport 加载待插页文件的索引，null参数清除待处理文件
+// loadImport 加载待导入文件的索引，null参数清除待处理文件
 // 入参: args OFD字节数组或null
-// 返回: any 页数及签名提示, error 错误信息
+// 返回: any 文档列表、页数及签名提示, error 错误信息
 func loadImport(args []js.Value) (any, error) {
 	clearImport()
 	if args[0].IsNull() {
@@ -4683,7 +4684,13 @@ func loadImport(args []js.Value) (any, error) {
 		return nil, fmt.Errorf("document has no pages")
 	}
 	pendingImport = reader
-	return map[string]any{"pageCount": len(doc.Pages.Page), "signed": doc.Signatures != "", "encrypted": reader.Encryption().Encrypted}, nil
+	entries := make([]DocumentEntry, reader.DocumentCount())
+	signed := doc.Signatures != ""
+	for index, body := range reader.OFD.DocBody {
+		entries[index] = DocumentEntry{Index: index, Title: body.DocInfo.Title, Root: body.DocRoot, ID: body.DocInfo.DocID}
+		signed = signed || body.Signatures != ""
+	}
+	return map[string]any{"pageCount": len(doc.Pages.Page), "signed": doc.Signatures != "", "documentsSigned": signed, "encrypted": reader.Encryption().Encrypted, "documents": entries, "documentCount": len(entries)}, nil
 }
 
 // importPages 插入指定来源页面并保持目标文档元数据
@@ -4725,6 +4732,37 @@ func importPages(args []js.Value) (any, error) {
 	clearImport()
 	info, err := previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 	return editorPageInfo{info, at}, err
+}
+
+// importDocuments 导入指定文档及历史版本并选中首个导入文档
+// 入参: args 文档序号表达式、插入位置、解密确认和可选进度回调
+// 返回: any 文档信息及当前页, error 导入错误
+func importDocuments(args []js.Value) (any, error) {
+	if currentEditor == nil || pendingImport == nil {
+		return nil, fmt.Errorf("no document is ready for document import")
+	}
+	if len(args) < 3 {
+		return nil, fmt.Errorf("invalid document import arguments")
+	}
+	var indexes []int
+	var err error
+	if value := strings.TrimSpace(args[0].String()); value != "" {
+		indexes, err = ofdgo.ParsePageRange(value, pendingImport.DocumentCount())
+		if err != nil {
+			return nil, err
+		}
+	}
+	options := ofdgo.DocumentImportOptions{AllowDecrypted: args[2].Bool()}
+	ctx := context.Background()
+	if len(args) > 3 {
+		ctx, options.OnProgress = newEditorOperationContext(args[3])
+	}
+	if _, err := currentEditor.ImportDocumentsContext(ctx, pendingImport, indexes, args[1].Int(), options); err != nil {
+		return nil, err
+	}
+	clearImport()
+	info, err := previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+	return editorPageInfo{info, 0}, err
 }
 
 // importImages 逐张读取图片并建页，负数位置表示新建文档

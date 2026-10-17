@@ -344,9 +344,10 @@
 			<form id="importForm">
 				<div class="form-row"><label for="importFile">文档</label><input id="importFile" type="file" accept=".ofd" required autofocus></div>
 				<div class="form-row"><label for="importRange">范围</label><select id="importRange"><option value="all">全部</option><option value="custom">指定</option></select></div>
-				<div id="importPagesRow" class="form-row" hidden><label for="importPages">页码</label><input id="importPages" type="text" autocomplete="off" spellcheck="false" disabled></div>
-				<div class="form-row"><label for="importPosition">位置</label><select id="importPosition"><option value="before">页前</option><option value="after" selected>页后</option><option value="first">开头</option><option value="last">末尾</option></select></div>
-				<div class="form-row"><label for="importOutlines">目录</label><input id="importOutlines" type="checkbox" title="导入对应目录"></div>
+				<div id="importDocuments" class="document-list" hidden></div>
+				<div id="importPagesRow" class="form-row" hidden><label id="importPagesLabel" for="importPages">页码</label><input id="importPages" type="text" autocomplete="off" spellcheck="false" disabled></div>
+				<div id="importPositionRow" class="form-row"><label for="importPosition">位置</label><select id="importPosition"><option value="before">页前</option><option value="after" selected>页后</option><option value="first">开头</option><option value="last">末尾</option></select></div>
+				<div id="importOutlinesRow" class="form-row"><label for="importOutlines">目录</label><input id="importOutlines" type="checkbox" title="导入对应目录"></div>
 				<div class="form-actions"><div id="importStatus" class="form-status"></div><button id="importCancel" class="button" type="button">取消</button><button id="importSubmit" class="button" type="submit" disabled>插入</button></div>
 			</form>
 		</dialog>
@@ -397,6 +398,7 @@
 				<div id="documentList" class="document-list"></div>
 				<div id="documentActions" class="document-actions">
 					<button id="documentAddButton" class="button" type="button">新增</button>
+					<button id="documentImportButton" class="button" type="button">导入</button>
 					<button id="infoButton" class="button" type="button">修改</button>
 					<button id="documentDeleteButton" class="button" type="button">删除</button>
 					<button id="documentUpButton" class="button" type="button">前移</button>

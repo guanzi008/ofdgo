@@ -64,6 +64,8 @@ const state = {
 	encryptionDirty: false,
 	insertObject: null,
 	importPageCount: 0,
+	importDocumentCount: 0,
+	importDocumentMode: false,
 	importEncrypted: false,
 	importing: false,
 	imageImporting: false,
@@ -263,6 +265,7 @@ const el = {
 	documentClose: document.querySelector("#documentClose"),
 	documentRow: document.querySelector("#documentRow"),
 	documentAddButton: document.querySelector("#documentAddButton"),
+	documentImportButton: document.querySelector("#documentImportButton"),
 	documentDeleteButton: document.querySelector("#documentDeleteButton"),
 	documentUpButton: document.querySelector("#documentUpButton"),
 	documentDownButton: document.querySelector("#documentDownButton"),
@@ -305,7 +308,11 @@ const el = {
 	importRange: document.querySelector("#importRange"),
 	importPagesRow: document.querySelector("#importPagesRow"),
 	importPages: document.querySelector("#importPages"),
+	importPagesLabel: document.querySelector("#importPagesLabel"),
+	importDocuments: document.querySelector("#importDocuments"),
 	importPosition: document.querySelector("#importPosition"),
+	importPositionRow: document.querySelector("#importPositionRow"),
+	importOutlinesRow: document.querySelector("#importOutlinesRow"),
 	importOutlines: document.querySelector("#importOutlines"),
 	importStatus: document.querySelector("#importStatus"),
 	importCancel: document.querySelector("#importCancel"),
@@ -757,6 +764,7 @@ editorClick(el.paragraphButton, () => {
 });
 el.paragraphCancel.addEventListener("click", () => el.paragraphPanel.close());
 editorClick(el.documentAddButton, () => openCreatePanel(false, true));
+editorClick(el.documentImportButton, () => openImportPanel(true));
 editorClick(el.documentManageButton, openDocumentManagement);
 resourceElements.ManageButton.addEventListener("click", openResourceManagement);
 resourceElements.Close.addEventListener("click", () => resourceElements.Panel.close());
@@ -1149,6 +1157,8 @@ el.importPanel.addEventListener("cancel", event => {
 });
 el.importPanel.addEventListener("close", () => {
 	state.importPageCount = 0;
+	state.importDocumentCount = 0;
+	state.importDocumentMode = false;
 	state.importEncrypted = false;
 	el.importForm.reset();
 	if (state.ready) callWASM("ofdgoLoadImport", null).catch(err => showError(err, false));
@@ -1163,14 +1173,17 @@ el.importRange.addEventListener("change", () => {
 });
 el.importForm.addEventListener("submit", async event => {
 	event.preventDefault();
-	if (document.body.hasAttribute("data-busy") || !state.importPageCount || !el.importForm.reportValidity()) return;
-	const position = { before:state.pageIndex, after:state.pageIndex+1, first:0, last:state.doc.pageCount }[el.importPosition.value];
+	if (document.body.hasAttribute("data-busy") || !(state.importDocumentMode ? state.importDocumentCount : state.importPageCount) || !el.importForm.reportValidity()) return;
+	const position = state.importDocumentMode ? managedDocumentIndex() + 1 : { before:state.pageIndex, after:state.pageIndex+1, first:0, last:state.doc.pageCount }[el.importPosition.value];
 	const options = [];
 	if (state.importEncrypted) {
 		if (!window.confirm(state.doc.encryption?.encrypted ? "按目标文档的加密策略导入，是否继续？" : "目标未加密，导入内容将按明文保存，是否继续？")) return;
 		options.push(true);
 	}
-	const saved = await changeDocument("ofdgoImportPages", null, el.importRange.value === "custom" ? el.importPages.value : "", position, el.importOutlines.checked, ...options);
+	const range = el.importRange.value === "custom" ? el.importPages.value : "";
+	const saved = state.importDocumentMode
+		? await changeDocument("ofdgoImportDocuments", null, range, position, state.importEncrypted)
+		: await changeDocument("ofdgoImportPages", null, range, position, el.importOutlines.checked, ...options);
 	if (saved) el.importPanel.close();
 });
 editorClick(el.copyPageButton, () => changeSelectedPages("copy"));
@@ -2149,11 +2162,21 @@ function remapOutlineExpansion(name, args, next) {
 	walk(roots, (item, key) => state.outlineExpanded.set(key, Boolean(expanded.get(item))));
 }
 
-function openImportPanel() {
+function openImportPanel(documents = false) {
 	if (!state.editing || document.body.hasAttribute("data-busy")) return;
 	state.importPageCount = 0;
+	state.importDocumentCount = 0;
+	state.importDocumentMode = documents;
+	state.importEncrypted = false;
 	el.importForm.reset();
 	el.importStatus.textContent = "";
+	el.importDocuments.replaceChildren();
+	el.importDocuments.hidden = !documents;
+	el.importPagesLabel.textContent = documents ? "文档" : "页码";
+	el.importPages.removeAttribute("title");
+	el.importPositionRow.hidden = documents;
+	el.importOutlinesRow.hidden = documents;
+	el.importSubmit.textContent = documents ? "导入" : "插入";
 	el.importSubmit.disabled = true;
 	el.importPagesRow.hidden = true;
 	el.importPages.disabled = true;
@@ -2165,6 +2188,8 @@ async function loadImportFile() {
 	const file = el.importFile.files[0];
 	const openSeq = state.openSeq;
 	state.importPageCount = 0;
+	state.importDocumentCount = 0;
+	el.importDocuments.replaceChildren();
 	state.importEncrypted = false;
 	el.importSubmit.disabled = true;
 	el.importStatus.textContent = "";
@@ -2178,10 +2203,20 @@ async function loadImportFile() {
 			return;
 		}
 		state.importPageCount = info?.pageCount || 0;
+		state.importDocumentCount = info?.documentCount || 0;
 		state.importEncrypted = Boolean(info?.encrypted);
-		el.importPages.title = state.importPageCount ? `页码 1-${state.importPageCount}` : "页码";
-		el.importStatus.textContent = info?.signed ? "保留签章外观，原签名不再有效" : "";
-		el.importSubmit.disabled = !state.importPageCount;
+		if (state.importDocumentMode) {
+			el.importDocuments.replaceChildren(...(info?.documents || []).map(entry => {
+				const row = document.createElement("div");
+				row.textContent = `${entry.index + 1} · ${entry.title || "未命名"}`;
+				return row;
+			}));
+			el.importStatus.textContent = `共${state.importDocumentCount}个文档${info?.documentsSigned || state.doc.signatureCount ? " · 合并后需验签" : ""}`;
+		} else {
+			el.importPages.title = state.importPageCount ? `页码 1-${state.importPageCount}` : "页码";
+			el.importStatus.textContent = info?.signed ? "保留签章外观，原签名不再有效" : "";
+		}
+		el.importSubmit.disabled = !(state.importDocumentMode ? state.importDocumentCount : state.importPageCount);
 	} catch (err) {
 		if (openSeq === state.openSeq && el.importPanel.open) el.importStatus.textContent = err.message;
 	} finally {
@@ -3590,12 +3625,12 @@ async function changeDocument(name, item, ...args) {
 	const restoring = name === "ofdgoUndo" || name === "ofdgoRedo";
 	if (restoring) canvasEditor.richClipboard = null;
 	const { scrollLeft, scrollTop } = el.viewerPanel;
-	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages";
+	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages" || name === "ofdgoImportDocuments";
 	const changingFont = name === "ofdgoChangeFontBinding";
 	let refreshManagement = false;
 	state.imageImporting = name === "ofdgoImportImages";
 	if (importing) state.importing = true;
-	setBusy(true, importing ? "正在导入页面" : "", null);
+	setBusy(true, importing ? name === "ofdgoImportDocuments" ? "正在导入文档" : "正在导入页面" : "", null);
 	const progressTimer = changingFont ? window.setTimeout(() => {
 		if (openSeq === state.openSeq && document.body.hasAttribute("data-busy")) {
 			el.progressPanel.hidden = false;
@@ -3647,17 +3682,17 @@ async function changeDocument(name, item, ...args) {
 		}
 		const restoredView = name === "ofdgoUndo" ? state.editorViews.get(revision) : name === "ofdgoRedo" ? state.editorViews.get(doc.revision) : null;
 		if (restoredView?.reading && state.savedRevision === revision) state.savedRevision = doc.revision;
-		refreshManagement = el.documentPanel.open && (name === "ofdgoChangeDocument" || name === "ofdgoUpdateInfo" || restoring);
+		refreshManagement = el.documentPanel.open && (name === "ofdgoChangeDocument" || name === "ofdgoImportDocuments" || name === "ofdgoUpdateInfo" || restoring);
 		const previousDocument = state.doc.documents?.[state.doc.documentIndex || 0];
 		const nextDocument = doc.documents?.[doc.documentIndex || 0];
 		const sameDocument = previousDocument?.id && previousDocument.id === nextDocument?.id && state.doc.documentIndex === doc.documentIndex;
 		const documentChanged = (state.doc.documentVersion || "") !== (doc.documentVersion || "")
 			|| previousDocument?.id !== nextDocument?.id || previousDocument?.root !== nextDocument?.root
 			&& !(sameDocument && (name === "ofdgoChangeFontBinding" || restoring));
-		const packageChanged = documentChanged || name === "ofdgoChangeDocument" || restoring
+		const packageChanged = documentChanged || name === "ofdgoChangeDocument" || name === "ofdgoImportDocuments" || restoring
 			&& JSON.stringify(doc.documents?.map(entry => [entry.root, entry.id])) !== JSON.stringify(state.doc.documents?.map(entry => [entry.root, entry.id]));
 		if (packageChanged) {
-			if (state.documentManagement && name === "ofdgoChangeDocument" && args[0] === "add") {
+			if (state.documentManagement && (name === "ofdgoImportDocuments" || name === "ofdgoChangeDocument" && args[0] === "add")) {
 				state.documentManagement.key = documentEntryKey(nextDocument);
 			}
 			resetCompositeScope();
@@ -4326,8 +4361,8 @@ async function loadWASM() {
 					return;
 				}
 				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.importing && !el.importCancel.disabled) {
-					const label = { ids: "正在检查标识", pages: "正在导入页面", resources: "正在读取资源", commit: "正在完成导入" }[data.phase];
-					el.importStatus.textContent = data.total ? `${label} · ${data.completed} / ${data.total} 页` : label;
+					const label = { ids: "正在检查标识", documents: "正在导入文档", pages: "正在导入页面", resources: "正在读取资源", commit: "正在完成导入" }[data.phase] || "正在导入文档";
+					el.importStatus.textContent = data.total ? `${label} · ${data.completed} / ${data.total}${state.importDocumentMode ? "" : " 页"}` : label;
 					setProgress(label, data.total ? data.completed / data.total * 100 : null);
 					if (data.phase === "commit") el.importCancel.disabled = el.cancelExportButton.disabled = true;
 				}
@@ -11717,6 +11752,7 @@ function updateDocumentControls() {
 	const actionsDisabled = disabled || !state.editing || Boolean(manager?.loading || manager?.failed);
 	el.documentList.inert = busy || Boolean(manager?.loading);
 	el.documentAddButton.disabled = actionsDisabled;
+	el.documentImportButton.disabled = actionsDisabled;
 	el.infoButton.disabled = actionsDisabled || Boolean(manager && !manager.entries);
 	el.documentDeleteButton.disabled = actionsDisabled || count <= 1;
 	el.documentUpButton.disabled = actionsDisabled || index === 0;
@@ -11916,7 +11952,7 @@ async function callWASM(name, ...args) {
 			request.fontData = new Map();
 			args.push([...request.localFonts.keys()]);
 		}
-		if (name === "ofdgoImportImages" || name === "ofdgoExportImages" || name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoExportResource" || name === "ofdgoExportVersion" || name === "ofdgoSaveDocument" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
+		if (name === "ofdgoImportDocuments" || name === "ofdgoImportImages" || name === "ofdgoExportImages" || name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoExportResource" || name === "ofdgoExportVersion" || name === "ofdgoSaveDocument" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
 			state.exportRequestID = id;
 			el.cancelExportButton.hidden = false;
 			el.cancelExportButton.disabled = false;
@@ -11964,7 +12000,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	el.importForm.inert = busy && !state.importing;
 	for (const input of [el.importFile, el.importRange, el.importPosition, el.importOutlines]) input.disabled = busy;
 	el.importPages.disabled = busy || el.importRange.value !== "custom";
-	el.importSubmit.disabled = busy || !state.importPageCount;
+	el.importSubmit.disabled = busy || !(state.importDocumentMode ? state.importDocumentCount : state.importPageCount);
 	el.batchPagesForm.inert = busy;
 	el.objectStyleForm.inert = busy;
 	el.objectBoundsForm.inert = busy;
