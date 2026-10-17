@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -49,6 +48,7 @@ type Host struct {
 	window       *guigo.Window
 	files        *fileStore
 	engines      map[string]*webui.NativeEngine
+	engineStops  map[string]func() bool
 	cancels      map[string]context.CancelFunc
 	fontOnce     sync.Once
 	fonts        []map[string]any
@@ -78,8 +78,8 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 	h := &Host{files: files, engines: make(map[string]*webui.NativeEngine), cancels: make(map[string]context.CancelFunc), fontFiles: make(map[string]string), pendingPaths: append([]string(nil), paths...)}
 	defer h.close()
 	bindings := make(map[string]guigo.HandlerFunc)
-	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.cancel", "open", "save", "directory", "file", "release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title"} {
-		bindings["ofdgo.host."+name] = func(ctx context.Context, raw json.RawMessage) (any, error) { return h.call(ctx, name, raw) }
+	for _, name := range []string{"engine.open", "engine.close", "engine.call", "open", "save", "directory", "file", "release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title"} {
+		bindings["ofdgo.host."+name] = func(ctx context.Context, args any) (any, error) { return h.call(ctx, name, args) }
 	}
 	static := http.FileServerFS(webuiassets.NativeFS)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -219,6 +219,7 @@ func (h *Host) resource(r *http.Request) (*guigo.Resource, error) {
 }
 
 // emit 发送当前窗口事件
+// 入参: name 事件名称, value 事件数据
 func (h *Host) emit(name string, value any) {
 	h.mu.Lock()
 	w := h.window
@@ -229,6 +230,7 @@ func (h *Host) emit(name string, value any) {
 }
 
 // openPaths 将操作系统提供的文件登记后交给界面
+// 入参: names 文件路径列表
 func (h *Host) openPaths(names []string) {
 	files := make([]any, 0, len(names))
 	for _, name := range names {
@@ -246,10 +248,12 @@ func (h *Host) openPaths(names []string) {
 }
 
 // call 执行宿主协议并保留业务结果结构
-func (h *Host) call(ctx context.Context, name string, raw json.RawMessage) (any, error) {
-	var args map[string]any
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, err
+// 入参: ctx 调用上下文, name 方法名称, value 已解码参数
+// 返回: any 调用结果, error 执行错误
+func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
+	args, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("参数无效")
 	}
 	text := func(key string) string { value, _ := args[key].(string); return value }
 	flag := func(key string) bool { value, _ := args[key].(bool); return value }
@@ -263,32 +267,14 @@ func (h *Host) call(ctx context.Context, name string, raw json.RawMessage) (any,
 		id := rand.Text()
 		h.mu.Lock()
 		h.engines[id] = engine
+		if h.engineStops == nil {
+			h.engineStops = make(map[string]func() bool)
+		}
+		h.engineStops[id] = context.AfterFunc(guigo.PageContext(ctx), func() { _ = h.closeEngine(id) })
 		h.mu.Unlock()
-		return map[string]any{"engine": id}, nil
+		return guigo.Result{Value: map[string]any{"engine": id}, Discard: func() { _ = h.closeEngine(id) }}, nil
 	case "engine.close":
-		id := text("engine")
-		h.mu.Lock()
-		engine := h.engines[id]
-		delete(h.engines, id)
-		for key, cancel := range h.cancels {
-			if strings.HasPrefix(key, id+"/") {
-				cancel()
-			}
-		}
-		h.mu.Unlock()
-		if engine != nil {
-			return nil, engine.Close()
-		}
-		return nil, nil
-	case "engine.cancel":
-		key := text("engine") + "/" + fmt.Sprint(args["id"])
-		h.mu.Lock()
-		cancel := h.cancels[key]
-		h.mu.Unlock()
-		if cancel != nil {
-			cancel()
-		}
-		return nil, nil
+		return nil, h.closeEngine(text("engine"))
 	case "engine.call":
 		id := text("engine")
 		key := id + "/" + fmt.Sprint(args["id"])
@@ -307,20 +293,14 @@ func (h *Host) call(ctx context.Context, name string, raw json.RawMessage) (any,
 			return nil, fmt.Errorf("会话已关闭")
 		}
 		values, _ := args["args"].([]any)
-		for i, value := range values {
-			var err error
-			values[i], err = nativeBytes(value)
-			if err != nil {
-				return nil, err
-			}
-		}
 		result := engine.Call(operation, text("name"), values, func(event any) {
 			if value, ok := event.(map[string]any); ok {
 				value["id"] = args["id"]
 				h.emit("ofdgo.engine."+id, value)
 			}
 		})
-		return h.encode(result), nil
+		encoded := h.encode(guigo.PageContext(ctx), result)
+		return guigo.Result{Value: encoded, Discard: func() { h.discard(encoded) }}, nil
 	case "open", "save", "directory":
 		h.mu.Lock()
 		window := h.window
@@ -420,13 +400,11 @@ func (h *Host) call(ctx context.Context, name string, raw json.RawMessage) (any,
 		if name == "write.abort" {
 			return nil, writer.Abort()
 		}
-		descriptor, _ := args["data"].(map[string]any)
-		if value, err := nativeBytes(descriptor); err != nil {
-			return nil, err
-		} else if data, ok := value.([]byte); ok {
-			_, err = writer.Write(data)
+		if data, ok := args["data"].([]byte); ok {
+			_, err := writer.Write(data)
 			return nil, err
 		}
+		descriptor, _ := args["data"].(map[string]any)
 		key, _ := descriptor["nativeFile"].(string)
 		source, size, err := h.files.resolve(key)
 		if err != nil {
@@ -458,48 +436,9 @@ func (h *Host) call(ctx context.Context, name string, raw json.RawMessage) (any,
 	return nil, fmt.Errorf("未知宿主操作")
 }
 
-// nativeBytes 还原仅在消息内传递的小型二进制参数
-func nativeBytes(value any) (any, error) {
-	switch value := value.(type) {
-	case map[string]any:
-		if raw, exists := value["nativeBytes"]; exists {
-			items, ok := raw.([]any)
-			if !ok || len(value) != 1 || len(items) > 1<<20 {
-				return nil, fmt.Errorf("二进制参数无效")
-			}
-			data := make([]byte, len(items))
-			for i, item := range items {
-				number, ok := item.(float64)
-				if !ok || number < 0 || number > 255 || float64(byte(number)) != number {
-					return nil, fmt.Errorf("二进制参数无效")
-				}
-				data[i] = byte(number)
-			}
-			return data, nil
-		}
-		for key, item := range value {
-			decoded, err := nativeBytes(item)
-			if err != nil {
-				return nil, err
-			}
-			value[key] = decoded
-		}
-		return value, nil
-	case []any:
-		for i, item := range value {
-			decoded, err := nativeBytes(item)
-			if err != nil {
-				return nil, err
-			}
-			value[i] = decoded
-		}
-		return value, nil
-	default:
-		return value, nil
-	}
-}
-
 // dialogFilters 将共用界面的文件类型映射到系统对话框
+// 入参: args 对话框参数
+// 返回: []guigo.FileFilter 文件类型列表
 func dialogFilters(args map[string]any) []guigo.FileFilter {
 	patterns := func(values []string) string {
 		var result []string
@@ -571,6 +510,8 @@ func dialogFilters(args map[string]any) []guigo.FileFilter {
 }
 
 // dialogError 将用户取消与业务错误区分
+// 入参: err 对话框错误
+// 返回: error 页面可识别的错误
 func dialogError(err error) error {
 	if errors.Is(err, guigo.ErrCanceled) {
 		return &guigo.BridgeError{Name: "AbortError", Message: "已取消"}
@@ -578,21 +519,23 @@ func dialogError(err error) error {
 	return err
 }
 
-// encode 将二进制输出转为窗口内资源
-func (h *Host) encode(value any) any {
+// encode 将二进制输出登记为页面资源
+// 入参: ctx 页面上下文, value 原生调用结果
+// 返回: any 包含资源描述的调用结果
+func (h *Host) encode(ctx context.Context, value any) any {
 	switch v := value.(type) {
 	case []byte:
-		return h.files.bytes(v)
+		return h.files.bytes(ctx, v)
 	case map[string]any:
 		out := make(map[string]any, len(v))
 		for key, item := range v {
-			out[key] = h.encode(item)
+			out[key] = h.encode(ctx, item)
 		}
 		return out
 	case []any:
 		out := make([]any, len(v))
 		for i, item := range v {
-			out[i] = h.encode(item)
+			out[i] = h.encode(ctx, item)
 		}
 		return out
 	default:
@@ -600,7 +543,28 @@ func (h *Host) encode(value any) any {
 	}
 }
 
+// discard 释放页面未接收的临时结果
+// 入参: value 包含资源描述的调用结果
+func (h *Host) discard(value any) {
+	switch v := value.(type) {
+	case map[string]any:
+		if id, ok := v["nativeFile"].(string); ok && v["temporary"] == true {
+			h.files.release(id)
+			return
+		}
+		for _, item := range v {
+			h.discard(item)
+		}
+	case []any:
+		for _, item := range v {
+			h.discard(item)
+		}
+	}
+}
+
 // openWriter 将授权目标转换为原生事务写入器
+// 入参: ctx 调用上下文, value 目标句柄, name 输出文件名
+// 返回: io.WriteCloser 事务写入器, error 创建错误
 func (h *Host) openWriter(ctx context.Context, value any, name string) (io.WriteCloser, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -631,6 +595,8 @@ func (h *Host) openWriter(ctx context.Context, value any, name string) (io.Write
 }
 
 // reserveOutput 为一次转换预留独立输出文件或目录
+// 入参: ctx 调用上下文, request 输出请求
+// 返回: webui.NativeOutputTarget 预留目标, error 创建错误
 func (h *Host) reserveOutput(ctx context.Context, request webui.NativeOutputRequest) (webui.NativeOutputTarget, error) {
 	if err := ctx.Err(); err != nil {
 		return webui.NativeOutputTarget{}, err
@@ -642,6 +608,8 @@ func (h *Host) reserveOutput(ctx context.Context, request webui.NativeOutputRequ
 }
 
 // cleanupOutput 回滚本次转换创建的输出入口
+// 入参: ctx 调用上下文, target 预留目标
+// 返回: error 清理错误
 func (h *Host) cleanupOutput(ctx context.Context, target webui.NativeOutputTarget) error {
 	handle, _ := target.Destination.(map[string]any)
 	id, _ := handle["nativeHandle"].(string)
@@ -679,6 +647,8 @@ func (h *Host) readFonts() {
 }
 
 // loadFont 按转换请求读取单个系统字体
+// 入参: ctx 调用上下文, name 字体文件路径及字体索引
+// 返回: []byte 字体数据, error 读取错误
 func (h *Host) loadFont(ctx context.Context, name string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -696,6 +666,29 @@ func (h *Host) loadFont(ctx context.Context, name string) ([]byte, error) {
 	return (ofdgo.FontFile{Data: data}).Face(index)
 }
 
+// closeEngine 取消会话调用并释放文档
+// 入参: id 会话标识
+// 返回: error 关闭错误
+func (h *Host) closeEngine(id string) error {
+	h.mu.Lock()
+	engine := h.engines[id]
+	delete(h.engines, id)
+	if stop := h.engineStops[id]; stop != nil {
+		stop()
+		delete(h.engineStops, id)
+	}
+	for key, cancel := range h.cancels {
+		if strings.HasPrefix(key, id+"/") {
+			cancel()
+		}
+	}
+	h.mu.Unlock()
+	if engine != nil {
+		return engine.Close()
+	}
+	return nil
+}
+
 // close 取消任务并释放当前窗口持有的会话
 func (h *Host) close() {
 	h.mu.Lock()
@@ -703,6 +696,10 @@ func (h *Host) close() {
 		cancel()
 	}
 	engines := h.engines
+	for _, stop := range h.engineStops {
+		stop()
+	}
+	h.engineStops = nil
 	h.engines = make(map[string]*webui.NativeEngine)
 	h.mu.Unlock()
 	for _, engine := range engines {

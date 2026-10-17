@@ -16,8 +16,8 @@ package webview
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +37,7 @@ type fileEntry struct {
 	name      string
 	data      []byte
 	file      *os.File
+	stop      func() bool
 	directory bool
 	owned     bool
 	temporary bool
@@ -45,7 +46,6 @@ type fileEntry struct {
 // fileStore 管理窗口范围内的文件授权和临时数据
 type fileStore struct {
 	mu        sync.Mutex
-	transfers sync.WaitGroup
 	entries   map[string]*fileEntry
 	writers   map[string]*fileWriter
 	temporary string
@@ -64,6 +64,7 @@ type fileWriter struct {
 }
 
 // newFileStore 创建独立文件授权表
+// 返回: *fileStore 文件授权表, error 创建错误
 func newFileStore() (*fileStore, error) {
 	dir, err := temporaryDirectory()
 	if err != nil {
@@ -110,6 +111,8 @@ func temporaryFile(dir, prefix string) (*os.File, error) {
 }
 
 // add 登记已有授权文件
+// 入参: name 文件路径, directory 是否为目录
+// 返回: map[string]any 句柄描述, error 登记错误
 func (s *fileStore) add(name string, directory bool) (map[string]any, error) {
 	info, err := os.Stat(name)
 	if err != nil {
@@ -126,6 +129,8 @@ func (s *fileStore) add(name string, directory bool) (map[string]any, error) {
 }
 
 // save 登记用户选择的输出路径
+// 入参: name 输出文件路径
+// 返回: map[string]any 句柄描述
 func (s *fileStore) save(name string) map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -135,6 +140,8 @@ func (s *fileStore) save(name string) map[string]any {
 }
 
 // descriptor 返回文件句柄，不暴露本机路径
+// 入参: id 授权标识
+// 返回: map[string]any 句柄描述
 func (s *fileStore) descriptor(id string) map[string]any {
 	entry := s.entries[id]
 	kind := "file"
@@ -145,6 +152,8 @@ func (s *fileStore) descriptor(id string) map[string]any {
 }
 
 // file 创建独立读取快照并返回资源描述
+// 入参: id 授权标识
+// 返回: map[string]any 资源描述, error 读取错误
 func (s *fileStore) file(id string) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -172,6 +181,8 @@ func (s *fileStore) file(id string) (map[string]any, error) {
 }
 
 // resolve 按授权标识读取文件并保持随机读取句柄
+// 入参: id 授权标识
+// 返回: io.ReaderAt 随机读取器, int64 文件大小, error 读取错误
 func (s *fileStore) resolve(id string) (io.ReaderAt, int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -196,15 +207,20 @@ func (s *fileStore) resolve(id string) (io.ReaderAt, int64, error) {
 	return entry.file, info.Size(), nil
 }
 
-// bytes 登记原生输出，前端通过资源通道读取
-func (s *fileStore) bytes(data []byte) map[string]any {
+// bytes 登记原生输出，页面退出时释放未读取数据
+// 入参: ctx 页面上下文, data 输出数据
+// 返回: map[string]any 资源描述，页面取消或授权表关闭时返回nil
+func (s *fileStore) bytes(ctx context.Context, data []byte) map[string]any {
 	if data == nil {
 		data = []byte{}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed || ctx.Err() != nil {
+		return nil
+	}
 	id := rand.Text()
-	s.entries[id] = &fileEntry{data: data, name: "data"}
+	s.entries[id] = &fileEntry{data: data, name: "data", stop: context.AfterFunc(ctx, func() { s.release(id) })}
 	return map[string]any{"nativeFile": id, "size": len(data), "name": "data", "url": "/__native/data/" + id, "temporary": true}
 }
 
@@ -233,12 +249,16 @@ func (s *fileStore) resource(id string) (io.ReaderAt, int64, func() error, error
 	return file, info.Size(), file.Close, nil
 }
 
-// release 释放已传递完成的内存结果
+// release 释放内存结果或临时文件并取消页面清理回调
+// 入参: id 资源标识
 func (s *fileStore) release(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if entry := s.entries[id]; entry != nil && (entry.data != nil || entry.temporary) {
 		delete(s.entries, id)
+		if entry.stop != nil {
+			entry.stop()
+		}
 		if entry.file != nil {
 			entry.file.Close()
 		}
@@ -249,6 +269,8 @@ func (s *fileStore) release(id string) {
 }
 
 // child 在已授权目录中查找或创建直接子项
+// 入参: id 目录授权标识, name 子项名称, directory 是否为目录, create 是否允许创建
+// 返回: map[string]any 句柄描述, error 访问错误
 func (s *fileStore) child(id, name string, directory, create bool) (map[string]any, error) {
 	if !fs.ValidPath(name) || name == "." || strings.ContainsAny(name, "/\\:") {
 		return nil, fmt.Errorf("文件名无效")
@@ -302,6 +324,8 @@ func (s *fileStore) child(id, name string, directory, create bool) (map[string]a
 }
 
 // reserve 为批量输出独占创建入口并避开已有文件
+// 入参: id 目录授权标识, base 基础名称, extension 扩展名, directory 是否创建目录
+// 返回: string 输出基础名称, string 输出入口名称, error 创建错误
 func (s *fileStore) reserve(id, base, extension string, directory bool) (string, string, error) {
 	if !fs.ValidPath(base) || base == "." || strings.ContainsAny(base+extension, "/\\:") {
 		return "", "", fmt.Errorf("文件名无效")
@@ -350,6 +374,8 @@ func (s *fileStore) reserve(id, base, extension string, directory bool) (string,
 }
 
 // begin 创建文件写入事务
+// 入参: id 输出授权标识
+// 返回: *fileWriter 事务写入器, error 创建错误
 func (s *fileStore) begin(id string) (*fileWriter, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -370,6 +396,8 @@ func (s *fileStore) begin(id string) (*fileWriter, error) {
 }
 
 // remove 清理由当前窗口创建的目录子项
+// 入参: id 目录授权标识, name 子项名称, recursive 是否递归删除
+// 返回: error 删除错误
 func (s *fileStore) remove(id, name string, recursive bool) error {
 	if !fs.ValidPath(name) || name == "." || strings.ContainsAny(name, "/\\:") {
 		return fmt.Errorf("文件名无效")
@@ -414,6 +442,8 @@ func (s *fileStore) remove(id, name string, recursive bool) error {
 }
 
 // Write 追加输出数据
+// 入参: data 输出数据
+// 返回: int 写入字节数, error 写入错误
 func (w *fileWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -432,6 +462,7 @@ func (w *fileWriter) Write(data []byte) (int, error) {
 }
 
 // Close 同步并替换目标文件
+// 返回: error 提交错误
 func (w *fileWriter) Close() error {
 	defer w.release()
 	w.mu.Lock()
@@ -460,6 +491,7 @@ func (w *fileWriter) Close() error {
 }
 
 // Abort 删除未提交的临时输出
+// 返回: error 清理错误
 func (w *fileWriter) Abort() error {
 	defer w.release()
 	w.mu.Lock()
@@ -479,46 +511,9 @@ func (w *fileWriter) release() {
 }
 
 // serve 提供窗口内资源，不建立网络监听器
+// 入参: w 响应写入器, r 资源请求
 func (s *fileStore) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	if r.URL.Path == "/__native/input" && r.Method == http.MethodPost {
-		s.mu.Lock()
-		if s.closed {
-			s.mu.Unlock()
-			http.Error(w, os.ErrClosed.Error(), 500)
-			return
-		}
-		s.transfers.Add(1)
-		s.mu.Unlock()
-		defer s.transfers.Done()
-		file, err := temporaryFile(s.temporary, "input-")
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		size, err := io.Copy(file, r.Body)
-		if err != nil {
-			file.Close()
-			os.Remove(file.Name())
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		s.mu.Lock()
-		if s.closed {
-			s.mu.Unlock()
-			file.Close()
-			os.Remove(file.Name())
-			http.Error(w, os.ErrClosed.Error(), 500)
-			return
-		}
-		id := rand.Text()
-		s.entries[id] = &fileEntry{path: file.Name(), name: "data", file: file, temporary: true}
-		s.mu.Unlock()
-		value := map[string]any{"nativeFile": id, "size": size, "name": "data", "url": "/__native/data/" + id, "temporary": true}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(value)
-		return
-	}
 	if !strings.HasPrefix(r.URL.Path, "/__native/data/") || r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.NotFound(w, r)
 		return
@@ -540,6 +535,7 @@ func (s *fileStore) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 // close 释放授权文件与未提交输出
+// 返回: error 清理错误
 func (s *fileStore) close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -552,12 +548,14 @@ func (s *fileStore) close() error {
 	s.writers = make(map[string]*fileWriter)
 	s.entries = make(map[string]*fileEntry)
 	s.mu.Unlock()
-	s.transfers.Wait()
 	var err error
 	for _, writer := range writers {
 		err = errors.Join(err, writer.Abort())
 	}
 	for _, entry := range entries {
+		if entry.stop != nil {
+			entry.stop()
+		}
 		if entry.file != nil {
 			err = errors.Join(err, entry.file.Close())
 		}

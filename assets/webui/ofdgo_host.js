@@ -22,10 +22,14 @@ class NativeFile {
 		if (value.temporary) nativeHost?.resources?.register(this, value.nativeFile);
 	}
 
-	async arrayBuffer() {
-		const response = await fetch(this.url);
+	async arrayBuffer(signal) {
+		const response = await fetch(this.url, {signal});
 		if (!response.ok) throw new Error("读取文件失败");
 		return response.arrayBuffer();
+	}
+
+	toJSON() {
+		return {nativeFile:this.nativeFile, size:this.size, name:this.name};
 	}
 
 	async text() {
@@ -37,6 +41,10 @@ class NativeHandle {
 	constructor(host, value) {
 		this.host = host;
 		Object.assign(this, value);
+	}
+
+	toJSON() {
+		return {nativeHandle:this.nativeHandle, name:this.name, kind:this.kind};
 	}
 
 	async getFile() {
@@ -58,11 +66,7 @@ class NativeHandle {
 	async createWritable() {
 		const {writer} = await this.host.call("write.begin", {handle:this.nativeHandle});
 		return {
-			write: async data => {
-				const resources = new Set();
-				try { return await this.host.call("write.data", {writer, data:await this.host.encode(data, "", resources)}); }
-				finally { for (const file of resources) await this.host.call("release", {file}).catch(() => {}); }
-			},
+			write: data => this.host.call("write.data", {writer, data}),
 			close: () => this.host.call("write.commit", {writer}),
 			abort: () => this.host.call("write.abort", {writer}),
 		};
@@ -77,59 +81,34 @@ class NativeHost {
 		}) : null;
 	}
 
-	call(name, value) {
-		return this.bridge.call(`ofdgo.host.${name}`, value);
+	call(name, value, signal) {
+		return this.bridge.call(`ofdgo.host.${name}`, value, {signal});
 	}
 
-	async encode(value, key = "", resources = null) {
-		if (value?.nativeFile) return {nativeFile:value.nativeFile, size:value.size, name:value.name};
-		if (value?.nativeHandle) return {nativeHandle:value.nativeHandle, name:value.name, kind:value.kind};
-		if (value instanceof Blob || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
-			if (!(value instanceof Blob)) {
-				const bytes = ArrayBuffer.isView(value) ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength) : new Uint8Array(value);
-				if (bytes.byteLength <= 65536 || ["password", "key", "keyPassword", "certificate"].includes(key)) return {nativeBytes:Array.from(bytes)};
-			}
-			const response = await fetch("/__native/input", {method:"POST", body:value});
-			if (!response.ok) throw new Error("传递数据失败");
-			const file = await response.json();
-			resources?.add(file.nativeFile);
-			return file;
-		}
-		if (Array.isArray(value)) {
-			const results = await Promise.allSettled(value.map(item => this.encode(item, "", resources)));
-			const failure = results.find(item => item.status === "rejected");
-			if (failure) throw failure.reason;
-			return results.map(item => item.value);
-		}
-		if (value && typeof value === "object") {
-			const result = {};
-			for (const [key, item] of Object.entries(value)) result[key] = await this.encode(item, key, resources);
-			return result;
-		}
-		return value;
-	}
-
-	async decode(value, name = "", key = "") {
+	async decode(value, name = "", key = "", signal) {
 		if (value?.nativeFile) {
 			const file = new NativeFile(value);
 			if (key === "file" || name === "ofdgoConvertPDF" && key === "bytes") return file;
 			try {
-				const bytes = await file.arrayBuffer();
+				const bytes = await file.arrayBuffer(signal);
 				return key === "blob" ? new Blob([bytes], {type:value.type}) : new Uint8Array(bytes);
 			} finally {
 				await this.call("release", {file:value.nativeFile});
 			}
 		}
-		if (Array.isArray(value)) return Promise.all(value.map(item => this.decode(item, name)));
+		if (Array.isArray(value)) {
+			for (let i = 0; i < value.length; i++) value[i] = await this.decode(value[i], name, "", signal);
+			return value;
+		}
 		if (value && typeof value === "object") {
-			const result = {};
-			for (const [field, item] of Object.entries(value)) result[field] = await this.decode(item, name, field);
-			return result;
+			for (const [field, item] of Object.entries(value)) value[field] = await this.decode(item, name, field, signal);
+			return value;
 		}
 		return value;
 	}
 
 	async release(value) {
+		if (value instanceof Blob || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return;
 		if (value?.nativeFile && value.temporary) {
 			await this.call("release", {file:value.nativeFile}).catch(() => {});
 			return;
@@ -144,11 +123,10 @@ class NativeHost {
 		let closed = false;
 		let unsubscribe;
 		let pending = Promise.resolve();
-		const canceled = new Set();
-		const resources = new Set();
+		const requests = new Map();
 		const emit = data => { if (!closed) worker.onmessage?.({data}); };
 		const ready = host.call("engine.open", {}).then(({engine}) => {
-			if (closed) { host.call("engine.close", {engine}).catch(() => {}); return engine; }
+			if (closed) return engine;
 			unsubscribe = host.bridge.on(`ofdgo.engine.${engine}`, emit);
 			emit({type:"ready"});
 			return engine;
@@ -159,35 +137,35 @@ class NativeHost {
 			postMessage(data) {
 				if (closed) return;
 				if (data.type === "cancel") {
-					canceled.add(data.id);
-					ready.then(engine => host.call("engine.cancel", {engine, id:data.id})).catch(() => {});
+					requests.get(data.id)?.abort();
 					return;
 				}
 				if (data.type === "font") return;
+				const controller = new AbortController();
+				requests.set(data.id, controller);
 				pending = pending.then(async () => {
 					const engine = await ready;
 					if (closed) return;
-					if (canceled.has(data.id)) throw Object.assign(new Error("操作已取消"), {name:"AbortError"});
-					const args = await host.encode(data.args, "", resources);
-					if (closed) return;
-					if (canceled.has(data.id)) throw Object.assign(new Error("操作已取消"), {name:"AbortError"});
-					const result = await host.call("engine.call", {engine, id:data.id, name:data.name, args});
+					controller.signal.throwIfAborted();
+					const result = await host.call("engine.call", {engine, id:data.id, name:data.name, args:data.args}, controller.signal);
 					if (closed) { await host.release(result); return; }
-					const decoded = await host.decode(result, data.name);
+					let decoded;
+					try {
+						controller.signal.throwIfAborted();
+						decoded = await host.decode(result, data.name, "", controller.signal);
+						controller.signal.throwIfAborted();
+					}
+					catch (error) { await host.release(result); throw error; }
 					if (closed) { await host.release(result); return; }
 					emit({id:data.id, ...decoded});
-				}).catch(error => emit({id:data.id, ok:false, error:error.message, code:error.code, canceled:error.name === "AbortError"})).finally(() => canceled.delete(data.id));
+				}).catch(error => emit({id:data.id, ok:false, error:error.message, code:error.code, canceled:error.name === "AbortError"})).finally(() => requests.delete(data.id));
 			},
 			terminate() {
 				if (closed) return;
 				closed = true;
 				unsubscribe?.();
-				const closing = ready.then(engine => host.call("engine.close", {engine})).catch(() => {});
-				pending.finally(async () => {
-					await closing;
-					for (const file of resources) await host.call("release", {file}).catch(() => {});
-					resources.clear();
-				});
+				for (const controller of requests.values()) controller.abort();
+				ready.then(engine => host.call("engine.close", {engine})).catch(() => {});
 			},
 		};
 		ready.catch(() => {});

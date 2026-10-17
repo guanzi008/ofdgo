@@ -40,6 +40,8 @@ const (
 )
 
 // NativeResolver 将授权标识解析为随机读取源，生命周期由宿主管理
+// 入参: token 资源授权标识
+// 返回: io.ReaderAt 随机读取器, int64 资源大小, error 解析错误
 type NativeResolver func(token string) (io.ReaderAt, int64, error)
 
 // NativeOutputRequest 请求为整次批量转换预留唯一输出入口
@@ -60,7 +62,9 @@ type NativeOutputTarget struct {
 // hooks应在首次Call前配置，Resolve返回的资源需保持有效直到相应会话关闭
 type NativeEngine struct {
 	businessEngine
-	Resolve  NativeResolver
+	// Resolve 按授权标识提供资源读取源
+	Resolve NativeResolver
+	// LoadFont 按名称读取系统字体数据
 	LoadFont func(context.Context, string) ([]byte, error)
 	// OpenWriter 必须防止覆盖已有文件，成功时Close提交，失败时仅调用可选Abort
 	// 不支持Abort的输出由宿主负责回收，宿主也负责回滚已完成的批量输出
@@ -258,30 +262,33 @@ func (r nativeReader) ReadAt(data []byte, offset int64) (int, error) {
 	return total, nil
 }
 
-// readBytes 读取需要完整数据的资源，每块检查取消
+// readBytes 分块读取完整资源并检查取消状态
+// 入参: ctx 调用上下文, value 资源参数
+// 返回: []byte 资源数据, error 读取错误
 func (e *NativeEngine) readBytes(ctx context.Context, value any) ([]byte, error) {
 	source, size, err := e.source(ctx, value)
 	if err != nil {
 		return nil, err
 	}
-	var output bytes.Buffer
-	chunk := make([]byte, 256<<10)
+	if size > int64(int(^uint(0)>>1)) {
+		return nil, fmt.Errorf("resource exceeds address space")
+	}
+	output := make([]byte, int(size))
 	for offset := int64(0); offset < size; {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		n := int(min(int64(len(chunk)), size-offset))
-		got, err := source.ReadAt(chunk[:n], offset)
+		n := int(min(int64(256<<10), size-offset))
+		got, err := source.ReadAt(output[int(offset):int(offset)+n], offset)
 		if got != n {
 			return nil, io.ErrUnexpectedEOF
 		}
 		if err != nil && err != io.EOF {
 			return nil, err
 		}
-		output.Write(chunk[:got])
 		offset += int64(got)
 	}
-	return output.Bytes(), nil
+	return output, nil
 }
 
 // nativePlain 保留字节并转换JSON结构
