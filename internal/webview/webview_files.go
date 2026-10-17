@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -62,11 +63,48 @@ type fileWriter struct {
 
 // newFileStore 创建独立文件授权表
 func newFileStore() (*fileStore, error) {
-	dir, err := os.MkdirTemp("", "ofdgo-webview-")
+	dir, err := temporaryDirectory()
 	if err != nil {
 		return nil, err
 	}
 	return &fileStore{entries: make(map[string]*fileEntry), writers: make(map[string]*fileWriter), temporary: dir}, nil
+}
+
+// temporaryDirectory 创建独立临时目录
+// 返回: string 目录路径, error 创建错误
+func temporaryDirectory() (string, error) {
+	for i := 0; i < 100; i++ {
+		n, err := rand.Int(rand.Reader, big.NewInt(10000000))
+		if err != nil {
+			return "", err
+		}
+		path := filepath.Join(os.TempDir(), fmt.Sprintf("ofdgo-%07d", n.Int64()))
+		err = os.Mkdir(path, 0700)
+		if os.IsExist(err) {
+			continue
+		}
+		return path, err
+	}
+	return "", os.ErrExist
+}
+
+// temporaryFile 创建临时文件
+// 入参: dir 所在目录, prefix 文件名前缀
+// 返回: *os.File 临时文件, error 创建错误
+func temporaryFile(dir, prefix string) (*os.File, error) {
+	for i := 0; i < 100; i++ {
+		n, err := rand.Int(rand.Reader, big.NewInt(10000000))
+		if err != nil {
+			return nil, err
+		}
+		path := filepath.Join(dir, fmt.Sprintf("%s%07d.tmp", prefix, n.Int64()))
+		file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if os.IsExist(err) {
+			continue
+		}
+		return file, err
+	}
+	return nil, os.ErrExist
 }
 
 // add 登记已有授权文件
@@ -289,7 +327,7 @@ func (s *fileStore) begin(id string) (*fileWriter, error) {
 	if entry == nil || entry.directory || entry.path == "" {
 		return nil, fmt.Errorf("输出授权无效")
 	}
-	file, err := os.CreateTemp(filepath.Dir(entry.path), ".ofdgo-*")
+	file, err := temporaryFile(filepath.Dir(entry.path), filepath.Base(entry.path)+".")
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +449,7 @@ func (w *fileWriter) release() {
 func (s *fileStore) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.URL.Path == "/__native/input" && r.Method == http.MethodPost {
-		file, err := os.CreateTemp(s.temporary, "input-")
+		file, err := temporaryFile(s.temporary, "input-")
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
