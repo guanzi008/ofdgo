@@ -60,6 +60,13 @@ set GOARCH=amd64
 go build -o ofdgo_webui.exe -trimpath -ldflags "-s -w -buildid=" ./cmd/webui/webui.go
 ```
 
+# 原生桌面
+```batch
+set GOOS=windows
+set GOARCH=amd64
+go build -o ofdgo_windows_amd64.exe -trimpath -ldflags "-H windowsgui -s -w -buildid=" ./cmd/webview
+```
+
 # 安装引擎
 ```shell
 go get -u github.com/xiaoqidun/ofdgo
