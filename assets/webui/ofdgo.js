@@ -1165,12 +1165,10 @@ el.importPanel.addEventListener("close", () => {
 });
 el.importFile.addEventListener("change", loadImportFile);
 el.importRange.addEventListener("change", () => {
-	const custom = el.importRange.value === "custom";
-	el.importPagesRow.hidden = !custom;
-	el.importPages.disabled = !custom;
-	el.importPages.required = custom;
-	if (custom) el.importPages.focus();
+	updateImportControls();
+	if (!el.importPages.disabled) el.importPages.focus();
 });
+el.importDocuments.addEventListener("change", () => updateImportControls());
 el.importForm.addEventListener("submit", async event => {
 	event.preventDefault();
 	if (document.body.hasAttribute("data-busy") || !(state.importDocumentMode ? state.importDocumentCount : state.importPageCount) || !el.importForm.reportValidity()) return;
@@ -1180,7 +1178,8 @@ el.importForm.addEventListener("submit", async event => {
 		if (!window.confirm(state.doc.encryption?.encrypted ? "按目标文档的加密策略导入，是否继续？" : "目标未加密，导入内容将按明文保存，是否继续？")) return;
 		options.push(true);
 	}
-	const range = el.importRange.value === "custom" ? el.importPages.value : "";
+	const range = el.importRange.value === "custom" ? state.importDocumentMode ? selectedImportDocuments() : el.importPages.value : "";
+	if (state.importDocumentMode && el.importRange.value === "custom" && !range) return;
 	const saved = state.importDocumentMode
 		? await changeDocument("ofdgoImportDocuments", null, range, position, state.importEncrypted)
 		: await changeDocument("ofdgoImportPages", null, range, position, el.importOutlines.checked, ...options);
@@ -2171,7 +2170,7 @@ function openImportPanel(documents = false) {
 	el.importForm.reset();
 	el.importStatus.textContent = "";
 	el.importDocuments.replaceChildren();
-	el.importDocuments.hidden = !documents;
+	el.importDocuments.hidden = true;
 	el.importPagesLabel.textContent = documents ? "文档" : "页码";
 	el.importPages.removeAttribute("title");
 	el.importPositionRow.hidden = documents;
@@ -2181,7 +2180,25 @@ function openImportPanel(documents = false) {
 	el.importPagesRow.hidden = true;
 	el.importPages.disabled = true;
 	el.importPages.required = false;
+	updateImportControls();
 	el.importPanel.showModal();
+}
+
+function selectedImportDocuments() {
+	return Array.from(el.importDocuments.children, row => row.children[0]).filter(input => input.checked).map(input => input.value).join(",");
+}
+
+function updateImportControls(busy = document.body.hasAttribute("data-busy")) {
+	const custom = el.importRange.value === "custom";
+	const documents = state.importDocumentMode;
+	const count = documents ? state.importDocumentCount : state.importPageCount;
+	el.importRange.disabled = busy || !count;
+	el.importDocuments.hidden = !documents || !custom || !count;
+	for (const row of el.importDocuments.children) row.children[0].disabled = busy;
+	el.importPagesRow.hidden = documents || !custom;
+	el.importPages.disabled = busy || documents || !custom;
+	el.importPages.required = !documents && custom;
+	el.importSubmit.disabled = busy || !count || (documents && custom && !selectedImportDocuments());
 }
 
 async function loadImportFile() {
@@ -2207,8 +2224,13 @@ async function loadImportFile() {
 		state.importEncrypted = Boolean(info?.encrypted);
 		if (state.importDocumentMode) {
 			el.importDocuments.replaceChildren(...(info?.documents || []).map(entry => {
-				const row = document.createElement("div");
-				row.textContent = `${entry.index + 1} · ${entry.title || "未命名"}`;
+				const row = document.createElement("label");
+				const input = document.createElement("input");
+				input.type = "checkbox";
+				input.value = String(entry.index + 1);
+				const name = document.createElement("span");
+				name.textContent = `${entry.index + 1} · ${entry.title || "未命名"}`;
+				row.append(input, name);
 				return row;
 			}));
 			el.importStatus.textContent = `共${state.importDocumentCount}个文档${info?.documentsSigned || state.doc.signatureCount ? " · 合并后需验签" : ""}`;
@@ -2217,6 +2239,7 @@ async function loadImportFile() {
 			el.importStatus.textContent = info?.signed ? "保留签章外观，原签名不再有效" : "";
 		}
 		el.importSubmit.disabled = !(state.importDocumentMode ? state.importDocumentCount : state.importPageCount);
+		updateImportControls(false);
 	} catch (err) {
 		if (openSeq === state.openSeq && el.importPanel.open) el.importStatus.textContent = err.message;
 	} finally {
@@ -11999,8 +12022,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	el.annotationForm.inert = busy;
 	el.importForm.inert = busy && !state.importing;
 	for (const input of [el.importFile, el.importRange, el.importPosition, el.importOutlines]) input.disabled = busy;
-	el.importPages.disabled = busy || el.importRange.value !== "custom";
-	el.importSubmit.disabled = busy || !(state.importDocumentMode ? state.importDocumentCount : state.importPageCount);
+	updateImportControls(busy);
 	el.batchPagesForm.inert = busy;
 	el.objectStyleForm.inert = busy;
 	el.objectBoundsForm.inert = busy;

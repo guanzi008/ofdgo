@@ -2205,6 +2205,31 @@ body[data-hide-meta] .meta-panel {
 	text-align: left;
 }
 
+#importDocuments {
+	min-height: 0;
+}
+
+#importDocuments label {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 10px;
+	cursor: pointer;
+}
+
+#importDocuments label:hover {
+	background: var(--accent-soft);
+}
+
+#importDocuments input {
+	flex: 0 0 auto;
+}
+
+#importDocuments span {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
 .document-entry:last-child {
 	border-bottom: 0;
 }
