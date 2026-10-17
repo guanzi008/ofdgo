@@ -661,6 +661,7 @@ func windowOptions(dataDir string) (guigo.Options, error) {
 		Height:      900,
 		MinWidth:    360,
 		MinHeight:   240,
+		Center:      true,
 		UserDataDir: dataDir,
 	}, nil
 }
