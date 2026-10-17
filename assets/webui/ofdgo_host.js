@@ -168,7 +168,8 @@ class NativeHost {
 						const cancel = () => host.call("engine.cancel", {engine, id:data.id}).catch(() => {});
 						controller.signal.addEventListener("abort", cancel, {once:true});
 						try {
-							await host.call("engine.start", args, controller.signal);
+							await host.call("engine.start", args);
+							if (controller.signal.aborted) cancel();
 							result = await completed;
 							await host.call("engine.finish", {engine, id:data.id});
 						} finally {

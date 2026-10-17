@@ -775,6 +775,8 @@ func (h *Host) close() {
 		cancel()
 	}
 	engines := h.engines
+	results := h.batchResults
+	h.batchResults = nil
 	for _, stop := range h.engineStops {
 		stop()
 	}
@@ -783,6 +785,9 @@ func (h *Host) close() {
 	h.mu.Unlock()
 	for _, engine := range engines {
 		_ = engine.Close()
+	}
+	for _, result := range results {
+		h.discard(result)
 	}
 	_ = h.files.close()
 }
