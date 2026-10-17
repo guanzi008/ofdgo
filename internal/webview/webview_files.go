@@ -69,9 +69,6 @@ func newFileStore() (*fileStore, error) {
 	return &fileStore{entries: make(map[string]*fileEntry), writers: make(map[string]*fileWriter), temporary: dir}, nil
 }
 
-// token 生成不暴露本机路径的资源标识
-func token() string { return rand.Text() }
-
 // add 登记已有授权文件
 func (s *fileStore) add(name string, directory bool) (map[string]any, error) {
 	info, err := os.Stat(name)
@@ -83,7 +80,7 @@ func (s *fileStore) add(name string, directory bool) (map[string]any, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	id := token()
+	id := rand.Text()
 	s.entries[id] = &fileEntry{path: name, name: filepath.Base(name), directory: directory}
 	return s.descriptor(id), nil
 }
@@ -92,7 +89,7 @@ func (s *fileStore) add(name string, directory bool) (map[string]any, error) {
 func (s *fileStore) save(name string) map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	id := token()
+	id := rand.Text()
 	s.entries[id] = &fileEntry{path: name, name: filepath.Base(name)}
 	return s.descriptor(id)
 }
@@ -127,7 +124,7 @@ func (s *fileStore) file(id string) (map[string]any, error) {
 			return nil, err
 		}
 		size = info.Size()
-		id = token()
+		id = rand.Text()
 		entry = &fileEntry{path: entry.path, name: entry.name, file: file}
 		s.entries[id] = entry
 	}
@@ -166,7 +163,7 @@ func (s *fileStore) bytes(data []byte) map[string]any {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	id := token()
+	id := rand.Text()
 	s.entries[id] = &fileEntry{data: data, name: "data"}
 	return map[string]any{"nativeFile": id, "size": len(data), "name": "data", "url": "/__native/data/" + id, "temporary": true}
 }
@@ -228,7 +225,7 @@ func (s *fileStore) child(id, name string, directory, create bool) (map[string]a
 	if info.IsDir() != directory {
 		return nil, fmt.Errorf("文件类型不匹配")
 	}
-	key := token()
+	key := rand.Text()
 	s.entries[key] = &fileEntry{path: filepath.Join(parent.path, name), name: name, directory: directory, owned: created}
 	return s.descriptor(key), nil
 }
@@ -276,7 +273,7 @@ func (s *fileStore) reserve(id, base, extension string, directory bool) (string,
 		if err != nil {
 			return "", "", err
 		}
-		s.entries[token()] = &fileEntry{path: filepath.Join(parent.path, name), name: name, directory: directory, owned: true}
+		s.entries[rand.Text()] = &fileEntry{path: filepath.Join(parent.path, name), name: name, directory: directory, owned: true}
 		return stem, name, nil
 	}
 }
@@ -296,7 +293,7 @@ func (s *fileStore) begin(id string) (*fileWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	writer := &fileWriter{id: token(), store: s, file: file, target: entry.path}
+	writer := &fileWriter{id: rand.Text(), store: s, file: file, target: entry.path}
 	s.writers[writer.id] = writer
 	return writer, nil
 }

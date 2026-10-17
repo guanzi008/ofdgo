@@ -18,6 +18,7 @@ package webview
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -179,7 +180,7 @@ func (h *Host) call(ctx context.Context, name string, raw json.RawMessage) (any,
 		engine.ReserveOutput = h.reserveOutput
 		engine.CleanupOutput = h.cleanupOutput
 		engine.LoadFont = h.loadFont
-		id := token()
+		id := rand.Text()
 		h.mu.Lock()
 		h.engines[id] = engine
 		h.mu.Unlock()
