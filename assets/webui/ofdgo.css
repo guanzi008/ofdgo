@@ -588,6 +588,9 @@ button:not(:disabled):hover {
 	position: relative;
 	width: 15px;
 	height: 15px;
+}
+
+.new-icon {
 	border: 1px solid currentColor;
 }
 
@@ -611,7 +614,7 @@ button:not(:disabled):hover {
 
 .close-icon::before,
 .close-icon::after {
-	width: 8px;
+	width: 16px;
 }
 
 .close-icon::before {
