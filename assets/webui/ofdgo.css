@@ -805,6 +805,16 @@ button:not(:disabled):hover {
 	line-height: 1.5;
 }
 
+.confirm-message {
+	margin: 0 0 16px;
+	line-height: 1.5;
+}
+
+.confirm-dialog .form-actions {
+	grid-template-columns: repeat(3, max-content);
+	justify-content: end;
+}
+
 .convert-dialog {
 	--convert-control-width: 64px;
 	width: 720px;
