@@ -10735,7 +10735,7 @@ function renderMeta(keepDetails = false) {
 	});
 	el.documentSelect.value = String(doc.documentIndex || 0);
 	el.metaPanel.setAttribute("data-busy", String(!!doc.detailsPending));
-	document.title = `OFDGo WebUI - ${state.fileName}`;
+	document.title = state.doc ? `${nativeHost ? "OFDGo" : "OFDGo WebUI"} - ${state.fileName}` : "OFDGo - OFD编辑器";
 	el.metaFile.textContent = state.fileName;
 	el.metaTitle.textContent = doc.title || "-";
 	el.metaAuthor.textContent = doc.author || "-";

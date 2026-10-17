@@ -652,7 +652,7 @@ func windowOptions(dataDir string) (guigo.Options, error) {
 	}
 	return guigo.Options{
 		AppID:       applicationID,
-		Title:       "OFDGo",
+		Title:       "OFDGo - OFD编辑器",
 		Icon:        icon,
 		Width:       1440,
 		Height:      900,
