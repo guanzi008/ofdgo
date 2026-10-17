@@ -17,12 +17,10 @@
 package webview
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"image/png"
 	"io"
 	"io/fs"
 	"mime"
@@ -34,8 +32,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/tdewolff/canvas"
-	"github.com/tdewolff/canvas/renderers/rasterizer"
 	"github.com/xiaoqidun/guigo"
 	"github.com/xiaoqidun/ofdgo"
 	webuiassets "github.com/xiaoqidun/ofdgo/assets/webui"
@@ -649,7 +645,7 @@ func windowOptions(dataDir string) (guigo.Options, error) {
 	if err != nil {
 		return guigo.Options{}, err
 	}
-	icon, err := windowIcon()
+	icon, err := webuiassets.NativeFS.ReadFile("ofdgo.png")
 	if err != nil {
 		return guigo.Options{}, err
 	}
@@ -665,23 +661,4 @@ func windowOptions(dataDir string) (guigo.Options, error) {
 		Maximized:   true,
 		UserDataDir: dataDir,
 	}, nil
-}
-
-// windowIcon 将共用SVG图标转换为透明PNG，不生成外置文件
-// 返回: []byte PNG图标, error 转换错误
-func windowIcon() ([]byte, error) {
-	data, err := webuiassets.NativeFS.ReadFile("ofdgo.svg")
-	if err != nil {
-		return nil, err
-	}
-	graphic, err := canvas.ParseSVG(bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	image := rasterizer.Draw(graphic, canvas.DPMM(512/graphic.W), canvas.DefaultColorSpace)
-	var buffer bytes.Buffer
-	if err := png.Encode(&buffer, image); err != nil {
-		return nil, err
-	}
-	return buffer.Bytes(), nil
 }
