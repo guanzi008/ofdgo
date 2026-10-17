@@ -1704,6 +1704,7 @@ document.addEventListener("visibilitychange", () => {
 
 el.fontDirectoryButton.disabled = !("webkitdirectory" in el.fontDirectoryInput);
 nativeHost?.installFileInputs(error => showError(error, false));
+if (nativeHost) document.title = "OFDGo - OFD编辑器";
 updateSidebarState();
 boot();
 
@@ -10735,7 +10736,7 @@ function renderMeta(keepDetails = false) {
 	});
 	el.documentSelect.value = String(doc.documentIndex || 0);
 	el.metaPanel.setAttribute("data-busy", String(!!doc.detailsPending));
-	document.title = state.doc ? `${nativeHost ? "OFDGo" : "OFDGo WebUI"} - ${state.fileName}` : "OFDGo - OFD编辑器";
+	document.title = `${nativeHost ? "OFDGo" : "OFDGo WebUI"} - ${state.doc ? state.fileName : "OFD编辑器"}`;
 	el.metaFile.textContent = state.fileName;
 	el.metaTitle.textContent = doc.title || "-";
 	el.metaAuthor.textContent = doc.author || "-";
