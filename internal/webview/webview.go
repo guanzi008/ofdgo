@@ -634,7 +634,7 @@ func (h *Host) close() {
 	_ = h.files.close()
 }
 
-// windowOptions 创建原生窗口配置，默认沿用既有数据目录
+// windowOptions 创建原生窗口配置
 // 入参: dataDir 自定义浏览器数据目录
 // 返回: guigo.Options 窗口配置, error 配置错误
 func windowOptions(dataDir string) (guigo.Options, error) {
@@ -643,7 +643,7 @@ func windowOptions(dataDir string) (guigo.Options, error) {
 		if err != nil {
 			return guigo.Options{}, err
 		}
-		dataDir = filepath.Join(cache, "OFDGo", "webview")
+		dataDir = filepath.Join(cache, "OFDGo")
 	}
 	dataDir, err := filepath.Abs(dataDir)
 	if err != nil {
