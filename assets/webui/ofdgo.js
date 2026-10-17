@@ -4169,6 +4169,7 @@ async function prepareOffline() {
 		return true;
 	}
 	setProgress("正在准备离线", null, "正在准备离线");
+	let checksum;
 	try {
 		const registration = await registerOffline();
 		const result = await requestOffline(registration.active, "prepare");
@@ -4179,9 +4180,10 @@ async function prepareOffline() {
 		if (navigator.storage?.persist) {
 			navigator.storage.persist().catch(() => false);
 		}
-		watchApplicationUpdates(result.checksum);
+		checksum = result.checksum;
 	} catch {
 	}
+	watchApplicationUpdates(checksum);
 	el.refreshAppButton.disabled = false;
 	return true;
 }
@@ -4196,6 +4198,13 @@ function watchApplicationUpdates(checksum) {
 		checking = true;
 		checked = Date.now();
 		try {
+			if (!checksum) {
+				if (!navigator.serviceWorker.controller) return;
+				const current = await fetch("./ofdgo.js", { signal: AbortSignal.timeout(10000) });
+				if (current.ok && !current.redirected) checksum = current.headers.get("X-OFDGo-Checksum");
+				await current.body?.cancel();
+				if (!checksum) return;
+			}
 			const response = await fetch("./", { method: "HEAD", cache: "no-store", signal: AbortSignal.timeout(10000) });
 			const latest = response.headers.get("X-OFDGo-Checksum");
 			if (response.ok && !response.redirected && latest) {
@@ -4207,6 +4216,7 @@ function watchApplicationUpdates(checksum) {
 		}
 	}
 	window.addEventListener("online", check);
+	window.addEventListener("focus", check);
 	document.addEventListener("visibilitychange", check);
 	window.setInterval(check, 300000);
 	check();
