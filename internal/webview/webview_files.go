@@ -39,11 +39,13 @@ type fileEntry struct {
 	file      *os.File
 	directory bool
 	owned     bool
+	temporary bool
 }
 
 // fileStore 管理窗口范围内的文件授权和临时数据
 type fileStore struct {
 	mu        sync.Mutex
+	transfers sync.WaitGroup
 	entries   map[string]*fileEntry
 	writers   map[string]*fileWriter
 	temporary string
@@ -206,12 +208,43 @@ func (s *fileStore) bytes(data []byte) map[string]any {
 	return map[string]any{"nativeFile": id, "size": len(data), "name": "data", "url": "/__native/data/" + id, "temporary": true}
 }
 
+// resource 创建独立资源读取句柄
+// 入参: id 文件标识
+// 返回: io.ReaderAt 随机读取器, int64 文件大小, func() error 关闭函数, error 读取错误
+func (s *fileStore) resource(id string) (io.ReaderAt, int64, func() error, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry := s.entries[id]
+	if entry == nil || entry.directory {
+		return nil, 0, nil, os.ErrNotExist
+	}
+	if entry.data != nil {
+		return bytes.NewReader(entry.data), int64(len(entry.data)), nil, nil
+	}
+	file, err := openReadFile(entry.path)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, 0, nil, err
+	}
+	return file, info.Size(), file.Close, nil
+}
+
 // release 释放已传递完成的内存结果
 func (s *fileStore) release(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if entry := s.entries[id]; entry != nil && entry.data != nil {
+	if entry := s.entries[id]; entry != nil && (entry.data != nil || entry.temporary) {
 		delete(s.entries, id)
+		if entry.file != nil {
+			entry.file.Close()
+		}
+		if entry.temporary {
+			os.Remove(entry.path)
+		}
 	}
 }
 
@@ -449,28 +482,39 @@ func (w *fileWriter) release() {
 func (s *fileStore) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.URL.Path == "/__native/input" && r.Method == http.MethodPost {
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			http.Error(w, os.ErrClosed.Error(), 500)
+			return
+		}
+		s.transfers.Add(1)
+		s.mu.Unlock()
+		defer s.transfers.Done()
 		file, err := temporaryFile(s.temporary, "input-")
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		_, err = io.Copy(file, r.Body)
-		err = errors.Join(err, file.Close())
+		size, err := io.Copy(file, r.Body)
 		if err != nil {
+			file.Close()
 			os.Remove(file.Name())
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		handle, err := s.add(file.Name(), false)
-		if err != nil {
-			http.Error(w, err.Error(), 500)
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			file.Close()
+			os.Remove(file.Name())
+			http.Error(w, os.ErrClosed.Error(), 500)
 			return
 		}
-		value, err := s.file(handle["nativeHandle"].(string))
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
+		id := rand.Text()
+		s.entries[id] = &fileEntry{path: file.Name(), name: "data", file: file, temporary: true}
+		s.mu.Unlock()
+		value := map[string]any{"nativeFile": id, "size": size, "name": "data", "url": "/__native/data/" + id, "temporary": true}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(value)
 		return
@@ -508,6 +552,7 @@ func (s *fileStore) close() error {
 	s.writers = make(map[string]*fileWriter)
 	s.entries = make(map[string]*fileEntry)
 	s.mu.Unlock()
+	s.transfers.Wait()
 	var err error
 	for _, writer := range writers {
 		err = errors.Join(err, writer.Abort())

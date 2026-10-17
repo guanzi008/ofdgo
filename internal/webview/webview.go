@@ -17,6 +17,7 @@
 package webview
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -56,9 +57,10 @@ type Host struct {
 	pendingPaths []string
 }
 
-// resourceReader 保持资源独立的读取位置，文件生命周期由窗口管理
+// resourceReader 保存资源读取位置及关闭操作
 type resourceReader struct {
 	*io.SectionReader
+	close func() error
 }
 
 // Run 启动共用WebUI的原生入口
@@ -115,27 +117,105 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 }
 
 // Close 结束本次资源读取
-func (r *resourceReader) Close() error { return nil }
+// 返回: error 关闭错误
+func (r *resourceReader) Close() error {
+	if r.close != nil {
+		return r.close()
+	}
+	return nil
+}
 
-// resource 将大文件直接交给宿主资源流
+// resource 将静态资源及文件直接交给宿主资源流
+// 入参: r 资源请求
+// 返回: *guigo.Resource 资源响应, error 读取错误
 func (h *Host) resource(r *http.Request) (*guigo.Resource, error) {
-	if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/__native/data/") || r.Header.Get("Range") != "" {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return nil, nil
 	}
-	id := strings.TrimPrefix(r.URL.Path, "/__native/data/")
-	reader, size, err := h.files.resolve(id)
-	if err != nil {
-		return nil, nil
+	for _, name := range []string{"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "If-Range"} {
+		if r.Header.Get(name) != "" {
+			return nil, nil
+		}
+	}
+	var reader io.ReaderAt
+	var size int64
+	var close func() error
+	transferred := false
+	defer func() {
+		if !transferred && close != nil {
+			close()
+		}
+	}()
+	if strings.HasPrefix(r.URL.Path, "/__native/data/") {
+		var err error
+		reader, size, close, err = h.files.resource(strings.TrimPrefix(r.URL.Path, "/__native/data/"))
+		if err != nil {
+			return nil, nil
+		}
+	} else {
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		if name == "" {
+			name = "index.html"
+		}
+		data, err := webuiassets.NativeFS.ReadFile(name)
+		if err != nil {
+			return nil, nil
+		}
+		reader, size = bytes.NewReader(data), int64(len(data))
 	}
 	header := make([]byte, min(size, 512))
-	_, err = reader.ReadAt(header, 0)
+	_, err := reader.ReadAt(header, 0)
 	if err != nil && err != io.EOF {
 		return nil, err
 	}
-	return &guigo.Resource{
-		Body:   &resourceReader{io.NewSectionReader(reader, 0, size)},
-		Header: http.Header{"Content-Type": {http.DetectContentType(header)}, "Content-Length": {strconv.FormatInt(size, 10)}, "Cache-Control": {"no-store"}},
-	}, nil
+	contentType := mime.TypeByExtension(filepath.Ext(r.URL.Path))
+	if contentType == "" {
+		contentType = http.DetectContentType(header)
+	}
+	headers := http.Header{"Content-Type": {contentType}, "Content-Length": {strconv.FormatInt(size, 10)}, "Cache-Control": {"no-store"}, "Accept-Ranges": {"bytes"}}
+	start, length, status := int64(0), size, http.StatusOK
+	if value := r.Header.Get("Range"); value != "" && r.Method == http.MethodGet {
+		if !strings.HasPrefix(value, "bytes=") || strings.Contains(value, ",") {
+			return nil, nil
+		}
+		first, last, ok := strings.Cut(strings.TrimPrefix(value, "bytes="), "-")
+		if !ok {
+			return nil, nil
+		}
+		if first == "" {
+			count, err := strconv.ParseInt(last, 10, 64)
+			if err != nil || count <= 0 {
+				return nil, nil
+			}
+			length = min(count, size)
+			start = size - length
+		} else {
+			var err error
+			start, err = strconv.ParseInt(first, 10, 64)
+			if err != nil || start < 0 || start >= size {
+				return nil, nil
+			}
+			end := size - 1
+			if last != "" {
+				end, err = strconv.ParseInt(last, 10, 64)
+				if err != nil || end < start {
+					return nil, nil
+				}
+			}
+			length = min(end, size-1) - start + 1
+		}
+		if length == 0 {
+			return nil, nil
+		}
+		status = http.StatusPartialContent
+		headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, size))
+		headers.Set("Content-Length", strconv.FormatInt(length, 10))
+	}
+	if r.Method == http.MethodHead {
+		length = 0
+	}
+	transferred = true
+	return &guigo.Resource{Body: &resourceReader{SectionReader: io.NewSectionReader(reader, start, length), close: close}, StatusCode: status, Header: headers}, nil
 }
 
 // emit 发送当前窗口事件

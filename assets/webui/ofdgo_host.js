@@ -58,7 +58,11 @@ class NativeHandle {
 	async createWritable() {
 		const {writer} = await this.host.call("write.begin", {handle:this.nativeHandle});
 		return {
-			write: async data => this.host.call("write.data", {writer, data:await this.host.encode(data)}),
+			write: async data => {
+				const resources = new Set();
+				try { return await this.host.call("write.data", {writer, data:await this.host.encode(data, "", resources)}); }
+				finally { for (const file of resources) await this.host.call("release", {file}).catch(() => {}); }
+			},
 			close: () => this.host.call("write.commit", {writer}),
 			abort: () => this.host.call("write.abort", {writer}),
 		};
@@ -77,7 +81,7 @@ class NativeHost {
 		return this.bridge.call(`ofdgo.host.${name}`, value);
 	}
 
-	async encode(value, key = "") {
+	async encode(value, key = "", resources = null) {
 		if (value?.nativeFile) return {nativeFile:value.nativeFile, size:value.size, name:value.name};
 		if (value?.nativeHandle) return {nativeHandle:value.nativeHandle, name:value.name, kind:value.kind};
 		if (value instanceof Blob || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
@@ -87,12 +91,19 @@ class NativeHost {
 			}
 			const response = await fetch("/__native/input", {method:"POST", body:value});
 			if (!response.ok) throw new Error("传递数据失败");
-			return response.json();
+			const file = await response.json();
+			resources?.add(file.nativeFile);
+			return file;
 		}
-		if (Array.isArray(value)) return Promise.all(value.map(item => this.encode(item)));
+		if (Array.isArray(value)) {
+			const results = await Promise.allSettled(value.map(item => this.encode(item, "", resources)));
+			const failure = results.find(item => item.status === "rejected");
+			if (failure) throw failure.reason;
+			return results.map(item => item.value);
+		}
 		if (value && typeof value === "object") {
 			const result = {};
-			for (const [key, item] of Object.entries(value)) result[key] = await this.encode(item, key);
+			for (const [key, item] of Object.entries(value)) result[key] = await this.encode(item, key, resources);
 			return result;
 		}
 		return value;
@@ -118,12 +129,23 @@ class NativeHost {
 		return value;
 	}
 
+	async release(value) {
+		if (value?.nativeFile && value.temporary) {
+			await this.call("release", {file:value.nativeFile}).catch(() => {});
+			return;
+		}
+		if (value && typeof value === "object") {
+			for (const item of Object.values(value)) await this.release(item);
+		}
+	}
+
 	worker() {
 		const host = this;
 		let closed = false;
 		let unsubscribe;
 		let pending = Promise.resolve();
 		const canceled = new Set();
+		const resources = new Set();
 		const emit = data => { if (!closed) worker.onmessage?.({data}); };
 		const ready = host.call("engine.open", {}).then(({engine}) => {
 			if (closed) { host.call("engine.close", {engine}).catch(() => {}); return engine; }
@@ -146,18 +168,26 @@ class NativeHost {
 					const engine = await ready;
 					if (closed) return;
 					if (canceled.has(data.id)) throw Object.assign(new Error("操作已取消"), {name:"AbortError"});
-					const args = await host.encode(data.args);
+					const args = await host.encode(data.args, "", resources);
 					if (closed) return;
 					if (canceled.has(data.id)) throw Object.assign(new Error("操作已取消"), {name:"AbortError"});
 					const result = await host.call("engine.call", {engine, id:data.id, name:data.name, args});
-					emit({id:data.id, ...await host.decode(result, data.name)});
+					if (closed) { await host.release(result); return; }
+					const decoded = await host.decode(result, data.name);
+					if (closed) { await host.release(result); return; }
+					emit({id:data.id, ...decoded});
 				}).catch(error => emit({id:data.id, ok:false, error:error.message, code:error.code, canceled:error.name === "AbortError"})).finally(() => canceled.delete(data.id));
 			},
 			terminate() {
 				if (closed) return;
 				closed = true;
 				unsubscribe?.();
-				ready.then(engine => host.call("engine.close", {engine})).catch(() => {});
+				const closing = ready.then(engine => host.call("engine.close", {engine})).catch(() => {});
+				pending.finally(async () => {
+					await closing;
+					for (const file of resources) await host.call("release", {file}).catch(() => {});
+					resources.clear();
+				});
 			},
 		};
 		ready.catch(() => {});
