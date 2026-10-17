@@ -12,56 +12,59 @@
 </head>
 <body>
 	<div class="app">
-		<header class="toolbar app-bar">
-			<input id="ofdInput" class="file-input" type="file" accept=".ofd,.pdf">
-			<input id="fontInput" class="file-input" type="file" accept=".ttf,.otf,.ttc,font/*" multiple>
-			<input id="fontDirectoryInput" class="file-input" type="file" webkitdirectory multiple>
-			<div class="tool-group">
-				<button id="ofdButton" class="icon-button" type="button" title="打开"><span class="open-icon"></span></button>
-				<button id="newButton" class="icon-button" type="button" title="新建"><span class="new-icon"></span></button>
-				<button id="saveButton" class="icon-button" type="button" title="保存" disabled><span class="save-icon"></span></button>
-				<button id="editButton" class="icon-button" type="button" title="编辑" data-pressed="false" disabled><span class="edit-icon"></span></button>
-				<button id="convertButton" class="icon-button" type="button" title="转换"><span>&#8644;</span></button>
-				<button id="togglePagesButton" class="icon-button" type="button" title="页面栏" data-pressed="true">&#9776;</button>
-				<button id="toggleMetaButton" class="icon-button" type="button" title="信息栏" data-pressed="true">&#9432;</button>
+		<header class="toolbar-frame">
+			<div class="toolbar app-bar">
+				<input id="ofdInput" class="file-input" type="file" accept=".ofd,.pdf">
+				<input id="fontInput" class="file-input" type="file" accept=".ttf,.otf,.ttc,font/*" multiple>
+				<input id="fontDirectoryInput" class="file-input" type="file" webkitdirectory multiple>
+				<div class="tool-group">
+					<button id="ofdButton" class="icon-button" type="button" title="打开"><span class="open-icon"></span></button>
+					<button id="newButton" class="icon-button" type="button" title="新建"><span class="new-icon"></span></button>
+					<button id="saveButton" class="icon-button" type="button" title="保存" disabled><span class="save-icon"></span></button>
+					<button id="editButton" class="icon-button" type="button" title="编辑" data-pressed="false" disabled><span class="edit-icon"></span></button>
+					<button id="convertButton" class="icon-button" type="button" title="转换"><span>&#8644;</span></button>
+					<button id="togglePagesButton" class="icon-button" type="button" title="页面栏" data-pressed="true">&#9776;</button>
+					<button id="toggleMetaButton" class="icon-button" type="button" title="信息栏" data-pressed="true">&#9432;</button>
+				</div>
+				<div class="toolbar-space"></div>
+				<div class="tool-group">
+					<button id="prevButton" class="icon-button arrow-prev" type="button" title="上一页" disabled></button>
+					<label class="page-control">
+						<input id="pageInput" type="number" min="1" value="0" disabled>
+						<span>/</span>
+						<span id="pageTotal">0</span>
+					</label>
+					<button id="nextButton" class="icon-button arrow-next" type="button" title="下一页" disabled></button>
+				</div>
+				<div class="tool-group">
+					<button id="zoomOutButton" class="icon-button" type="button" title="缩小" disabled>-</button>
+					<span id="zoomLabel" class="zoom-label">100%</span>
+					<button id="zoomInButton" class="icon-button" type="button" title="放大" disabled>+</button>
+					<button id="fitButton" class="button" type="button" data-short="宽" disabled>适宽</button>
+					<button id="fitHeightButton" class="button" type="button" data-short="高" disabled>适高</button>
+					<button id="rotateButton" class="button" type="button" data-short="转" disabled>旋转</button>
+					<button id="panButton" class="button" type="button" data-short="拖" data-pressed="false" disabled>拖动</button>
+					<button id="continuousButton" class="button" type="button" data-short="连" data-pressed="false" disabled>连续</button>
+					<button id="annotationButton" class="button" type="button" data-short="注" data-pressed="true">注解</button>
+				</div>
+				<div class="tool-group">
+					<button id="renderVectorButton" class="button" type="button" data-short="矢" data-pressed="true" disabled>矢量</button>
+					<button id="renderRasterButton" class="button" type="button" data-short="位" data-pressed="false" disabled>位图</button>
+				</div>
+				<div class="tool-group">
+					<label class="toolbar-select"><select id="exportFormat" class="format-select" title="导出格式" disabled></select><span id="formatValue"></span></label>
+					<label class="toolbar-select"><select id="imageDPI" class="format-select" title="输出精度" disabled>
+						<option value="96">96 dpi</option>
+						<option value="150">150 dpi</option>
+						<option value="300" selected>300 dpi</option>
+						<option value="600">600 dpi</option>
+					</select><span id="dpiValue">300</span></label>
+					<label class="toolbar-select"><select id="outputCompression" class="format-select" title="压缩模式" disabled><option value="0">原始</option><option value="1">无损</option><option value="2">轻压</option><option value="3">均衡</option><option value="4">强压</option></select><span id="compressionValue" data-short="原">原始</span></label>
+					<button id="exportPageButton" class="button" type="button" data-short="单" disabled>单页</button>
+					<button id="exportButton" class="button" type="button" data-short="多" disabled>文档</button>
+				</div>
 			</div>
-			<div class="toolbar-space"></div>
-			<div class="tool-group">
-				<button id="prevButton" class="icon-button arrow-prev" type="button" title="上一页" disabled></button>
-				<label class="page-control">
-					<input id="pageInput" type="number" min="1" value="0" disabled>
-					<span>/</span>
-					<span id="pageTotal">0</span>
-				</label>
-				<button id="nextButton" class="icon-button arrow-next" type="button" title="下一页" disabled></button>
-			</div>
-			<div class="tool-group">
-				<button id="zoomOutButton" class="icon-button" type="button" title="缩小" disabled>-</button>
-				<span id="zoomLabel" class="zoom-label">100%</span>
-				<button id="zoomInButton" class="icon-button" type="button" title="放大" disabled>+</button>
-				<button id="fitButton" class="button" type="button" data-short="宽" disabled>适宽</button>
-				<button id="fitHeightButton" class="button" type="button" data-short="高" disabled>适高</button>
-				<button id="rotateButton" class="button" type="button" data-short="转" disabled>旋转</button>
-				<button id="panButton" class="button" type="button" data-short="拖" data-pressed="false" disabled>拖动</button>
-				<button id="continuousButton" class="button" type="button" data-short="连" data-pressed="false" disabled>连续</button>
-				<button id="annotationButton" class="button" type="button" data-short="注" data-pressed="true">注解</button>
-			</div>
-			<div class="tool-group">
-				<button id="renderVectorButton" class="button" type="button" data-short="矢" data-pressed="true" disabled>矢量</button>
-				<button id="renderRasterButton" class="button" type="button" data-short="位" data-pressed="false" disabled>位图</button>
-			</div>
-			<div class="tool-group">
-				<label class="toolbar-select"><select id="exportFormat" class="format-select" title="导出格式" disabled></select><span id="formatValue"></span></label>
-				<label class="toolbar-select"><select id="imageDPI" class="format-select" title="输出精度" disabled>
-					<option value="96">96 dpi</option>
-					<option value="150">150 dpi</option>
-					<option value="300" selected>300 dpi</option>
-					<option value="600">600 dpi</option>
-				</select><span id="dpiValue">300</span></label>
-				<label class="toolbar-select"><select id="outputCompression" class="format-select" title="压缩模式" disabled><option value="0">原始</option><option value="1">无损</option><option value="2">轻压</option><option value="3">均衡</option><option value="4">强压</option></select><span id="compressionValue" data-short="原">原始</span></label>
-				<button id="exportPageButton" class="button" type="button" data-short="单" disabled>单页</button>
-				<button id="exportButton" class="button" type="button" data-short="多" disabled>文档</button>
-			</div>
+			<button id="refreshAppButton" class="button app-update" type="button" hidden>更新</button>
 		</header>
 		<div id="editorTools" class="editor-toolbar" hidden>
 			<div class="editor-group editor-actions">
@@ -708,7 +711,6 @@
 						<div id="appPanelTitle" class="panel-title compact">应用</div>
 						<div class="panel-actions">
 							<span id="offlineStatus" class="app-status">准备中</span>
-							<button id="refreshAppButton" class="small-button app-refresh" type="button" title="刷新应用" disabled>&#8635;</button>
 						</div>
 					</div>
 				</section>

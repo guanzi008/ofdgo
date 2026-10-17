@@ -106,8 +106,9 @@ async function readResource(event, navigation) {
 }
 
 async function updateBundle(meta) {
+	const signal = AbortSignal.timeout(120000);
 	const resources = await Promise.all(ASSETS.map(async (url) => {
-		const response = await fetch(new Request(url, { cache: "no-store" }));
+		const response = await fetch(new Request(url, { cache: "no-store", signal }));
 		if (!response.ok || response.redirected) {
 			throw new Error("资源下载失败");
 		}

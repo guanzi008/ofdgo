@@ -4194,16 +4194,18 @@ async function prepareOffline() {
 
 function watchApplicationUpdates(checksum) {
 	let checking = false;
+	let checked = 0;
 	async function check() {
-		if (checking || document.hidden || !navigator.onLine) {
+		if (checking || document.hidden || !navigator.onLine || Date.now() - checked < 60000) {
 			return;
 		}
 		checking = true;
+		checked = Date.now();
 		try {
 			const response = await fetch("./", { method: "HEAD", cache: "no-store", signal: AbortSignal.timeout(10000) });
 			const latest = response.headers.get("X-OFDGo-Checksum");
 			if (response.ok && !response.redirected && latest) {
-				el.offlineStatus.textContent = latest === checksum ? "可离线" : "可更新";
+				el.refreshAppButton.hidden = latest === checksum;
 			}
 		} catch {
 		} finally {
@@ -4212,16 +4214,27 @@ function watchApplicationUpdates(checksum) {
 	}
 	window.addEventListener("online", check);
 	document.addEventListener("visibilitychange", check);
+	window.setInterval(check, 300000);
 	check();
 }
 
 function waitForWorker(worker, target) {
 	return new Promise((resolve, reject) => {
+		if (!worker) {
+			reject(new Error("离线服务未就绪"));
+			return;
+		}
+		const timer = setTimeout(() => {
+			worker.removeEventListener("statechange", changed);
+			reject(new Error("更新等待超时"));
+		}, 30000);
 		function changed() {
 			if (worker.state === target || worker.state === "activated") {
+				clearTimeout(timer);
 				worker.removeEventListener("statechange", changed);
 				resolve();
 			} else if (worker.state === "redundant") {
+				clearTimeout(timer);
 				worker.removeEventListener("statechange", changed);
 				reject(new Error("离线启动失败"));
 			}
@@ -4233,8 +4246,17 @@ function waitForWorker(worker, target) {
 
 function requestOffline(worker, type) {
 	return new Promise((resolve, reject) => {
+		if (!worker) {
+			reject(new Error("离线服务未就绪"));
+			return;
+		}
 		const channel = new MessageChannel();
+		const timer = setTimeout(() => {
+			close();
+			reject(new Error("更新等待超时"));
+		}, 180000);
 		function close() {
+			clearTimeout(timer);
 			channel.port1.close();
 			worker.removeEventListener("statechange", changed);
 		}
@@ -4253,13 +4275,23 @@ function requestOffline(worker, type) {
 			}
 		};
 		worker.addEventListener("statechange", changed);
-		worker.postMessage({ type }, [channel.port2]);
+		try {
+			worker.postMessage({ type }, [channel.port2]);
+		} catch (err) {
+			close();
+			channel.port2.close();
+			reject(err);
+		}
 		changed();
 	});
 }
 
 async function refreshApplication() {
-	if (document.body.hasAttribute("data-busy")) {
+	if (nativeHost || state.exporting || document.body.hasAttribute("data-busy")) {
+		return;
+	}
+	if (!navigator.onLine) {
+		setStatus("离线，联网后重试");
 		return;
 	}
 	const temporaryFonts = fontManager.userFonts.some((font) => font.source === "upload");
@@ -4267,21 +4299,29 @@ async function refreshApplication() {
 	if ((state.ofdBytes || state.doc || temporaryFonts) && !window.confirm(message)) {
 		return;
 	}
-	setBusy(true, "正在刷新应用", null, "正在刷新应用");
+	setBusy(true, "正在更新应用", null, "正在更新应用");
 	el.refreshAppButton.disabled = true;
-	const panels = document.querySelectorAll(".toolbar, .workspace");
+	el.refreshAppButton.textContent = "更新中";
+	const panels = document.querySelectorAll(".toolbar-frame, .workspace");
 	panels.forEach((panel) => { panel.inert = true; });
 	try {
 		if (navigator.storage?.persist) {
-			await navigator.storage.persist().catch(() => false);
+			navigator.storage.persist().catch(() => false);
 		}
 		const scope = new URL("./", location.href).href;
 		await navigator.locks.request(`ofdgo:${scope}:refresh`, { ifAvailable: true }, async (lock) => {
 			if (!lock) {
-				throw new Error("应用正在刷新");
+				throw new Error("其他页面正在更新");
 			}
 			const registration = await registerOffline();
-			await registration.update();
+			let timer;
+			try {
+				await Promise.race([registration.update(), new Promise((resolve, reject) => {
+					timer = setTimeout(() => reject(new Error("更新等待超时")), 30000);
+				})]);
+			} finally {
+				clearTimeout(timer);
+			}
 			if (registration.installing) {
 				await waitForWorker(registration.installing, "installed");
 			}
@@ -4292,10 +4332,11 @@ async function refreshApplication() {
 			location.reload();
 		});
 	} catch (err) {
-		setStatus(err.message === "应用正在刷新" ? err.message : "应用刷新失败");
+		setStatus(err.message === "其他页面正在更新" ? err.message : "更新失败，请重试");
 	} finally {
 		panels.forEach((panel) => { panel.inert = false; });
 		el.refreshAppButton.disabled = false;
+		el.refreshAppButton.textContent = "更新";
 		setBusy(false);
 	}
 }
@@ -12019,6 +12060,7 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("data-busy", busy);
+	el.refreshAppButton.disabled = busy;
 	updateStructureControls();
 	updateDocumentControls();
 	renderSecurity();
