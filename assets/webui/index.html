@@ -55,10 +55,10 @@
 				<div class="tool-group">
 					<label class="toolbar-select"><select id="exportFormat" class="format-select" title="导出格式" disabled></select><span id="formatValue"></span></label>
 					<label class="toolbar-select"><select id="imageDPI" class="format-select" title="输出精度" disabled>
-						<option value="96">96 dpi</option>
-						<option value="150">150 dpi</option>
-						<option value="300" selected>300 dpi</option>
-						<option value="600">600 dpi</option>
+						<option value="96">96 DPI</option>
+						<option value="150">150 DPI</option>
+						<option value="300" selected>300 DPI</option>
+						<option value="600">600 DPI</option>
 					</select><span id="dpiValue">300</span></label>
 					<label class="toolbar-select"><select id="outputCompression" class="format-select" title="压缩模式" disabled><option value="0">原始</option><option value="1">无损</option><option value="2">轻压</option><option value="3">均衡</option><option value="4">强压</option></select><span id="compressionValue" data-short="原">原始</span></label>
 					<button id="exportPageButton" class="button" type="button" data-short="单" disabled>单页</button>
@@ -205,7 +205,7 @@
 						<div class="form-row"><label for="convertFormat">格式</label><select id="convertFormat" required></select></div>
 						<div class="form-row"><label for="convertCompression">压缩</label><select id="convertCompression"><option value="0">原始</option><option value="1">无损</option><option value="2">轻压</option><option value="3">均衡</option><option value="4">强压</option></select></div>
 						<div id="convertFontRow" class="form-row" hidden><label for="convertFontMode">字体</label><select id="convertFontMode"><option value="0">保持</option><option value="1">内嵌</option><option value="2">外部</option></select></div>
-						<div id="convertDPIRow" class="form-row" hidden><label for="convertDPI">精度</label><select id="convertDPI"><option value="96">96 dpi</option><option value="150">150 dpi</option><option value="300" selected>300 dpi</option><option value="600">600 dpi</option></select></div>
+						<div id="convertDPIRow" class="form-row" hidden><label for="convertDPI">精度</label><div class="form-select"><select id="convertDPI"><option value="96">96 DPI</option><option value="150">150 DPI</option><option value="300" selected>300 DPI</option><option value="600">600 DPI</option></select><span id="convertDPIValue">300</span></div></div>
 						<div class="form-row"><label for="convertDestination">保存</label><select id="convertDestination"><option value="directory">目录</option><option value="archive">打包</option></select></div>
 						<div class="form-row"><label for="convertParallel">并行</label><input id="convertParallel" type="number" min="1" step="1" placeholder="自动"></div>
 					</div>

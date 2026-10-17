@@ -678,7 +678,8 @@ button:not(:disabled):hover {
 	color: #1f2428;
 }
 
-.toolbar-select {
+.toolbar-select,
+.form-select {
 	position: relative;
 	display: inline-flex;
 }
@@ -690,11 +691,13 @@ button:not(:disabled):hover {
 	color: transparent;
 }
 
-.toolbar-select option {
+.toolbar-select option,
+.form-select option {
 	color: #1f2428;
 }
 
-.toolbar-select > span {
+.toolbar-select > span,
+.form-select > span {
 	position: absolute;
 	inset: 0;
 	display: flex;
@@ -705,7 +708,8 @@ button:not(:disabled):hover {
 	pointer-events: none;
 }
 
-.toolbar-select::after {
+.toolbar-select::after,
+.form-select::after {
 	position: absolute;
 	right: 7px;
 	top: calc(50% - 2px);
@@ -717,7 +721,9 @@ button:not(:disabled):hover {
 }
 
 .toolbar-select select:disabled + span,
-.toolbar-select:has(select:disabled)::after {
+.toolbar-select:has(select:disabled)::after,
+.form-select select:disabled + span,
+.form-select:has(select:disabled)::after {
 	opacity: 0.48;
 }
 
@@ -1265,6 +1271,11 @@ button:not(:disabled):hover {
 	border-radius: 0;
 	background: #ffffff;
 	color: #1f2428;
+}
+
+.form-row .form-select select {
+	appearance: none;
+	color: transparent;
 }
 
 .form-row textarea {

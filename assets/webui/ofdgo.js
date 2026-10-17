@@ -1387,6 +1387,7 @@ batchElements.Add.addEventListener("click", () => batchElements.Input.click());
 batchElements.Input.addEventListener("change", () => { addBatchFiles(batchElements.Input.files); batchElements.Input.value = ""; });
 batchElements.Clear.addEventListener("click", () => { batch.items = []; renderBatchList(); batchElements.Status.textContent = ""; batchElements.Progress.value = 0; });
 batchElements.Format.addEventListener("change", updateBatchControls);
+batchElements.DPI.addEventListener("change", updateBatchControls);
 batchElements.Close.addEventListener("click", () => batchElements.Panel.close());
 batchElements.Cancel.addEventListener("click", cancelBatch);
 batchElements.Form.addEventListener("submit", event => { event.preventDefault(); runBatch(); });
@@ -8239,6 +8240,7 @@ function updateBatchControls() {
 	batchElements.Close.textContent = batch.running ? "收起" : "关闭";
 	batchElements.Count.textContent = batch.items.length ? `${batch.items.length}个文件` : "";
 	batchElements.DPIRow.hidden = !(batch.items.length ? batch.items : [null]).some(batchUsesDPI);
+	batchElements.DPI.nextElementSibling.textContent = batchElements.DPI.value;
 	batchElements.Button.toggleAttribute("data-running", batch.running);
 }
 
