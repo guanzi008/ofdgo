@@ -226,6 +226,8 @@ const el = {
 	encryptionConfirm: document.querySelector("#encryptionConfirm"),
 	ofdInput: document.querySelector("#ofdInput"),
 	ofdButton: document.querySelector("#ofdButton"),
+	closeButton: document.querySelector("#closeButton"),
+	closePanel: document.querySelector("#closePanel"),
 	newButton: document.querySelector("#newButton"),
 	editButton: document.querySelector("#editButton"),
 	editNotice: document.querySelector("#editNotice"),
@@ -606,7 +608,7 @@ el.editorTools.addEventListener("scroll", () => fontPicker.position());
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	textControls: [el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.fontInput, document.querySelector("#textReflow")],
-	keepTextFocus: () => fontPicker.open || canvasEditor.input?.fontDialog,
+	keepTextFocus: () => fontPicker.open || el.closePanel.open || canvasEditor.input?.fontDialog,
 	textClipboardScope: () => `${state.wasmSeq}:${state.fileName}:${state.doc?.documents?.[state.doc.documentIndex || 0]?.root}:${state.doc?.documentIndex || 0}:${state.doc?.documentVersion || ""}`,
 	busy: () => document.body.hasAttribute("data-busy"),
 	rotation: () => state.rotation,
@@ -1378,6 +1380,8 @@ el.pageForm.addEventListener("submit", async (event) => {
 	}
 });
 el.ofdButton.addEventListener("click", openOFDFile);
+el.closeButton.addEventListener("pointerdown", event => event.preventDefault());
+el.closeButton.addEventListener("click", () => closeFile().catch(error => showError(error, false)));
 batchElements.Button.addEventListener("click", () => { updateBatchControls(); batchElements.Panel.showModal(); });
 batchElements.Add.addEventListener("click", () => batchElements.Input.click());
 batchElements.Input.addEventListener("change", () => { addBatchFiles(batchElements.Input.files); batchElements.Input.value = ""; });
@@ -2295,6 +2299,102 @@ function setDirty(dirty) {
 
 function discardChanges() {
 	return !state.dirty || window.confirm("文档尚未保存，放弃更改？");
+}
+
+async function closeFile() {
+	if (!state.doc || state.exporting || batch.unlocking || document.body.hasAttribute("data-busy")) return;
+	let openSeq = state.openSeq;
+	if (state.dirty || canvasEditor.input || canvasEditor.nudge || canvasEditor.nudgeCommit || canvasEditor.crop) {
+		el.closePanel.returnValue = "cancel";
+		const choice = new Promise(resolve => el.closePanel.addEventListener("close", () => resolve(el.closePanel.returnValue), { once: true }));
+		el.closePanel.showModal();
+		const action = await choice;
+		if (openSeq !== state.openSeq || action === "cancel") return;
+		if (action === "save") {
+			if (!await exportFile(true, null, "ofd")) return;
+			openSeq = state.openSeq;
+		}
+	}
+	if (openSeq !== state.openSeq || batch.unlocking) return;
+	clearSecurityForms();
+	const source = state.ofdBytes;
+	state.openSeq++;
+	state.pageSeq++;
+	state.ofdBytes = null;
+	state.doc = null;
+	state.fileName = "ofdgo.ofd";
+	state.editing = false;
+	state.editorInfo = null;
+	state.savedRevision = null;
+	state.packageDirty = false;
+	state.encryptionDirty = false;
+	state.composite = null;
+	state.annotationEdit = null;
+	state.annotationCreate = null;
+	state.annotationSummary = null;
+	state.openActionTask = null;
+	state.openActionEnabled = false;
+	state.insertObject = null;
+	state.objectClipboard = null;
+	state.styleClipboard = null;
+	state.styleOriginal = null;
+	state.conversionWarnings = [];
+	state.editorViews.clear();
+	state.pageSelection.clear();
+	state.pageSelectionAnchor = null;
+	state.pageMultiSelect = false;
+	state.navigationScroll.clear();
+	state.documentManagement = null;
+	state.versionManagement = null;
+	state.infoDocumentIndex = null;
+	state.pageIndex = 0;
+	state.scale = 1;
+	state.rotation = 0;
+	state.fontRenderPending = false;
+	canvasEditor.richClipboard = null;
+	canvasEditor.cancelNudge();
+	canvasEditor.clear();
+	setDirty(false);
+	resetSearch();
+	resetPageFlow();
+	state.pageWindow = null;
+	el.svgHost.replaceChildren();
+	el.viewerPanel.classList.remove("single-page-fits-height");
+	el.annotationsList.replaceChildren();
+	el.annotationsStatus.textContent = "";
+	el.ofdInput.value = "";
+	releaseResourcePreview();
+	resourceManager.sequence++;
+	resourceManager.items = [];
+	resourceManager.selected = null;
+	resourceManager.references = [];
+	resourceManager.targets = [];
+	settings.sequence++;
+	settings.data = null;
+	settings.drafts.clear();
+	settings.actions = [];
+	settings.baseline = {};
+	settingsElements.Content.replaceChildren();
+	settingsElements.Actions.replaceChildren();
+	resourceElements.List.replaceChildren();
+	resourceElements.Reference.replaceChildren();
+	invoicePanel.entries = [];
+	invoicePanel.drafts.clear();
+	invoicePanel.result = null;
+	fontBinding.font = null;
+	fontBinding.choices = [];
+	fontManager.localFonts = [];
+	markWASMExited();
+	renderPageList();
+	renderOutlines();
+	renderMeta();
+	renderFontList();
+	updateFontSummary();
+	updateControls();
+	el.zoomLabel.textContent = "100%";
+	setEmpty(STATUS.ready);
+	setStatus(STATUS.ready);
+	if (nativeHost) await nativeHost.release(source);
 }
 
 function setEditorInfo(doc) {
@@ -9938,7 +10038,7 @@ function renderOutlines(reset = true) {
 		state.outlineExpanded.clear();
 		state.outlineSelection = null;
 	}
-	const outlines = state.doc.outlines || [];
+	const outlines = state.doc?.outlines || [];
 	el.pageListTitle.hidden = true;
 	el.navigationTabs.hidden = false;
 	el.outlinesTab.hidden = outlines.length === 0 && !state.editing;
@@ -10813,7 +10913,7 @@ function renderMeta(keepDetails = false) {
 	el.documentSelect.value = String(doc.documentIndex || 0);
 	el.metaPanel.setAttribute("data-busy", String(!!doc.detailsPending));
 	document.title = `${nativeHost ? "OFDGo" : "OFDGo WebUI"} - ${state.doc ? state.fileName : "OFD编辑器"}`;
-	el.metaFile.textContent = state.fileName;
+	el.metaFile.textContent = state.doc ? state.fileName : "-";
 	el.metaTitle.textContent = doc.title || "-";
 	el.metaAuthor.textContent = doc.author || "-";
 	for (const [field, value] of [
@@ -11912,6 +12012,7 @@ function updateControls() {
 	renderSecurity();
 	updateStructureControls();
 	const hasDoc = Boolean(state.doc);
+	el.closeButton.disabled = !hasDoc || state.exporting || document.body.hasAttribute("data-busy");
 	updateDocumentControls();
 	updateDisplayControls();
 	updateEditorTools();
@@ -12130,6 +12231,7 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("data-busy", busy);
+	el.closeButton.disabled = busy || !state.doc || state.exporting;
 	el.refreshAppButton.disabled = busy;
 	updateStructureControls();
 	updateDocumentControls();

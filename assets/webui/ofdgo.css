@@ -583,6 +583,7 @@ button:not(:disabled):hover {
 	content: "";
 }
 
+.close-icon,
 .new-icon {
 	position: relative;
 	width: 15px;
@@ -590,6 +591,8 @@ button:not(:disabled):hover {
 	border: 1px solid currentColor;
 }
 
+.close-icon::before,
+.close-icon::after,
 .new-icon::before,
 .new-icon::after {
 	position: absolute;
@@ -604,6 +607,19 @@ button:not(:disabled):hover {
 
 .new-icon::after {
 	transform: translate(-50%, -50%) rotate(90deg);
+}
+
+.close-icon::before,
+.close-icon::after {
+	width: 8px;
+}
+
+.close-icon::before {
+	transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.close-icon::after {
+	transform: translate(-50%, -50%) rotate(-45deg);
 }
 
 .save-icon {

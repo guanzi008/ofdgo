@@ -19,6 +19,7 @@
 				<input id="fontDirectoryInput" class="file-input" type="file" webkitdirectory multiple>
 				<div class="tool-group">
 					<button id="ofdButton" class="icon-button" type="button" title="打开"><span class="open-icon"></span></button>
+					<button id="closeButton" class="icon-button" type="button" title="关闭" disabled><span class="close-icon"></span></button>
 					<button id="newButton" class="icon-button" type="button" title="新建"><span class="new-icon"></span></button>
 					<button id="saveButton" class="icon-button" type="button" title="保存" disabled><span class="save-icon"></span></button>
 					<button id="editButton" class="icon-button" type="button" title="编辑" data-pressed="false" disabled><span class="edit-icon"></span></button>
@@ -185,6 +186,13 @@
 				<button id="batchPagesButton" class="editor-group-action" type="button">页面</button>
 			</div>
 		</div>
+		<dialog id="closePanel" class="form-dialog">
+			<form method="dialog">
+				<h2 class="form-title">关闭文档</h2>
+				<div class="form-row">文档尚未保存</div>
+				<div class="form-actions"><button class="button" value="cancel" autofocus>取消</button><button class="button" value="discard">放弃</button><button class="button" value="save">保存</button></div>
+			</form>
+		</dialog>
 		<dialog id="convertPanel" class="form-dialog convert-dialog">
 			<form id="convertForm">
 				<h2 id="convertTitle" class="form-title">批量转换<span id="convertCount"></span></h2>
