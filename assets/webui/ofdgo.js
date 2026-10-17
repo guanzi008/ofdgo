@@ -21,7 +21,7 @@ const STATUS = {
 const wasmRequests = new Map();
 const metaContents = new WeakMap();
 const batch = { items: [], formats: [], running: false, canceled: false, workers: new Set(), requests: new Map(), sequence: 0, progress: null, jobs: [], credentials: Promise.resolve() };
-const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Compression", "FontRow", "FontMode", "Destination", "DPIRow", "DPI", "Parallel", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
+const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Compression", "FontRow", "FontMode", "Destination", "DPIRow", "DPI", "DPIValue", "Parallel", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
 const fontBinding = { font: null, choices: [], sequence: 0 };
 const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name", "SourceRow", "Source", "File", "Hint", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#fontBinding${name}`)]));
 const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Kind", "List", "Empty", "Reference", "ReferenceGroup", "Actions", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "BindingActions", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
@@ -8240,7 +8240,7 @@ function updateBatchControls() {
 	batchElements.Close.textContent = batch.running ? "收起" : "关闭";
 	batchElements.Count.textContent = batch.items.length ? `${batch.items.length}个文件` : "";
 	batchElements.DPIRow.hidden = !(batch.items.length ? batch.items : [null]).some(batchUsesDPI);
-	batchElements.DPI.nextElementSibling.textContent = batchElements.DPI.value;
+	batchElements.DPIValue.textContent = batchElements.DPI.value;
 	batchElements.Button.toggleAttribute("data-running", batch.running);
 }
 
