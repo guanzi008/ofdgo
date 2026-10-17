@@ -687,12 +687,13 @@ func (h *Host) cleanupOutput(ctx context.Context, target webui.NativeOutputTarge
 
 // readFonts 建立系统字体目录并登记按需读取资源
 func (h *Host) readFonts() {
+	platform, language := fontNameLanguage()
 	for _, name := range ofdgo.FontSystemFiles() {
 		data, err := os.ReadFile(name)
 		if err != nil {
 			continue
 		}
-		faces, err := (ofdgo.FontFile{Name: filepath.Base(name), Data: data}).Faces()
+		faces, err := (ofdgo.FontFile{Name: filepath.Base(name), Data: data}).LocalizedFaces(platform, language)
 		if err != nil {
 			continue
 		}

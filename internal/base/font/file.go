@@ -36,6 +36,13 @@ type Face struct {
 // 入参: data 名称表数据, index 零起始字体索引
 // 返回: Face 字体信息
 func FaceInfo(data []byte, index int) Face {
+	return faceInfoLanguage(data, index, 0xffff, 0xffff)
+}
+
+// faceInfoLanguage 优先读取指定平台和语言的显示名称，保留标识及全部别名
+// 入参: data 名称表数据, index 字体索引, platform 平台标识, language 语言标识
+// 返回: Face 字体信息
+func faceInfoLanguage(data []byte, index int, platform, language uint16) Face {
 	records, values := fontNameValues(data)
 	name := func(ids ...uint16) string {
 		for _, id := range ids {
@@ -49,7 +56,19 @@ func FaceInfo(data []byte, index int) Face {
 		}
 		return ""
 	}
-	return Face{Index: index, FullName: name(4, 6, 16, 1), Family: name(16, 1), Style: name(17, 2), PostScriptName: name(6), Names: fontNamesFromValues(records, values)}
+	localized := func(ids ...uint16) string {
+		for _, id := range ids {
+			for _, record := range records {
+				if record.Platform == platform && record.Language == language && record.Name == id {
+					if value := strings.TrimSpace(values[[4]uint16{record.Platform, record.Encoding, record.Language, id}]); value != "" {
+						return value
+					}
+				}
+			}
+		}
+		return name(ids...)
+	}
+	return Face{Index: index, FullName: localized(4, 6, 16, 1), Family: localized(16, 1), Style: localized(17, 2), PostScriptName: name(6), Names: fontNamesFromValues(records, values)}
 }
 
 // FileCount 校验字体或集合头并读取字体数量
@@ -78,6 +97,13 @@ func FileCount(data []byte) (int, error) {
 // 入参: data OpenType数据
 // 返回: []Face 字体列表, error 格式或名称表错误
 func ReadFaces(data []byte) ([]Face, error) {
+	return ReadLocalizedFaces(data, 0xffff, 0xffff)
+}
+
+// ReadLocalizedFaces 读取指定平台和语言的字体名称，缺失时沿用名称表顺序
+// 入参: data OpenType数据, platform 名称表平台标识, language 名称表语言标识
+// 返回: []Face 字体列表, error 格式或名称表错误
+func ReadLocalizedFaces(data []byte, platform, language uint16) ([]Face, error) {
 	count, err := FileCount(data)
 	if err != nil {
 		return nil, err
@@ -88,7 +114,7 @@ func ReadFaces(data []byte) ([]Face, error) {
 		if err != nil {
 			return nil, err
 		}
-		face := FaceInfo(tables["name"], index)
+		face := faceInfoLanguage(tables["name"], index, platform, language)
 		if face.FullName == "" {
 			return nil, fmt.Errorf("font %d has no usable name", index)
 		}

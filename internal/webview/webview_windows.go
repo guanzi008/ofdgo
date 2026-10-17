@@ -25,6 +25,9 @@ import (
 // replaceFileProc 保留目标文件属性并替换文件内容
 var replaceFileProc = syscall.NewLazyDLL("kernel32.dll").NewProc("ReplaceFileW")
 
+// memoryStatusProc 查询系统物理内存和提交额度
+var memoryStatusProc = syscall.NewLazyDLL("kernel32.dll").NewProc("GlobalMemoryStatusEx")
+
 // openReadFile 允许原子替换路径，同时保持已有读取句柄有效
 func openReadFile(name string) (*os.File, error) {
 	path, err := nativeFilePath(name)
@@ -72,4 +75,33 @@ func nativeFilePath(name string) (*uint16, error) {
 		}
 	}
 	return syscall.UTF16PtrFromString(path)
+}
+
+// fontNameLanguage 获取系统显示语言对应的OpenType名称表标识
+// 返回: uint16 名称表平台标识, uint16 系统显示语言标识
+func fontNameLanguage() (uint16, uint16) {
+	language, _, _ := syscall.NewLazyDLL("kernel32.dll").NewProc("GetUserDefaultUILanguage").Call()
+	return 3, uint16(language)
+}
+
+// conversionMemory 预留系统内存后返回可用于新增转换的额度
+// 返回: int64 可用字节数，查询失败时暂停扩容
+func conversionMemory() int64 {
+	status := struct {
+		length           uint32
+		load             uint32
+		total            uint64
+		available        uint64
+		totalPage        uint64
+		availablePage    uint64
+		totalVirtual     uint64
+		availableVirtual uint64
+		extended         uint64
+	}{}
+	status.length = uint32(unsafe.Sizeof(status))
+	ok, _, _ := memoryStatusProc.Call(uintptr(unsafe.Pointer(&status)))
+	if ok == 0 {
+		return 0
+	}
+	return max(0, int64(min(status.available, status.availablePage))-int64(status.total/8))
 }

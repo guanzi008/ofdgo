@@ -44,6 +44,18 @@ func (f FontFile) Faces() ([]FontFace, error) {
 	return basefont.ReadFaces(data)
 }
 
+// LocalizedFaces 读取指定语言的显示名称，保留PostScript名称、全部别名和集合索引
+// 未找到对应名称时沿用Faces的名称选择规则，不修改字体数据
+// 入参: platform OpenType名称表平台标识, language 该平台的语言标识
+// 返回: []FontFace 字体列表, error 格式或名称表错误
+func (f FontFile) LocalizedFaces(platform, language uint16) ([]FontFace, error) {
+	data, err := decodeFontContainer(f.Data)
+	if err != nil {
+		return nil, err
+	}
+	return basefont.ReadLocalizedFaces(data, platform, language)
+}
+
 // Face 提取指定字体，返回独立的OpenType数据，可用于预览或AddFont，且不修改原文件
 // 入参: index 零起始字体索引，非集合文件只能为0
 // 返回: []byte 独立字体数据, error 格式或索引错误
