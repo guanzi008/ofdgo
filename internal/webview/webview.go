@@ -705,8 +705,8 @@ func (h *Host) readFonts() {
 			continue
 		}
 		for _, face := range faces {
-			h.fonts = append(h.fonts, map[string]any{"index": face.Index, "postscriptName": face.PostScriptName, "fullName": face.FullName, "family": face.Family, "style": face.Style, "file": file})
-			for _, alias := range []string{face.FullName, face.Family, face.PostScriptName, strings.TrimSpace(face.Family + " " + face.Style)} {
+			h.fonts = append(h.fonts, map[string]any{"index": face.Index, "postscriptName": face.PostScriptName, "fullName": face.FullName, "family": face.Family, "style": face.Style, "names": face.Names, "file": file})
+			for _, alias := range append([]string{face.FullName, face.Family, face.PostScriptName, strings.TrimSpace(face.Family + " " + face.Style)}, face.Names...) {
 				if alias != "" {
 					h.fontFiles[alias+".ttf"] = name + "\x00" + strconv.Itoa(face.Index)
 				}
