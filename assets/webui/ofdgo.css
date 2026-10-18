@@ -1682,6 +1682,8 @@ body[data-hide-meta] .meta-panel {
 }
 
 .resource-list {
+	--resource-row-height: 40px;
+	position: relative;
 	min-height: 80px;
 }
 
@@ -1691,6 +1693,9 @@ body[data-hide-meta] .meta-panel {
 }
 
 .resource-option {
+	position: absolute;
+	left: 0;
+	height: var(--resource-row-height);
 	width: 100%;
 	border: 0;
 	border-bottom: 1px solid var(--line);

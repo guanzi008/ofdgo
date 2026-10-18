@@ -25,7 +25,7 @@ const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "A
 const fontBinding = { font: null, choices: [], sequence: 0 };
 const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name", "SourceRow", "Source", "File", "Hint", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#fontBinding${name}`)]));
 const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Kind", "List", "Empty", "Reference", "ReferenceGroup", "Actions", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "BindingActions", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
-const resourceManager = { items: [], selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
+const resourceManager = { items: [], visibleItems: [], start: -1, end: -1, selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
 const settingsElements = Object.fromEntries(["Button", "Panel", "Form", "Title", "Kind", "Context", "Content", "Actions", "Status"].map(name => [name, document.querySelector(`#settings${name}`)]));
 const settings = { sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false, invoice: false };
 const invoicePanel = { tab: "basic", entries: [], formats: [], drafts: new Map(), key: "", result: null };
@@ -777,6 +777,27 @@ resourceElements.Panel.addEventListener("close", () => {
 	releaseResourcePreview();
 });
 resourceElements.Kind.addEventListener("change", () => resourceTask(renderResourceList));
+resourceElements.List.closest(".resource-list-container").addEventListener("scroll", renderResourceWindow, {passive: true});
+new ResizeObserver(renderResourceWindow).observe(resourceElements.List.closest(".resource-list-container"));
+resourceElements.List.addEventListener("keydown", event => {
+	if (resourceManager.busy) return;
+	const items = resourceManager.visibleItems, index = items.indexOf(resourceManager.selected);
+	const target = { ArrowDown: Math.min(items.length - 1, index + 1), ArrowUp: Math.max(0, index - 1), Home: 0, End: items.length - 1 }[event.key];
+	if (target == null || !items[target]) return;
+	event.preventDefault();
+	const sequence = state.openSeq;
+	chooseManagedResource(items[target]).then(() => {
+		if (!resourceElements.Panel.open || sequence !== state.openSeq || items !== resourceManager.visibleItems || resourceManager.selected !== items[target]) return;
+		const container = resourceElements.List.closest(".resource-list-container");
+		const height = parseFloat(getComputedStyle(resourceElements.List).getPropertyValue("--resource-row-height"));
+		const viewport = container.clientHeight - container.querySelector(".resource-heading").offsetHeight;
+		const top = target * height;
+		if (top < container.scrollTop) container.scrollTop = top;
+		else if (top + height > container.scrollTop + viewport) container.scrollTop = top + height - viewport;
+		renderResourceWindow();
+		resourceElements.List.querySelector(`[data-index="${target}"]`)?.focus({preventScroll: true});
+	});
+});
 resourceElements.Reference.addEventListener("change", () => resourceTask(syncResourceReference));
 resourceElements.ReferenceGroup.addEventListener("change", () => resourceTask(() => loadManagedReferences(Number(resourceElements.ReferenceGroup.value) * 100)));
 resourceElements.Page.addEventListener("change", () => resourceTask(() => loadResourceTargets("")));
@@ -2367,6 +2388,8 @@ async function closeFile() {
 	releaseResourcePreview();
 	resourceManager.sequence++;
 	resourceManager.items = [];
+	resourceManager.visibleItems = [];
+	resourceManager.start = resourceManager.end = -1;
 	resourceManager.selected = null;
 	resourceManager.references = [];
 	resourceManager.targets = [];
@@ -2378,6 +2401,7 @@ async function closeFile() {
 	settingsElements.Content.replaceChildren();
 	settingsElements.Actions.replaceChildren();
 	resourceElements.List.replaceChildren();
+	resourceElements.List.style.height = "";
 	resourceElements.Reference.replaceChildren();
 	invoicePanel.entries = [];
 	invoicePanel.drafts.clear();
@@ -7320,16 +7344,36 @@ async function loadManagedResources() {
 async function renderResourceList() {
 	const items = resourceManager.items.filter(item => item.kind === resourceElements.Kind.value);
 	const selected = items.find(item => item.id === resourceManager.selected?.id && item.kind === resourceManager.selected?.kind) || items[0];
-	resourceElements.List.replaceChildren();
+	resourceManager.visibleItems = items;
+	resourceManager.start = resourceManager.end = -1;
 	resourceElements.Empty.hidden = items.length !== 0;
-	const sequence = resourceManager.sequence;
-	let fragment = document.createDocumentFragment();
-	for (const item of items) {
-		const button = document.createElement("button");
+	const height = parseFloat(getComputedStyle(resourceElements.List).getPropertyValue("--resource-row-height"));
+	resourceElements.List.style.height = `${items.length * height}px`;
+	resourceElements.List.closest(".resource-list-container").scrollTop = Math.max(0, items.indexOf(selected)) * height;
+	await selectManagedResource(selected);
+}
+
+function renderResourceWindow() {
+	if (!resourceElements.Panel.open) return;
+	const items = resourceManager.visibleItems, list = resourceElements.List;
+	const container = list.closest(".resource-list-container");
+	const height = parseFloat(getComputedStyle(list).getPropertyValue("--resource-row-height"));
+	const viewport = container.clientHeight - container.querySelector(".resource-heading").offsetHeight;
+	const start = Math.max(0, Math.min(items.length, Math.floor(container.scrollTop / height)) - 4);
+	const end = Math.min(items.length, Math.ceil((container.scrollTop + viewport) / height) + 4);
+	if (start === resourceManager.start && end === resourceManager.end) return;
+	resourceManager.start = start;
+	resourceManager.end = end;
+	const focused = list.contains(document.activeElement) ? document.activeElement.dataset.index : null;
+	const fragment = document.createDocumentFragment();
+	for (let index = start; index < end; index++) {
+		const item = items[index], button = document.createElement("button");
 		button.type = "button";
 		button.className = "resource-option";
-		button.setAttribute("data-selected", String(item === selected));
-		button.tabIndex = item === selected ? 0 : -1;
+		button.dataset.index = String(index);
+		button.style.top = `${index * height}px`;
+		button.setAttribute("data-selected", String(item === resourceManager.selected));
+		button.tabIndex = item === resourceManager.selected ? 0 : -1;
 		button.title = item.file || item.name;
 		for (const value of [item.name, item.missing ? "缺失" : item.file ? formatBytes(item.size) : item.kind === "Font" ? "外部" : "-", item.complete ? String(item.referenceCount || 0) : "未知"]) {
 			const span = document.createElement("span");
@@ -7337,25 +7381,11 @@ async function renderResourceList() {
 			button.append(span);
 		}
 		button.addEventListener("click", () => chooseManagedResource(item));
-		button.addEventListener("keydown", event => {
-			const index = items.indexOf(item);
-			const target = { ArrowDown: Math.min(items.length - 1, index + 1), ArrowUp: Math.max(0, index - 1), Home: 0, End: items.length - 1 }[event.key];
-			if (target == null) return;
-			event.preventDefault();
-			chooseManagedResource(items[target]).then(() => {
-				if (resourceElements.Panel.open && resourceManager.selected === items[target]) resourceElements.List.children[target]?.focus();
-			});
-		});
 		fragment.append(button);
-		if (fragment.childElementCount === 100) {
-			resourceElements.List.append(fragment);
-			await new Promise(resolve => setTimeout(resolve, 0));
-			if (sequence !== resourceManager.sequence || !resourceElements.Panel.open) return;
-			fragment = document.createDocumentFragment();
-		}
 	}
-	resourceElements.List.append(fragment);
-	await selectManagedResource(selected);
+	list.replaceChildren(fragment);
+	list.tabIndex = items.length && !list.querySelector('[data-selected="true"]') ? 0 : -1;
+	if (focused != null) (list.querySelector(`[data-index="${focused}"]`) || list).focus({preventScroll: true});
 }
 
 async function chooseManagedResource(item) {
@@ -7371,11 +7401,12 @@ async function selectManagedResource(item) {
 	const reference = same ? resourceElements.Reference.value : "0";
 	releaseResourcePreview();
 	resourceManager.selected = item || null;
-	const items = resourceManager.items.filter(entry => entry.kind === resourceElements.Kind.value);
+	renderResourceWindow();
 	const previous = resourceElements.List.querySelector('[data-selected="true"]');
 	if (previous) { previous.setAttribute("data-selected", "false"); previous.tabIndex = -1; }
-	const current = resourceElements.List.children[items.indexOf(item)];
+	const current = resourceElements.List.querySelector(`[data-index="${resourceManager.visibleItems.indexOf(item)}"]`);
 	if (current) { current.setAttribute("data-selected", "true"); current.tabIndex = 0; }
+	resourceElements.List.tabIndex = resourceManager.visibleItems.length && !current ? 0 : -1;
 	await loadManagedReferences(same ? Number(reference) : 0);
 }
 
