@@ -26,6 +26,12 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// 图案标记保留设备四色通道及非零对象形状
+const (
+	pdfTransferChannels uint8 = 15
+	pdfTransferShape    uint8 = 16
+)
+
 // pdfCompositeNode 保留局部合成所需的原始图元和透明组层级
 type pdfCompositeNode struct {
 	path       *pdfgo.PathMark
@@ -125,7 +131,7 @@ type pdfCompositeCache struct {
 	imageProcesses  map[pdfImageProcessKey]*pdfgo.ImageProcess
 	imageColor      pdfCompositeImageColor
 	masks           map[*pdfgo.SoftMask][]pdfCompositeNode
-	meshes          map[*pdfgo.MeshGradient][]pdfMeshTriangle
+	meshes          map[*pdfgo.MeshGradient][]codecpdf.MeshTriangle
 	linearMeshes    *renderCache[pdfLinearMeshKey, []pdfgo.MeshTriangle]
 	patterns        map[pdfgo.Paint]*pdfCompositePattern
 	shadingPatterns map[*pdfgo.ShadingPattern][]pdfCompositeNode
@@ -136,11 +142,22 @@ type pdfCompositeCache struct {
 	groups          map[*pdfgo.GroupMark]Box
 }
 
+// pdfCompositeTileSize 限定单次合成块的像素边长
+const pdfCompositeTileSize = codecpdf.CompositeTileSize
+
+// pdfCompositeScratch 复用像素及蒙版缓冲，不跨页持有活动内容
+type pdfCompositeScratch struct {
+	pixels   codecpdf.CompositeBuffers[pdfCompositePixel]
+	masks    codecpdf.CompositeBuffers[float64]
+	channels codecpdf.CompositeBuffers[uint8]
+	rasters  codecpdf.RasterBuffers
+}
+
 // compositingCache 按需创建单页合成缓存，页面切换时由导入器释放
 // 返回: *pdfCompositeCache 当前页面缓存
 func (p *pdfImporter) compositingCache() *pdfCompositeCache {
 	if p.compositeCache == nil {
-		p.compositeCache = &pdfCompositeCache{images: map[*pdfgo.Image]*pdfgo.ImageComponents{}, masks: map[*pdfgo.SoftMask][]pdfCompositeNode{}, meshes: map[*pdfgo.MeshGradient][]pdfMeshTriangle{}}
+		p.compositeCache = &pdfCompositeCache{images: map[*pdfgo.Image]*pdfgo.ImageComponents{}, masks: map[*pdfgo.SoftMask][]pdfCompositeNode{}, meshes: map[*pdfgo.MeshGradient][]codecpdf.MeshTriangle{}}
 	}
 	return p.compositeCache
 }
@@ -665,7 +682,7 @@ func (p *pdfImporter) opaque(n pdfCompositeNode, space *pdfgo.ColorSpace) (bool,
 	if style.SoftMask != nil || !codecpdf.NormalBlend(style.BlendMode) || fill && style.Fill.Alpha != 1 || stroke && style.Stroke.Alpha != 1 {
 		return false, nil
 	}
-	if fill && style.FillOverprint && pdfOverprintNeedsSeparation(style.Fill) || stroke && style.StrokeOverprint && pdfOverprintNeedsSeparation(style.Stroke) {
+	if fill && style.FillOverprint && codecpdf.OverprintNeedsSeparation(style.Fill) || stroke && style.StrokeOverprint && codecpdf.OverprintNeedsSeparation(style.Stroke) {
 		return false, nil
 	}
 	if fill && p.gradientError(style.Fill) != nil || stroke && p.gradientError(style.Stroke) != nil {
@@ -709,7 +726,7 @@ func (n pdfCompositeNode) direct() bool {
 	if n.image != nil && s.FillOverprint {
 		return false
 	}
-	return codecpdf.NormalBlend(s.BlendMode) && !(fill && s.FillOverprint && pdfOverprintNeedsSeparation(s.Fill) || stroke && s.StrokeOverprint && pdfOverprintNeedsSeparation(s.Stroke))
+	return codecpdf.NormalBlend(s.BlendMode) && !(fill && s.FillOverprint && codecpdf.OverprintNeedsSeparation(s.Fill) || stroke && s.StrokeOverprint && codecpdf.OverprintNeedsSeparation(s.Stroke))
 }
 
 // style 获取图元实际使用的图形状态
@@ -983,4 +1000,78 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 		}
 	}
 	return p.appendRasterGroup(output, box, 1, origins.origin)
+}
+
+// acquireCoverage 借用当前块的独占画布，保留活动画布供嵌套合成读取
+// 返回: *image.RGBA 未清空画布，不支持缓冲绘制的后端返回nil, error 无效绘制区域
+func (c *pdfCompositor) acquireCoverage() (*image.RGBA, error) {
+	if _, ok := c.importer.editor.Backends().Raster.(RasterBufferBackend); !ok {
+		return nil, nil
+	}
+	page := RasterPage{Width: c.box.W, Height: c.box.H, DPI: c.importer.rasterDPI}
+	w, h, err := page.PixelSize()
+	if err != nil {
+		return nil, err
+	}
+	if c.scratch == nil {
+		c.scratch = &pdfCompositeScratch{}
+	}
+	return c.scratch.rasters.Acquire(image.Rect(0, 0, w, h)), nil
+}
+
+// releaseCoverage 归还当前调用不再读取的画布，限制单次合成保留的内存
+// 入参: coverage 当前调用的覆盖图像
+func (c *pdfCompositor) releaseCoverage(coverage image.Image) {
+	if _, ok := c.importer.editor.Backends().Raster.(RasterBufferBackend); !ok || c.scratch == nil {
+		return
+	}
+	if buffer, ok := coverage.(*image.RGBA); ok {
+		c.scratch.rasters.Release(buffer)
+	}
+}
+
+// acquirePixels 为当前合成器借用独立像素缓冲
+// 入参: count 所需像素数量
+// 返回: []pdfCompositePixel 尚未初始化的独占缓冲
+func (c *pdfCompositor) acquirePixels(count int) []pdfCompositePixel {
+	if c.scratch == nil {
+		c.scratch = &pdfCompositeScratch{}
+	}
+	return c.scratch.pixels.Acquire(count)
+}
+
+// releasePixels 归还当前调用已不再访问的像素缓冲
+// 入参: pixels 当前调用借用的缓冲
+func (c *pdfCompositor) releasePixels(pixels []pdfCompositePixel) {
+	if c.scratch != nil {
+		c.scratch.pixels.Release(pixels)
+	}
+}
+
+// acquireChannels 借用图案通道标记，仅在设备函数需要时分配
+// 入参: count 当前块像素数
+// 返回: []uint8 尚未初始化的独占通道缓冲
+func (c *pdfCompositor) acquireChannels(count int) []uint8 {
+	if c.scratch == nil {
+		c.scratch = &pdfCompositeScratch{}
+	}
+	return c.scratch.channels.Acquire(count)
+}
+
+// releaseChannels 归还不再参与嵌套合成的通道标记
+// 入参: channels 当前调用借用的通道缓冲
+func (c *pdfCompositor) releaseChannels(channels []uint8) {
+	if c.scratch != nil {
+		c.scratch.channels.Release(channels)
+	}
+}
+
+// releaseMasks 在当前块绘制结束后归还蒙版结果，不复用其他块的坐标缓存
+func (c *pdfCompositor) releaseMasks() {
+	if c.scratch != nil {
+		for _, mask := range c.masks {
+			c.scratch.masks.Release(mask)
+		}
+	}
+	clear(c.masks)
 }

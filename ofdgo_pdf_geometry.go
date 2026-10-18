@@ -374,7 +374,7 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 		}
 		return err
 	}
-	if mark.Fill && mark.Style.FillOverprint && pdfOverprintNeedsSeparation(mark.Style.Fill) || mark.Stroke && mark.Style.StrokeOverprint && pdfOverprintNeedsSeparation(mark.Style.Stroke) {
+	if mark.Fill && mark.Style.FillOverprint && codecpdf.OverprintNeedsSeparation(mark.Style.Fill) || mark.Stroke && mark.Style.StrokeOverprint && codecpdf.OverprintNeedsSeparation(mark.Style.Stroke) {
 		return &pdfgo.UnsupportedError{Feature: "color separation overprint"}
 	}
 	if p.warning != nil && (mark.Fill && p.gradientError(mark.Style.Fill) != nil || mark.Stroke && p.gradientError(mark.Style.Stroke) != nil) {

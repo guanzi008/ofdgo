@@ -262,7 +262,7 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 		if err := c.importer.ctx.Err(); err != nil {
 			return err
 		}
-		row := pdfCoverageRow(coverage, y, region.Min.X, region.Max.X)
+		row := codecpdf.CoverageRow(coverage, y, region.Min.X, region.Max.X)
 		for x := region.Min.X; x < region.Max.X; x++ {
 			var a uint32
 			if row != nil {
@@ -306,11 +306,11 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 					}
 				}
 			} else if shading != nil {
-				values = shading[index].values
+				values = shading[index].Values
 				if paint.Mesh == nil {
-					shape = shading[index].shape
+					shape = shading[index].Shape
 				} else {
-					shape *= shading[index].shape
+					shape *= shading[index].Shape
 				}
 				if node.image != nil && paint.Mesh != nil {
 					point := c.inverse.Apply(pdfgo.Point{X: c.box.X + (float64(x)+.5)*step, Y: c.box.Y + (float64(y)+.5)*step})
@@ -708,11 +708,11 @@ func (c *pdfCompositor) mask(mask *pdfgo.SoftMask, inherited *pdfgo.ColorSpace) 
 	if err := local.draw(nodes, pixels, space); err != nil {
 		return nil, err
 	}
-	result := c.scratch.masks.acquire(len(pixels))
+	result := c.scratch.masks.Acquire(len(pixels))
 	complete := false
 	defer func() {
 		if !complete {
-			c.scratch.masks.release(result)
+			c.scratch.masks.Release(result)
 		}
 	}()
 	values := make(map[[4]float64]float64)

@@ -18,6 +18,12 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// ShadingPixel 保存抗锯齿覆盖率与混合空间分量
+type ShadingPixel struct {
+	Values [4]float64
+	Shape  float64
+}
+
 // ShadingColorants 复用原始浓度缓冲及原生通道映射，不跨并发采样共享
 type ShadingColorants struct {
 	paint   pdfgo.Paint

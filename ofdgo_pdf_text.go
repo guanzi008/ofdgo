@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"unicode/utf8"
 
+	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
@@ -68,7 +69,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		return err
 	}
 	paintMode := mark.Mode % 4
-	if (paintMode == 0 || paintMode == 2) && mark.Style.FillOverprint && pdfOverprintNeedsSeparation(mark.Style.Fill) || (paintMode == 1 || paintMode == 2) && mark.Style.StrokeOverprint && pdfOverprintNeedsSeparation(mark.Style.Stroke) {
+	if (paintMode == 0 || paintMode == 2) && mark.Style.FillOverprint && codecpdf.OverprintNeedsSeparation(mark.Style.Fill) || (paintMode == 1 || paintMode == 2) && mark.Style.StrokeOverprint && codecpdf.OverprintNeedsSeparation(mark.Style.Stroke) {
 		return &pdfgo.UnsupportedError{Feature: "text color separation overprint"}
 	}
 	if p.warning != nil && ((paintMode == 0 || paintMode == 2) && p.gradientError(mark.Style.Fill) != nil || (paintMode == 1 || paintMode == 2) && p.gradientError(mark.Style.Stroke) != nil) {

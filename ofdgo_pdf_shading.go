@@ -27,10 +27,7 @@ import (
 )
 
 // pdfShadingPixel 保存抗锯齿覆盖率与混合空间分量
-type pdfShadingPixel struct {
-	values [4]float64
-	shape  float64
-}
+type pdfShadingPixel = codecpdf.ShadingPixel
 
 // pdfGradientKey 区分渐变画刷及其输出混合空间
 type pdfGradientKey struct {
@@ -47,6 +44,20 @@ type pdfGradientKey struct {
 type pdfICCKey struct {
 	space  *pdfgo.ColorSpace
 	intent pdfgo.Name
+}
+
+// pdfMeshKey 区分网格及其输出混合空间
+type pdfMeshKey struct {
+	mesh       *pdfgo.MeshGradient
+	space      *pdfgo.ColorSpace
+	conversion pdfgo.ColorConversion
+	softMask   bool
+}
+
+// pdfLinearMeshKey 定位源网格中需分段展开的三角形，不包含输出变换
+type pdfLinearMeshKey struct {
+	mesh  *pdfgo.MeshGradient
+	index int
 }
 
 // pdfICCTransfer 检查OFD可原生表达的ICC模型与单位分量范围
@@ -682,16 +693,16 @@ func (c *pdfCompositor) gradient(paint pdfgo.Paint, space *pdfgo.ColorSpace, nod
 						weight *= alpha
 					}
 					for i, value := range values {
-						pixel.values[i] += value * weight
+						pixel.Values[i] += value * weight
 					}
-					pixel.shape += weight
+					pixel.Shape += weight
 				}
 			}
-			if pixel.shape != 0 {
-				for i := range pixel.values {
-					pixel.values[i] /= pixel.shape
+			if pixel.Shape != 0 {
+				for i := range pixel.Values {
+					pixel.Values[i] /= pixel.Shape
 				}
-				pixel.shape /= samples * samples
+				pixel.Shape /= samples * samples
 			}
 		}
 	}
@@ -865,4 +876,185 @@ func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box, intent pdfgo.Name) 
 	color.Value = ""
 	color.AxialShd = shading
 	return color, nil
+}
+
+// linearMeshTriangles 在单页内复用只读分区，固定布局计量内存并丢弃超预算缓存
+// 入参: mesh 源网格, index 源三角形索引
+// 返回: []pdfgo.MeshTriangle 只读分区结果, error 转换或取消错误
+func (p *pdfImporter) linearMeshTriangles(mesh *pdfgo.MeshGradient, index int) ([]pdfgo.MeshTriangle, error) {
+	if err := p.ctx.Err(); err != nil {
+		return nil, err
+	}
+	cache := p.compositingCache()
+	if cache.linearMeshes == nil {
+		cache.linearMeshes = &renderCache[pdfLinearMeshKey, []pdfgo.MeshTriangle]{limit: 8 << 20}
+	}
+	key := pdfLinearMeshKey{mesh: mesh, index: index}
+	if triangles, ok := cache.linearMeshes.get(key); ok {
+		return triangles, nil
+	}
+	triangles, err := mesh.LinearTrianglesContext(p.ctx, index)
+	if err != nil {
+		return nil, err
+	}
+	if len(triangles) > (cache.linearMeshes.limit-64)/216 {
+		return triangles, nil
+	}
+	stored := make([]pdfgo.MeshTriangle, len(triangles))
+	colors := make([][3][4]float64, len(triangles))
+	for i, triangle := range triangles {
+		if err := p.ctx.Err(); err != nil {
+			return nil, err
+		}
+		stored[i].Points = triangle.Points
+		for j, values := range triangle.Colors {
+			copy(colors[i][j][:], values)
+			stored[i].Colors[j] = colors[i][j][:len(values):len(values)]
+		}
+	}
+	if err := p.ctx.Err(); err != nil {
+		return nil, err
+	}
+	cache.linearMeshes.put(key, stored, 64+len(stored)*216)
+	return stored, nil
+}
+
+// meshColor 将线性三角网格映射为OFD高洛德渐变，保留顶点和覆盖顺序
+// 入参: paint PDF网格画刷, box 对象边界
+// 返回: *FillColor OFD渐变, error 不可线性表达的颜色或坐标错误
+func (p *pdfImporter) meshColor(paint pdfgo.Paint, box Box) (*FillColor, error) {
+	if err := p.gradientError(paint); err != nil {
+		return nil, err
+	}
+	mesh := paint.Mesh
+	matrix := p.matrix.Mul(mesh.Matrix)
+	shading := &GouraudShd{}
+	icc := ""
+	if pdfICCTransfer(mesh.Space) {
+		var err error
+		icc, err = p.iccColorSpace(mesh.Space, mesh.Intent)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var previous pdfgo.MeshTriangle
+	var previousColors [3][4]float64
+	var colors [3][4]float64
+	for i := range previous.Colors {
+		previous.Colors[i] = previousColors[i][:mesh.Space.Components()]
+	}
+	for index, triangle := range mesh.Triangles {
+		if err := p.ctx.Err(); err != nil {
+			return nil, err
+		}
+		var err error
+		colors, err = mesh.LinearColors(index)
+		var triangles []pdfgo.MeshTriangle
+		if err != nil {
+			triangles, err = p.linearMeshTriangles(mesh, index)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			for i := range triangle.Colors {
+				triangle.Colors[i] = colors[i][:mesh.Space.Components()]
+			}
+			triangles = []pdfgo.MeshTriangle{triangle}
+		}
+		for _, triangle := range triangles {
+			if err := p.ctx.Err(); err != nil {
+				return nil, err
+			}
+			first, flag := 0, 0
+			if len(shading.Point) > 0 {
+				flag = codecpdf.MeshEdge(previous, triangle)
+				if flag != 0 {
+					first = 2
+				}
+			}
+			for i := first; i < len(triangle.Points); i++ {
+				point := triangle.Points[i]
+				point = matrix.Apply(point)
+				if !finite(point.X) || !finite(point.Y) {
+					return nil, fmt.Errorf("nonfinite mesh vertex")
+				}
+				values := triangle.Colors[i]
+				if icc != "" {
+					value, err := pdfICCValues(values, mesh.Space.Components())
+					if err != nil {
+						return nil, err
+					}
+					shading.Point = append(shading.Point, ShdPoint{X: point.X - box.X, Y: point.Y - box.Y, EdgeFlag: flag, Color: ShdColor{Value: value, ColorSpace: icc}})
+					continue
+				}
+				rgb, err := mesh.Space.SRGB(values[:mesh.Space.Components()], mesh.Intent)
+				if err != nil {
+					return nil, err
+				}
+				color := pdfgo.Paint{RGB: rgb, Alpha: 1}
+				if mesh.Space.Model == "DeviceCMYK" && !mesh.Space.Calibrated() {
+					color.CMYK = (*[4]float64)(values)
+				}
+				converted, err := p.color(color, mesh.Intent)
+				if err != nil {
+					return nil, err
+				}
+				shading.Point = append(shading.Point, ShdPoint{X: point.X - box.X, Y: point.Y - box.Y, EdgeFlag: flag, Color: ShdColor{Value: converted.Value, ColorSpace: converted.ColorSpace}})
+			}
+			previous.Points = triangle.Points
+			for i := range previous.Colors {
+				copy(previous.Colors[i], triangle.Colors[i])
+			}
+		}
+	}
+	if mesh.Background != nil {
+		background, err := p.gradientBackgroundColor(*mesh.Background, mesh.Space, mesh.Intent)
+		if err != nil {
+			return nil, err
+		}
+		shading.Extend, shading.BackColor = 1, &background
+	}
+	alpha := int(math.Round(paint.Alpha * 255))
+	color := &FillColor{Alpha: &alpha}
+	color.GouraudShd = shading
+	return color, nil
+}
+
+// mesh 复用页内网格及当前块采样结果，不缓存失败结果
+// 入参: mesh 原曲面, space 输出混合空间, conversion 设备转换函数
+// 返回: []pdfShadingPixel 颜色及覆盖, error 几何、颜色或取消错误
+func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, conversion pdfgo.ColorConversion) ([]pdfShadingPixel, error) {
+	if err := c.importer.ctx.Err(); err != nil {
+		return nil, err
+	}
+	key := pdfMeshKey{mesh, space, conversion, c.softMask}
+	if pixels, ok := c.meshes[key]; ok {
+		return pixels, nil
+	}
+	converter, err := space.PrepareConversion(mesh.Space, mesh.Intent, conversion)
+	if err != nil {
+		return nil, err
+	}
+	triangles, ok := c.cache.meshes[mesh]
+	if !ok {
+		var err error
+		triangles, err = codecpdf.MeshTriangles(c.importer.ctx, mesh, c.importer.matrix, c.importer.rasterDPI)
+		if err != nil {
+			return nil, err
+		}
+		if c.cache.meshes == nil {
+			c.cache.meshes = map[*pdfgo.MeshGradient][]codecpdf.MeshTriangle{}
+		}
+		c.cache.meshes[mesh] = triangles
+	}
+	options := codecpdf.MeshRasterOptions{Matrix: c.importer.matrix, Origin: pdfgo.Point{X: c.box.X, Y: c.box.Y}, DPI: c.importer.rasterDPI, Width: c.width, Height: c.height, Workers: conversionWorkers(c.importer.ctx, 4), SoftMask: c.softMask}
+	pixels, err := codecpdf.MeshPixels(c.importer.ctx, mesh, triangles, space, converter, options)
+	if err != nil {
+		return nil, err
+	}
+	if c.meshes == nil {
+		c.meshes = map[pdfMeshKey][]pdfShadingPixel{}
+	}
+	c.meshes[key] = pixels
+	return pixels, nil
 }

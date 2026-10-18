@@ -171,7 +171,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 			if stroke {
 				color, overprint = path.Style.Stroke, path.Style.StrokeOverprint
 			}
-			if color.Tiling != nil || color.Shading != nil || color.Axial != nil || color.Radial != nil || color.Function != nil || color.Mesh != nil || overprint && pdfOverprintNeedsSeparation(color) {
+			if color.Tiling != nil || color.Shading != nil || color.Axial != nil || color.Radial != nil || color.Function != nil || color.Mesh != nil || overprint && codecpdf.OverprintNeedsSeparation(color) {
 				return fmt.Errorf("%w: patterned or overprinted group content", errPDFGroupRaster)
 			}
 			if color.Alpha == 0 {

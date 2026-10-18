@@ -340,3 +340,18 @@ func PaintChannels(values [4]float64, compatible bool, marked *[4]bool) [4]bool 
 	}
 	return channels
 }
+
+// OpaqueBlack 判断不受底层分色影响的全黑设备色
+// 入参: paint PDF颜色与不透明度
+// 返回: bool 是否为不透明全黑CMYK颜色
+func OpaqueBlack(paint pdfgo.Paint) bool {
+	return paint.Alpha == 1 && paint.CMYK != nil && paint.CMYK[3] == 1
+}
+
+// OverprintNeedsSeparation 判断彩色CMYK套印是否依赖分色输出
+// 入参: paint PDF颜色与不透明度
+// 返回: bool 是否需要保留分色语义
+func OverprintNeedsSeparation(paint pdfgo.Paint) bool {
+	_, process := paint.Process.CMYKMask()
+	return (paint.CMYK != nil || process) && !OpaqueBlack(paint)
+}
