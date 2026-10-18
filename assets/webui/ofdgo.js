@@ -52,6 +52,8 @@ const state = {
 	wasmRecovering: false,
 	wasmRecoveries: 0,
 	exporting: false,
+	saving: false,
+	saveRequestID: 0,
 	signing: false,
 	signCanceled: false,
 	exportRequestID: 0,
@@ -61,6 +63,8 @@ const state = {
 	editorInfo: null,
 	editorViews: new Map(),
 	savedRevision: null,
+	saveHandle: null,
+	saveStamp: null,
 	packageDirty: false,
 	encryptionDirty: false,
 	insertObject: null,
@@ -428,6 +432,7 @@ const el = {
 	pageStatus: document.querySelector("#pageStatus"),
 	pageCancel: document.querySelector("#pageCancel"),
 	saveButton: document.querySelector("#saveButton"),
+	saveAsButton: document.querySelector("#saveAsButton"),
 	createPanel: document.querySelector("#createPanel"),
 	createMode: document.querySelector("#createMode"),
 	createImages: document.querySelector("#createImages"),
@@ -607,7 +612,7 @@ const annotationFields = Object.fromEntries(["CreateForm", "CreateCancel", "Cont
 el.editorTools.addEventListener("scroll", () => fontPicker.position());
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
-	textControls: [el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.fontInput, document.querySelector("#textReflow")],
+	textControls: [el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.saveAsButton, el.fontInput, document.querySelector("#textReflow")],
 	keepTextFocus: () => fontPicker.open || el.closePanel.open || canvasEditor.input?.fontDialog,
 	textClipboardScope: () => `${state.wasmSeq}:${state.fileName}:${state.doc?.documents?.[state.doc.documentIndex || 0]?.root}:${state.doc?.documentIndex || 0}:${state.doc?.documentVersion || ""}`,
 	busy: () => document.body.hasAttribute("data-busy"),
@@ -1475,7 +1480,8 @@ el.insertCancel.addEventListener("click", () => el.insertPanel.close());
 el.insertPanel.addEventListener("close", () => { state.insertObject = null; });
 el.insertForm.addEventListener("submit", insertObject);
 el.textFontAdd.addEventListener("click", () => openFontFile(el.fontInput));
-el.saveButton.addEventListener("click", () => exportFile(true, null, "ofd"));
+el.saveButton.addEventListener("click", () => exportFile(true, null, "ofd", false));
+el.saveAsButton.addEventListener("click", () => exportFile(true, null, "ofd", true));
 editorClick(el.encryptSaveButton, openEncryptionPanel);
 el.signButton.addEventListener("click", () => {
 	if (!state.doc || document.body.hasAttribute("data-busy")) return;
@@ -1744,10 +1750,10 @@ function handleKeyDown(event) {
 	}
 	const key = event.key;
 	const target = event.target;
-	if ((event.ctrlKey || event.metaKey) && !event.shiftKey && key.toLowerCase() === "s" && state.doc
+	if ((event.ctrlKey || event.metaKey) && key.toLowerCase() === "s" && state.doc
 		&& (state.editorInfo || state.ofdBytes)) {
 		event.preventDefault();
-		if (!document.body.hasAttribute("data-busy") && !formDialogOpen()) exportFile(true, null, "ofd");
+		if (!document.body.hasAttribute("data-busy") && !formDialogOpen()) exportFile(true, null, "ofd", event.shiftKey);
 		return;
 	}
 	if ((event.ctrlKey || event.metaKey) && !event.shiftKey && key.toLowerCase() === "a" && state.doc
@@ -2320,20 +2326,24 @@ function setDirty(dirty) {
 }
 
 function discardChanges() {
+	if (state.saving) return false;
 	return !state.dirty || window.confirm("文档尚未保存，放弃更改？");
 }
 
 async function closeFile() {
+	if (state.saving) return;
 	if (!state.doc || state.exporting || batch.unlocking || document.body.hasAttribute("data-busy")) return;
 	let openSeq = state.openSeq;
 	if (state.dirty || canvasEditor.input || canvasEditor.nudge || canvasEditor.nudgeCommit || canvasEditor.crop) {
+		el.closePanel.querySelector('[value="save"]').textContent = state.saveHandle ? "保存" : "另存";
 		el.closePanel.returnValue = "cancel";
 		const choice = new Promise(resolve => el.closePanel.addEventListener("close", () => resolve(el.closePanel.returnValue), { once: true }));
 		el.closePanel.showModal();
 		const action = await choice;
 		if (openSeq !== state.openSeq || action === "cancel") return;
 		if (action === "save") {
-			if (!await exportFile(true, null, "ofd")) return;
+			if (!await exportFile(true, null, "ofd", false)) return;
+			if (state.dirty) return;
 			openSeq = state.openSeq;
 		}
 	}
@@ -2345,6 +2355,8 @@ async function closeFile() {
 	state.ofdBytes = null;
 	state.doc = null;
 	state.fileName = "ofdgo.ofd";
+	state.saveHandle = null;
+	state.saveStamp = null;
 	state.editing = false;
 	state.editorInfo = null;
 	state.savedRevision = null;
@@ -2497,6 +2509,7 @@ function selectManagedVersion(id, focus = false) {
 }
 
 async function changeVersion(action) {
+	if (state.saving) return;
 	const manager = state.versionManagement;
 	if (!state.ready || state.exporting || !state.editing && action !== "select" || !manager?.entries || manager.loading || manager.failed || document.body.hasAttribute("data-busy")) return;
 	const entry = manager.entries.find(entry => entry.id === manager.id);
@@ -2518,6 +2531,7 @@ async function changeVersion(action) {
 }
 
 async function switchReadingVersion(id) {
+	if (state.saving) return;
 	if (!state.doc || state.editing || !state.ready || state.exporting || document.body.hasAttribute("data-busy")) return;
 	if (id === (state.doc.documentVersion || "")) return true;
 	const dirty = state.dirty;
@@ -2556,7 +2570,7 @@ async function switchReadingVersion(id) {
 
 function updateVersionControls() {
 	const manager = state.versionManagement, busy = document.body.hasAttribute("data-busy");
-	const disabled = !state.doc || !state.ready || state.exporting || busy;
+	const disabled = !state.doc || !state.ready || state.exporting || state.saving || busy;
 	const title = state.editing ? "版本管理" : "版本浏览";
 	el.versionManageButton.hidden = !state.editing && !(state.doc?.versionCount > 0);
 	el.versionTitle.textContent = title;
@@ -2691,6 +2705,7 @@ function selectManagedDocument(index, focus = false) {
 }
 
 async function switchDocument(index) {
+	if (state.saving) return;
 	if (!state.doc || document.body.hasAttribute("data-busy") || state.exporting || formDialogOpen()) return;
 	const previous = state.doc.documentIndex || 0;
 	if (index === previous) return;
@@ -2819,6 +2834,7 @@ function confirmTextReflow(item) {
 }
 
 function openCreatePanel(insert = false, packageDocument = false) {
+	if (state.saving && insert !== true) return;
 	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
@@ -2912,6 +2928,8 @@ async function createDocument(event) {
 		setPan(false);
 		state.ofdBytes = null;
 		state.fileName = `${title.replace(/[\\/:*?"<>|]+/g, "_").replace(/\.ofd$/i, "")}.ofd`;
+		state.saveHandle = null;
+		state.saveStamp = null;
 		state.conversionWarnings = [];
 		state.savedRevision = null;
 		state.packageDirty = false;
@@ -4112,7 +4130,17 @@ function releasePageResources() {
 }
 
 async function openOFDFile() {
+	if (state.saving) return;
 	if (document.body.hasAttribute("data-busy")) {
+		return;
+	}
+	if (!nativeHost && window.showOpenFilePicker) {
+		try {
+			const [handle] = await window.showOpenFilePicker({types: [{description: "OFD、PDF", accept: {"application/ofd": [".ofd"], "application/pdf": [".pdf"]}}]});
+			const file = await handle.getFile();
+			await requestLocalFontsBeforeOpen();
+			await openOFD(file, null, handle);
+		} catch (error) { if (error.name !== "AbortError") showError(error, !state.doc); }
 		return;
 	}
 	await requestLocalFontsBeforeOpen();
@@ -4139,11 +4167,12 @@ async function openOFDFromDrop(event) {
 		setStatus("一次拖入一个文件");
 		return;
 	}
+	const handlePromise = event.dataTransfer.items[0]?.getAsFileSystemHandle?.();
 	const file = event.dataTransfer.files[0];
 	if (file && isDocumentFile(file)) {
 		await requestLocalFontsBeforeOpen();
 	}
-	await openOFD(file);
+	await openOFD(file, null, await handlePromise?.catch(() => null));
 }
 
 function openFontFile(input) {
@@ -4249,7 +4278,7 @@ async function boot() {
 					return;
 				}
 				opening = opening.then(async () => {
-					await openOFD(await files[0].getFile());
+					await openOFD(await files[0].getFile(), null, files[0]);
 				}).catch((err) => showError(err, !state.doc));
 			});
 		}
@@ -4557,11 +4586,15 @@ async function loadWASM() {
 					else setProgress("正在生成文档", null);
 				}
 			} else if (data.type === "export") {
+				if (data.id === state.saveRequestID && state.saving && !state.exporting) {
+					if (data.stage === "save") el.cancelExportButton.disabled = true;
+					return;
+				}
 				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.exporting) {
 					if (data.stage === "save") {
 						el.cancelExportButton.disabled = true;
 						if (state.signing) el.signCancel.disabled = true;
-						setProgress("正在保存文件", null);
+						setProgress("正在写入文件", null);
 					} else if (!el.cancelExportButton.disabled) {
 						if (data.stage === "prepare") {
 							const label = { snapshot: "正在准备文档", ids: "正在检查标识", commit: "正在整理文档", fonts: "正在处理字体", pages: "正在处理页面", references: "正在检查引用", resources: "正在整理资源", compress: "正在压缩文件", write: "正在写入文件", sign: "正在签署文档", encrypt: "正在加密文档" }[data.phase];
@@ -4600,6 +4633,7 @@ async function loadWASM() {
 				} else {
 					const err = new Error(missingGlyphMessage(data.missingGlyphs) || (data.reasonCode === "layoutRequired" ? "跨段或换行修改需先设置段落排版" : data.error));
 					err.code = data.code;
+					if (data.errorName) err.name = data.errorName;
 					err.missingGlyphs = data.missingGlyphs;
 					if (data.canceled) {
 						err.name = "AbortError";
@@ -4729,7 +4763,8 @@ async function downloadRemoteDocument(options) {
 	}
 }
 
-async function openOFD(file, remote = null) {
+async function openOFD(file, remote = null, handle = file?.handle) {
+	if (state.saving) return;
 	if (!file) {
 		return;
 	}
@@ -4785,6 +4820,8 @@ async function openOFD(file, remote = null) {
 		const doc = convertedDoc || await openWithCredentials(await fontManager.files(fontManager.userFonts), openSeq, bytes);
 		if (openSeq !== state.openSeq) return;
 		state.ofdBytes = bytes;
+		state.saveHandle = format === "ofd" && !remote ? handle || null : null;
+		state.saveStamp = state.saveHandle && !nativeHost ? {size: file.size, modified: file.lastModified} : null;
 		state.conversionWarnings = warnings;
 		state.fileName = (name || "ofdgo.ofd").replace(/\.pdf$/i, ".ofd");
 		if (remote && !/\.ofd$/i.test(state.fileName)) state.fileName += ".ofd";
@@ -6712,11 +6749,11 @@ async function commitInvoice(draft, request) {
 	const key = invoicePanel.key;
 	settings.busy = true;
 	settingsElements.Form.inert = true;
-	settingsElements.Status.textContent = "正在保存修改";
+	settingsElements.Status.textContent = "正在应用修改";
 	try {
 		invoicePanel.result = null;
 		if (!await changeDocument("ofdgoChangeInvoice", null, JSON.stringify({ ...draft.scope, source: draft.entry?.source, index: draft.entry?.index || 0, digest: draft.detail.digest, ...request }))) {
-			if (settingsElements.Status.textContent === "正在保存修改") settingsElements.Status.textContent = el.statusText.textContent;
+			if (settingsElements.Status.textContent === "正在应用修改") settingsElements.Status.textContent = el.statusText.textContent;
 			return;
 		}
 		const result = invoicePanel.result;
@@ -6742,7 +6779,7 @@ async function commitInvoice(draft, request) {
 		await loadDocumentSettings();
 		const warning = invoiceIssues(result?.issues).replaceAll("\n", " · ");
 		if (warning) {
-			const status = "已保存 · " + warning;
+			const status = "已应用 · " + warning;
 			if (invoiceCurrent()) invoiceCurrent().status = status;
 			settingsElements.Status.textContent = status;
 		}
@@ -6861,11 +6898,11 @@ async function commitSettings(name, ...args) {
 	const pending = settings.drafts.get(settings.view), baseline = settings.baseline;
 	settings.busy = true;
 	settingsElements.Form.inert = true;
-	settingsElements.Status.textContent = "正在保存修改";
+	settingsElements.Status.textContent = "正在应用修改";
 	const view = settings.view, focus = document.activeElement?.id, body = document.querySelector("#settingsBody"), scroll = body?.scrollTop || 0;
 	try {
 		if (!await changeDocument(name, null, ...args)) {
-			if (settingsElements.Status.textContent === "正在保存修改") settingsElements.Status.textContent = el.statusText.textContent;
+			if (settingsElements.Status.textContent === "正在应用修改") settingsElements.Status.textContent = el.statusText.textContent;
 			return false;
 		}
 		settings.drafts.delete(view);
@@ -7803,6 +7840,7 @@ function updateEncryptionType() {
 }
 
 async function applyEncryption(event) {
+	if (state.saving) { event.preventDefault(); return; }
 	event.preventDefault();
 	if (!state.doc || document.body.hasAttribute("data-busy") || el.encryptionSubmit.disabled) return;
 	const mode = el.encryptionType.value;
@@ -7884,7 +7922,7 @@ function renderSecurity() {
 	el.securitySchemeRow.hidden = !encryption?.encrypted;
 	el.securityMethod.textContent = scheme ? "SM4-CBC" : "";
 	el.securityMethodRow.hidden = !encryption?.encrypted || !scheme;
-	el.encryptSaveButton.disabled = !state.doc || !state.ready || state.exporting || document.body.hasAttribute("data-busy");
+	el.encryptSaveButton.disabled = !state.doc || !state.ready || state.exporting || state.saving || document.body.hasAttribute("data-busy");
 	el.verifyButton.disabled = el.encryptSaveButton.disabled;
 	el.signButton.disabled = el.encryptSaveButton.disabled;
 }
@@ -8034,6 +8072,7 @@ function updateSignPlacement() {
 }
 
 async function signDocument(event) {
+	if (state.saving) { event.preventDefault(); return; }
 	event.preventDefault();
 	if (!state.doc || document.body.hasAttribute("data-busy")) return;
 	if (!el.signCertificate.files?.length || !el.signKey.files?.length || !el.signRoots.files?.length) {
@@ -8587,8 +8626,8 @@ function compressionOptions(value) {
 	return preset > 2 ? { mode: 2, level: preset - 2 } : { mode: preset };
 }
 
-async function exportFile(whole, indices = null, value = el.exportFormat.value) {
-	if (!state.doc || document.body.hasAttribute("data-busy")) {
+async function exportFile(whole, indices = null, value = el.exportFormat.value, saveAs = true) {
+	if (!state.doc || state.saving || state.exporting || document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	const saving = value === "ofd";
@@ -8608,14 +8647,36 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 	const mime = archive ? "application/zip" : format.mime;
 	let openSeq = state.openSeq;
 	const fileName = saving && indices !== null ? `${baseFileName()}_选页.ofd` : whole ? `${baseFileName()}.${extension}` : pageFileName(extension);
+	const wasmSeq = state.wasmSeq;
 	const pageIndex = state.pageIndex;
 	const dpi = exportFormatUsesDPI(format.value) ? currentImageDPI() : 0;
-	const status = saving ? "正在保存文档" : whole ? STATUS.exporting : STATUS.pageExporting;
+	let action = saving ? saveAs || !state.saveHandle || indices !== null ? "另存" : "保存" : "导出";
+	const status = saving ? `正在${action}文档` : whole ? STATUS.exporting : STATUS.pageExporting;
+	let retrySaveAs = false;
+	let background = false;
+	let savedRevision = null;
+	let snapshotPrepared = false;
 	state.exporting = true;
+	state.saving = saving && indices === null;
 	updateControls();
 	setBusy(true, "正在生成文件", null, status);
 	try {
-		const file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({
+		let file = saving && indices === null && !saveAs ? state.saveHandle : null;
+		if (file && !nativeHost) {
+			try {
+				const permission = await file.queryPermission({mode: "readwrite"});
+				if (permission !== "granted" && await file.requestPermission({mode: "readwrite"}) !== "granted") file = null;
+			} catch (error) {
+				if (!["NotAllowedError", "SecurityError"].includes(error.name)) throw error;
+				file = null;
+			}
+			if (file && state.saveStamp) {
+				const current = await file.getFile();
+				if (current.size !== state.saveStamp.size || current.lastModified !== state.saveStamp.modified) throw new Error("文件已被修改，请另存");
+			}
+		}
+		if (saving && !file) action = "另存";
+		file ||= nativeHost || window.showSaveFilePicker ? await saveFilePicker({
 			suggestedName: fileName,
 			types: [{ description: label, accept: { [mime]: [`.${extension}`] } }],
 		}) : null;
@@ -8631,34 +8692,63 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 			setBusy(true, "正在生成文件", null, status);
 		}
 		const readingSave = saving && !state.editorInfo && indices === null && compression.mode === 0;
+		const destination = !nativeHost && file && file === state.saveHandle && state.saveStamp ? {fileHandle: file, saveStamp: state.saveStamp} : file;
+		if (saving && indices === null && !readingSave) {
+			snapshotPrepared = true;
+			await callWASM("ofdgoPrepareSave");
+			savedRevision = state.editorInfo?.revision;
+			background = true;
+			state.exporting = false;
+			setBusy(false);
+			updateControls();
+		}
 		const result = readingSave
 			? { label: "OFD", size: state.ofdBytes.byteLength, mime, blob: state.ofdBytes }
-			: saving ? await callWASM("ofdgoSaveDocument", indices, ...outputOptions, file) : whole
+			: saving ? await callWASM(background ? "ofdgoSaveSnapshot" : "ofdgoSaveDocument", indices, ...outputOptions, destination) : whole
 			? await callWASM("ofdgoExportDocument", format.value, dpi, indices, state.renderBackend, ...outputOptions, file)
 			: await callWASM("ofdgoExportPage", pageIndex, format.value, dpi, state.renderBackend, ...outputOptions, file);
-		if (openSeq !== state.openSeq) {
+		if ((!background && openSeq !== state.openSeq) || wasmSeq !== state.wasmSeq) {
 			return;
 		}
 		if (readingSave && file) {
 			const writer = await file.createWritable();
-			await writer.write(result.blob);
-			await writer.close();
+			try {
+				await writer.write(result.blob);
+				await writer.close();
+			} catch (error) {
+				await writer.abort().catch(() => {});
+				throw error;
+			}
 			delete result.blob;
 		}
 		if (result.blob) {
 			downloadBytes(result.blob, result.mime, fileName);
 		}
-		if (saving && indices === null && state.editorInfo) {
-			state.savedRevision = state.editorInfo.revision;
+		if (saving && indices === null && state.editorInfo && file) {
+			state.savedRevision = background ? savedRevision : state.editorInfo.revision;
 			state.packageDirty = false;
 			state.encryptionDirty = false;
-			setDirty(false);
+			updatePendingChanges();
 		}
-		setStatus(`${result.label}已${saving ? "保存" : "导出"}（${formatBytes(result.size)}）`);
+		if (saving && indices === null && file) {
+			state.saveHandle = file;
+			state.fileName = file.name;
+			state.saveStamp = null;
+			if (!nativeHost) {
+				try {
+					const current = await file.getFile();
+					state.saveStamp = {size: current.size, modified: current.lastModified};
+				} catch { state.saveHandle = null; }
+			}
+			document.title = `${nativeHost ? "OFDGo" : "OFDGo WebUI"} - ${state.fileName}`;
+			el.metaFile.textContent = state.fileName;
+		}
+		setStatus(`${result.label}已${action}（${formatBytes(result.size)}）`);
 		return true;
 	} catch (err) {
-		if (openSeq === state.openSeq) {
-			const canceled = saving ? "保存已取消" : "导出已取消";
+		retrySaveAs = saving && !saveAs && !nativeHost && !!state.saveHandle && ["NotAllowedError", "SecurityError"].includes(err.name);
+		if ((background || openSeq === state.openSeq) && wasmSeq === state.wasmSeq && !retrySaveAs) {
+			const canceled = `${action}已取消`;
 			if (el.batchPagesPanel.open) el.batchPagesStatus.textContent = err.name === "AbortError" ? canceled : err.message;
 			if (err.name === "AbortError") {
 				setStatus(canceled);
@@ -8667,14 +8757,21 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 			}
 		}
 	} finally {
-		state.exporting = false;
-		state.exportRequestID = 0;
-		el.cancelExportButton.hidden = true;
-		if (openSeq === state.openSeq) {
-			setBusy(false);
+		if (snapshotPrepared) await callWASM("ofdgoDiscardSave").catch(() => {});
+		state.saving = false;
+		state.saveRequestID = 0;
+		if (!background) {
+			state.exporting = false;
+			state.exportRequestID = 0;
+		}
+		el.cancelExportButton.hidden = !state.exportRequestID;
+		if (!document.body.hasAttribute("data-busy")) el.progressPanel.hidden = true;
+		if ((background || openSeq === state.openSeq) && wasmSeq === state.wasmSeq) {
+			if (!background) setBusy(false);
 			updateControls();
 		}
 	}
+	if (retrySaveAs && (background || openSeq === state.openSeq) && wasmSeq === state.wasmSeq) return exportFile(whole, indices, value, true);
 }
 
 function cancelExport() {
@@ -8682,7 +8779,8 @@ function cancelExport() {
 		remoteDownload.abort();
 		return;
 	}
-	if (!state.exportRequestID || el.cancelExportButton.disabled) {
+	const requestID = state.exportRequestID || state.saveRequestID;
+	if (!requestID || el.cancelExportButton.disabled) {
 		return;
 	}
 	el.cancelExportButton.disabled = true;
@@ -8694,7 +8792,7 @@ function cancelExport() {
 		el.importStatus.textContent = "正在取消操作";
 	}
 	setProgress("正在取消操作", null);
-	wasmWorker.postMessage({ type: "cancel", id: state.exportRequestID });
+	wasmWorker.postMessage({ type: "cancel", id: requestID });
 }
 
 function virtualIndex(offsets, top) {
@@ -12023,14 +12121,14 @@ function updateDocumentControls() {
 	const busy = document.body.hasAttribute("data-busy");
 	const disabled = !state.doc || !state.ready || state.exporting || busy;
 	el.documentManageButton.hidden = !state.editing;
-	el.documentManageButton.disabled = disabled;
+	el.documentManageButton.disabled = disabled || state.saving;
 	resourceElements.ManageButton.disabled = disabled;
 	settingsElements.Button.disabled = disabled;
 	updateInvoiceControl(disabled);
 	updateResourceControls();
 	el.documentRow.hidden = !count || !state.editing && count < 2;
-	el.documentSelect.disabled = disabled;
-	const actionsDisabled = disabled || !state.editing || Boolean(manager?.loading || manager?.failed);
+	el.documentSelect.disabled = disabled || state.saving;
+	const actionsDisabled = disabled || state.saving || !state.editing || Boolean(manager?.loading || manager?.failed);
 	el.documentList.inert = busy || Boolean(manager?.loading);
 	el.documentAddButton.disabled = actionsDisabled;
 	el.documentImportButton.disabled = actionsDisabled;
@@ -12045,7 +12143,8 @@ function updateControls() {
 	renderSecurity();
 	updateStructureControls();
 	const hasDoc = Boolean(state.doc);
-	el.closeButton.disabled = !hasDoc || state.exporting || document.body.hasAttribute("data-busy");
+	el.newButton.disabled = state.saving;
+	el.closeButton.disabled = !hasDoc || state.exporting || state.saving || document.body.hasAttribute("data-busy");
 	updateDocumentControls();
 	updateDisplayControls();
 	updateEditorTools();
@@ -12083,7 +12182,8 @@ function updateEditorTools() {
 	el.editorTools.hidden = !state.editing;
 	const pagesDisabled = !state.editing || !state.ready || state.exporting;
 	el.insertTextButton.disabled = el.insertImageButton.disabled = pagesDisabled || !pageCan("insert");
-	el.saveButton.disabled = !state.doc || !state.ready || state.exporting || (!state.editorInfo && !state.ofdBytes);
+	el.saveButton.disabled = !state.doc || !state.ready || state.exporting || state.saving || (!state.editorInfo && !state.ofdBytes);
+	el.saveAsButton.disabled = el.saveButton.disabled;
 	el.addPageButton.disabled = pagesDisabled;
 	const selectedPages = state.editing ? selectedPageIndexes() : [state.pageIndex];
 	const selectionDisabled = pagesDisabled || !selectedPages.length;
@@ -12225,6 +12325,11 @@ async function callWASM(name, ...args) {
 	}
 	return new Promise((resolve, reject) => {
 		const id = ++wasmRequestID;
+		if (name === "ofdgoPrepareSave" || name === "ofdgoSaveSnapshot") {
+			state.saveRequestID = id;
+			el.cancelExportButton.hidden = false;
+			el.cancelExportButton.disabled = false;
+		}
 		if (name === "ofdgoResources" && resourceElements.Panel.open) resourceManager.requestID = id;
 		wasmRequests.set(id, { resolve, reject, openSeq: state.openSeq });
 		if (name === "ofdgoExportMedia") wasmRequests.get(id).mediaID = args[0];
@@ -12264,7 +12369,7 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("data-busy", busy);
-	el.closeButton.disabled = busy || !state.doc || state.exporting;
+	el.closeButton.disabled = busy || !state.doc || state.exporting || state.saving;
 	el.refreshAppButton.disabled = busy;
 	updateStructureControls();
 	updateDocumentControls();
@@ -12296,7 +12401,11 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	el.fontList.inert = busy;
 	el.docFontList.inert = busy;
 	if (!busy) {
-		el.progressPanel.hidden = true;
+		el.progressPanel.hidden = !state.saving;
+		if (state.saving) {
+			el.cancelExportButton.hidden = false;
+			setProgress("正在保存文档", null);
+		}
 		if (state.fontSyncPending) {
 			window.setTimeout(syncUserFonts, 0);
 		}

@@ -451,6 +451,7 @@ func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader) error 
 		next.revision, next.serial = e.revision, e.serial
 		next.OnWriteProgress, next.output = e.OnWriteProgress, e.output
 		next.encryption = e.encryption
+		next.saveTarget = e.saveTarget
 		next.backends, next.fontDirs, next.fontFS = e.backends, e.fontDirs, e.fontFS
 		next.validatedPaths = e.validatedPaths
 		*e = *next

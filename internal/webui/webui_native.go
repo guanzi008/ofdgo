@@ -82,6 +82,7 @@ type NativeEngine struct {
 	CleanupOutput func(context.Context, NativeOutputTarget) error
 	gate          chan struct{}
 	once          sync.Once
+	saves         sync.WaitGroup
 	closed        bool
 }
 
@@ -149,12 +150,32 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 	case <-ctx.Done():
 		return nativeFailure(ctx.Err())
 	}
-	defer func() { <-e.gate }()
+	locked := true
+	defer func() {
+		if locked {
+			<-e.gate
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return nativeFailure(err)
 	}
 	if e.closed {
 		return nativeFailure(fmt.Errorf("native engine is closed"))
+	}
+	if name == "ofdgoSaveSnapshot" {
+		snapshot := e.saveSnapshot
+		e.saveSnapshot = nil
+		if snapshot == nil {
+			return nativeFailure(fmt.Errorf("save snapshot is not prepared"))
+		}
+		output := &NativeEngine{OpenWriter: e.OpenWriter}
+		output.currentEditor = snapshot
+		e.saves.Add(1)
+		defer e.saves.Done()
+		<-e.gate
+		locked = false
+		defer output.Close()
+		return output.Call(ctx, "ofdgoSaveDocument", args, emit)
 	}
 	e.ctx = ctx
 	if e.currentSession != nil {
@@ -219,6 +240,8 @@ func (e *NativeEngine) Close() error {
 	e.gate <- struct{}{}
 	defer func() { <-e.gate }()
 	e.closed = true
+	e.saveSnapshot = nil
+	e.saves.Wait()
 	var err error
 	if e.currentSession != nil {
 		err = e.currentSession.Close()
@@ -728,7 +751,7 @@ func (c *nativeCall) prepare(name string, args []any) ([]any, error) {
 		args = append(args, c.fileCallback(files))
 	}
 	switch name {
-	case "ofdgoResources":
+	case "ofdgoResources", "ofdgoPrepareSave":
 		return append(args, checkpoint), nil
 	case "ofdgoImportPages", "ofdgoImportDocuments", "ofdgoImportImages":
 		return append(args, c.progress("import", "", true)), nil

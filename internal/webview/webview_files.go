@@ -29,18 +29,23 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	basefile "github.com/xiaoqidun/ofdgo/internal/base/file"
 )
 
 // fileEntry 保存窗口授权的文件或目录
 type fileEntry struct {
-	path      string
-	name      string
-	data      []byte
-	file      *os.File
-	stop      func() bool
-	directory bool
-	owned     bool
-	temporary bool
+	path       string
+	name       string
+	data       []byte
+	file       *os.File
+	stop       func() bool
+	directory  bool
+	owned      bool
+	temporary  bool
+	saveTarget *basefile.Target
+	readers    int
+	retired    bool
 }
 
 // fileStore 管理窗口范围内的文件授权和临时数据
@@ -55,12 +60,8 @@ type fileStore struct {
 // fileWriter 在同目录临时文件中保存输出
 type fileWriter struct {
 	id     string
-	mu     sync.Mutex
 	store  *fileStore
-	file   *os.File
-	target string
-	err    error
-	closed bool
+	output *basefile.Writer
 }
 
 // newFileStore 创建独立文件授权表
@@ -124,7 +125,14 @@ func (s *fileStore) add(name string, directory bool) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id := rand.Text()
-	s.entries[id] = &fileEntry{path: name, name: filepath.Base(name), directory: directory}
+	entry := &fileEntry{path: name, name: filepath.Base(name), directory: directory}
+	if !directory {
+		entry.saveTarget, err = basefile.NewTarget(name)
+		if err != nil {
+			return nil, err
+		}
+	}
+	s.entries[id] = entry
 	return s.descriptor(id), nil
 }
 
@@ -161,9 +169,10 @@ func (s *fileStore) file(id string) (map[string]any, error) {
 	if entry == nil || entry.directory {
 		return nil, fmt.Errorf("文件授权无效")
 	}
+	handle := s.descriptor(id)
 	size := int64(len(entry.data))
 	if entry.data == nil {
-		file, err := openReadFile(entry.path)
+		file, err := basefile.Open(entry.path)
 		if err != nil {
 			return nil, err
 		}
@@ -177,7 +186,7 @@ func (s *fileStore) file(id string) (map[string]any, error) {
 		entry = &fileEntry{path: entry.path, name: entry.name, file: file}
 		s.entries[id] = entry
 	}
-	return map[string]any{"nativeFile": id, "name": entry.name, "size": size, "url": "/__native/data/" + id}, nil
+	return map[string]any{"nativeFile": id, "name": entry.name, "size": size, "url": "/__native/data/" + id, "handle": handle}, nil
 }
 
 // resolve 按授权标识读取文件并保持随机读取句柄
@@ -194,7 +203,7 @@ func (s *fileStore) resolve(id string) (io.ReaderAt, int64, error) {
 		return bytes.NewReader(entry.data), int64(len(entry.data)), nil
 	}
 	if entry.file == nil {
-		file, err := openReadFile(entry.path)
+		file, err := basefile.Open(entry.path)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -237,7 +246,27 @@ func (s *fileStore) resource(id string) (io.ReaderAt, int64, func() error, error
 	if entry.data != nil {
 		return bytes.NewReader(entry.data), int64(len(entry.data)), nil, nil
 	}
-	file, err := openReadFile(entry.path)
+	if entry.file != nil && !entry.temporary {
+		info, err := entry.file.Stat()
+		if err != nil {
+			return nil, 0, nil, err
+		}
+		entry.readers++
+		var once sync.Once
+		var closeErr error
+		return entry.file, info.Size(), func() error {
+			once.Do(func() {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				entry.readers--
+				if entry.retired && entry.readers == 0 {
+					closeErr = entry.file.Close()
+				}
+			})
+			return closeErr
+		}, nil
+	}
+	file, err := basefile.Open(entry.path)
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -374,9 +403,9 @@ func (s *fileStore) reserve(id, base, extension string, directory bool) (string,
 }
 
 // begin 创建文件写入事务
-// 入参: id 输出授权标识
+// 入参: ctx 取消上下文, id 输出授权标识
 // 返回: *fileWriter 事务写入器, error 创建错误
-func (s *fileStore) begin(id string) (*fileWriter, error) {
+func (s *fileStore) begin(ctx context.Context, id string) (*fileWriter, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -386,11 +415,18 @@ func (s *fileStore) begin(id string) (*fileWriter, error) {
 	if entry == nil || entry.directory || entry.path == "" {
 		return nil, fmt.Errorf("输出授权无效")
 	}
-	file, err := temporaryFile(filepath.Dir(entry.path), filepath.Base(entry.path)+".")
+	if entry.saveTarget == nil {
+		var err error
+		entry.saveTarget, err = basefile.NewTarget(entry.path)
+		if err != nil {
+			return nil, err
+		}
+	}
+	output, err := entry.saveTarget.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
-	writer := &fileWriter{id: rand.Text(), store: s, file: file, target: entry.path}
+	writer := &fileWriter{id: rand.Text(), store: s, output: output}
 	s.writers[writer.id] = writer
 	return writer, nil
 }
@@ -429,7 +465,8 @@ func (s *fileStore) remove(id, name string, recursive bool) error {
 	defer root.Close()
 	for key, entry := range s.entries {
 		if entry.path == target || recursive && strings.HasPrefix(entry.path, target+string(filepath.Separator)) {
-			if entry.file != nil {
+			entry.retired = true
+			if entry.file != nil && entry.readers == 0 {
 				entry.file.Close()
 			}
 			delete(s.entries, key)
@@ -445,62 +482,21 @@ func (s *fileStore) remove(id, name string, recursive bool) error {
 // 入参: data 输出数据
 // 返回: int 写入字节数, error 写入错误
 func (w *fileWriter) Write(data []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.closed {
-		return 0, os.ErrClosed
-	}
-	if w.err != nil {
-		return 0, w.err
-	}
-	n, err := w.file.Write(data)
-	if err == nil && n != len(data) {
-		err = io.ErrShortWrite
-	}
-	w.err = err
-	return n, err
+	return w.output.Write(data)
 }
 
 // Close 同步并替换目标文件
 // 返回: error 提交错误
 func (w *fileWriter) Close() error {
 	defer w.release()
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.closed {
-		return os.ErrClosed
-	}
-	w.closed = true
-	if w.err != nil {
-		return errors.Join(w.err, w.file.Close(), os.Remove(w.file.Name()))
-	}
-	if err := w.file.Sync(); err != nil {
-		w.file.Close()
-		os.Remove(w.file.Name())
-		return err
-	}
-	if err := w.file.Close(); err != nil {
-		os.Remove(w.file.Name())
-		return err
-	}
-	if err := replaceFile(w.file.Name(), w.target); err != nil {
-		os.Remove(w.file.Name())
-		return err
-	}
-	return nil
+	return w.output.Close()
 }
 
 // Abort 删除未提交的临时输出
 // 返回: error 清理错误
 func (w *fileWriter) Abort() error {
 	defer w.release()
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.closed {
-		return nil
-	}
-	w.closed = true
-	return errors.Join(w.file.Close(), os.Remove(w.file.Name()))
+	return w.output.Abort()
 }
 
 // release 移除已结束的写入事务
@@ -556,9 +552,12 @@ func (s *fileStore) close() error {
 		if entry.stop != nil {
 			entry.stop()
 		}
-		if entry.file != nil {
+		s.mu.Lock()
+		entry.retired = true
+		if entry.file != nil && entry.readers == 0 {
 			err = errors.Join(err, entry.file.Close())
 		}
+		s.mu.Unlock()
 	}
 	return errors.Join(err, os.RemoveAll(s.temporary))
 }

@@ -22,6 +22,7 @@
 					<button id="closeButton" class="icon-button" type="button" title="关闭" disabled><span class="close-icon"></span></button>
 					<button id="newButton" class="icon-button" type="button" title="新建"><span class="new-icon"></span></button>
 					<button id="saveButton" class="icon-button" type="button" title="保存" disabled><span class="save-icon"></span></button>
+					<button id="saveAsButton" class="icon-button" type="button" title="另存" disabled><span class="save-as-icon"></span></button>
 					<button id="editButton" class="icon-button" type="button" title="编辑" data-pressed="false" disabled><span class="edit-icon"></span></button>
 					<button id="convertButton" class="icon-button" type="button" title="转换"><span class="convert-icon"></span></button>
 					<button id="togglePagesButton" class="icon-button" type="button" title="页面栏" data-pressed="true"><span class="pages-icon"></span></button>
@@ -206,7 +207,7 @@
 						<div class="form-row"><label for="convertCompression">压缩</label><select id="convertCompression"><option value="0">原始</option><option value="1">无损</option><option value="2">轻压</option><option value="3">均衡</option><option value="4">强压</option></select></div>
 						<div id="convertFontRow" class="form-row" hidden><label for="convertFontMode">字体</label><select id="convertFontMode"><option value="0">保持</option><option value="1">内嵌</option><option value="2">外部</option></select></div>
 						<div id="convertDPIRow" class="form-row" hidden><label for="convertDPI">精度</label><div class="form-select"><select id="convertDPI"><option value="96">96 DPI</option><option value="150">150 DPI</option><option value="300" selected>300 DPI</option><option value="600">600 DPI</option></select><span id="convertDPIValue">300</span></div></div>
-						<div class="form-row"><label for="convertDestination">保存</label><select id="convertDestination"><option value="directory">目录</option><option value="archive">打包</option></select></div>
+						<div class="form-row"><label for="convertDestination">输出</label><select id="convertDestination"><option value="directory">目录</option><option value="archive">打包</option></select></div>
 						<div class="form-row"><label for="convertParallel">并行</label><input id="convertParallel" type="number" min="1" step="1" placeholder="自动"></div>
 					</div>
 					<button id="convertClose" class="button" type="button">关闭</button><button id="convertCancel" class="button" type="button" hidden>取消</button><button id="convertStart" class="button" type="submit" disabled>转换</button>

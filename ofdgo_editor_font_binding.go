@@ -908,6 +908,7 @@ func (e *Editor) restoreResourceSnapshot(state Editor) {
 	}
 	state.backends, state.fontDirs, state.fontFS = e.backends, e.fontDirs, e.fontFS
 	state.encryption, state.output, state.OnWriteProgress = e.encryption, e.output, e.OnWriteProgress
+	state.saveTarget = e.saveTarget
 	state.fontRenderer, state.fontSourcesCache = nil, nil
 	state.fontMetrics = make(map[string]FontMetrics)
 	*e = state

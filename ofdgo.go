@@ -20,6 +20,8 @@ import (
 	"image"
 	"io"
 	"io/fs"
+
+	basefile "github.com/xiaoqidun/ofdgo/internal/base/file"
 )
 
 // Open 打开OFD文件
@@ -27,14 +29,24 @@ import (
 // 入参: path 文件路径, options 阅读选项
 // 返回: *Reader 阅读器实例, error 错误信息
 func Open(path string, options ...ReaderOption) (*Reader, error) {
-	r, err := zip.OpenReader(path)
+	f, err := basefile.Open(path)
 	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	r, err := zip.NewReader(f, info.Size())
+	if err != nil {
+		f.Close()
 		return nil, err
 	}
 	reader := &Reader{
 		Path:   path,
-		Zip:    &r.Reader,
-		Closer: r,
+		Zip:    r,
+		Closer: f,
 	}
 	if err := reader.open(options); err != nil {
 		reader.Close()

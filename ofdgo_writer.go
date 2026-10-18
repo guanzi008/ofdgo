@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -29,6 +30,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	basefile "github.com/xiaoqidun/ofdgo/internal/base/file"
 )
 
 // editorProgress 编辑与保存阶段的进度回调，nil表示不回报进度
@@ -53,6 +56,141 @@ type ofdXML struct {
 
 // ofdAttrs OFD节点属性
 type ofdAttrs []xml.Attr
+
+// ErrSaveTarget 表示编辑器尚未绑定保存目标
+var ErrSaveTarget = errors.New("save target is not set")
+
+// ErrSaveConflict 表示保存目标在打开或最近保存后被其他操作修改
+var ErrSaveConflict = basefile.ErrChanged
+
+// ErrSaveBusy 表示目标文件正在提交其他写入事务
+var ErrSaveBusy = basefile.ErrBusy
+
+// Snapshot 创建独立编辑快照，完成后可与原编辑器并行使用
+// 创建过程需与原实例串行，保留修订及保存目标，不复制撤销记录和进度回调
+// 原包压缩数据直接复制，快照不依赖原阅读器及文件句柄，内存随快照释放
+// 自定义后端及字体文件系统仍由调用方提供，需支持并行读取
+// 入参: ctx 取消上下文
+// 返回: *Editor 独立快照, error 准备或取消错误
+func (e *Editor) Snapshot(ctx context.Context) (*Editor, error) {
+	reader, err := e.readerContext(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	next := &Reader{files: make(map[string][]byte, len(reader.files)), encryption: reader.encryption, documentIndex: reader.documentIndex, selectedVersion: cloneEditorData(reader.selectedVersion)}
+	if reader.encryption != nil {
+		next.encryption = &encryptionState{info: cloneEditorData(reader.encryption.info), options: cloneEncryptionOptions(reader.encryption.options)}
+	}
+	if reader.Zip != nil {
+		var data bytes.Buffer
+		var count int64
+		archive := zip.NewWriter(convertWriter{context: ctx, writer: &data, count: &count})
+		for _, file := range reader.Zip.File {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if err := archive.Copy(file); err != nil {
+				return nil, err
+			}
+		}
+		if err := archive.Close(); err != nil {
+			return nil, err
+		}
+		next.Zip, err = zip.NewReader(bytes.NewReader(data.Bytes()), int64(data.Len()))
+		if err != nil {
+			return nil, err
+		}
+	}
+	for name, data := range reader.files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		next.files[name] = bytes.Clone(data)
+	}
+	if err := next.initRootContext(ctx); err != nil {
+		return nil, err
+	}
+	snapshot, err := next.EditorContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	snapshot.revision, snapshot.serial, snapshot.saveTarget = e.revision, e.serial, e.saveTarget
+	snapshot.backends, snapshot.fontDirs, snapshot.fontFS = e.backends, slices.Clone(e.fontDirs), slices.Clone(e.fontFS)
+	return snapshot, nil
+}
+
+// SetSavePath 绑定保存目标并记录当前文件状态，不读取或修改编辑内容
+// 绑定已有文件时应在打开后立即调用；空路径解除绑定，调用需与编辑操作串行
+// 入参: name 目标路径
+// 返回: error 路径或文件状态错误
+func (e *Editor) SetSavePath(name string) error {
+	if name == "" {
+		e.saveTarget = nil
+		return nil
+	}
+	target, err := basefile.NewTarget(name)
+	if err != nil {
+		return err
+	}
+	e.saveTarget = target
+	return nil
+}
+
+// SavePath 返回当前保存目标，未绑定时返回空字符串
+// 返回: string 绝对文件路径
+func (e *Editor) SavePath() string {
+	if e.saveTarget == nil {
+		return ""
+	}
+	return e.saveTarget.Name()
+}
+
+// Save 将当前完整文档写回已绑定目标，不改变编辑状态及撤销记录
+// 调用需与编辑操作串行，支持取消；失败保留原文件，成功后可继续编辑和保存
+// 入参: ctx 取消上下文, options 输出配置
+// 返回: int64 输出字节数, error 保存错误
+func (e *Editor) Save(ctx context.Context, options WriteOptions) (int64, error) {
+	if e.saveTarget == nil {
+		return 0, ErrSaveTarget
+	}
+	return e.saveFile(ctx, e.saveTarget, options)
+}
+
+// SaveAs 将完整文档另存，成功后切换保存目标，不改变撤销记录
+// 调用需与编辑操作串行，取消或失败时保持原目标
+// 入参: ctx 取消上下文, name 目标路径, options 输出配置
+// 返回: int64 输出字节数, error 保存错误
+func (e *Editor) SaveAs(ctx context.Context, name string, options WriteOptions) (int64, error) {
+	target, err := basefile.NewTarget(name)
+	if err != nil {
+		return 0, err
+	}
+	if e.saveTarget != nil && target.Name() == e.saveTarget.Name() {
+		target = e.saveTarget
+	}
+	n, err := e.saveFile(ctx, target, options)
+	if err == nil {
+		e.saveTarget = target
+	}
+	return n, err
+}
+
+// saveFile 使用共用文件事务提交文档
+// 入参: ctx 取消上下文, target 保存目标, options 输出配置
+// 返回: int64 输出字节数, error 保存错误
+func (e *Editor) saveFile(ctx context.Context, target *basefile.Target, options WriteOptions) (int64, error) {
+	writer, err := target.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer writer.Abort()
+	n, err := e.WriteToWithOptions(ctx, writer, options)
+	if err != nil {
+		return n, err
+	}
+	return n, writer.Close()
+}
 
 // WriteTo 逐个条目写出OFD，不关闭调用方输出流，出错时应丢弃本次输出
 // 新增资源仅写入实际引用的部分，静态TrueType轮廓字体按实际文字生成子集

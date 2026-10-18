@@ -27,6 +27,7 @@ export function directoryPicker() {
 class NativeFile {
 	constructor(value) {
 		Object.assign(this, value);
+		if (value.handle) this.handle = new NativeHandle(nativeHost, value.handle);
 		this.byteLength = this.size;
 		this.type ||= "application/octet-stream";
 		if (value.temporary) nativeHost?.resources?.register(this, value.nativeFile);
@@ -157,7 +158,7 @@ class NativeHost {
 				if (data.type === "font") return;
 				const controller = new AbortController();
 				requests.set(data.id, controller);
-				pending = pending.then(async () => {
+				const operation = pending.then(async () => {
 					const engine = await ready;
 					if (closed) return;
 					controller.signal.throwIfAborted();
@@ -188,6 +189,7 @@ class NativeHost {
 					if (closed) { await host.release(result); return; }
 					emit({id:data.id, ...decoded});
 				}).catch(error => emit({id:data.id, ok:false, error:error.message, code:error.code, canceled:error.name === "AbortError"})).finally(() => requests.delete(data.id));
+				if (data.name !== "ofdgoSaveSnapshot") pending = operation;
 			},
 			terminate() {
 				if (closed) return;

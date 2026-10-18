@@ -15,67 +15,12 @@
 package webview
 
 import (
-	"os"
-	"path/filepath"
-	"strings"
 	"syscall"
 	"unsafe"
 )
 
-// replaceFileProc 保留目标文件属性并替换文件内容
-var replaceFileProc = syscall.NewLazyDLL("kernel32.dll").NewProc("ReplaceFileW")
-
 // memoryStatusProc 查询系统物理内存和提交额度
 var memoryStatusProc = syscall.NewLazyDLL("kernel32.dll").NewProc("GlobalMemoryStatusEx")
-
-// openReadFile 允许原子替换路径，同时保持已有读取句柄有效
-func openReadFile(name string) (*os.File, error) {
-	path, err := nativeFilePath(name)
-	if err != nil {
-		return nil, &os.PathError{Op: "open", Path: name, Err: err}
-	}
-	handle, err := syscall.CreateFile(path, syscall.GENERIC_READ, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE, nil, syscall.OPEN_EXISTING, syscall.FILE_ATTRIBUTE_NORMAL, 0)
-	if err != nil {
-		return nil, &os.PathError{Op: "open", Path: name, Err: err}
-	}
-	return os.NewFile(uintptr(handle), name), nil
-}
-
-// replaceFile 替换已有文件，目标不存在时直接重命名
-func replaceFile(source, target string) error {
-	from, err := nativeFilePath(source)
-	if err != nil {
-		return err
-	}
-	to, err := nativeFilePath(target)
-	if err != nil {
-		return err
-	}
-	result, _, err := replaceFileProc.Call(uintptr(unsafe.Pointer(to)), uintptr(unsafe.Pointer(from)), 0, 0, 0, 0)
-	if result != 0 {
-		return nil
-	}
-	if err == syscall.ERROR_FILE_NOT_FOUND {
-		return os.Rename(source, target)
-	}
-	return &os.LinkError{Op: "replace", Old: source, New: target, Err: err}
-}
-
-// nativeFilePath 转换绝对路径并支持长路径与网络共享
-func nativeFilePath(name string) (*uint16, error) {
-	path, err := filepath.Abs(name)
-	if err != nil {
-		return nil, err
-	}
-	if !strings.HasPrefix(path, `\\?\`) {
-		if strings.HasPrefix(path, `\\`) {
-			path = `\\?\UNC\` + path[2:]
-		} else {
-			path = `\\?\` + path
-		}
-	}
-	return syscall.UTF16PtrFromString(path)
-}
 
 // fontNameLanguage 获取系统显示语言对应的OpenType名称表标识
 // 返回: uint16 名称表平台标识, uint16 系统显示语言标识

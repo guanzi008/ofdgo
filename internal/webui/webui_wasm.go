@@ -56,6 +56,8 @@ func RunWASM() {
 		"ofdgoImportPages":      true,
 		"ofdgoImportDocuments":  true,
 		"ofdgoSaveDocument":     true,
+		"ofdgoPrepareSave":      true,
+		"ofdgoSaveSnapshot":     true,
 		"ofdgoSetEncryption":    true,
 		"ofdgoSaveSigned":       true,
 	}

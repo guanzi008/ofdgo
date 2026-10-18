@@ -35,7 +35,11 @@ self.onmessage = ({ data }) => {
 		operations.get(data.id)?.abort();
 		return;
 	}
-	if (data.name === "ofdgoResources") operations.set(data.id, new AbortController());
+	if (["ofdgoResources", "ofdgoPrepareSave", "ofdgoSaveSnapshot"].includes(data.name)) operations.set(data.id, new AbortController());
+	if (data.name === "ofdgoSaveSnapshot") {
+		pending = pending.then(() => { void handleMessage(data); });
+		return;
+	}
 	if (data.name === "ofdgoImportDocuments" || data.name === "ofdgoImportImages" || data.name === "ofdgoExportImages" || data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" || data.name === "ofdgoConvertPDF" || data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoExportResource" || data.name === "ofdgoExportMedia" || data.name === "ofdgoExportVersion" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoSaveSigned" || data.name === "ofdgoImportPages") {
 		operations.set(data.id, new AbortController());
 	}
@@ -173,12 +177,14 @@ async function handleBatchMessage({ id, name, args }) {
 }
 async function handleMessage({ id, name, args }) {
 	let output;
+	let saveFile;
+	let saveStamp;
 	let channel;
 	const signal = operations.get(id)?.signal;
 	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages" || name === "ofdgoImportDocuments";
 	const converting = name === "ofdgoConvertPDF";
-	const saving = name === "ofdgoSaveDocument" || name === "ofdgoSaveSigned";
-	const resources = name === "ofdgoResources";
+	const saving = name === "ofdgoSaveDocument" || name === "ofdgoSaveSnapshot" || name === "ofdgoSaveSigned";
+	const resources = name === "ofdgoResources" || name === "ofdgoPrepareSave";
 	const key = name === "ofdgoOpen" ? args[3]?.key : name === "ofdgoSaveSigned" || name === "ofdgoLoadImport" ? args[1]?.key : null;
 	const keyPassword = name === "ofdgoOpen" ? args[3]?.keyPassword : name === "ofdgoSaveSigned" || name === "ofdgoLoadImport" ? args[1]?.keyPassword : null;
 	const password = converting ? args[2] : name === "ofdgoSetEncryption" ? args[0]?.password : name === "ofdgoOpen" ? args[3]?.password : name === "ofdgoLoadImport" ? args[1]?.password : null;
@@ -230,7 +236,10 @@ async function handleMessage({ id, name, args }) {
 				});
 				if (converting) args.push((name, done) => requestFont(id, signal, name, done));
 			} else {
-				const file = args.pop();
+				const destination = args.pop();
+				const file = destination?.fileHandle || destination;
+				saveFile = file;
+				saveStamp = destination?.saveStamp;
 				const compression = saving && name !== "ofdgoSaveSigned" && args.at(-1)?.mode !== undefined ? args.pop() : null;
 				const indices = saving ? args.shift() : null;
 				if (file) output = await file.createWritable();
@@ -263,7 +272,7 @@ async function handleMessage({ id, name, args }) {
 						self.postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
 						finish(done);
 					});
-					if (compression) args.push(indices, compression, done => finish(done));
+					if (compression || name === "ofdgoSaveSnapshot") args.push(indices, compression || {mode: 0}, done => finish(done));
 					else if (indices != null) args.push(indices);
 				}
 				if (!saving && args.some(value => value?.mode !== undefined)) args.push(done => finish(done));
@@ -277,6 +286,10 @@ async function handleMessage({ id, name, args }) {
 			result.data.size = size;
 			if (name !== "ofdgoExportMedia") self.postMessage({ id, type: "export", stage: "save" });
 			if (output) {
+				if (saveStamp) {
+					const current = await saveFile.getFile();
+					if (current.size !== saveStamp.size || current.lastModified !== saveStamp.modified) throw new Error("文件已被修改，请另存");
+				}
 				await output.close();
 			} else {
 				result.data.blob = new Blob(chunks, { type: result.data.mime });
@@ -289,7 +302,7 @@ async function handleMessage({ id, name, args }) {
 		self.postMessage({ id, ...result }, transfer);
 	} catch (err) {
 		await output?.abort().catch(() => {});
-		const result = { id, ok: false, error: err.message };
+		const result = { id, ok: false, error: err.message, errorName: err.name };
 		if (signal?.aborted) {
 			result.error = resources ? "查询已取消" : importing ? "导入已取消" : converting ? "转换已取消" : "导出已取消";
 			result.canceled = true;

@@ -171,6 +171,7 @@ func (e *Editor) restoreTransaction(state Editor) {
 	state.fontSourcesCache = e.fontSourcesCache
 	state.validatedPaths = e.validatedPaths
 	state.encryption, state.output, state.OnWriteProgress = e.encryption, e.output, e.OnWriteProgress
+	state.saveTarget = e.saveTarget
 	*e = state
 }
 

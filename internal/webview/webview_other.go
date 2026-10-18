@@ -16,20 +16,8 @@
 
 package webview
 
-import "os"
-
 // conversionMemory 未提供系统内存探测时仅按并行数调度
 var conversionMemory func() int64
-
-// openReadFile 打开独立读取句柄
-func openReadFile(name string) (*os.File, error) {
-	return os.Open(name)
-}
-
-// replaceFile 替换目标文件并保留已有读取句柄
-func replaceFile(source, target string) error {
-	return os.Rename(source, target)
-}
 
 // fontNameLanguage 未指定系统显示语言时沿用字体名称表顺序
 // 返回: uint16 未指定平台标识, uint16 未指定语言标识

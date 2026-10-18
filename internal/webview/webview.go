@@ -450,7 +450,7 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 	case "remove":
 		return nil, h.files.remove(text("handle"), text("name"), flag("recursive"))
 	case "write.begin":
-		writer, err := h.files.begin(text("handle"))
+		writer, err := h.files.begin(guigo.PageContext(ctx), text("handle"))
 		if err != nil {
 			return nil, err
 		}
@@ -660,7 +660,7 @@ func (h *Host) openWriter(ctx context.Context, value any, name string) (io.Write
 			return nil, fmt.Errorf("输出文件已存在")
 		}
 	}
-	return h.files.begin(id)
+	return h.files.begin(ctx, id)
 }
 
 // reserveOutput 为一次转换预留独立输出文件或目录

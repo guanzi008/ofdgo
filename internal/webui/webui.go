@@ -419,6 +419,7 @@ type outputContext struct {
 type businessEngine struct {
 	currentSession *Session
 	currentEditor  *ofdgo.Editor
+	saveSnapshot   *ofdgo.Editor
 	pendingImport  *ofdgo.Reader
 	copiedObjects  *editorClipboard
 	copiedStyle    *ofdgo.GraphicObject
@@ -7162,6 +7163,54 @@ func (e *businessEngine) saveSigned(args []platformValue) (any, error) {
 	return successResult(map[string]any{"mime": "application/ofd", "label": "OFD"}), nil
 }
 
+// prepareSave 创建独立保存快照，后续写出不占用当前编辑文档
+// 入参: args 取消检查回调
+// 返回: any 快照修订, error 准备错误
+func (e *businessEngine) prepareSave(args []platformValue) (any, error) {
+	e.saveSnapshot = nil
+	editor := e.currentEditor
+	if editor == nil {
+		if e.currentSession == nil {
+			return nil, fmt.Errorf("ofd document is not opened")
+		}
+		var err error
+		editor, err = e.currentSession.Reader.Editor()
+		if err != nil {
+			return nil, err
+		}
+	}
+	ctx := e.operationContext()
+	if len(args) > 0 {
+		ctx = e.newOutputContext(args[0])
+	}
+	snapshot, err := editor.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	e.saveSnapshot = snapshot
+	return successResult(map[string]any{"revision": editor.Revision()}), nil
+}
+
+// savePrepared 写出并释放已准备的快照，不修改当前编辑状态
+// 入参: args 写出回调、进度回调及输出配置
+// 返回: any 保存结果, error 保存错误
+func (e *businessEngine) savePrepared(args []platformValue) (any, error) {
+	snapshot := e.saveSnapshot
+	e.saveSnapshot = nil
+	if snapshot == nil {
+		return nil, fmt.Errorf("save snapshot is not prepared")
+	}
+	return e.saveEditor(snapshot, args)
+}
+
+// discardSave 释放尚未写出的保存快照
+// 入参: args 空参数
+// 返回: any 操作结果, error 错误信息
+func (e *businessEngine) discardSave(args []platformValue) (any, error) {
+	e.saveSnapshot = nil
+	return successResult(nil), nil
+}
+
 // saveDocument 分块写出当前编辑文档或指定页面
 // 入参: args 数据写出回调、可选准备进度回调和可选页面索引
 // 返回: any 保存结果, error 错误信息
@@ -7403,6 +7452,9 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoUndo":                   func([]platformValue) (any, error) { return e.restoreEditor(false) },
 		"ofdgoRedo":                   func([]platformValue) (any, error) { return e.restoreEditor(true) },
 		"ofdgoSaveDocument":           e.saveDocument,
+		"ofdgoPrepareSave":            e.prepareSave,
+		"ofdgoSaveSnapshot":           e.savePrepared,
+		"ofdgoDiscardSave":            e.discardSave,
 		"ofdgoSetEncryption":          e.setEncryption,
 		"ofdgoSaveSigned":             e.saveSigned,
 		"ofdgoPreviewSignatureSeal":   e.previewSignatureSeal,
