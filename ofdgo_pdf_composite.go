@@ -49,6 +49,7 @@ type pdfCompositor struct {
 	inverse         pdfgo.Matrix
 	cache           *pdfCompositeCache
 	scratch         *pdfCompositeScratch
+	origins         *pdfOriginSet
 	masks           map[*pdfgo.SoftMask][]float64
 	meshes          map[pdfMeshKey][]pdfShadingPixel
 	gradients       map[pdfGradientKey][]pdfShadingPixel
@@ -628,9 +629,6 @@ func (p *pdfImporter) compositeObjects(nodes []pdfCompositeNode) error {
 			if p.warning == nil {
 				return &pdfgo.UnsupportedError{Feature: "page color-space compositing"}
 			}
-			if err := p.flushPath(); err != nil {
-				return err
-			}
 			if err := p.compositeRegion(p.compositeNodes, node, space, true); err != nil {
 				return fmt.Errorf("composite graphic %d: %w", i+1, err)
 			}
@@ -638,7 +636,7 @@ func (p *pdfImporter) compositeObjects(nodes []pdfCompositeNode) error {
 		p.compositeNodes = append(p.compositeNodes, node)
 		p.transferBackdrop = p.transferBackdrop || transfer
 	}
-	return p.flushPath()
+	return p.ctx.Err()
 }
 
 // opaque 检查图元是否无需与页面背景混合
@@ -900,6 +898,7 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 	var colorValues [4]float64
 	var colorRGB [3]float64
 	colorReady := false
+	var origins pdfOriginSet
 	for y := 0; y < h; y += pdfCompositeTileSize {
 		for x := 0; x < w; x += pdfCompositeTileSize {
 			if err := p.ctx.Err(); err != nil {
@@ -907,7 +906,7 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 			}
 			runtime.Gosched()
 			width, height := min(pdfCompositeTileSize, w-x), min(pdfCompositeTileSize, h-y)
-			c := pdfCompositor{importer: p, box: Box{X: box.X + float64(x)*step, Y: box.Y + float64(y)*step, W: float64(width) * step, H: float64(height) * step}, width: width, height: height, inverse: inverse, cache: cache, scratch: scratch, masks: map[*pdfgo.SoftMask][]float64{}}
+			c := pdfCompositor{importer: p, box: Box{X: box.X + float64(x)*step, Y: box.Y + float64(y)*step, W: float64(width) * step, H: float64(height) * step}, width: width, height: height, inverse: inverse, cache: cache, scratch: scratch, origins: &origins, masks: map[*pdfgo.SoftMask][]float64{}}
 			if transfers != nil {
 				c.transfers = transfers[:width*height]
 				c.transferModel = device
@@ -983,5 +982,5 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 			c.releaseMasks()
 		}
 	}
-	return p.appendRasterGroup(output, box, 1)
+	return p.appendRasterGroup(output, box, 1, origins.origin)
 }

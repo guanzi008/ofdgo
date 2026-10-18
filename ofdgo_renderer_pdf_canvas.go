@@ -20,7 +20,9 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"maps"
 	"strconv"
+	"time"
 
 	"github.com/tdewolff/canvas"
 	cimage "github.com/tdewolff/canvas/image"
@@ -32,6 +34,7 @@ import (
 // pdfRenderer PDF渲染器
 type pdfRenderer struct {
 	*pdf.PDF
+	information pdfgo.Dictionary
 	glyphPaths  renderCache[*canvas.Path, *canvas.Path]
 	fonts       map[*canvas.Font]*canvas.Font
 	cffFonts    map[*canvas.Font][]*pdfFontSubset
@@ -159,7 +162,14 @@ func (r *pdfRenderer) writePDF(ctx context.Context, data []byte, writer io.Write
 	if r.imageError != nil {
 		return r.imageError
 	}
+	information := maps.Clone(r.information)
+	if information == nil {
+		information = make(pdfgo.Dictionary)
+	}
+	information["Producer"] = pdfgo.String(ofdCreator)
+	information["CreationDate"] = pdfgo.String(time.Now().UTC().Format("D:20060102150405Z"))
 	options := codecpdf.WriteOptions{
+		Information:  information,
 		Images:       r.images,
 		Text:         r.text,
 		ExactImages:  r.exactImages,

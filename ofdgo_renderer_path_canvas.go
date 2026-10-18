@@ -312,6 +312,12 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			ctx.SetDashes(0)
 		}
 		strokeClip := r.intersectCachedClipPath(clipPath, shadingClip)
+		if bounds, ok := rectangularPath(strokeClip); ok {
+			margin := style.lineWidth / 2 * math.Max(math.Sqrt2, style.miterLimit)
+			if finite(margin) && bounds.Contains(sp.Bounds().Expand(margin)) {
+				strokeClip = nil
+			}
+		}
 		_, repeat := strokePaint.(*repeatAxialGradient)
 		if strokeClip != nil || strokeView != canvas.Identity || repeat || style.strokePattern != nil || !canvasNativeStroke(r.backends.Geometry) || zeroDash {
 			sp = sp.Copy()

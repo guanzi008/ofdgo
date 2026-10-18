@@ -17,6 +17,7 @@ package geom
 import (
 	"fmt"
 	"math"
+	"slices"
 )
 
 // UnsupportedError 表示当前几何实现无法展开的描边形态
@@ -347,7 +348,22 @@ func (line geometryPolyline) stroke(result Path, options StrokeOptions) (Path, e
 		}
 		return result, nil
 	}
-	directions := make([]Point, len(points)-1)
+	segments := len(points) - 1
+	joins := segments - 1
+	caps := 0
+	if line.closed {
+		joins++
+	} else if options.Cap == "Round" {
+		caps = 8
+	} else if options.Cap == "Square" {
+		caps = 10
+	}
+	joinSize := 4
+	if options.Join == "" || options.Join == "Miter" {
+		joinSize = 5
+	}
+	result = slices.Grow(result, min(segments*5+joins*joinSize+caps, 1<<20-len(result)))
+	directions := make([]Point, segments)
 	for i := range directions {
 		a, b := points[i], points[i+1]
 		length := math.Hypot(b.X-a.X, b.Y-a.Y)

@@ -61,11 +61,12 @@ func (p *pdfImporter) clipPath(path pdfgo.Path) (pdfClipPath, error) {
 	return result, nil
 }
 
-// sharedClipObjects 将连续重复的大裁剪区提取为复合对象，保留页面坐标和绘制顺序
+// sharedClipObjects 将连续重复的大裁剪区提取为复合对象，同步缓冲区及来源区段
 // 入参: objects 本库生成且尚未分配标识的对象
 // 返回: []GraphicObject 提取后的对象, error 资源创建或取消错误
 func (p *pdfImporter) sharedClipObjects(objects []GraphicObject) ([]GraphicObject, error) {
 	var output []GraphicObject
+	var mapped pdfObjectBuffer
 	for start := 0; start < len(objects); {
 		if err := p.ctx.Err(); err != nil {
 			return nil, err
@@ -73,7 +74,7 @@ func (p *pdfImporter) sharedClipObjects(objects []GraphicObject) ([]GraphicObjec
 		clips := pdfPageClip(objects[start])
 		end := start + 1
 		if clips != nil {
-			for end < len(objects) && pdfMatchesPageClip(objects[end], clips) {
+			for end < len(objects) && p.objects.origin(start).equal(p.objects.origin(end)) && pdfMatchesPageClip(objects[end], clips) {
 				if err := p.ctx.Err(); err != nil {
 					return nil, err
 				}
@@ -82,6 +83,7 @@ func (p *pdfImporter) sharedClipObjects(objects []GraphicObject) ([]GraphicObjec
 		}
 		if end-start < 2 {
 			if output != nil {
+				mapped.recordOrigin(len(output), p.objects.origin(start))
 				output = append(output, objects[start])
 			}
 			start = end
@@ -89,6 +91,14 @@ func (p *pdfImporter) sharedClipObjects(objects []GraphicObject) ([]GraphicObjec
 		}
 		if output == nil {
 			output = append(make([]GraphicObject, 0, len(objects)), objects[:start]...)
+			if p.objects != nil {
+				for _, run := range p.objects.sequences {
+					if run.start >= start {
+						break
+					}
+					mapped.sequences = append(mapped.sequences, run)
+				}
+			}
 		}
 		members := objects[start:end:end]
 		for index := range members {
@@ -98,6 +108,7 @@ func (p *pdfImporter) sharedClipObjects(objects []GraphicObject) ([]GraphicObjec
 		if err != nil {
 			return nil, err
 		}
+		mapped.recordOrigin(len(output), p.objects.origin(start))
 		output = append(output, GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: CompositeGraphicUnit{
 			Boundary: pdfBoundary(Box{W: p.pageWidth, H: p.pageHeight}), ResourceID: id, Clips: clips,
 		}})
@@ -105,6 +116,11 @@ func (p *pdfImporter) sharedClipObjects(objects []GraphicObject) ([]GraphicObjec
 	}
 	if output == nil {
 		return objects, nil
+	}
+	if p.objects != nil {
+		mapped.parts = [][]GraphicObject{output}
+		mapped.size = len(output)
+		*p.objects = mapped
 	}
 	return output, nil
 }
@@ -217,9 +233,6 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 		for _, mark := range path.Text {
 			objects, ok := p.clipTexts[mark]
 			if !ok {
-				if err := p.flushPath(); err != nil {
-					return nil, err
-				}
 				count := p.objects.len()
 				textCount := p.report.TextObjects
 				if err := p.text(pdfgo.TextMark{Font: mark.Font, Glyphs: mark.Glyphs, Positions: mark.Positions, Matrix: mark.Matrix, Size: mark.Size, HorizontalScale: mark.HorizontalScale, Mode: 7, Clip: mark, Style: pdfgo.Style{Fill: pdfgo.Paint{Alpha: 1}}}); err != nil {

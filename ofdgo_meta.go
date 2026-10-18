@@ -49,10 +49,14 @@ type DocInfo struct {
 	Abstract       string       `xml:"Abstract"`
 	CreationDate   string       `xml:"CreationDate"`
 	ModDate        string       `xml:"ModDate"`
+	Keywords       Keywords     `xml:"Keywords,omitempty"`
 	Creator        string       `xml:"Creator"`
 	CreatorVersion string       `xml:"CreatorVersion"`
 	CustomDatas    *CustomDatas `xml:"CustomDatas"`
 }
+
+// Keywords 保存有序关键词，保留重复及空文本，空集合不生成XML节点
+type Keywords []string
 
 // CustomDatas 自定义数据集合
 type CustomDatas struct {
@@ -129,6 +133,8 @@ func (info *DocInfo) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 			target = &info.CreationDate
 		case "ModDate":
 			target = &info.ModDate
+		case "Keywords":
+			target = &info.Keywords
 		case "Creator":
 			target = &info.Creator
 		case "CreatorVersion":
@@ -140,6 +146,43 @@ func (info *DocInfo) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 		}
 		return d.DecodeElement(target, &node)
 	})
+}
+
+// UnmarshalXML 按原顺序读取标准关键词，跳过外部扩展条目
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (keywords *Keywords) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*keywords = nil
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local != "Keyword" {
+			return d.Skip()
+		}
+		var value string
+		if err := d.DecodeElement(&value, &node); err != nil {
+			return err
+		}
+		*keywords = append(*keywords, value)
+		return nil
+	})
+}
+
+// MarshalXML 编码非空关键词集合，子节点沿用集合的命名空间
+// 入参: e XML编码器, start 起始节点
+// 返回: error 编码错误
+func (keywords Keywords) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+	if len(keywords) == 0 {
+		return nil
+	}
+	if err := e.EncodeToken(start); err != nil {
+		return err
+	}
+	for _, value := range keywords {
+		child := xml.StartElement{Name: xml.Name{Space: start.Name.Space, Local: "Keyword"}}
+		if err := e.EncodeElement(value, child); err != nil {
+			return err
+		}
+	}
+	return e.EncodeToken(start.End())
 }
 
 // UnmarshalXML 按原顺序读取OFD自定义字段，跳过外部扩展条目

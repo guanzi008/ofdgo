@@ -45,7 +45,7 @@ type Structure struct {
 
 // StructureNode 保存标引节点的名称、属性、直接文本和有序子节点，不改变原始XML
 // Text按文档顺序汇总直接文本并保留空白，不包含子节点文本
-// References仅解释已识别公文、富文本或发票标引中的ObjectRef；未知扩展保留结构，不推定其引用语义
+// References仅解释已识别标引中的ObjectRef；未知扩展保留结构，不推定其引用语义
 type StructureNode struct {
 	Name       string               `json:"name"`
 	Namespace  string               `json:"namespace,omitempty"`
@@ -132,11 +132,11 @@ func (r *Reader) readStructureContext(ctx context.Context, tag CustomTag) (Struc
 // 入参: ctx 取消上下文, data 标引XML, tag 标引入口
 // 返回: *StructureNode 根节点, error 解析、限额或取消错误
 func parseStructure(ctx context.Context, data []byte, tag CustomTag) (*StructureNode, error) {
+	data = bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
 	d := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
 	var root *StructureNode
 	var stack []*StructureNode
 	var text []*strings.Builder
-	count := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -150,15 +150,19 @@ func parseStructure(ctx context.Context, data []byte, tag CustomTag) (*Structure
 		}
 		switch token := token.(type) {
 		case xml.StartElement:
-			count++
-			if len(stack) >= 128 || count > 100000 {
+			if len(stack) >= 128 {
 				return nil, fmt.Errorf("custom tag structure limit exceeded")
 			}
 			if len(stack) == len(text) {
 				text = append(text, new(strings.Builder))
 			}
 			node := StructureNode{Name: token.Name.Local, Namespace: token.Name.Space}
+			attributes := make(map[xml.Name]bool, len(token.Attr))
 			for _, attr := range token.Attr {
+				if attributes[attr.Name] {
+					return nil, fmt.Errorf("duplicate custom tag attribute")
+				}
+				attributes[attr.Name] = true
 				if attr.Name.Space != "xmlns" && !(attr.Name.Space == "" && attr.Name.Local == "xmlns") {
 					node.Attributes = append(node.Attributes, StructureAttribute{Name: attr.Name.Local, Namespace: attr.Name.Space, Value: attr.Value})
 				}
@@ -301,7 +305,7 @@ func (r *Reader) structureReferenceTags(ctx context.Context, tags []CustomTag) (
 	return known, nil
 }
 
-// structureOfficial 识别公文、富文本及发票标引的明确引用规则，不推断未知行业语义
+// structureOfficial 识别公文及库内标引的明确引用规则，不推断未知行业语义
 // 入参: tag 标引入口, namespace 内容根节点命名空间
 // 返回: bool 是否使用公文引用规则
 func structureOfficial(tag CustomTag, namespace string) bool {
@@ -309,6 +313,9 @@ func structureOfficial(tag CustomTag, namespace string) bool {
 		return true
 	}
 	if tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace && namespace == richTextNamespace {
+		return true
+	}
+	if tag.TypeID == pdfStructureTagType && tag.NameSpace == pdfStructureNamespace && namespace == pdfStructureNamespace {
 		return true
 	}
 	if tag.TypeID == structureTypeOfficial {

@@ -177,7 +177,7 @@ func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (result Ge
 	style.applyLineJoin(options.Join, options.MiterLimit, options.MiterLimitSet)
 	style.lineCap = pathLineCap(options.Cap, style.lineCap)
 	p = p.Dash(options.DashOffset, options.Dashes...)
-	p = p.Flatten(tolerance)
+	p = flattenCanvasPath(p, tolerance)
 	p = p.Stroke(options.Width, style.lineCap, style.lineJoin, tolerance)
 	return *geometryFromCanvasPath(p), nil
 }
@@ -197,6 +197,27 @@ func (CanvasBackend) Clip(r *Renderer, clips *Clips, matrix Matrix, parent *Geom
 		return nil, renderer.renderError
 	}
 	return geometryFromCanvasPath(r.intersectCachedClipPath(p, clip)), nil
+}
+
+// flattenCanvasPath 按子路径展开曲线，避免每次替换都复制后续独立轮廓
+// 入参: path 原始路径, tolerance 展开误差
+// 返回: *canvas.Path 直线路径，不修改原始路径
+func flattenCanvasPath(path *canvas.Path, tolerance float64) *canvas.Path {
+	if path.IsFlat() {
+		return path
+	}
+	if data := path.Data(); len(data) > 0 && data[len(data)-1] == canvas.MoveToCmd {
+		return path.Flatten(tolerance)
+	}
+	parts := path.Split()
+	if len(parts) <= 1 {
+		return path.Flatten(tolerance)
+	}
+	data := make([]float64, 0, len(path.Data()))
+	for _, part := range parts {
+		data = append(data, part.Flatten(tolerance).Data()...)
+	}
+	return canvas.NewPathFromData(data)
 }
 
 // canvasNativeStroke 判断描边是否由Canvas提供

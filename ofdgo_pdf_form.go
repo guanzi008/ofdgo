@@ -19,6 +19,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/xml"
+
+	"github.com/xiaoqidun/pdfgo"
 )
 
 // pdfFormBufferLimit 限制表单编码暂存容量，不限制资源大小
@@ -74,6 +76,10 @@ func (c *pdfFormCache) reset() {
 // 入参: nodes 普通表单连续图元
 // 返回: bool 是否已保存为复合对象, error 检查或转换错误
 func (p *pdfImporter) compositeForm(nodes []pdfCompositeNode) (bool, error) {
+	sequence, same, err := p.formSequence(nodes)
+	if err != nil || !same {
+		return false, err
+	}
 	if found, err := p.compositeHasTransfer(nodes, p.transferModel); err != nil || found {
 		return false, err
 	}
@@ -86,9 +92,6 @@ func (p *pdfImporter) compositeForm(nodes []pdfCompositeNode) (bool, error) {
 			return false, err
 		}
 	}
-	if err := p.flushPath(); err != nil {
-		return false, err
-	}
 	parent := p.objects
 	p.objects = nil
 	defer func() { p.objects = parent }()
@@ -97,9 +100,6 @@ func (p *pdfImporter) compositeForm(nodes []pdfCompositeNode) (bool, error) {
 		if err := node.emit(visitor); err != nil {
 			return false, err
 		}
-	}
-	if err := p.flushPath(); err != nil {
-		return false, err
 	}
 	if err := p.ctx.Err(); err != nil {
 		return false, err
@@ -134,9 +134,55 @@ func (p *pdfImporter) compositeForm(nodes []pdfCompositeNode) (bool, error) {
 		}
 	}
 	p.objects = parent
-	p.appendObject(GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: CompositeGraphicUnit{
+	p.appendSequenceObject(GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: CompositeGraphicUnit{
 		Boundary: pdfBoundary(Box{W: p.pageWidth, H: p.pageHeight}), ResourceID: resource.id,
-	}})
+	}}, sequence)
 	parent = p.objects
 	return true, nil
+}
+
+// formSequence 检查表单图元是否属于同一区段，不跨区段合并可独立引用的内容
+// 入参: nodes 表单图元
+// 返回: *pdfgo.ContentSequence 来源区段, bool 是否相同, error 取消错误
+func (p *pdfImporter) formSequence(nodes []pdfCompositeNode) (*pdfgo.ContentSequence, bool, error) {
+	var sequence *pdfgo.ContentSequence
+	seen := false
+	var visit func([]pdfCompositeNode) bool
+	visit = func(nodes []pdfCompositeNode) bool {
+		for _, node := range nodes {
+			if p.ctx.Err() != nil {
+				return false
+			}
+			var current *pdfgo.ContentSequence
+			switch {
+			case node.path != nil:
+				current = node.path.Sequence
+			case node.text != nil:
+				origin := p.textOrigin(*node.text)
+				if len(origin.related) != 0 {
+					return false
+				}
+				current = origin.sequence
+			case node.image != nil:
+				current = node.image.Sequence
+			case node.glyph != nil:
+				current = node.glyph.Sequence
+			default:
+				if !visit(node.children) {
+					return false
+				}
+				continue
+			}
+			if seen && sequence != current {
+				return false
+			}
+			sequence, seen = current, true
+			if !visit(node.children) {
+				return false
+			}
+		}
+		return true
+	}
+	same := visit(nodes)
+	return sequence, same, p.ctx.Err()
 }

@@ -400,12 +400,19 @@ func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []b
 			{"DocID", e.Info.DocID}, {"Title", e.Info.Title}, {"Author", e.Info.Author},
 			{"Subject", e.Info.Subject}, {"Abstract", e.Info.Abstract},
 			{"CreationDate", e.Info.CreationDate}, {"ModDate", e.Info.ModDate},
-			{"Creator", ofdCreator},
 		} {
 			if field[1] != "" {
 				x.text(field[0], field[1])
 			}
 		}
+		if len(e.Info.Keywords) != 0 {
+			x.start("Keywords", nil)
+			for _, keyword := range e.Info.Keywords {
+				x.text("Keyword", keyword)
+			}
+			x.end("Keywords")
+		}
+		x.text("Creator", ofdCreator)
 		if e.Info.CustomDatas != nil && len(e.Info.CustomDatas.CustomData) != 0 {
 			x.start("CustomDatas", nil)
 			for _, item := range e.Info.CustomDatas.CustomData {

@@ -69,9 +69,6 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	if mark.Style.BlendMode != "" && mark.Style.BlendMode != "Normal" && mark.Style.BlendMode != "Compatible" {
 		return &pdfgo.UnsupportedError{Feature: "image blend mode " + string(mark.Style.BlendMode)}
 	}
-	if err := p.flushPath(); err != nil {
-		return err
-	}
 	if mark.Image.ImageMask && (mark.Style.Fill.Axial != nil || mark.Style.Fill.Radial != nil || mark.Style.Fill.Function != nil || mark.Style.Fill.Mesh != nil || mark.Style.Fill.Shading != nil) {
 		if p.warning != nil {
 			return p.compositeRegion(nil, pdfCompositeNode{image: &mark}, &pdfgo.ColorSpace{Model: "DeviceRGB"}, false)
@@ -250,7 +247,7 @@ func (p *pdfImporter) appendImage(mark pdfgo.ImageMark, id string) error {
 		return err
 	}
 	object := ImageObject{Boundary: pdfBoundary(box), ResourceID: id, CTM: pdfNumbers(m[0], m[1], m[2], m[3], m[4]-box.X, m[5]-box.Y), Alpha: &alpha, Clips: clips}
-	p.appendObject(GraphicObject{Type: "ImageObject", ImageObject: object})
+	p.appendSequenceObject(GraphicObject{Type: "ImageObject", ImageObject: object}, mark.Sequence)
 	p.report.ImageObjects++
 	return nil
 }

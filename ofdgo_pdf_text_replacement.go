@@ -78,15 +78,30 @@ func (r *pdfTextReplacements) block(text *pdfgo.ReplacementText) {
 	}
 }
 
-// markedContent 核对已接入的替换文本属性，不静默丢弃其他内容语义
+// markedContent 处理结构区段、可选内容及替换文本属性
 // 入参: mark 内容标记
 // 返回: error 未支持的语义错误
 func (r *pdfTextReplacements) markedContent(mark pdfgo.MarkedContentMark) error {
 	if mark.Operator == "EMC" {
 		return nil
 	}
+	if r.importer.structureBindings != nil {
+		if err := r.importer.prepareSourceStructure(r.importer.ctx, mark.Reader); err != nil {
+			return err
+		}
+		r.importer.structureBindings.observe(mark.Sequence)
+		if mark.Sequence != nil && r.importer.structureBindings.marked != nil {
+			key, ok, err := pdfStructureContentKey(mark.Sequence)
+			if err != nil {
+				return err
+			}
+			if ok && r.importer.structureBindings.marked[key] {
+				return nil
+			}
+		}
+	}
 	if mark.Tag == "OC" {
-		kind, err := r.importer.reader.Resolve(mark.Properties["Type"])
+		kind, err := mark.Reader.Resolve(mark.Properties["Type"])
 		if err != nil {
 			return err
 		}
@@ -229,6 +244,23 @@ func (r *pdfTextReplacements) merge(nodes []pdfCompositeNode) ([]pdfCompositeNod
 				end = max(end, i+1)
 				if len(marks) == span.count {
 					if mark, ok := pdfMergeReplacement(marks, span.text); ok {
+						var origins pdfOriginSet
+						for _, source := range marks {
+							if err := r.importer.ctx.Err(); err != nil {
+								return nil, err
+							}
+							origin := r.importer.textOrigin(*source.text)
+							origins.add(origin.sequence)
+							for _, sequence := range origin.related {
+								origins.add(sequence)
+							}
+						}
+						if len(origins.origin.related) != 0 {
+							if r.importer.textOrigins == nil {
+								r.importer.textOrigins = make(map[*pdfgo.ReplacementText]pdfObjectOrigin)
+							}
+							r.importer.textOrigins[span.text] = origins.origin
+						}
 						if node.text != nil {
 							node.text = mark
 						} else {
@@ -267,6 +299,16 @@ func (r *pdfTextReplacements) clear(nodes []pdfCompositeNode) {
 	}
 }
 
+// textOrigin 获取合并文字的完整来源，普通文字沿用原始区段
+// 入参: mark 文字图元
+// 返回: pdfObjectOrigin 来源区段
+func (p *pdfImporter) textOrigin(mark pdfgo.TextMark) pdfObjectOrigin {
+	if origin, ok := p.textOrigins[mark.Replacement]; ok {
+		return origin
+	}
+	return pdfObjectOrigin{sequence: mark.Sequence}
+}
+
 // pdfMergeReplacement 统一同一替换区段内的坐标原点，不重新塑形或调整字距
 // 入参: nodes 连续文字图元, replacement 整段原文
 // 返回: *pdfgo.TextMark 合并文字, bool 是否可等价合并
@@ -282,6 +324,7 @@ func pdfMergeReplacement(nodes []pdfCompositeNode, replacement *pdfgo.Replacemen
 		return nil, false
 	}
 	count := 0
+	sequence := first.Sequence
 	for _, node := range nodes {
 		mark := node.text
 		if mark.Font != first.Font || mark.Size != first.Size || mark.HorizontalScale != first.HorizontalScale || mark.Mode != first.Mode || mark.Clip != nil || len(mark.Glyphs) != len(mark.Positions) || !reflect.DeepEqual(mark.Style, style) {
@@ -291,12 +334,14 @@ func pdfMergeReplacement(nodes []pdfCompositeNode, replacement *pdfgo.Replacemen
 			return nil, false
 		}
 		count += len(mark.Glyphs)
+		sequence = pdfCommonSequence(sequence, mark.Sequence)
 	}
 	if count == 0 {
 		return nil, false
 	}
 	merged := *first
 	merged.Replacement = replacement
+	merged.Sequence = sequence
 	merged.Glyphs = make([]pdfgo.Glyph, 0, count)
 	merged.Positions = make([]pdfgo.Point, 0, count)
 	for _, node := range nodes {
@@ -314,6 +359,36 @@ func pdfMergeReplacement(nodes []pdfCompositeNode, replacement *pdfgo.Replacemen
 		merged.Glyphs = append(merged.Glyphs, mark.Glyphs...)
 	}
 	return &merged, true
+}
+
+// pdfCommonSequence 查找两个内容区段的最近共同外层，不将合并内容归入单个子区段
+// 入参: first 首个区段, second 后续区段
+// 返回: *pdfgo.ContentSequence 共同区段，没有共同区段时为空
+func pdfCommonSequence(first, second *pdfgo.ContentSequence) *pdfgo.ContentSequence {
+	if first == second {
+		return first
+	}
+	if first == nil || second == nil {
+		return nil
+	}
+	depth := func(sequence *pdfgo.ContentSequence) int {
+		count := 0
+		for ; sequence != nil; sequence = sequence.Parent {
+			count++
+		}
+		return count
+	}
+	a, b := depth(first), depth(second)
+	for ; a > b; a-- {
+		first = first.Parent
+	}
+	for ; b > a; b-- {
+		second = second.Parent
+	}
+	for first != second {
+		first, second = first.Parent, second.Parent
+	}
+	return first
 }
 
 // pdfApplyReplacement 将整段原文映射到全部字形，字形位移遵循GB/T 33190的文字定位规则

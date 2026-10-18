@@ -35,6 +35,12 @@ type pdfPatternCellKey struct {
 	space  *pdfgo.ColorSpace
 }
 
+// pdfPatternCell 保存图案快照及单元内部的来源区段
+type pdfPatternCell struct {
+	pattern *Pattern
+	origin  pdfObjectOrigin
+}
+
 // pdfPatternInstanceRange 收缩已知路径及图片的实例范围，未知边界保留完整范围
 // 入参: columns 横向实例数, rows 纵向实例数, bounds 对象边界, width 单元宽, height 单元高, xstep 横向步距, ystep 纵向步距
 // 返回: int 左界, int 右界, int 上界, int 下界
@@ -63,7 +69,7 @@ func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Pain
 		return p.buildTilingPattern(source, base)
 	}
 	if p.patternCells == nil {
-		p.patternCells = &renderCache[pdfPatternCellKey, *Pattern]{limit: pdfPatternCellLimit}
+		p.patternCells = &renderCache[pdfPatternCellKey, pdfPatternCell]{limit: pdfPatternCellLimit}
 	}
 	key := pdfPatternCellKey{source: source, matrix: p.matrix, dpi: p.rasterDPI, editor: p.editor, space: p.compositeSpace}
 	if source.PaintType == 2 {
@@ -72,7 +78,11 @@ func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Pain
 		key.base = base
 	}
 	if cached, ok := p.patternCells.get(key); ok {
-		return cloneEditorData(cached), p.ctx.Err()
+		pattern := cloneEditorData(cached.pattern)
+		if cached.origin.sequence != nil || len(cached.origin.related) != 0 {
+			p.patternOrigins[pattern] = cached.origin
+		}
+		return pattern, p.ctx.Err()
 	}
 	pattern, err := p.buildTilingPattern(source, base)
 	if err != nil {
@@ -82,8 +92,9 @@ func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Pain
 		return nil, err
 	}
 	cost := pdfPatternCellCost(reflect.ValueOf(pattern), p.patternCells.limit, 0)
+	cost += int(reflect.TypeFor[pdfPatternCell]().Size()) + len(p.patternOrigins[pattern].related)*int(reflect.TypeFor[*pdfgo.ContentSequence]().Size())
 	if cost <= p.patternCells.limit {
-		p.patternCells.put(key, cloneEditorData(pattern), cost)
+		p.patternCells.put(key, pdfPatternCell{pattern: cloneEditorData(pattern), origin: p.patternOrigins[pattern]}, cost)
 	}
 	return pattern, p.ctx.Err()
 }
@@ -143,6 +154,9 @@ func (p *pdfImporter) buildTilingPattern(source *pdfgo.TilingPattern, base pdfgo
 	localToPDF := pdfgo.Matrix{1 / unit, 0, 0, -1 / unit, box.XMin, box.YMax}
 	m := p.matrix.Mul(source.Matrix).Mul(localToPDF)
 	pattern := &Pattern{Width: math.Min(width, xstep) * unit, Height: math.Min(height, ystep) * unit, XStep: xstep * unit, YStep: ystep * unit, RelativeTo: "Page", CTM: pdfNumbers(m[:]...)}
+	if p.patternOrigins == nil {
+		p.patternOrigins = make(map[*Pattern]pdfObjectOrigin)
+	}
 	cell := *p
 	cell.matrix = pdfgo.Matrix{unit, 0, 0, -unit, -box.XMin * unit, box.YMax * unit}
 	cell.pageWidth, cell.pageHeight = width*unit, height*unit
@@ -150,12 +164,21 @@ func (p *pdfImporter) buildTilingPattern(source *pdfgo.TilingPattern, base pdfgo
 	if !finite(cell.rasterDPI) || cell.rasterDPI < 0 {
 		return nil, fmt.Errorf("invalid PDF tiling pattern raster scale")
 	}
-	cell.objects, cell.pendingPath = nil, nil
-	if err := source.Walk(p.ctx, base, cell.visitor()); err != nil {
+	cell.objects = nil
+	nodes, err := cell.collectCompositeNodes(func(visitor pdfgo.Visitor) error {
+		return source.Walk(p.ctx, base, visitor)
+	}, false)
+	if err != nil {
 		return nil, err
 	}
-	if err := cell.flushPath(); err != nil {
-		return nil, err
+	visitor := cell.visitor()
+	for _, node := range nodes {
+		if err := p.ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := node.emit(visitor); err != nil {
+			return nil, err
+		}
 	}
 	objects, err := cell.objects.data(p.ctx)
 	if err != nil {
@@ -205,7 +228,7 @@ func (p *pdfImporter) buildTilingPattern(source *pdfgo.TilingPattern, base pdfgo
 					if err != nil {
 						return nil, err
 					}
-					expanded.append(translated)
+					expanded.appendOrigin(translated, cell.objects.origin(index))
 				}
 			}
 		}
@@ -213,6 +236,14 @@ func (p *pdfImporter) buildTilingPattern(source *pdfgo.TilingPattern, base pdfgo
 		if err != nil {
 			return nil, err
 		}
+		cell.objects = &expanded
+	}
+	origin, err := cell.objects.combinedOrigin(p.ctx)
+	if err != nil {
+		return nil, err
+	}
+	if origin.sequence != nil || len(origin.related) != 0 {
+		p.patternOrigins[pattern] = origin
 	}
 	return pattern, nil
 }

@@ -29,7 +29,6 @@ func NormalizeOS2(data []byte) []byte {
 	var size int
 	switch binary.BigEndian.Uint16(data) {
 	case 0:
-		// 旧式68字节表保持原样，不将截断的78字节表推断为旧式表
 		size = 78
 	case 1:
 		size = 86

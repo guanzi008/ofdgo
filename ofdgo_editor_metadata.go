@@ -19,6 +19,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"reflect"
+	"slices"
 )
 
 // sourceInfoXML 更新文档描述字段，保留未识别内容
@@ -54,6 +55,16 @@ func editorUpdateInfoXML(data []byte, docID string, index int, before, after Doc
 	if err != nil {
 		return nil, err
 	}
+	if !slices.Equal(before.Keywords, after.Keywords) {
+		root, err := parseEditorXML(data)
+		if err != nil {
+			return nil, err
+		}
+		data, err = editorKeywords(data, root.childAt("DocBody", index).child("DocInfo"), after.Keywords)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if !reflect.DeepEqual(before.CustomDatas, after.CustomDatas) {
 		root, err := parseEditorXML(data)
 		if err != nil {
@@ -62,6 +73,69 @@ func editorUpdateInfoXML(data []byte, docID string, index int, before, after Doc
 		return editorCustomDatas(data, root.childAt("DocBody", index).child("DocInfo"), after.CustomDatas)
 	}
 	return data, nil
+}
+
+// editorKeywords 更新有序关键词，保留已有词条的属性及未修改内容
+// 入参: data 原XML, info 文档信息节点, values 关键词
+// 返回: []byte 修改后的XML, error 编码错误
+func editorKeywords(data []byte, info *editorXML, values []string) ([]byte, error) {
+	container := info.child("Keywords")
+	if len(values) == 0 {
+		if container == nil {
+			return data, nil
+		}
+		return editorPatchXML(data, []editorXMLPatch{{container.start, container.end, nil}}), nil
+	}
+	if container == nil {
+		var content []byte
+		for _, value := range values {
+			content = append(content, info.textXML("Keyword", value)...)
+		}
+		encoded, err := info.containerXML("Keywords", nil, content)
+		if err != nil {
+			return nil, err
+		}
+		if info.open == info.end {
+			return editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, info, encoded)}), nil
+		}
+		position := info.close
+		for _, child := range info.children {
+			if child.matchesOFD("Creator") || child.matchesOFD("CreatorVersion") || child.matchesOFD("CustomDatas") {
+				position = child.start
+				break
+			}
+		}
+		return editorPatchXML(data, []editorXMLPatch{{position, position, encoded}}), nil
+	}
+	var patches []editorXMLPatch
+	index := 0
+	for _, child := range container.children {
+		if !child.matchesOFD("Keyword") {
+			continue
+		}
+		var encoded []byte
+		if index < len(values) {
+			var err error
+			encoded, err = editorXMLTextValue(data, child, editorImportText(data, child), values[index])
+			if err != nil {
+				return nil, err
+			}
+		}
+		patches = append(patches, editorXMLPatch{child.start, child.end, encoded})
+		index++
+	}
+	var added []byte
+	for ; index < len(values); index++ {
+		added = append(added, container.textXML("Keyword", values[index])...)
+	}
+	if len(added) != 0 {
+		if container.open == container.end {
+			patches = append(patches, editorXMLContent(data, container, added))
+		} else {
+			patches = append(patches, editorXMLPatch{container.close, container.close, added})
+		}
+	}
+	return editorPatchXML(data, patches), nil
 }
 
 // editorCreatorXML 更新指定文档的制作软件，移除原软件版本，保留其余根索引内容

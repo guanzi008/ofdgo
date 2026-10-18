@@ -147,7 +147,21 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	if docInfo, err := r.Reader.DocInfo(); err == nil {
 		info = *docInfo
 	}
-	p.SetInfo(info.Title, info.Subject, "", info.Author, ofdCreator)
+	renderer.information = make(pdfgo.Dictionary)
+	for _, field := range []struct {
+		key   pdfgo.Name
+		value string
+	}{{"Title", info.Title}, {"Subject", info.Subject}, {"Author", info.Author}, {"Creator", ofdCreator}} {
+		if field.value == "" {
+			continue
+		}
+		encoded, err := pdfgo.EncodeTextString(field.value)
+		if err != nil {
+			buf.Truncate(start)
+			return err
+		}
+		renderer.information[field.key] = encoded
+	}
 	for i, page := range pages {
 		content, err := page.ReadContent(ctx, r.Reader)
 		if err != nil {
@@ -201,7 +215,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		buf.Truncate(start)
 		return err
 	}
-	data := replacePDFProducer(buf.Bytes()[start:])
+	data := buf.Bytes()[start:]
 	options := pdfgo.OptimizeOptions{Compression: r.Compression}
 	if r.Compression.Mode != CompressionUnchanged && progress != nil {
 		options.OnProgress = func(_ string, _, _ int) error {
@@ -209,13 +223,6 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		}
 	}
 	if direct {
-		if !renderer.exactImages && !renderer.exactText && !navigation.nativeWrite {
-			if err := r.outputContext().Err(); err != nil {
-				buf.Truncate(start)
-				return err
-			}
-			return nil
-		}
 		var result bytes.Buffer
 		err := renderer.writePDF(r.outputContext(), data, &result, options)
 		buf.Truncate(start)
@@ -226,18 +233,4 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		return err
 	}
 	return renderer.writePDF(r.outputContext(), data, writer, options)
-}
-
-// replacePDFProducer 替换PDF的Producer属性
-// 入参: data PDF字节数据
-// 返回: []byte 替换后的PDF字节数据
-func replacePDFProducer(data []byte) []byte {
-	old := []byte("/Producer(tdewolff/canvas)")
-	idx := bytes.LastIndex(data, old)
-	if idx < 0 {
-		return data
-	}
-	dst := []byte("/Producer(" + ofdCreator + ")")
-	copy(data[idx:idx+len(old)], dst)
-	return data
 }

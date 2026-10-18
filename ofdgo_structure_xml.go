@@ -29,13 +29,21 @@ import (
 // 入参: node 根节点
 // 返回: []byte XML片段, error 名称、属性或编码错误
 func encodeStructureNode(node StructureNode) ([]byte, error) {
+	return encodeStructureNodeContext(context.Background(), node)
+}
+
+// encodeStructureNodeContext 编码标引子树并检查取消状态
+// 入参: ctx 取消上下文, node 根节点
+// 返回: []byte XML片段, error 名称、深度、编码或取消错误
+func encodeStructureNodeContext(ctx context.Context, node StructureNode) ([]byte, error) {
 	var output bytes.Buffer
 	encoder := xml.NewEncoder(&output)
-	count := 0
 	var write func(StructureNode, int) error
 	write = func(node StructureNode, depth int) error {
-		count++
-		if depth > 128 || count > 100000 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if depth > 128 {
 			return fmt.Errorf("custom tag structure limit exceeded")
 		}
 		if err := validateStructureNode(node); err != nil {

@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
+	"sort"
 
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
@@ -66,66 +68,138 @@ type PDFImportReport struct {
 
 // pdfImporter 保存单次转换的对象与资源状态
 type pdfImporter struct {
-	ctx              context.Context
-	reader           *pdfgo.Reader
-	editor           *Editor
-	renderer         *Renderer
-	report           PDFImportReport
-	matrix           pdfgo.Matrix
-	page             int
-	pageActionPage   int
-	fontIDs          map[*pdfgo.Font]string
-	fonts            map[*pdfgo.Font]*pdfImportedFont
-	symbolFonts      map[*pdfgo.Font]*pdfImportedFont
-	fontWarnings     map[string]bool
-	clipTexts        map[*pdfgo.TextClip][]TextObject
-	clipPaths        *renderCache[[32]byte, pdfClipPath]
-	cmykSpace        string
-	rgbSpace         string
-	iccSpaces        map[pdfICCKey]string
-	objects          *pdfObjectBuffer
-	formResources    *pdfFormCache
-	validation       *editorValidation
-	pages            map[pdfgo.Reference]*pdfgo.Page
-	pageOrder        []*pdfgo.Page
-	pageIDs          map[pdfgo.Reference]string
-	pageIndexes      map[pdfgo.Reference]int
-	destinationBoxes map[pdfgo.Reference]Box
-	imageIDs         map[pdfImageKey][]pdfImageResource
-	imageContents    *renderCache[pdfImageContentKey, pdfImageContent]
-	attachmentIDs    map[pdfAttachmentKey]string
-	modelAttachments map[*pdfgo.Stream]string
-	mediaResources   map[pdfMediaFileKey]pdfMediaResource
-	mediaInstances   map[pdfMediaInstanceKey]pdfMediaResource
-	movieBounds      map[*Movie]Box
-	renditions       *pdfRenditionImport
-	maskClips        map[*pdfgo.SoftMask]pdfgo.Path
-	pageBox          pdfgo.Rectangle
-	pageWidth        float64
-	pageHeight       float64
-	pendingPath      *pdfgo.PathMark
-	warning          func(pdfgo.Diagnostic)
-	rasterDPI        float64
-	rasterWarned     bool
-	compositeCache   *pdfCompositeCache
-	compositeNodes   []pdfCompositeNode
-	compositeSpace   *pdfgo.ColorSpace
-	patternCells     *renderCache[pdfPatternCellKey, *Pattern]
-	annotationData   []byte
-	resolveFile      pdfgo.FileResolver
-	resolveReference pdfgo.ReferenceResolver
-	references       *codecpdf.ReferenceCache
-	halftoneWarnings map[*pdfgo.Halftone]bool
-	halftones        map[string]*pdfgo.Halftone
-	transferBackdrop bool
-	transferModel    pdfgo.Name
-	compression      CompressionOptions
+	ctx                context.Context
+	reader             *pdfgo.Reader
+	editor             *Editor
+	renderer           *Renderer
+	report             PDFImportReport
+	matrix             pdfgo.Matrix
+	page               int
+	pageActionPage     int
+	fontIDs            map[*pdfgo.Font]string
+	fonts              map[*pdfgo.Font]*pdfImportedFont
+	symbolFonts        map[*pdfgo.Font]*pdfImportedFont
+	fontWarnings       map[string]bool
+	clipTexts          map[*pdfgo.TextClip][]TextObject
+	textOrigins        map[*pdfgo.ReplacementText]pdfObjectOrigin
+	clipPaths          *renderCache[[32]byte, pdfClipPath]
+	cmykSpace          string
+	rgbSpace           string
+	iccSpaces          map[pdfICCKey]string
+	objects            *pdfObjectBuffer
+	structureBindings  *pdfStructureBindings
+	annotationBindings []pdfStructureObjectBinding
+	formResources      *pdfFormCache
+	validation         *editorValidation
+	pages              map[pdfgo.Reference]*pdfgo.Page
+	pageOrder          []*pdfgo.Page
+	pageIDs            map[pdfgo.Reference]string
+	pageIndexes        map[pdfgo.Reference]int
+	destinationBoxes   map[pdfgo.Reference]Box
+	imageIDs           map[pdfImageKey][]pdfImageResource
+	imageContents      *renderCache[pdfImageContentKey, pdfImageContent]
+	attachmentIDs      map[pdfAttachmentKey]string
+	modelAttachments   map[*pdfgo.Stream]string
+	mediaResources     map[pdfMediaFileKey]pdfMediaResource
+	mediaInstances     map[pdfMediaInstanceKey]pdfMediaResource
+	movieBounds        map[*Movie]Box
+	renditions         *pdfRenditionImport
+	maskClips          map[*pdfgo.SoftMask]pdfgo.Path
+	pageBox            pdfgo.Rectangle
+	pageWidth          float64
+	pageHeight         float64
+	warning            func(pdfgo.Diagnostic)
+	rasterDPI          float64
+	rasterWarned       bool
+	compositeCache     *pdfCompositeCache
+	compositeNodes     []pdfCompositeNode
+	compositeSpace     *pdfgo.ColorSpace
+	patternCells       *renderCache[pdfPatternCellKey, pdfPatternCell]
+	patternOrigins     map[*Pattern]pdfObjectOrigin
+	annotationData     []byte
+	resolveFile        pdfgo.FileResolver
+	resolveReference   pdfgo.ReferenceResolver
+	references         *codecpdf.ReferenceCache
+	halftoneWarnings   map[*pdfgo.Halftone]bool
+	halftones          map[string]*pdfgo.Halftone
+	transferBackdrop   bool
+	transferModel      pdfgo.Name
+	compression        CompressionOptions
 }
 
 // pdfObjectBuffer 分块收集导入对象，提交前只整理一次连续数据
 type pdfObjectBuffer struct {
-	parts [][]GraphicObject
-	size  int
+	parts     [][]GraphicObject
+	sequences []pdfObjectSequence
+	size      int
+}
+
+// pdfObjectSequence 记录连续对象的来源区段，仅在区段变化时追加
+type pdfObjectSequence struct {
+	start int
+	pdfObjectOrigin
+}
+
+// pdfObjectOrigin 保存图元的来源区段，混合区域同时保留参与合成的区段
+type pdfObjectOrigin struct {
+	sequence *pdfgo.ContentSequence
+	related  []*pdfgo.ContentSequence
+}
+
+// pdfOriginSet 按首次出现顺序收集来源，仅在出现不同区段时分配去重表
+type pdfOriginSet struct {
+	origin  pdfObjectOrigin
+	seen    map[*pdfgo.ContentSequence]bool
+	started bool
+}
+
+// add 记录参与绘制的区段，空区段表示未标记内容
+// 入参: sequence 来源区段
+func (s *pdfOriginSet) add(sequence *pdfgo.ContentSequence) {
+	if !s.started {
+		s.origin.sequence, s.started = sequence, true
+		return
+	}
+	if sequence == s.origin.sequence || s.seen[sequence] {
+		return
+	}
+	if s.seen == nil {
+		s.seen = make(map[*pdfgo.ContentSequence]bool)
+	}
+	s.seen[sequence] = true
+	s.origin.related = append(s.origin.related, sequence)
+}
+
+// equal 比较来源及其顺序，不合并不同来源的图元
+// 入参: other 待比较来源
+// 返回: bool 是否相同
+func (o pdfObjectOrigin) equal(other pdfObjectOrigin) bool {
+	return o.sequence == other.sequence && slices.Equal(o.related, other.related)
+}
+
+// merge 合并参与混色的来源，不修改已有区段切片
+// 入参: other 另一来源
+// 返回: pdfObjectOrigin 去重后的来源
+func (o pdfObjectOrigin) merge(other pdfObjectOrigin) pdfObjectOrigin {
+	if o.equal(other) {
+		return o
+	}
+	result := o
+	copied := false
+	appendSequence := func(sequence *pdfgo.ContentSequence) {
+		if sequence != result.sequence && !slices.Contains(result.related, sequence) {
+			if !copied {
+				result.related = slices.Clone(result.related)
+				copied = true
+			}
+			result.related = append(result.related, sequence)
+		}
+	}
+	appendSequence(other.sequence)
+	for _, sequence := range other.related {
+		appendSequence(sequence)
+	}
+	return result
 }
 
 // ImportPDF 将PDF内容转换为独立OFD编辑文档，失败时不返回部分结果
@@ -159,7 +233,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	editor.SetRenderBackends(renderer.Backends())
 	editor.fontDirs, editor.fontFS = renderer.FontSources()
 	editor.fontSourcesCache = renderer.fontSourcesCache
-	importer := pdfImporter{ctx: ctx, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, fontIDs: map[*pdfgo.Font]string{}, fonts: map[*pdfgo.Font]*pdfImportedFont{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
+	importer := pdfImporter{ctx: ctx, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, fontIDs: map[*pdfgo.Font]string{}, fonts: map[*pdfgo.Font]*pdfImportedFont{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}, structureBindings: &pdfStructureBindings{}}
 	readOptions := pdfgo.ReaderOptions{Password: options.Password, PasswordUTF8: options.PasswordUTF8, ShapeText: importer.shapePDFText}
 	var diagnostics []pdfgo.Diagnostic
 	var readWarning func(pdfgo.Diagnostic)
@@ -173,6 +247,9 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	}
 	defer reader.Close()
 	importer.reader = reader
+	if err := importer.prepareStructure(ctx); err != nil {
+		return nil, PDFImportReport{}, fmt.Errorf("import PDF structure: %w", err)
+	}
 	outputIntents, err := reader.OutputIntents()
 	if err != nil {
 		return nil, PDFImportReport{}, fmt.Errorf("import PDF output intents: %w", err)
@@ -192,12 +269,6 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	importer.references = &codecpdf.ReferenceCache{}
 	defer importer.references.Close()
 	importer.halftoneWarnings = make(map[*pdfgo.Halftone]bool)
-	if security := reader.Encryption(); security != nil && !security.Owner && security.Permissions&0xf3c != 0xf3c {
-		if options.Strict {
-			return nil, PDFImportReport{}, &pdfgo.UnsupportedError{Feature: "PDF access permission conversion"}
-		}
-		importer.report.Warnings = append(importer.report.Warnings, pdfgo.Diagnostic{Message: "PDF access permissions not transferred to OFD"})
-	}
 	if !options.Strict {
 		importer.warning = func(warning pdfgo.Diagnostic) {
 			warning.Page = importer.page + 1
@@ -224,6 +295,9 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	}
 	if len(editor.pages) != 0 {
 		importer.page = -1
+		if err := importer.documentMetadata(ctx); err != nil {
+			return nil, PDFImportReport{}, fmt.Errorf("import PDF metadata: %w", err)
+		}
 		if err := importer.documentAttachments(ctx); err != nil {
 			return nil, PDFImportReport{}, fmt.Errorf("import PDF attachments: %w", err)
 		}
@@ -251,26 +325,23 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		importer.compositeNodes = nil
 		importer.compositeSpace = nil
 		importer.patternCells = nil
+		importer.patternOrigins = nil
 		importer.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
+		importer.textOrigins = nil
 		importer.clipPaths = nil
 		importer.annotationData = nil
+		importer.annotationBindings = nil
 		if err := importer.pageOpenActions(ctx, page); err != nil {
 			return fmt.Errorf("import PDF page %d actions: %w", index+1, err)
 		}
 		if err := importer.compositePage(nil, func(visitor pdfgo.Visitor) error { return reader.WalkPage(ctx, page, visitor) }); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
-		if err := importer.flushPath(); err != nil {
-			return fmt.Errorf("import PDF page %d: %w", index+1, err)
-		}
 		if err := importer.annotations(ctx, page, options.Strict); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
-		if len(importer.annotationData) != 0 {
-			if err := editor.appendAnnotations(index, importer.annotationData, true); err != nil {
-				return fmt.Errorf("import PDF page %d: %w", index+1, err)
-			}
-			importer.annotationData = nil
+		if err := importer.commitAnnotations(); err != nil {
+			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
 		if err := importer.commitObjects(); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
@@ -291,6 +362,9 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	}
 	if importer.report.Pages == 0 {
 		return nil, PDFImportReport{}, fmt.Errorf("PDF contains no pages")
+	}
+	if err := importer.documentStructures(ctx); err != nil {
+		return nil, PDFImportReport{}, fmt.Errorf("import PDF structure: %w", err)
 	}
 	return editor, importer.report, nil
 }
@@ -346,15 +420,60 @@ func (p *pdfImporter) objectValidation() *editorValidation {
 // appendObject 追加本次导入对象，按需建立独立暂存缓冲
 // 入参: object 独立导入对象
 func (p *pdfImporter) appendObject(object GraphicObject) {
+	p.appendSequenceObject(object, nil)
+}
+
+// appendSequenceObject 追加对象并保留来源区段，供复合对象优化核对边界
+// 入参: object 独立导入对象, sequence 来源区段
+func (p *pdfImporter) appendSequenceObject(object GraphicObject, sequence *pdfgo.ContentSequence) {
+	p.appendOriginObject(object, pdfObjectOrigin{sequence: sequence})
+}
+
+// appendOriginObject 追加对象并保留全部来源区段
+// 入参: object 独立导入对象, origin 来源区段
+func (p *pdfImporter) appendOriginObject(object GraphicObject, origin pdfObjectOrigin) {
+	if len(p.patternOrigins) != 0 {
+		var fill *FillColor
+		var stroke *StrokeColor
+		switch object.Type {
+		case "PathObject":
+			fill, stroke = object.PathObject.FillColor, object.PathObject.StrokeColor
+		case "TextObject":
+			fill, stroke = object.TextObject.FillColor, object.TextObject.StrokeColor
+		}
+		if fill != nil {
+			if source, ok := p.patternOrigins[fill.Pattern]; ok {
+				origin = origin.merge(source)
+			}
+		}
+		if stroke != nil {
+			if source, ok := p.patternOrigins[stroke.Pattern]; ok {
+				origin = origin.merge(source)
+			}
+		}
+	}
 	if p.objects == nil {
 		p.objects = &pdfObjectBuffer{}
 	}
-	p.objects.append(object)
+	p.objects.appendOrigin(object, origin)
 }
 
 // append 追加对象，小批量连续存储，超过阈值后不复制前序片段
 // 入参: object 独立对象
 func (b *pdfObjectBuffer) append(object GraphicObject) {
+	b.appendSequence(object, nil)
+}
+
+// appendSequence 按区段连续存储对象，不为未标记内容分配区段记录
+// 入参: object 独立对象, sequence 来源区段
+func (b *pdfObjectBuffer) appendSequence(object GraphicObject, sequence *pdfgo.ContentSequence) {
+	b.appendOrigin(object, pdfObjectOrigin{sequence: sequence})
+}
+
+// appendOrigin 按来源连续存储对象，混合区域保留多个区段
+// 入参: object 独立对象, origin 来源区段
+func (b *pdfObjectBuffer) appendOrigin(object GraphicObject, origin pdfObjectOrigin) {
+	b.recordOrigin(b.size, origin)
 	index := len(b.parts) - 1
 	if index == 0 && len(b.parts[0]) == cap(b.parts[0]) && cap(b.parts[0]) < pdfObjectChunkLimit {
 		part := b.parts[0]
@@ -374,6 +493,66 @@ func (b *pdfObjectBuffer) append(object GraphicObject) {
 	b.size++
 }
 
+// recordOrigin 按递增对象位置记录完整来源变化
+// 入参: index 对象位置, origin 来源区段
+func (b *pdfObjectBuffer) recordOrigin(index int, origin pdfObjectOrigin) {
+	var previous pdfObjectOrigin
+	if len(b.sequences) != 0 {
+		previous = b.sequences[len(b.sequences)-1].pdfObjectOrigin
+	}
+	if !previous.equal(origin) {
+		b.sequences = append(b.sequences, pdfObjectSequence{start: index, pdfObjectOrigin: origin})
+	}
+}
+
+// origin 获取暂存对象的全部来源，未标记对象或空缓冲返回空来源
+// 入参: index 对象位置
+// 返回: pdfObjectOrigin 来源区段
+func (b *pdfObjectBuffer) origin(index int) pdfObjectOrigin {
+	if b == nil {
+		return pdfObjectOrigin{}
+	}
+	next := sort.Search(len(b.sequences), func(i int) bool { return b.sequences[i].start > index })
+	if next == 0 {
+		return pdfObjectOrigin{}
+	}
+	return b.sequences[next-1].pdfObjectOrigin
+}
+
+// combinedOrigin 收集局部合成的来源区段，按首次出现顺序去重
+// 入参: ctx 取消上下文
+// 返回: pdfObjectOrigin 合并来源, error 取消错误
+func (b *pdfObjectBuffer) combinedOrigin(ctx context.Context) (pdfObjectOrigin, error) {
+	if err := ctx.Err(); err != nil {
+		return pdfObjectOrigin{}, err
+	}
+	if b.len() == 0 {
+		return pdfObjectOrigin{}, nil
+	}
+	origin := b.origin(0)
+	if len(b.sequences) <= 1 && (len(b.sequences) == 0 || b.sequences[0].start == 0) {
+		return origin, nil
+	}
+	var result pdfOriginSet
+	result.add(origin.sequence)
+	for _, sequence := range origin.related {
+		result.add(sequence)
+	}
+	for _, run := range b.sequences {
+		if err := ctx.Err(); err != nil {
+			return pdfObjectOrigin{}, err
+		}
+		result.add(run.sequence)
+		for _, sequence := range run.related {
+			if err := ctx.Err(); err != nil {
+				return pdfObjectOrigin{}, err
+			}
+			result.add(sequence)
+		}
+	}
+	return result.origin, nil
+}
+
 // len 获取暂存对象数量，空缓冲返回零
 // 返回: int 对象数量
 func (b *pdfObjectBuffer) len() int {
@@ -391,6 +570,11 @@ func (b *pdfObjectBuffer) truncate(size int) {
 	}
 	if size == b.len() {
 		return
+	}
+	for len(b.sequences) > 0 && b.sequences[len(b.sequences)-1].start >= size {
+		last := len(b.sequences) - 1
+		b.sequences[last] = pdfObjectSequence{}
+		b.sequences = b.sequences[:last]
 	}
 	remaining := size
 	for index, part := range b.parts {
@@ -450,8 +634,18 @@ func (p *pdfImporter) commitObjects() error {
 	if err != nil {
 		return err
 	}
+	var bindings []pdfStructureBinding
+	if p.structureBindings != nil {
+		bindings, err = p.objects.structureBindings(p.ctx)
+		if err != nil {
+			return err
+		}
+	}
 	if err := p.objectValidation().appendOwnedObjects(p.ctx, p.page, objects); err != nil {
 		return err
+	}
+	if p.structureBindings != nil {
+		p.structureBindings.append(p.editor.pages[p.page].ID, objects, bindings)
 	}
 	p.objects = nil
 	return nil

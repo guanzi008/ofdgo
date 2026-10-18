@@ -35,16 +35,13 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		return &pdfgo.UnsupportedError{Feature: "text blend mode " + string(mark.Style.BlendMode)}
 	}
 	if mark.Font.Subtype == pdfgo.Name("Type3") {
-		if err := p.flushPath(); err != nil {
-			return err
-		}
 		visitor := p.visitor()
 		for index := range mark.Glyphs {
 			if err := p.reader.WalkType3Glyph(p.ctx, mark, index, visitor); err != nil {
 				return err
 			}
 		}
-		return p.flushPath()
+		return p.ctx.Err()
 	}
 	if mark.Size == 0 || mark.HorizontalScale == 0 {
 		return p.degenerateText(mark)
@@ -58,9 +55,6 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			positions[index] = pdfgo.Point{X: position.X * x, Y: position.Y * y}
 		}
 		mark.Positions = positions
-	}
-	if err := p.flushPath(); err != nil {
-		return err
 	}
 	var err error
 	mark.Style, err = p.maskStyle(mark.Style)
@@ -377,14 +371,14 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			if matrix == (pdfgo.Matrix{}) {
 				matrix = pdfgo.Identity()
 			}
-			if err := p.appendPath(pdfgo.PathMark{Path: path, Style: mark.Style, Fill: fill, Stroke: true, StrokeMatrix: matrix}); err != nil {
+			if err := p.appendPath(pdfgo.PathMark{Sequence: mark.Sequence, Path: path, Style: mark.Style, Fill: fill, Stroke: true, StrokeMatrix: matrix}); err != nil {
 				return err
 			}
 		}
 		object.Visible = new(bool)
 		object.Fill, object.Stroke = new(bool), new(bool)
 	}
-	p.appendObject(GraphicObject{Type: "TextObject", TextObject: object})
+	p.appendOriginObject(GraphicObject{Type: "TextObject", TextObject: object}, p.textOrigin(mark))
 	p.report.TextObjects++
 	return nil
 }

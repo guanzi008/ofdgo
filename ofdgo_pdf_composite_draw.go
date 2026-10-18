@@ -257,6 +257,7 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 	var previousValues [4]float64
 	var previousAlpha float64
 	composedReady := false
+	originRecorded := c.origins == nil
 	for y := region.Min.Y; y < region.Max.Y; y++ {
 		if err := c.importer.ctx.Err(); err != nil {
 			return err
@@ -384,6 +385,21 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 			}
 			if style.AlphaIsShape {
 				shape, opacity = shape*opacity, 1
+			}
+			if !originRecorded && shape != 0 {
+				switch {
+				case node.path != nil:
+					c.origins.add(node.path.Sequence)
+				case node.text != nil:
+					origin := c.importer.textOrigin(*node.text)
+					c.origins.add(origin.sequence)
+					for _, sequence := range origin.related {
+						c.origins.add(sequence)
+					}
+				case node.image != nil:
+					c.origins.add(node.image.Sequence)
+				}
+				originRecorded = true
 			}
 			if initial != nil {
 				pixel := initial[index]

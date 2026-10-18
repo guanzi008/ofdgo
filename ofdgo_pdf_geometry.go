@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"image/color"
 	"math"
-	"reflect"
 	"strconv"
 
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
@@ -351,43 +350,13 @@ func (p *pdfImporter) pathDataContext(ctx context.Context, path pdfgo.Path, orig
 	return string(data), nil
 }
 
-// path 合并相同状态下的不透明描边，保留独立子路径与绘制顺序
+// path 保留每次路径绘制操作，重叠描边不合并为单次绘制
 // 入参: mark PDF路径绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) path(mark pdfgo.PathMark) error {
 	if mark.Style.BlendMode != "" && mark.Style.BlendMode != "Normal" && mark.Style.BlendMode != "Compatible" {
 		return &pdfgo.UnsupportedError{Feature: "path blend mode " + string(mark.Style.BlendMode)}
 	}
-	if !mark.Stroke || mark.Fill || mark.Style.Stroke.Alpha != 1 {
-		if err := p.flushPath(); err != nil {
-			return err
-		}
-		return p.appendPath(mark)
-	}
-	if p.pendingPath != nil && (p.pendingPath.StrokeMatrix != mark.StrokeMatrix || !reflect.DeepEqual(p.pendingPath.Style, mark.Style)) {
-		if err := p.flushPath(); err != nil {
-			return err
-		}
-	}
-	if p.pendingPath == nil {
-		p.pendingPath = &mark
-	} else {
-		p.pendingPath.Path.Segments = append(p.pendingPath.Path.Segments, mark.Path.Segments...)
-	}
-	if len(p.pendingPath.Path.Segments) >= 512 {
-		return p.flushPath()
-	}
-	return nil
-}
-
-// flushPath 写入连续描边批次，保持后续图元的叠放位置
-// 返回: error 转换错误
-func (p *pdfImporter) flushPath() error {
-	if p.pendingPath == nil {
-		return nil
-	}
-	mark := *p.pendingPath
-	p.pendingPath = nil
 	return p.appendPath(mark)
 }
 
@@ -492,7 +461,7 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 		phase := mark.Style.DashPhase * scale
 		object.DashOffset = &phase
 	}
-	p.appendObject(GraphicObject{Type: "PathObject", PathObject: object})
+	p.appendSequenceObject(GraphicObject{Type: "PathObject", PathObject: object}, mark.Sequence)
 	p.report.PathObjects++
 	return nil
 }

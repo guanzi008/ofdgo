@@ -104,7 +104,6 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 	stamp := *p
 	stamp.matrix = (pdfgo.Matrix{1, 0, 0, 1, -box.X, -box.Y}).Mul(p.matrix)
 	stamp.objects = nil
-	stamp.pendingPath = nil
 	stamp.report = PDFImportReport{}
 	stamp.compositeCache = nil
 	stamp.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
@@ -226,6 +225,33 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 	if err != nil {
 		return fmt.Errorf("PDF annotation: %w", err)
 	}
+	var binding pdfStructureObjectBinding
+	if p.structureBindings != nil {
+		binding.content, err = stamp.objects.structureBindings(ctx)
+		if err != nil {
+			return err
+		}
+		if annotation.Reference != (pdfgo.Reference{}) && annotation.Dictionary["StructParent"] != nil {
+			binding.source = pdfStructureObject{reader: p.reader, page: page.Reference, object: annotation.Reference}
+		}
+	}
+	if binding.source.object != (pdfgo.Reference{}) || len(binding.content) != 0 {
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			return err
+		}
+		if appearance := root.child("Appearance"); appearance != nil {
+			for _, object := range appearance.children {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if id := object.attr("ID"); id != "" {
+					binding.ids = append(binding.ids, id)
+				}
+			}
+		}
+		p.annotationBindings = append(p.annotationBindings, binding)
+	}
 	p.annotationData = append(p.annotationData, bytes.TrimPrefix(data, []byte(xml.Header))...)
 	if len(actions) != 0 && annotation.Subtype == "Link" || len(clicks) != 0 {
 		p.report.Links++
@@ -234,6 +260,35 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 	p.report.PathObjects += stamp.report.PathObjects
 	p.report.ImageObjects += stamp.report.ImageObjects
 	p.report.Warnings = append(p.report.Warnings, stamp.report.Warnings...)
+	return nil
+}
+
+// commitAnnotations 提交注解后登记最终外观标识，失败时保留待提交状态
+// 返回: error 注解提交错误
+func (p *pdfImporter) commitAnnotations() error {
+	if err := p.ctx.Err(); err != nil {
+		return err
+	}
+	if len(p.annotationData) == 0 {
+		return nil
+	}
+	if err := p.editor.appendAnnotations(p.page, p.annotationData, true); err != nil {
+		return err
+	}
+	for _, binding := range p.annotationBindings {
+		pageID := p.editor.pages[p.page].ID
+		if binding.source.object != (pdfgo.Reference{}) {
+			if p.structureBindings.objects == nil {
+				p.structureBindings.objects = make(map[pdfStructureObject][]StructureReference)
+			}
+			p.structureBindings.objects[binding.source] = append(p.structureBindings.objects[binding.source], StructureReference{PageID: pageID, ObjectIDs: binding.ids})
+		}
+		for _, content := range binding.content {
+			ref := p.structureBindings.reference(pageID, content.sequence)
+			ref.ObjectIDs = append(ref.ObjectIDs, binding.ids[content.start:content.end]...)
+		}
+	}
+	p.annotationData, p.annotationBindings = nil, nil
 	return nil
 }
 

@@ -123,7 +123,7 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 				}
 			}
 			cell := pdfCompositor{importer: &pattern.local, box: Box{X: c.box.X + float64(left)*pixelStep - dx, Y: c.box.Y + float64(top)*pixelStep - dy, W: float64(width) * pixelStep, H: float64(height) * pixelStep},
-				width: width, height: height, inverse: localInverse, cache: pattern.local.compositingCache(), scratch: c.scratch, masks: map[*pdfgo.SoftMask][]float64{}, softMask: c.softMask, channels: cellChannels}
+				width: width, height: height, inverse: localInverse, cache: pattern.local.compositingCache(), scratch: c.scratch, origins: c.origins, masks: map[*pdfgo.SoftMask][]float64{}, softMask: c.softMask, channels: cellChannels}
 			err := cell.draw(pattern.nodes, pixels, space)
 			cell.releaseMasks()
 			if err != nil {

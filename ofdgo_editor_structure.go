@@ -476,14 +476,12 @@ func rewriteStructureReferences(ctx context.Context, data []byte, tag CustomTag,
 		}
 	}
 	var patches []editorXMLPatch
-	count := 0
 	var walk func(*editorXML, int) error
 	walk = func(node *editorXML, depth int) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		count++
-		if depth > 128 || count > 100000 {
+		if depth > 128 {
 			return fmt.Errorf("custom tag structure limit exceeded")
 		}
 		if node.name.Space != root.name.Space {

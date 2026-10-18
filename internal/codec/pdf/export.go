@@ -31,10 +31,11 @@ type TextPage struct {
 	Replacements []pdfgo.TextReplacement
 }
 
-// WriteOptions 保存PDF最终写出所需的像素、文字和导航修正
+// WriteOptions 保存PDF最终写出所需的元数据、像素、文字和导航修正
 // Images逐页记录绘制图像，nil图像表示不替换；Links保留全部链接位置，包括矩形区域的nil项
 // PrepareRewrite在页面引用确定后填充导航动作，不得提前写出PDF
 type WriteOptions struct {
+	Information    pdfgo.Dictionary
 	Images         [][]image.Image
 	Text           []TextPage
 	Links          map[int][]*pdfgo.LinkRegion
@@ -49,7 +50,7 @@ type WriteOptions struct {
 // 返回: error 资源、压缩或写入错误
 func Write(ctx context.Context, data []byte, writer io.Writer, settings WriteOptions) error {
 	nativeWrite := settings.PrepareRewrite != nil
-	if !settings.ExactImages && !settings.ExactText && !nativeWrite && settings.Optimization.Compression.Mode == pdfgo.CompressionUnchanged {
+	if !settings.ExactImages && !settings.ExactText && !nativeWrite && len(settings.Information) == 0 && settings.Optimization.Compression.Mode == pdfgo.CompressionUnchanged {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -65,6 +66,10 @@ func Write(ctx context.Context, data []byte, writer io.Writer, settings WriteOpt
 	}
 	defer reader.Close()
 	if !settings.ExactImages && !settings.ExactText && !nativeWrite {
+		if len(settings.Information) != 0 {
+			_, err := reader.RewriteTo(ctx, writer, pdfgo.RewriteOptions{Information: settings.Information, Optimization: settings.Optimization})
+			return err
+		}
 		_, err := reader.OptimizeTo(ctx, writer, settings.Optimization)
 		return err
 	}
@@ -171,7 +176,7 @@ func Write(ctx context.Context, data []byte, writer io.Writer, settings WriteOpt
 	if pages != len(settings.Images) {
 		return fmt.Errorf("PDF output page missing")
 	}
-	options := pdfgo.RewriteOptions{Images: images, ImageOptions: pdfgo.ImageWriteOptions{PreblendBinary: true}, LinkRegions: links, TextReplacements: texts, Optimization: settings.Optimization}
+	options := pdfgo.RewriteOptions{Information: settings.Information, Images: images, ImageOptions: pdfgo.ImageWriteOptions{PreblendBinary: true}, LinkRegions: links, TextReplacements: texts, Optimization: settings.Optimization}
 	if nativeWrite {
 		if err := settings.PrepareRewrite(ctx, reader, references, &options); err != nil {
 			return err

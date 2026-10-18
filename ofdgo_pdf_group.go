@@ -35,6 +35,7 @@ type pdfPaintRegion struct {
 	paint  pdfgo.Paint
 	path   GeometryPath
 	intent pdfgo.Name
+	origin pdfObjectOrigin
 }
 
 // group 将单色图元的透明组转换为互不重叠的填充区域，保留矢量与组不透明度
@@ -46,9 +47,6 @@ func (p *pdfImporter) group(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error
 	}
 	if mark.BlendMode != "" && mark.BlendMode != "Normal" && mark.BlendMode != "Compatible" {
 		return &pdfgo.UnsupportedError{Feature: "group blend mode " + string(mark.BlendMode)}
-	}
-	if err := p.flushPath(); err != nil {
-		return err
 	}
 	if mark.ColorSpace != nil && !mark.ColorSpace.SRGBEquivalent() {
 		if mark.Alpha != 1 || mark.SoftMask != nil {
@@ -72,10 +70,7 @@ func (p *pdfImporter) group(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error
 		}
 	}
 	if mark.Alpha == 1 {
-		if err := walk(visitor); err != nil {
-			return err
-		}
-		return p.flushPath()
+		return walk(visitor)
 	}
 	err := p.groupPaths(mark, walk, visitor)
 	if errors.Is(err, errPDFGroupRaster) && p.warning != nil {
@@ -140,6 +135,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 	var combined GeometryPath
 	var paint *pdfgo.Paint
 	var intent pdfgo.Name
+	var origin pdfObjectOrigin
 	var clips []pdfgo.Path
 	opaque := true
 	scale := math.Hypot(p.matrix[0], p.matrix[1])
@@ -185,13 +181,15 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 			if paint == nil {
 				paint, clips = &color, path.Style.Clips
 				intent = path.Style.RenderingIntent
+				origin = pdfObjectOrigin{sequence: path.Sequence}
 			} else if !reflect.DeepEqual(clips, path.Style.Clips) {
 				return fmt.Errorf("%w: independently clipped group content", errPDFGroupRaster)
 			} else if color.Alpha != 1 || !reflect.DeepEqual(*paint, color) || intent != path.Style.RenderingIntent {
-				regions = append(regions, pdfPaintRegion{*paint, combined, intent})
+				regions = append(regions, pdfPaintRegion{*paint, combined, intent, origin})
 				combined = nil
 				paint = &color
 				intent = path.Style.RenderingIntent
+				origin = pdfObjectOrigin{sequence: path.Sequence}
 			}
 			outline := shape
 			evenOdd := path.Path.EvenOdd
@@ -242,7 +240,14 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 			if err := p.ctx.Err(); err != nil {
 				return err
 			}
-			combined = append(combined, outline...)
+			if len(outline) != 0 {
+				if len(combined) == 0 {
+					origin = pdfObjectOrigin{sequence: path.Sequence}
+				} else {
+					origin = origin.merge(pdfObjectOrigin{sequence: path.Sequence})
+				}
+				combined = append(combined, outline...)
+			}
 		}
 		return nil
 	}
@@ -252,10 +257,12 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 	if err := p.ctx.Err(); err != nil {
 		return err
 	}
-	if len(combined) == 0 {
+	if len(combined) != 0 {
+		regions = append(regions, pdfPaintRegion{*paint, combined, intent, origin})
+	}
+	if len(regions) == 0 {
 		return nil
 	}
-	regions = append(regions, pdfPaintRegion{*paint, combined, intent})
 	if !opaque {
 		regions, err = pdfCompositeRegions(geometry, regions)
 		if err != nil {
@@ -310,7 +317,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 			return err
 		}
 		object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: data, Fill: &fill, Stroke: &stroke, FillColor: color, Clips: objectClips}
-		p.appendObject(GraphicObject{Type: "PathObject", PathObject: object})
+		p.appendOriginObject(GraphicObject{Type: "PathObject", PathObject: object}, region.origin)
 		p.report.PathObjects++
 	}
 	return nil
@@ -320,7 +327,15 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 // 入参: mark 组状态, walk 内容访问函数
 // 返回: error 转换或渲染错误
 func (p *pdfImporter) rasterGroup(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
-	img, box, err := p.renderGroup(func(local *pdfImporter) error { return walk(local.visitor()) }, nil)
+	var origin pdfObjectOrigin
+	img, box, err := p.renderGroup(func(local *pdfImporter) error {
+		if err := walk(local.visitor()); err != nil {
+			return err
+		}
+		var err error
+		origin, err = local.objects.combinedOrigin(local.ctx)
+		return err
+	}, nil)
 	if err != nil || img == nil {
 		return err
 	}
@@ -330,7 +345,7 @@ func (p *pdfImporter) rasterGroup(mark pdfgo.GroupMark, walk func(pdfgo.Visitor)
 			return err
 		}
 	}
-	return p.appendRasterGroup(img, box, mark.Alpha)
+	return p.appendRasterGroup(img, box, mark.Alpha, origin)
 }
 
 // visitor 绑定当前导入器的图元与透明组访问函数
@@ -385,14 +400,11 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 	if p.clipPaths == nil {
 		p.clipPaths = &renderCache[[32]byte, pdfClipPath]{limit: 8 << 20}
 	}
-	local := pdfImporter{ctx: p.ctx, reader: p.reader, editor: editor, renderer: p.renderer, matrix: p.matrix, pageBox: p.pageBox, pageWidth: p.pageWidth, pageHeight: p.pageHeight, rasterDPI: p.rasterDPI, warning: p.warning, rasterWarned: true, fontIDs: map[*pdfgo.Font]string{}, fonts: p.fonts, symbolFonts: p.symbolFonts, clipPaths: p.clipPaths}
+	local := pdfImporter{ctx: p.ctx, reader: p.reader, editor: editor, renderer: p.renderer, matrix: p.matrix, pageBox: p.pageBox, pageWidth: p.pageWidth, pageHeight: p.pageHeight, rasterDPI: p.rasterDPI, warning: p.warning, rasterWarned: true, fontIDs: map[*pdfgo.Font]string{}, fonts: p.fonts, symbolFonts: p.symbolFonts, clipPaths: p.clipPaths, textOrigins: p.textOrigins}
 	if err := build(&local); err != nil {
 		return nil, box, err
 	}
 	if err := p.ctx.Err(); err != nil {
-		return nil, box, err
-	}
-	if err := local.flushPath(); err != nil {
 		return nil, box, err
 	}
 	if local.objects.len() == 0 {
@@ -492,9 +504,9 @@ func (p *pdfImporter) renderGroupSceneInto(source *RasterPage, box Box, target *
 }
 
 // appendRasterGroup 保存局部合成结果并记录输出精度
-// 入参: img 透明图像, box 页面区域, opacity 组透明度
+// 入参: img 透明图像, box 页面区域, opacity 组透明度, origin 来源区段
 // 返回: error 保存错误
-func (p *pdfImporter) appendRasterGroup(img image.Image, box Box, opacity float64) error {
+func (p *pdfImporter) appendRasterGroup(img image.Image, box Box, opacity float64, origin pdfObjectOrigin) error {
 	var data bytes.Buffer
 	if err := pdfgo.EncodePNG(p.ctx, &data, img); err != nil {
 		return err
@@ -508,7 +520,7 @@ func (p *pdfImporter) appendRasterGroup(img image.Image, box Box, opacity float6
 	}
 	alpha := int(math.Round(opacity * 255))
 	object := ImageObject{ResourceID: id, Boundary: pdfBoundary(box), CTM: pdfNumbers(box.W, 0, 0, box.H, 0, 0), Alpha: &alpha}
-	p.appendObject(GraphicObject{Type: "ImageObject", ImageObject: object})
+	p.appendOriginObject(GraphicObject{Type: "ImageObject", ImageObject: object}, origin)
 	p.report.ImageObjects++
 	if !p.rasterWarned {
 		p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("PDF effect locally composited at %g DPI; other objects retained", p.rasterDPI)})
@@ -531,7 +543,7 @@ func pdfCompositeRegions(geometry GeometryBackend, regions []pdfPaintRegion) ([]
 				return nil, err
 			}
 			if len(outside) != 0 {
-				next = append(next, pdfPaintRegion{backdrop.paint, outside, backdrop.intent})
+				next = append(next, pdfPaintRegion{backdrop.paint, outside, backdrop.intent, backdrop.origin})
 			}
 			overlap, err := geometry.Combine(backdrop.path, source.path, GeometryIntersect)
 			if err != nil {
@@ -542,7 +554,11 @@ func pdfCompositeRegions(geometry GeometryBackend, regions []pdfPaintRegion) ([]
 				for i := range paint.RGB {
 					paint.RGB[i] = (source.paint.RGB[i]*source.paint.Alpha + backdrop.paint.RGB[i]*backdrop.paint.Alpha*(1-source.paint.Alpha)) / paint.Alpha
 				}
-				next = append(next, pdfPaintRegion{paint, overlap, ""})
+				origin := source.origin
+				if source.paint.Alpha != 1 {
+					origin = backdrop.origin.merge(origin)
+				}
+				next = append(next, pdfPaintRegion{paint, overlap, "", origin})
 			}
 			remaining, err = geometry.Combine(remaining, backdrop.path, GeometrySubtract)
 			if err != nil {
@@ -550,7 +566,7 @@ func pdfCompositeRegions(geometry GeometryBackend, regions []pdfPaintRegion) ([]
 			}
 		}
 		if len(remaining) != 0 {
-			next = append(next, pdfPaintRegion{source.paint, remaining, source.intent})
+			next = append(next, pdfPaintRegion{source.paint, remaining, source.intent, source.origin})
 		}
 		result = next
 	}
