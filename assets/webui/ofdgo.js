@@ -25,7 +25,7 @@ const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "A
 const fontBinding = { font: null, choices: [], sequence: 0 };
 const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name", "SourceRow", "Source", "File", "Hint", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#fontBinding${name}`)]));
 const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Kind", "List", "Empty", "Reference", "ReferenceGroup", "Actions", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "BindingActions", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
-const resourceManager = { items: [], visibleItems: [], start: -1, end: -1, selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
+const resourceManager = { items: [], filteredItems: [], start: -1, end: -1, selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
 const settingsElements = Object.fromEntries(["Button", "Panel", "Form", "Title", "Kind", "Context", "Content", "Actions", "Status"].map(name => [name, document.querySelector(`#settings${name}`)]));
 const settings = { sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false, invoice: false };
 const invoicePanel = { tab: "basic", entries: [], formats: [], drafts: new Map(), key: "", result: null };
@@ -781,13 +781,13 @@ resourceElements.List.closest(".resource-list-container").addEventListener("scro
 new ResizeObserver(renderResourceWindow).observe(resourceElements.List.closest(".resource-list-container"));
 resourceElements.List.addEventListener("keydown", event => {
 	if (resourceManager.busy) return;
-	const items = resourceManager.visibleItems, index = items.indexOf(resourceManager.selected);
+	const items = resourceManager.filteredItems, index = items.indexOf(resourceManager.selected);
 	const target = { ArrowDown: Math.min(items.length - 1, index + 1), ArrowUp: Math.max(0, index - 1), Home: 0, End: items.length - 1 }[event.key];
 	if (target == null || !items[target]) return;
 	event.preventDefault();
 	const sequence = state.openSeq;
 	chooseManagedResource(items[target]).then(() => {
-		if (!resourceElements.Panel.open || sequence !== state.openSeq || items !== resourceManager.visibleItems || resourceManager.selected !== items[target]) return;
+		if (!resourceElements.Panel.open || sequence !== state.openSeq || items !== resourceManager.filteredItems || resourceManager.selected !== items[target]) return;
 		const container = resourceElements.List.closest(".resource-list-container");
 		const height = parseFloat(getComputedStyle(resourceElements.List).getPropertyValue("--resource-row-height"));
 		const viewport = container.clientHeight - container.querySelector(".resource-heading").offsetHeight;
@@ -2388,7 +2388,7 @@ async function closeFile() {
 	releaseResourcePreview();
 	resourceManager.sequence++;
 	resourceManager.items = [];
-	resourceManager.visibleItems = [];
+	resourceManager.filteredItems = [];
 	resourceManager.start = resourceManager.end = -1;
 	resourceManager.selected = null;
 	resourceManager.references = [];
@@ -7344,7 +7344,7 @@ async function loadManagedResources() {
 async function renderResourceList() {
 	const items = resourceManager.items.filter(item => item.kind === resourceElements.Kind.value);
 	const selected = items.find(item => item.id === resourceManager.selected?.id && item.kind === resourceManager.selected?.kind) || items[0];
-	resourceManager.visibleItems = items;
+	resourceManager.filteredItems = items;
 	resourceManager.start = resourceManager.end = -1;
 	resourceElements.Empty.hidden = items.length !== 0;
 	const height = parseFloat(getComputedStyle(resourceElements.List).getPropertyValue("--resource-row-height"));
@@ -7355,7 +7355,7 @@ async function renderResourceList() {
 
 function renderResourceWindow() {
 	if (!resourceElements.Panel.open) return;
-	const items = resourceManager.visibleItems, list = resourceElements.List;
+	const items = resourceManager.filteredItems, list = resourceElements.List;
 	const container = list.closest(".resource-list-container");
 	const height = parseFloat(getComputedStyle(list).getPropertyValue("--resource-row-height"));
 	const viewport = container.clientHeight - container.querySelector(".resource-heading").offsetHeight;
@@ -7404,9 +7404,9 @@ async function selectManagedResource(item) {
 	renderResourceWindow();
 	const previous = resourceElements.List.querySelector('[data-selected="true"]');
 	if (previous) { previous.setAttribute("data-selected", "false"); previous.tabIndex = -1; }
-	const current = resourceElements.List.querySelector(`[data-index="${resourceManager.visibleItems.indexOf(item)}"]`);
+	const current = resourceElements.List.querySelector(`[data-index="${resourceManager.filteredItems.indexOf(item)}"]`);
 	if (current) { current.setAttribute("data-selected", "true"); current.tabIndex = 0; }
-	resourceElements.List.tabIndex = resourceManager.visibleItems.length && !current ? 0 : -1;
+	resourceElements.List.tabIndex = resourceManager.filteredItems.length && !current ? 0 : -1;
 	await loadManagedReferences(same ? Number(reference) : 0);
 }
 
