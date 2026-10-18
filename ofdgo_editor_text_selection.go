@@ -118,15 +118,15 @@ func (e *Editor) analyzeTextSelection(page int, selection TextSelection) (TextSe
 		if len(selection.IDs) != 0 || len(selection.Indexes) == 0 {
 			return result, fmt.Errorf("composite selection requires indexes only")
 		}
-		members, err := e.CompositeObjectsAt(page, root, selection.Indexes)
-		if err != nil {
-			return result, err
-		}
-		reader, _, _, nodes, err := e.compositeScope(page, root)
+		reader, renderer, _, nodes, err := e.compositeScope(page, root)
 		if err != nil {
 			return result, err
 		}
 		defer reader.Close()
+		members, err := e.measureCompositeSelection(renderer, nodes, selection.Indexes)
+		if err != nil {
+			return result, err
+		}
 		for i, member := range members {
 			if member.Object.Type != "TextObject" || !member.Capabilities.RewriteText {
 				return result, fmt.Errorf("selection member is not editable text")
@@ -648,19 +648,21 @@ func (e *Editor) prepareTextSelectionEdit(edit *TextSelectionEdit) error {
 // 返回: TextSelection 提交后可用于重新枚举的选择
 func selectionAfterTextEdit(analysis TextSelectionAnalysis, parts []TextSelectionPart, reflow bool) TextSelection {
 	result := TextSelection{Root: analysis.Selection.Root}
-	deleted := make(map[int]bool)
+	var deleted []int
 	if reflow {
 		for _, part := range analysis.Parts[1:] {
-			deleted[part.Index] = true
+			deleted = append(deleted, part.Index)
 		}
 		parts = analysis.Parts[:1]
 	} else {
 		for _, part := range parts {
 			if part.Deleted {
-				deleted[part.Index] = true
+				deleted = append(deleted, part.Index)
 			}
 		}
 	}
+	slices.Sort(deleted)
+	deleted = slices.Compact(deleted)
 	for _, part := range parts {
 		if part.Deleted {
 			continue
@@ -669,13 +671,8 @@ func selectionAfterTextEdit(analysis TextSelectionAnalysis, parts []TextSelectio
 			result.IDs = append(result.IDs, part.ID)
 			continue
 		}
-		index := part.Index
-		for removed := range deleted {
-			if removed < part.Index {
-				index--
-			}
-		}
-		result.Indexes = append(result.Indexes, index)
+		removed, _ := slices.BinarySearch(deleted, part.Index)
+		result.Indexes = append(result.Indexes, part.Index-removed)
 	}
 	return result
 }
@@ -700,35 +697,39 @@ func (e *Editor) UpdateTextSelection(page int, selection TextSelection, edit Tex
 			return e.reflowTextSelection(page, selection, edit, preview)
 		}
 		if selection.Root != nil {
+			parts := make(map[int]int, len(preview.Parts))
+			for i, part := range preview.Parts {
+				parts[part.Index] = i
+			}
 			return e.editCompositeObjects(page, *selection.Root, selection.Indexes, func(_ *Renderer, nodes []*editorCompositeNode, _ []CompositeMember) error {
 				for i, node := range nodes {
-					for _, part := range preview.Parts {
-						if part.Index != selection.Indexes[i] {
-							continue
-						}
-						if part.Deleted {
-							node.owner.patches = append(node.owner.patches, editorXMLPatch{node.span.start, node.span.end, nil})
-							continue
-						}
-						object := cloneEditorData(node.object)
-						object.TextObject.TextCode, object.TextObject.CGTransform = part.TextObject.TextCode, part.TextObject.CGTransform
-						if edit.Font != "" {
-							object.TextObject.Font = part.TextObject.Font
-						}
-						if edit.Size != 0 {
-							object.TextObject.Size = part.TextObject.Size
-						}
-						if edit.Color != "" {
-							object.TextObject.FillColor = part.TextObject.FillColor
-						}
-						if reflect.DeepEqual(object, node.object) {
-							continue
-						}
-						if err := node.update(object); err != nil {
-							return err
-						}
-						node.setState(editorCompositeState{})
+					index, exists := parts[selection.Indexes[i]]
+					if !exists {
+						continue
 					}
+					part := &preview.Parts[index]
+					if part.Deleted {
+						node.owner.patches = append(node.owner.patches, editorXMLPatch{node.span.start, node.span.end, nil})
+						continue
+					}
+					object := cloneEditorData(node.object)
+					object.TextObject.TextCode, object.TextObject.CGTransform = part.TextObject.TextCode, part.TextObject.CGTransform
+					if edit.Font != "" {
+						object.TextObject.Font = part.TextObject.Font
+					}
+					if edit.Size != 0 {
+						object.TextObject.Size = part.TextObject.Size
+					}
+					if edit.Color != "" {
+						object.TextObject.FillColor = part.TextObject.FillColor
+					}
+					if reflect.DeepEqual(object, node.object) {
+						continue
+					}
+					if err := node.update(object); err != nil {
+						return err
+					}
+					node.setState(editorCompositeState{})
 				}
 				return nil
 			})

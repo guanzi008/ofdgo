@@ -82,6 +82,12 @@ func (p *ConversionPool) memoryLimit() int64 {
 // 入参: ctx 取消上下文, image 是否为图像任务, size 图像工作量
 // 返回: error 取消错误
 func (p *ConversionPool) acquire(ctx context.Context, image bool, size int64) error {
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -104,15 +110,23 @@ func (p *ConversionPool) acquire(ctx context.Context, image bool, size int64) er
 		}
 		changed := p.changed
 		p.mu.Unlock()
-		timer := time.NewTimer(250 * time.Millisecond)
+		var tick <-chan time.Time
+		if p.options.AvailableMemory != nil {
+			if timer == nil {
+				timer = time.NewTimer(250 * time.Millisecond)
+			} else {
+				timer.Reset(250 * time.Millisecond)
+			}
+			tick = timer.C
+		}
 		select {
 		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
 		case <-changed:
-		case <-timer.C:
+		case <-tick:
 		}
-		timer.Stop()
+		if timer != nil {
+			timer.Stop()
+		}
 	}
 }
 

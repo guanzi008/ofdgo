@@ -717,7 +717,7 @@ func (h *Host) readFonts() {
 }
 
 // loadFont 按转换请求读取单个系统字体
-// 入参: ctx 调用上下文, name 字体文件路径及字体索引
+// 入参: ctx 调用上下文, name 字体别名对应的文件名
 // 返回: []byte 字体数据, error 读取错误
 func (h *Host) loadFont(ctx context.Context, name string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {

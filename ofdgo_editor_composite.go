@@ -119,6 +119,13 @@ func (e *Editor) CompositeObjectsAt(page int, path ObjectPath, indexes []int) ([
 		return nil, err
 	}
 	defer reader.Close()
+	return e.measureCompositeSelection(renderer, nodes, indexes)
+}
+
+// measureCompositeSelection 复用已解析范围，按输入索引度量成员并保留容器位置
+// 入参: renderer 资源渲染器, nodes 范围内全部成员, indexes 不重复的成员序号
+// 返回: []CompositeMember 独立成员快照, error 索引或度量错误
+func (e *Editor) measureCompositeSelection(renderer *Renderer, nodes []*editorCompositeNode, indexes []int) ([]CompositeMember, error) {
 	selected := make([]*editorCompositeNode, len(indexes))
 	seen := make(map[int]bool, len(indexes))
 	for i, index := range indexes {
