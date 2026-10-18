@@ -332,7 +332,12 @@ func (p *pdfImporter) documentStructure(ctx context.Context) error {
 				} else {
 					decoded, err = pdfgo.DecodeTextString(text)
 					if err != nil {
-						return err
+						original, err := values.encode(text, 0)
+						if err != nil {
+							return err
+						}
+						node.Children = append(node.Children, StructureNode{Name: string(field), Namespace: pdfStructureNamespace, Children: []StructureNode{original}})
+						continue
 					}
 				}
 				node.Attributes = append(node.Attributes, pdfStructureAttribute(string(field), decoded)...)
