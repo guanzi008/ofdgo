@@ -1,6 +1,6 @@
 import { SVG_NAMESPACE, CanvasEditor, canEditObject, editTextValue, richTextModel, fontFaceStyle, missingGlyphMessage, objectEditReason, selectedText, lineShape, selectionBounds, pagePoint } from "./ofdgo_edit.js";
 import { FontManager, FontPicker } from "./ofdgo_font.js";
-import { nativeHost, createEngineWorker, documentBytes, saveFilePicker, directoryPicker } from "./ofdgo_host.js";
+import { nativeHost, createEngineWorker, engineLimits, documentBytes, saveFilePicker, directoryPicker } from "./ofdgo_host.js";
 
 const MM_TO_PX = 96 / 25.4;
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
@@ -8546,10 +8546,11 @@ async function runBatch() {
 				fontNames: [...batch.localFonts.keys()], fontMode: format.value === "ofd" ? Number(batchElements.FontMode.value) : 0 };
 			return { item, format, options };
 		});
-		const capacity = nativeHost ? (await nativeHost.call("batch", {})).parallelism : Math.max(1, (navigator.hardwareConcurrency || 2) - 1);
-		const automatic = nativeHost ? capacity : Math.min(capacity, Math.max(1, Math.floor((navigator.deviceMemory || 4) / 2)));
-		const parallel = Math.min(jobs.length, nativeHost ? capacity : jobs.length, Number(batchElements.Parallel.value) || automatic);
-		const workerMemory = (navigator.deviceMemory || 4) * 1024 ** 3 / 4 / parallel;
+		const limits = nativeHost ? await nativeHost.call("batch", {}) : engineLimits();
+		const capacity = limits.parallelism;
+		const automatic = nativeHost ? capacity : Math.min(capacity, Math.max(1, Math.floor(limits.memoryBytes / (512 << 20))));
+		const parallel = Math.min(jobs.length, capacity, Number(batchElements.Parallel.value) || automatic);
+		const workerMemory = (limits.memoryBytes || 0) / parallel;
 		let next = 0;
 		const run = async initial => {
 			let slot = initial;
@@ -9922,7 +9923,7 @@ function queueNearbyPages(index, openSeq = state.openSeq) {
 	for (const face of state.svgFonts.values()) bytes += svgFontBytes.get(face) || 0;
 	const budget = nativeHost?.cacheBytes || PAGE_CACHE_BYTES;
 	const cost = Math.max(1 << 20, bytes / Math.max(1, state.pageCache.size));
-	const count = Math.max(0, Math.min(nativeHost?.parallelism || 1, state.pageLayout * 2, Math.floor((budget - bytes) / cost)));
+	const count = Math.max(0, Math.min(nativeHost?.parallelism || wasmWorker?.parallelism || 1, state.pageLayout * 2, Math.floor((budget - bytes) / cost)));
 	for (let i = start; i < Math.min(state.doc?.pageCount || 1, start + state.pageLayout); i += 1) {
 		renderFlowPage(i, { openSeq, priority: 1 });
 	}

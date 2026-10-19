@@ -1,16 +1,138 @@
 let engineModule = null;
+let engineScheduler = null;
+
+export function engineLimits() {
+	engineScheduler ||= new BrowserScheduler();
+	return {parallelism: engineScheduler.capacity, memoryBytes: engineScheduler.budget};
+}
+
+class BrowserScheduler {
+	constructor() {
+		this.budget = Math.max(256, Math.min(2048, (navigator.deviceMemory || 2) * 256)) * 1024 * 1024;
+		this.capacity = Math.max(1, Math.min((navigator.hardwareConcurrency || 2) - 1, Math.floor(this.budget / (128 << 20))));
+		this.limit = Math.min(this.capacity, Math.max(1, Math.floor(this.budget / (512 << 20))));
+		this.workers = new Set();
+		this.queue = [];
+	}
+
+	get memory() {
+		return [...this.workers].reduce((total, worker) => total + Math.max(worker.memory, worker.reservation), 0);
+	}
+
+	active() {
+		return [...this.workers].filter(worker => worker.requests.size).length;
+	}
+
+	submit(worker, data, transfer) {
+		if (worker.primary) { this.send({worker, data, transfer}); return; }
+		this.queue.push({worker, data, transfer, queued:performance.now()});
+		this.drain();
+	}
+
+	send(task) {
+		const {worker, data, transfer} = task;
+		worker.requests.set(data.id, performance.now());
+		try { worker.worker.postMessage(data, transfer); }
+		catch (error) {
+			worker.requests.delete(data.id);
+			worker.onmessage?.({data:{id:data.id, ok:false, error:error.message}});
+		}
+	}
+
+	complete(worker, data) {
+		if (data.memory) worker.memory = data.memory;
+		if (data.id == null || data.type) return;
+		const started = worker.requests.get(data.id);
+		worker.requests.delete(data.id);
+		if (this.memory > this.budget) this.limit = Math.max(1, this.limit - 1);
+		else if (started !== undefined && data.ok && performance.now() - started > 100 && this.memory + Math.max(128 << 20, worker.memory) < this.budget) this.limit = Math.min(this.capacity, this.limit + 1);
+	}
+
+	drain() {
+		if (this.draining) return;
+		this.draining = true;
+		try {
+			if (this.queue.length) for (const worker of [...this.workers].sort((a,b) => b.memory-a.memory)) {
+				if (this.memory + (64 << 20) <= this.budget) break;
+				if (!worker.requests.size) worker.reclaim?.();
+			}
+			this.queue.sort((a, b) => Number(a.worker.batch) - Number(b.worker.batch) + (a.queued - b.queued) / 2000);
+			for (let i = 0; i < this.queue.length;) {
+				const task = this.queue[i];
+				if (task.worker.closed) { this.queue.splice(i, 1); continue; }
+				const active = this.active();
+				if (task.worker.requests.size || active >= this.limit || active && this.memory + (64 << 20) > this.budget) { i++; continue; }
+				this.queue.splice(i, 1);
+				this.send(task);
+			}
+		} finally { this.draining = false; }
+	}
+
+	cancel(worker, id) {
+		const index = this.queue.findIndex(task => task.worker === worker && task.data.id === id);
+		if (index < 0) return false;
+		this.queue.splice(index, 1);
+		worker.onmessage?.({data:{id, ok:false, canceled:true, error:"操作已取消"}});
+		this.drain();
+		return true;
+	}
+
+	remove(worker) {
+		this.workers.delete(worker);
+		this.queue = this.queue.filter(task => task.worker !== worker);
+		worker.requests.clear();
+		this.drain();
+	}
+}
+
+class BrowserWorker {
+	constructor(options) {
+		engineScheduler ||= new BrowserScheduler();
+		this.primary = !!options.primary;
+		this.batch = !options.primary && !options.page;
+		this.requests = new Map();
+		this.memory = 64 << 20;
+		this.reservation = 0;
+		this.closed = false;
+		this.worker = new Worker("./ofdgo_wasm.js");
+		engineScheduler.workers.add(this);
+		this.worker.onmessage = event => {
+			if (this.closed || event.data.type === "module") return;
+			engineScheduler.complete(this, event.data);
+			if (event.data.type === "exit") this.terminate();
+			try { this.onmessage?.(event); }
+			finally { engineScheduler.drain(); }
+		};
+		this.worker.onerror = event => { this.terminate(); this.onerror?.(event); };
+		this.worker.onmessageerror = event => { this.terminate(); this.onmessageerror?.(event); };
+		this.worker.addEventListener("message", event => {
+			if (event.data.type !== "module") return;
+			event.stopImmediatePropagation();
+			engineModule ||= WebAssembly.compileStreaming(fetch("./ofdgo.wasm")).catch(error => { engineModule = null; throw error; });
+			engineModule.then(module => { if (!this.closed) this.worker.postMessage({ type:"module", module }); }, error => { if (!this.closed) this.worker.postMessage({ type:"module", error:error.message }); });
+		});
+	}
+
+	postMessage(data, transfer) {
+		if (this.closed) throw new DOMException("引擎已关闭", "AbortError");
+		if (data.type) {
+			if (data.type === "cancel" && engineScheduler.cancel(this, data.id)) return;
+			this.worker.postMessage(data, transfer);
+		} else engineScheduler.submit(this, data, transfer);
+	}
+
+	terminate() {
+		if (this.closed) return;
+		this.closed = true;
+		this.worker.terminate();
+		engineScheduler.remove(this);
+	}
+}
 
 export function createEngineWorker(options = {}) {
 	if (nativeHost) return nativeHost.worker();
 	if (options.pages) return new BrowserEngine();
-	const worker = new Worker("./ofdgo_wasm.js");
-	worker.addEventListener("message", event => {
-		if (event.data.type !== "module") return;
-		event.stopImmediatePropagation();
-		engineModule ||= WebAssembly.compileStreaming(fetch("./ofdgo.wasm")).catch(error => { engineModule = null; throw error; });
-		engineModule.then(module => worker.postMessage({ type: "module", module }), error => worker.postMessage({ type: "module", error: error.message }));
-	});
-	return worker;
+	return new BrowserWorker(options);
 }
 
 export async function documentBytes(file) {
@@ -21,10 +143,11 @@ export async function documentBytes(file) {
 
 class BrowserEngine {
 	constructor() {
-		this.primary = createEngineWorker();
+		this.primary = createEngineWorker({primary:true});
 		this.primary.onmessage = event => {
 			const data = event.data;
 			if (data.memory) this.memory = data.memory;
+			if (this.source) this.parallelism = engineScheduler.limit;
 			if (data.id != null && !data.type) this.requests.delete(data.id);
 			this.onmessage?.(event);
 		};
@@ -36,7 +159,7 @@ class BrowserEngine {
 		this.revision = 0;
 		this.memory = 0;
 		this.parallelism = 1;
-		this.budget = Math.max(128, Math.min(1024, (navigator.deviceMemory || 2) * 128)) * 1024 * 1024;
+		this.budget = engineScheduler.budget;
 		this.closed = false;
 		this.source = null;
 	}
@@ -45,7 +168,7 @@ class BrowserEngine {
 		this.invalidatePages();
 		if (!source || this.closed) return;
 		this.source = {...source, file: source.file instanceof Blob ? source.file : new Blob([source.file])};
-		this.parallelism = Math.max(1, Math.min(2, (navigator.hardwareConcurrency || 2) - 1, Math.floor(this.budget / (256 * 1024 * 1024))));
+		this.parallelism = engineScheduler.limit;
 	}
 
 	invalidatePages() {
@@ -64,12 +187,15 @@ class BrowserEngine {
 	}
 
 	createSlot(source) {
-		const worker = createEngineWorker();
-		const slot = {worker, pending: new Map(), busy: false, memory: Math.max(128 << 20, this.memory)};
+		const worker = createEngineWorker({page:true});
+		const slot = {worker, pending: new Map(), busy: false, memory: Math.max(128 << 20, this.memory), pages:new Set(), lastPage:0};
+		worker.reservation = slot.memory;
+		worker.reclaim = () => { if (!slot.busy) this.closeSlot(slot); };
 		const ready = new Promise((resolve, reject) => {
 			slot.rejectReady = reject;
 			worker.onmessage = ({data}) => {
 				if (data.memory) slot.memory = data.memory;
+				if (this.source) this.parallelism = engineScheduler.limit;
 				if (data.type === "ready") { resolve(); return; }
 				if (data.type === "exit") { this.closeSlot(slot, new Error("页面加载失败")); return; }
 				if (data.type) return;
@@ -119,13 +245,14 @@ class BrowserEngine {
 			"ofdgoExportFormats", "ofdgoOutputFormats", "ofdgoParsePageRange", "ofdgoExportPage", "ofdgoExportDocument",
 			"ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion"
 		].includes(data.name)) this.invalidatePages();
-		if (data.name !== "ofdgoRenderPage" || !this.source || ![...this.requests.values()].includes(null)) {
+		const preferred = data.name === "ofdgoRenderPage" ? [...this.slots].find(slot => !slot.busy && slot.pages.has(data.args[0])) : null;
+		if (data.name !== "ofdgoRenderPage" || !this.source || !preferred && ![...this.requests.values()].includes(null)) {
 			if (data.name === "ofdgoRenderPage") this.requests.set(data.id, null);
 			this.primary.postMessage(data, transfer);
 			return;
 		}
-		let slot = [...this.slots].find(slot => !slot.busy);
-		const memory = this.memory + [...this.slots].reduce((total, item) => total + item.memory, 0);
+		let slot = preferred || [...this.slots].filter(slot => !slot.busy).sort((a,b) => Math.abs(a.lastPage-data.args[0])-Math.abs(b.lastPage-data.args[0]))[0];
+		const memory = engineScheduler.memory;
 		if (!slot && this.slots.size < this.parallelism - 1 && memory + Math.max(128 << 20, this.memory) <= this.budget) slot = this.createSlot(this.source);
 		if (!slot) {
 			this.requests.set(data.id, null);
@@ -138,6 +265,10 @@ class BrowserEngine {
 		let fallback = false;
 		slot.ready.then(() => this.callSlot(slot, data.name, data.args)).then(result => {
 			if (revision !== this.revision) throw new DOMException("页面加载已取消", "AbortError");
+			slot.lastPage = data.args[0];
+			slot.pages.delete(slot.lastPage);
+			slot.pages.add(slot.lastPage);
+			if (slot.pages.size > 16) slot.pages.delete(slot.pages.values().next().value);
 			if (!this.closed) this.onmessage?.({data: {...result, id: data.id}});
 		}).catch(error => {
 			if (!this.closed && revision === this.revision && error.name !== "AbortError") {
@@ -152,8 +283,10 @@ class BrowserEngine {
 		}).finally(() => {
 			if (!fallback) this.requests.delete(data.id);
 			slot.busy = false;
-			const memory = this.memory + [...this.slots].reduce((total, item) => total + item.memory, 0);
+			slot.worker.reservation = 0;
+			const memory = engineScheduler.memory;
 			if (memory > this.budget) { this.closeSlot(slot); this.parallelism = Math.max(1, this.slots.size + 1); }
+			engineScheduler.drain();
 		});
 	}
 

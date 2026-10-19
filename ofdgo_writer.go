@@ -38,6 +38,9 @@ import (
 // editorSnapshotArchiveLimit 限制编辑器常驻的快照压缩包字节数
 const editorSnapshotArchiveLimit = 32 << 20
 
+// editorSnapshotChunkSize 指定快照压缩数据的分块大小
+const editorSnapshotChunkSize = 256 << 10
+
 // ErrSaveTarget 表示编辑器尚未绑定保存目标
 var ErrSaveTarget = errors.New("save target is not set")
 
@@ -74,6 +77,12 @@ type editorSnapshotArchive struct {
 	files    []*zip.File
 	archive  weak.Pointer[zip.Reader]
 	retained *zip.Reader
+}
+
+// editorSnapshotBuffer 分块保存压缩数据，写入完成后支持并发随机读取
+type editorSnapshotBuffer struct {
+	chunks [][]byte
+	size   int64
 }
 
 // editorProgress 编辑与保存阶段的进度回调，nil表示不回报进度
@@ -152,7 +161,7 @@ func (e *Editor) copySnapshotArchive(ctx context.Context, source *zip.Reader) (*
 			return archive, nil
 		}
 	}
-	var data bytes.Buffer
+	var data editorSnapshotBuffer
 	var count int64
 	archive := zip.NewWriter(convertWriter{ctx: ctx, writer: &data, count: &count})
 	for _, file := range source.File {
@@ -166,7 +175,7 @@ func (e *Editor) copySnapshotArchive(ctx context.Context, source *zip.Reader) (*
 	if err := archive.Close(); err != nil {
 		return nil, err
 	}
-	reader, err := zip.NewReader(bytes.NewReader(data.Bytes()), int64(data.Len()))
+	reader, err := zip.NewReader(&data, data.size)
 	if err != nil {
 		return nil, err
 	}
@@ -174,11 +183,51 @@ func (e *Editor) copySnapshotArchive(ctx context.Context, source *zip.Reader) (*
 		return nil, err
 	}
 	cached := &editorSnapshotArchive{files: slices.Clone(source.File), archive: weak.Make(reader)}
-	if data.Cap() <= editorSnapshotArchiveLimit {
+	if len(data.chunks) <= editorSnapshotArchiveLimit/editorSnapshotChunkSize {
 		cached.retained = reader
 	}
 	e.snapshotArchive = cached
 	return reader, nil
+}
+
+// Write 追加快照数据，不扩容或复制已有块
+// 入参: data 压缩数据
+// 返回: int 写入字节数, error 写入错误
+func (b *editorSnapshotBuffer) Write(data []byte) (int, error) {
+	size := len(data)
+	for len(data) > 0 {
+		offset := int(b.size % editorSnapshotChunkSize)
+		if offset == 0 {
+			b.chunks = append(b.chunks, make([]byte, editorSnapshotChunkSize))
+		}
+		n := copy(b.chunks[len(b.chunks)-1][offset:], data)
+		b.size += int64(n)
+		data = data[n:]
+	}
+	return size, nil
+}
+
+// ReadAt 跨块读取快照，不复制或合并底层存储
+// 入参: data 目标缓冲, offset 数据偏移
+// 返回: int 读取字节数, error 偏移或结束错误
+func (b *editorSnapshotBuffer) ReadAt(data []byte, offset int64) (int, error) {
+	if offset < 0 {
+		return 0, fmt.Errorf("negative snapshot offset")
+	}
+	read := 0
+	for len(data) > 0 {
+		if offset >= b.size {
+			return read, io.EOF
+		}
+		block := b.chunks[offset/editorSnapshotChunkSize]
+		start := int(offset % editorSnapshotChunkSize)
+		size := min(int64(len(block)-start), b.size-offset, int64(len(data)))
+		n := copy(data, block[start:start+int(size)])
+		read += n
+		offset += int64(n)
+		data = data[n:]
+	}
+	return read, nil
 }
 
 // NewFileOutput 创建本地保存目标并记录当前文件状态，不创建或修改文件

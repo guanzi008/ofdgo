@@ -128,7 +128,7 @@ async function handleBatchMessage({ id, name, args }) {
 			};
 			payload = await globalThis.ofdgoConvertFile(read(file), file.size, options, write,
 				(phase, completed, total, done) => {
-					self.postMessage({ id, type: "conversion", phase, completed, total });
+					self.postMessage({ id, type: "conversion", phase, completed, total, memory: engineMemory.buffer.byteLength });
 					finish(done);
 				},
 				(action, pageName, done) => boundary(action, pageName).then(() => finish(done), err => finish(done, err)),
@@ -138,7 +138,7 @@ async function handleBatchMessage({ id, name, args }) {
 			if (handle) output = await handle.createWritable();
 			payload = await globalThis.ofdgoPackFiles(entries.map(entry => ({ name: entry.name, size: entry.file.size })),
 				index => read(entries[index].file), write,
-				(completed, total, done) => { self.postMessage({ id, type: "conversion", phase: "pack", completed, total }); finish(done); },
+				(completed, total, done) => { self.postMessage({ id, type: "conversion", phase: "pack", completed, total, memory: engineMemory.buffer.byteLength }); finish(done); },
 				done => finish(done), compression);
 		}
 		signal.throwIfAborted();
@@ -337,7 +337,7 @@ async function loadWASM(module) {
 	if (!go.exited) {
 		const backends = JSON.parse(globalThis.ofdgoRenderBackends());
 		if (!backends.ok) throw new Error(backends.error);
-		self.postMessage({ type: "ready", backends: backends.data });
+		self.postMessage({ type: "ready", backends: backends.data, memory: engineMemory.buffer.byteLength });
 	}
 }
 
