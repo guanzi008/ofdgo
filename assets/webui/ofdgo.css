@@ -2563,8 +2563,9 @@ button.outline-link:hover {
 }
 
 .page-list {
+	--thumb-gap: 12px;
 	display: grid;
-	gap: 12px;
+	gap: var(--thumb-gap);
 }
 
 .virtual-pages {
@@ -3132,8 +3133,8 @@ button.outline-link:hover {
 	height: auto;
 }
 
-.grouped-pages .page-list-item.drop-before::before { left: -5px; right: auto; }
-.grouped-pages .page-list-item.drop-after::after { right: -5px; left: auto; }
+.grouped-pages .page-list-item.drop-before::before { left: calc(-1px - var(--thumb-gap) / 2); right: auto; }
+.grouped-pages .page-list-item.drop-after::after { right: calc(-1px - var(--thumb-gap) / 2); left: auto; }
 
 .edit-object.erasing {
 	background: var(--accent-soft);

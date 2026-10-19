@@ -10874,12 +10874,13 @@ function layoutThumbnails() {
 	view.rotation = state.rotation;
 	view.layout = state.pageLayout;
 	view.host.classList.toggle("grouped-pages", state.pageLayout > 1);
+	const gap = Number.parseFloat(getComputedStyle(view.host).columnGap) || 0;
 	const offsets = new Float64Array(state.doc.pages.length + 1);
 	view.heights = new Float64Array(state.doc.pages.length);
 	view.lefts = state.pageLayout > 1 ? new Float64Array(state.doc.pages.length) : null;
 	view.scales = state.pageLayout > 1 ? new Float64Array(state.doc.pages.length) : null;
 	view.columns = state.pageLayout > 1 ? state.pageLayout : 0;
-	view.itemWidth = state.pageLayout > 1 ? Math.max(1, (width - 8) / 2) : width;
+	view.itemWidth = state.pageLayout > 1 ? Math.max(1, (width - gap) / 2) : width;
 	let top = 0;
 	for (let start = 0; start < state.doc.pages.length; start += state.pageLayout) {
 		if (state.pageLayout === 1) {
@@ -10887,7 +10888,7 @@ function layoutThumbnails() {
 			const ratio = size.width > 0 && size.height > 0 ? size.height / size.width : 1 / 0.707;
 			view.heights[start] = Math.max(1, width - 20) * ratio + 70;
 			offsets[start] = top;
-			top += view.heights[start] + 12;
+			top += view.heights[start] + gap;
 			continue;
 		}
 		const group = pageGroupSize(start), scale = Math.max(1, view.itemWidth - 20) / Math.max(...group.widths);
@@ -10897,14 +10898,14 @@ function layoutThumbnails() {
 			if (index >= state.doc.pages.length) break;
 			offsets[index] = top;
 			view.heights[index] = height;
-			view.lefts[index] = column * (view.itemWidth + 8);
+			view.lefts[index] = column * (view.itemWidth + gap);
 			view.scales[index] = scale;
 		}
-		top += height + 20;
+		top += height + gap;
 	}
 	offsets[state.doc.pages.length] = top;
 	view.offsets = offsets;
-	view.gap = 12;
+	view.gap = gap;
 	view.total = Math.ceil(offsets.at(-1));
 	for (const [index, button] of view.nodes) {
 		layoutThumbnail(button, state.doc.pages[index]);
