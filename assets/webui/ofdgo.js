@@ -12094,7 +12094,7 @@ function fitWidth(updateStatus = true) {
 function fitWidthScale(page) {
 	if (state.pageLayout > 1) {
 		const size = pageGroupSize();
-		return Math.min(4, Math.max(1, el.viewerPanel.clientWidth - pageSpace() * 2 - (state.continuous ? 0 : PAGE_LAYOUT_GAP) - scrollbarWidth()) / (size.width * MM_TO_PX));
+		return Math.min(4, Math.max(1, el.viewerPanel.offsetWidth - pageSpace() * 2 - (state.continuous ? 0 : PAGE_LAYOUT_GAP) - scrollbarWidth()) / (size.width * MM_TO_PX));
 	}
 	page = pageViewSize(page);
 	const space = pageSpace();
@@ -12126,7 +12126,7 @@ function fitHeight(updateStatus = true) {
 	}
 	if (state.pageLayout > 1) {
 		const size = pageGroupSize(), space = pageSpace(), gap = state.continuous ? 0 : PAGE_LAYOUT_GAP;
-		const width = Math.max(1, el.viewerPanel.clientWidth - space * 2 - gap - scrollbarWidth());
+		const width = Math.max(1, el.viewerPanel.offsetWidth - space * 2 - gap - scrollbarWidth());
 		const height = Math.max(1, el.viewerPanel.clientHeight - space * 2);
 		setScale(Math.min(width / (size.width * MM_TO_PX), height / (size.height * MM_TO_PX)), updateStatus, "height");
 		if (updateStatus) scrollToPage(state.pageIndex);
