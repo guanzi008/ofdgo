@@ -4088,9 +4088,37 @@ audio.page-media {
 	}
 }
 
-@media (min-width: 901px) and (max-width: 1600px) {
+@media (min-width: 901px) and (max-width: 1900px) {
 	.toolbar {
-		--tool-gap: 6px;
+		--tool-gap: 4px;
+	}
+
+	.toolbar .button {
+		padding-inline: 6px;
+	}
+
+	.toolbar .tool-group + .tool-group::before {
+		margin-inline: 4px;
+	}
+}
+
+@media (min-width: 901px) and (max-width: 1400px) {
+	.toolbar {
+		--tool-gap: 3px;
+	}
+
+	.toolbar .button {
+		padding-inline: 4px;
+	}
+
+	.toolbar .tool-group + .tool-group::before {
+		margin-inline: 0;
+	}
+
+	.toolbar .page-control {
+		grid-template-columns: max(3ch, var(--page-width, 3ch)) auto max(3ch, var(--page-width, 3ch));
+		gap: 4px;
+		padding-inline: 4px;
 	}
 }
 
