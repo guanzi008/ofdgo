@@ -282,7 +282,6 @@ async function handleMessage({ id, name, args }) {
 		signal?.throwIfAborted();
 		const result = typeof payload === "string" ? JSON.parse(payload) : payload;
 		if (signal && !importing && !converting && !resources && result.ok) {
-			operations.delete(id);
 			result.data.size = size;
 			if (name !== "ofdgoExportMedia") self.postMessage({ id, type: "export", stage: "save" });
 			if (output) {
@@ -290,6 +289,8 @@ async function handleMessage({ id, name, args }) {
 					const current = await saveFile.getFile();
 					if (current.size !== saveStamp.size || current.lastModified !== saveStamp.modified) throw new Error("文件已被修改，请另存");
 				}
+				signal.throwIfAborted();
+				operations.delete(id);
 				await output.close();
 			} else {
 				result.data.blob = new Blob(chunks, { type: result.data.mime });

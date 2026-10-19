@@ -8714,6 +8714,10 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			const writer = await file.createWritable();
 			try {
 				await writer.write(result.blob);
+				if (destination?.saveStamp) {
+					const current = await file.getFile();
+					if (current.size !== destination.saveStamp.size || current.lastModified !== destination.saveStamp.modified) throw new Error("文件已被修改，请另存");
+				}
 				await writer.close();
 			} catch (error) {
 				await writer.abort().catch(() => {});
