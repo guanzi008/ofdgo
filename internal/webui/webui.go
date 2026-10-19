@@ -1012,7 +1012,11 @@ func (s *Session) pageContent(index int) (*ofdgo.PageContent, error) {
 		return page, nil
 	}
 	clear(s.pageCache)
-	page, err := s.Reader.PageContentByIndex(index)
+	ctx := s.Renderer.OutputContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	page, err := s.Reader.PageContentByIndexContext(ctx, index)
 	if err != nil {
 		return nil, err
 	}

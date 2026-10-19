@@ -133,12 +133,14 @@ const state = {
 	pageCache: new Map(),
 	mediaPlayers: new Map(),
 	svgFonts: new Map(),
+	svgFontLoads: new Map(),
 	svgImages: new Map(),
 	selectedPages: new Set(),
 	documentSelection: null,
 	pageInFlight: new Map(),
 	pageRenderQueue: [],
 	pageRenderRunning: false,
+	pageRenderWorkers: 0,
 	pageObserver: null,
 	visiblePages: new Set(),
 	scrollFrame: 0,
@@ -8969,6 +8971,11 @@ function resetPageFlow(keepCache = false) {
 
 function resetPageLoading() {
 	releaseMediaPlayers();
+	if (nativeHost) {
+		for (const [id, request] of wasmRequests) {
+			if (request.name === "ofdgoRenderPage") wasmWorker?.postMessage({ type: "cancel", id });
+		}
+	}
 	for (const task of state.pageInFlight.values()) {
 		task.resolve(null);
 	}
@@ -9104,6 +9111,9 @@ function loadPageData(index, options = {}) {
 
 function schedulePageRender() {
 	if (state.pageRenderRunning) {
+		if (state.pageRenderWorkers) {
+			while (state.pageRenderQueue.length && state.pageRenderWorkers < (nativeHost?.parallelism || 1)) processPageRenderTasks();
+		}
 		return;
 	}
 	state.pageRenderRunning = true;
@@ -9111,8 +9121,13 @@ function schedulePageRender() {
 }
 
 async function processPageRenderQueue() {
+	await nextFrame();
+	await Promise.all(Array.from({ length: nativeHost?.parallelism || 1 }, () => processPageRenderTasks()));
+}
+
+async function processPageRenderTasks() {
+	state.pageRenderWorkers++;
 	try {
-		await nextFrame();
 		while (state.pageRenderQueue.length) {
 			let next = 0;
 			for (let index = 1; index < state.pageRenderQueue.length; index++) {
@@ -9128,7 +9143,9 @@ async function processPageRenderQueue() {
 					task.resolve(state.pageCache.get(task.index));
 					continue;
 				}
-				const page = await callWASM("ofdgoRenderPage", task.index, state.renderBackend, state.renderDPI, displayMode() === "raster");
+				const args = [task.index, state.renderBackend, state.renderDPI, displayMode() === "raster"];
+				if (nativeHost) args.push([...state.svgFonts.keys()]);
+				const page = await callWASM("ofdgoRenderPage", ...args);
 				if (state.pageInFlight.get(task.key) !== task) {
 					task.resolve(null);
 					continue;
@@ -9139,6 +9156,7 @@ async function processPageRenderQueue() {
 					if (scope === state.composite && task.openSeq === state.openSeq) scope.objects = objects;
 				}
 				await loadSVGFonts(page.fonts, task.openSeq);
+				for (const font of page.fonts) delete font.data;
 				if (task.openSeq === state.openSeq && state.pageInFlight.get(task.key) === task) {
 					for (const image of page.images) {
 						if (!state.svgImages.has(image.name)) {
@@ -9172,8 +9190,11 @@ async function processPageRenderQueue() {
 			}
 		}
 	} finally {
-		state.pageRenderRunning = false;
-		if (!state.pageInFlight.size) releasePageResources();
+		if (--state.pageRenderWorkers === 0) {
+			state.pageRenderRunning = false;
+			if (!state.pageInFlight.size) releasePageResources();
+			if (state.pageRenderQueue.length) schedulePageRender();
+		}
 	}
 }
 
@@ -9196,8 +9217,9 @@ function trimPageCache() {
 	for (const image of state.svgImages.values()) {
 		bytes += image.size;
 	}
+	const budget = nativeHost?.cacheBytes || PAGE_CACHE_BYTES;
 	for (const [index, page] of state.pageCache) {
-		if (state.pageCache.size <= PAGE_CACHE_LIMIT && bytes <= PAGE_CACHE_BYTES) {
+		if (state.pageCache.size <= PAGE_CACHE_LIMIT * Math.max(1, budget / PAGE_CACHE_BYTES) && bytes <= budget) {
 			break;
 		}
 		if (protectedPages.has(index)) {
@@ -9227,18 +9249,29 @@ async function loadSVGFonts(fonts, openSeq) {
 		if (state.svgFonts.has(font.name)) {
 			continue;
 		}
-		const data = await callWASM("ofdgoSVGFontData", font.name);
-		if (openSeq !== state.openSeq) {
-			return;
+		const key = `${openSeq}:${font.name}`;
+		let loading = state.svgFontLoads.get(key);
+		if (!loading) {
+			loading = loadSVGFont(font, openSeq);
+			state.svgFontLoads.set(key, loading);
 		}
-		const face = new FontFace(font.name, data.bytes, { weight: String(font.weight), style: font.style });
-		await face.load();
-		if (openSeq !== state.openSeq) {
-			return;
-		}
-		document.fonts.add(face);
-		state.svgFonts.set(font.name, face);
+		try { await loading; }
+		finally { if (state.svgFontLoads.get(key) === loading) state.svgFontLoads.delete(key); }
 	}
+}
+
+async function loadSVGFont(font, openSeq) {
+	const data = font.data ? { bytes: font.data } : await callWASM("ofdgoSVGFontData", font.name);
+	if (openSeq !== state.openSeq) {
+		return;
+	}
+	const face = new FontFace(font.name, data.bytes, { weight: String(font.weight), style: font.style });
+	await face.load();
+	if (openSeq !== state.openSeq) {
+		return;
+	}
+	document.fonts.add(face);
+	state.svgFonts.set(font.name, face);
 }
 
 function comparePageRenderTask(a, b) {
@@ -9853,7 +9886,9 @@ function markFlowPageError(index, err) {
 
 function queueNearbyPages(index, openSeq = state.openSeq) {
 	const start = pageGroupStart(index);
-	for (let i = Math.max(0, start - 1); i <= Math.min((state.doc?.pageCount || 1) - 1, start + state.pageLayout + 1); i += 1) {
+	const before = nativeHost ? state.pageLayout : 1;
+	const after = nativeHost ? Math.max(1, Math.min(nativeHost.parallelism, state.pageLayout * 2)) : 1;
+	for (let i = Math.max(0, start - before); i <= Math.min((state.doc?.pageCount || 1) - 1, start + state.pageLayout + after); i += 1) {
 		renderFlowPage(i, { openSeq, priority: 2 });
 	}
 }
@@ -12497,7 +12532,7 @@ async function callWASM(name, ...args) {
 			el.cancelExportButton.disabled = false;
 		}
 		if (name === "ofdgoResources" && resourceElements.Panel.open) resourceManager.requestID = id;
-		wasmRequests.set(id, { resolve, reject, openSeq: state.openSeq });
+		wasmRequests.set(id, { name, resolve, reject, openSeq: state.openSeq });
 		if (name === "ofdgoExportMedia") wasmRequests.get(id).mediaID = args[0];
 		if (name === "ofdgoConvertPDF") {
 			const request = wasmRequests.get(id);

@@ -18,10 +18,12 @@ import (
 	"context"
 	"image"
 	"io/fs"
+	"maps"
 )
 
 // Renderer 渲染器实现
 // 通过NewRenderer创建，实例及共享的Reader需串行使用
+// Fork创建独立任务实例，派生实例之间可并行渲染
 // 外部字体缺失且无可用回退时不绘制对应文字，其余内容继续；字体状态可通过FontInfos查询
 // OnPageText可选，接收页面绘制时同步提取的文字，不包含图案和签名外观
 // OnExportProgress可选，同步回报文档导出的已处理页数及总页数，返回错误则停止，页数完成不代表写入成功
@@ -64,6 +66,31 @@ type Renderer struct {
 
 // RendererOption 渲染器配置选项
 type RendererOption func(*Renderer)
+
+// Fork 创建独立渲染实例，复用只读资源及线程安全的派生数据缓存
+// 创建过程需与原实例串行，输入生命周期遵循Reader.Fork，外部后端及字体文件系统需支持并行读取
+// 页面文字及导出进度回调不继承，取消上下文使用ctx
+// 入参: ctx 取消上下文
+// 返回: *Renderer 独立渲染器, error 准备或取消错误
+func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
+	reader, err := r.Reader.Fork(ctx)
+	if err != nil {
+		return nil, err
+	}
+	next := NewRenderer(reader, WithDPI(r.DPI), WithAnnotations(r.RenderAnnotations), WithRenderBackends(r.backends), WithFontDirs(r.fontDirs...), WithFontFS(r.fontFS...))
+	next.Compression = r.Compression
+	next.DrawParams = maps.Clone(r.DrawParams)
+	next.CompositeGraphicUnits = maps.Clone(r.CompositeGraphicUnits)
+	next.OutputContext = ctx
+	next.TransparentBackground = r.TransparentBackground
+	next.decodeImages = r.decodeImages
+	next.imageCache = r.imageCache
+	next.fontDigests = r.fontDigests
+	next.fontPreparations = r.fontPreparations
+	next.fontMetrics = r.fontMetrics
+	next.glyphOutlines = r.glyphOutlines
+	return next, nil
+}
 
 // deviceLineWidth 按设备分辨率计算描边宽度，零线宽为一像素，正线宽至少为两像素
 // 入参: width 页面空间线宽，单位为毫米

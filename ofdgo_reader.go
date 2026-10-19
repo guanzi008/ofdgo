@@ -95,6 +95,33 @@ func (r *Reader) Close() error {
 	return nil
 }
 
+// Fork 创建保留当前文档及历史版本的独立只读视图，不复制包内文件数据
+// 创建过程需与原实例串行，返回后可并行读取，公开结构及底层输入不得并发修改
+// 返回值不持有输入所有权，全部视图使用结束前不得关闭或替换原输入
+// 入参: ctx 取消上下文
+// 返回: *Reader 独立阅读器, error 准备或取消错误
+func (r *Reader) Fork(ctx context.Context) (*Reader, error) {
+	if _, err := r.DocContext(ctx); err != nil {
+		return nil, err
+	}
+	next := *r
+	next.Closer = nil
+	next.resourcesRead = maps.Clone(r.resourcesRead)
+	next.resourceFiles = maps.Clone(r.resourceFiles)
+	next.ResMap = maps.Clone(r.ResMap)
+	next.mediaCache = maps.Clone(r.mediaCache)
+	next.fontCache = maps.Clone(r.fontCache)
+	next.fontFaces = maps.Clone(r.fontFaces)
+	next.colorSpaceCache = maps.Clone(r.colorSpaceCache)
+	next.drawParamCache = maps.Clone(r.drawParamCache)
+	next.compositeGraphicUnitCache = maps.Clone(r.compositeGraphicUnitCache)
+	next.pageHeaderCache = maps.Clone(r.pageHeaderCache)
+	next.Annots = maps.Clone(r.Annots)
+	next.Stamps = maps.Clone(r.Stamps)
+	next.annotationFiles = maps.Clone(r.annotationFiles)
+	return &next, ctx.Err()
+}
+
 // DocumentCount 获取包内文档数量
 // 返回: int 文档数量
 func (r *Reader) DocumentCount() int {

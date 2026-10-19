@@ -24,8 +24,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -63,12 +65,15 @@ type NativeOutputTarget struct {
 	Base, Name  string
 }
 
-// NativeEngine 保存独立会话，不同实例可并行，同一实例的回调不可重入Call或Close
+// NativeEngine 保存独立会话，页面渲染可并行，修改等待已开始的只读任务完成
+// 同一实例的回调不可重入Call或Close
 // hooks应在首次Call前配置，Resolve返回的资源需保持有效直到相应会话关闭
 type NativeEngine struct {
 	businessEngine
 	// ConversionPool 协调不同会话的批量转换资源
 	ConversionPool *ofdgo.ConversionPool
+	// RenderParallelism 限制同时渲染的页面数，零值使用可用处理器数
+	RenderParallelism int
 	// Resolve 按授权标识提供资源读取源
 	Resolve NativeResolver
 	// LoadFont 按名称读取系统字体数据
@@ -84,6 +89,11 @@ type NativeEngine struct {
 	once          sync.Once
 	saves         sync.WaitGroup
 	closed        bool
+	renderMu      sync.Mutex
+	renderCount   int
+	renderDone    chan struct{}
+	renderSlots   chan struct{}
+	renderIdle    []*Session
 }
 
 // nativeReader 在会话当前操作上下文中分块读取，不捕获已结束请求的上下文
@@ -139,11 +149,20 @@ func NewNativeEngine(resolve NativeResolver) *NativeEngine { return &NativeEngin
 func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit func(any)) (result map[string]any) {
 	e.once.Do(func() {
 		e.gate = make(chan struct{}, 1)
+		e.renderSlots = make(chan struct{}, e.renderParallelism())
 		e.resolveInput = e.input
 		e.conversionPool = e.ConversionPool
 	})
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if name == "ofdgoRenderPage" {
+		select {
+		case e.renderSlots <- struct{}{}:
+			defer func() { <-e.renderSlots }()
+		case <-ctx.Done():
+			return nativeFailure(ctx.Err())
+		}
 	}
 	select {
 	case e.gate <- struct{}{}:
@@ -162,6 +181,84 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 	if e.closed {
 		return nativeFailure(fmt.Errorf("native engine is closed"))
 	}
+	if name == "ofdgoRenderPage" && e.currentSession != nil {
+		defer func() {
+			if failure := recover(); failure != nil {
+				result = nativeFailure(fmt.Errorf("%v", failure))
+			}
+		}()
+		worker, err := e.renderSession(ctx)
+		if err != nil {
+			return nativeFailure(err)
+		}
+		operation := &businessEngine{currentSession: worker, currentEditor: e.currentEditor, ctx: ctx}
+		values := make([]platformValue, len(args))
+		for i, arg := range args {
+			values[i] = platformValueOf(arg)
+		}
+		if len(values) > 0 && operation.currentEditor != nil {
+			pageErr := e.prepareRender(operation, values[0].Int())
+			if pageErr != nil {
+				return nativeFailure(pageErr)
+			}
+		}
+		operation.currentEditor = nil
+		e.renderMu.Lock()
+		if e.renderCount == 0 {
+			e.renderDone = make(chan struct{})
+		}
+		e.renderCount++
+		e.renderMu.Unlock()
+		<-e.gate
+		locked = false
+		defer func() {
+			worker.Renderer.OutputContext = context.Background()
+			e.renderMu.Lock()
+			e.currentSession.svgFonts = maps.Clone(worker.svgFonts)
+			e.renderIdle = append(e.renderIdle, worker)
+			e.renderCount--
+			if e.renderCount == 0 {
+				close(e.renderDone)
+			}
+			e.renderMu.Unlock()
+		}()
+		data, err := operation.safeCall(operation.renderPage, values)
+		if err != nil {
+			return nativeFailure(err)
+		}
+		result = nativePlain(data).(map[string]any)
+		if result["ok"] != true {
+			return result
+		}
+		page := result["data"].(map[string]any)
+		known := make(map[string]bool)
+		if len(args) > 4 {
+			for i := 0; i < values[4].Length(); i++ {
+				known[values[4].Index(i).String()] = true
+			}
+		}
+		for _, value := range page["fonts"].([]any) {
+			font := value.(map[string]any)
+			if name := font["name"].(string); !known[name] {
+				font["data"] = worker.svgFonts[name]
+			}
+		}
+		if e.currentEditor != nil {
+			objects, textErr := e.renderObjects(operation, values[0].Int())
+			if textErr != nil {
+				return nativeFailure(textErr)
+			}
+			page["objects"] = nativePlain(objects)
+		}
+		if err := ctx.Err(); err != nil {
+			return nativeFailure(err)
+		}
+		return result
+	}
+	if err := e.waitRenders(ctx); err != nil {
+		return nativeFailure(err)
+	}
+	e.renderIdle = nil
 	if name == "ofdgoSaveSnapshot" {
 		snapshot := e.saveSnapshot
 		e.saveSnapshot = nil
@@ -236,10 +333,16 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 
 // Close 释放会话，不关闭宿主持有的ReaderAt资源
 func (e *NativeEngine) Close() error {
-	e.once.Do(func() { e.gate = make(chan struct{}, 1); e.resolveInput = e.input })
+	e.once.Do(func() {
+		e.gate = make(chan struct{}, 1)
+		e.renderSlots = make(chan struct{}, e.renderParallelism())
+		e.resolveInput = e.input
+	})
 	e.gate <- struct{}{}
 	defer func() { <-e.gate }()
 	e.closed = true
+	_ = e.waitRenders(context.Background())
+	e.renderIdle = nil
 	e.saveSnapshot = nil
 	e.saves.Wait()
 	var err error
@@ -251,6 +354,85 @@ func (e *NativeEngine) Close() error {
 	}
 	e.currentSession, e.currentEditor, e.pendingImport, e.copiedObjects, e.copiedStyle = nil, nil, nil, nil, nil
 	return err
+}
+
+// waitRenders 等待已开始的页面任务，取消等待不修改当前会话
+// 入参: ctx 等待上下文
+// 返回: error 取消错误
+func (e *NativeEngine) waitRenders(ctx context.Context) error {
+	e.renderMu.Lock()
+	done, count := e.renderDone, e.renderCount
+	e.renderMu.Unlock()
+	if count == 0 {
+		return ctx.Err()
+	}
+	select {
+	case <-done:
+		return ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// renderParallelism 返回首次调用时采用的页面并行数
+// 返回: int 同时运行的页面任务数
+func (e *NativeEngine) renderParallelism() int {
+	if e.RenderParallelism > 0 {
+		return e.RenderParallelism
+	}
+	return runtime.GOMAXPROCS(0)
+}
+
+// renderSession 复用独立只读会话，调用时已持有引擎门控
+// 入参: ctx 渲染上下文
+// 返回: *Session 渲染会话, error 准备错误
+func (e *NativeEngine) renderSession(ctx context.Context) (*Session, error) {
+	e.renderMu.Lock()
+	defer e.renderMu.Unlock()
+	if count := len(e.renderIdle); count > 0 {
+		worker := e.renderIdle[count-1]
+		e.renderIdle = e.renderIdle[:count-1]
+		worker.Renderer.OutputContext = ctx
+		return worker, nil
+	}
+	source := e.currentSession
+	renderer, err := source.Renderer.Fork(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &Session{Reader: renderer.Reader, Renderer: renderer, doc: source.doc, fontFS: source.fontFS,
+		pageCache: make(map[int]*ofdgo.PageContent), boxCache: append([]pageBoxInfo(nil), source.boxCache...),
+		textCache: make(map[int]*ofdgo.PageText), svgFonts: make(map[string][]byte), editing: source.editing}, nil
+}
+
+// prepareRender 同步当前编辑页面的图元标识，避免并行访问编辑器缓存
+// 入参: operation 只读任务, index 页面索引
+// 返回: error 页面或取消错误
+func (e *NativeEngine) prepareRender(operation *businessEngine, index int) error {
+	e.renderMu.Lock()
+	defer e.renderMu.Unlock()
+	page, err := operation.currentEditor.Page(index)
+	if err != nil {
+		return err
+	}
+	return operation.syncEditorPageIDs(index, page)
+}
+
+// renderObjects 读取编辑图元信息，渲染状态由当前任务独立持有
+// 入参: operation 只读任务, index 页面索引
+// 返回: []any 图元信息, error 提取错误
+func (e *NativeEngine) renderObjects(operation *businessEngine, index int) ([]any, error) {
+	e.renderMu.Lock()
+	defer e.renderMu.Unlock()
+	operation.currentEditor = e.currentEditor
+	if !reflect.DeepEqual(e.currentEditor.Backends(), operation.currentSession.Renderer.Backends()) {
+		e.currentEditor.SetRenderBackends(operation.currentSession.Renderer.Backends())
+	}
+	text, err := operation.currentSession.PageText(index)
+	if err != nil {
+		return nil, err
+	}
+	return operation.editorObjects(index, text)
 }
 
 // input 读取授权源并以宿主报告的大小为准

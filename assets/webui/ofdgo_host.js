@@ -87,6 +87,10 @@ class NativeHandle {
 class NativeHost {
 	constructor(bridge) {
 		this.bridge = bridge;
+		this.parallelism = 1;
+		this.cacheBytes = 32 * 1024 * 1024;
+		this.reading = 0;
+		this.readQueue = [];
 		this.resources = typeof FinalizationRegistry === "function" ? new FinalizationRegistry(file => {
 			this.call("release", {file}).catch(() => {});
 		}) : null;
@@ -96,25 +100,40 @@ class NativeHost {
 		return this.bridge.call(`ofdgo.host.${name}`, value, {signal});
 	}
 
-	async decode(value, name = "", key = "", signal) {
-		if (value?.nativeFile) {
-			const file = new NativeFile(value);
-			if (key === "file" || name === "ofdgoConvertPDF" && key === "bytes") return file;
-			try {
-				const bytes = await file.arrayBuffer(signal);
-				return key === "blob" ? new Blob([bytes], {type:value.type}) : new Uint8Array(bytes);
-			} finally {
-				await this.call("release", {file:value.nativeFile});
+	async readResource(file, signal) {
+		if (this.reading >= this.parallelism) await new Promise(resolve => this.readQueue.push(resolve));
+		else this.reading++;
+		try {
+			signal?.throwIfAborted();
+			return await file.arrayBuffer(signal);
+		} finally {
+			try { await this.call("release", {file:file.nativeFile}); }
+			finally {
+				const next = this.readQueue.shift();
+				if (next) next();
+				else this.reading--;
 			}
 		}
-		if (Array.isArray(value)) {
-			for (let i = 0; i < value.length; i++) value[i] = await this.decode(value[i], name, "", signal);
-			return value;
-		}
-		if (value && typeof value === "object") {
-			for (const [field, item] of Object.entries(value)) value[field] = await this.decode(item, name, field, signal);
-			return value;
-		}
+	}
+
+	async decode(value, name = "", key = "", signal) {
+		const reads = [];
+		const visit = (item, field, replace) => {
+			if (!item || typeof item !== "object" || item instanceof Blob || item instanceof ArrayBuffer || ArrayBuffer.isView(item)) return;
+			if (item.nativeFile) {
+				const file = new NativeFile(item);
+				if (field === "file" || name === "ofdgoConvertPDF" && field === "bytes") replace(file);
+				else reads.push(this.readResource(file, signal).then(bytes => replace(field === "blob" ? new Blob([bytes], {type:item.type}) : new Uint8Array(bytes))));
+				return;
+			}
+			for (const [child, content] of Object.entries(item)) {
+				if (content && typeof content === "object") visit(content, Array.isArray(item) ? "" : child, result => item[child] = result);
+			}
+		};
+		visit(value, key, result => value = result);
+		const results = await Promise.allSettled(reads);
+		const failed = results.find(result => result.status === "rejected");
+		if (failed) throw failed.reason;
 		return value;
 	}
 
@@ -134,14 +153,17 @@ class NativeHost {
 		let closed = false;
 		let unsubscribe;
 		let pending = Promise.resolve();
+		const readers = new Set();
 		const requests = new Map();
 		const completions = new Map();
 		const emit = data => {
 			if (data.type === "result") { completions.get(data.id)?.(data.result); return; }
 			if (!closed) worker.onmessage?.({data});
 		};
-		const ready = host.call("engine.open", {}).then(({engine}) => {
+		const ready = host.call("engine.open", {}).then(({engine, parallelism, cacheBytes}) => {
 			if (closed) return engine;
+			host.parallelism = Math.max(1, parallelism || 1);
+			host.cacheBytes = cacheBytes || host.cacheBytes;
 			unsubscribe = host.bridge.on(`ofdgo.engine.${engine}`, emit);
 			emit({type:"ready"});
 			return engine;
@@ -158,7 +180,9 @@ class NativeHost {
 				if (data.type === "font") return;
 				const controller = new AbortController();
 				requests.set(data.id, controller);
-				const operation = pending.then(async () => {
+				const parallel = data.name === "ofdgoRenderPage";
+				const barrier = parallel ? pending : Promise.all([pending, ...readers]);
+				const operation = barrier.then(async () => {
 					const engine = await ready;
 					if (closed) return;
 					controller.signal.throwIfAborted();
@@ -189,7 +213,10 @@ class NativeHost {
 					if (closed) { await host.release(result); return; }
 					emit({id:data.id, ...decoded});
 				}).catch(error => emit({id:data.id, ok:false, error:error.message, code:error.code, canceled:error.name === "AbortError"})).finally(() => requests.delete(data.id));
-				if (data.name !== "ofdgoSaveSnapshot") pending = operation;
+				if (parallel) {
+					readers.add(operation);
+					operation.finally(() => readers.delete(operation));
+				} else if (data.name !== "ofdgoSaveSnapshot") pending = operation;
 			},
 			terminate() {
 				if (closed) return;

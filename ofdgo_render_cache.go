@@ -18,12 +18,14 @@ import (
 	"container/list"
 	"image"
 	"reflect"
+	"sync"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // renderCache 按估算字节数限制派生渲染数据，淘汰不修改源资源
 type renderCache[K comparable, V any] struct {
+	mu          sync.Mutex
 	limit, used int
 	entries     map[K]*list.Element
 	order       list.List
@@ -40,6 +42,8 @@ type renderCacheEntry[K comparable, V any] struct {
 // 入参: key 缓存键
 // 返回: V 缓存值, bool 是否命中
 func (c *renderCache[K, V]) get(key K) (V, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if item := c.entries[key]; item != nil {
 		c.order.MoveToFront(item)
 		return item.Value.(renderCacheEntry[K, V]).value, true
@@ -51,6 +55,8 @@ func (c *renderCache[K, V]) get(key K) (V, bool) {
 // put 缓存预算内的派生数据，超大单项不进入缓存
 // 入参: key 缓存键, value 缓存值, cost 字节成本
 func (c *renderCache[K, V]) put(key K, value V, cost int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if item := c.entries[key]; item != nil {
 		c.used -= item.Value.(renderCacheEntry[K, V]).cost
 		c.order.Remove(item)

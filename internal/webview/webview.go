@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -267,6 +268,13 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 	switch name {
 	case "engine.open":
 		engine := webui.NewNativeEngine(h.files.resolve)
+		parallelism, cacheBytes := runtime.GOMAXPROCS(0), int64(128<<20)
+		if memory := conversionMemory; memory != nil {
+			available := memory()
+			parallelism = max(1, min(parallelism, int(available/(256<<20))))
+			cacheBytes = max(32<<20, min(256<<20, available/16))
+		}
+		engine.RenderParallelism = parallelism
 		engine.ConversionPool = h.conversionPool
 		engine.OpenWriter = h.openWriter
 		engine.ReserveOutput = h.reserveOutput
@@ -280,7 +288,7 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		}
 		h.engineStops[id] = context.AfterFunc(guigo.PageContext(ctx), func() { _ = h.closeEngine(id) })
 		h.mu.Unlock()
-		return guigo.Result{Value: map[string]any{"engine": id}, Discard: func() { _ = h.closeEngine(id) }}, nil
+		return guigo.Result{Value: map[string]any{"engine": id, "parallelism": parallelism, "cacheBytes": cacheBytes}, Discard: func() { _ = h.closeEngine(id) }}, nil
 	case "batch":
 		return map[string]any{"parallelism": h.conversionPool.Parallelism()}, nil
 	case "engine.close":
