@@ -12184,12 +12184,13 @@ function fitPageScale(page, mode) {
 		contentHeight += item.height * MM_TO_PX * factor;
 		rows++;
 	}
+	const layoutWidth = state.pageLayout > 1 ? Math.max(width, contentWidth) : width;
 	const scrollbar = scrollbarWidth();
 	let vertical = false, horizontal = false, scale = 1;
 	for (let pass = 0; pass < 3; pass++) {
 		const availableWidth = Math.max(1, el.viewerPanel.offsetWidth - (vertical ? scrollbar : 0));
 		const availableHeight = Math.max(1, el.viewerPanel.offsetHeight - (horizontal ? scrollbar : 0));
-		scale = Math.min(4, Math.max(1, availableWidth - space * 2 - gap) / width);
+		scale = Math.min(4, Math.max(1, availableWidth - space * 2 - gap) / layoutWidth);
 		if (mode === "height") scale = Math.min(scale, Math.max(1, availableHeight - space * 2) / height);
 		const blockSpace = state.continuous ? 0 : Math.max(space, (availableHeight - height * scale) / 2);
 		const rowGap = state.continuous ? 0 : Math.max(gap, blockSpace > space ? blockSpace + 1 : blockSpace);
