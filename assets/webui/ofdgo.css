@@ -3135,12 +3135,6 @@ button.outline-link:hover {
 .grouped-pages .page-list-item.drop-before::before { left: -5px; right: auto; }
 .grouped-pages .page-list-item.drop-after::after { right: -5px; left: auto; }
 
-.edit-line::before {
-	position: absolute;
-	inset: calc(-4px / var(--surface-scale));
-	content: "";
-}
-
 .edit-object.erasing {
 	background: var(--accent-soft);
 	outline-style: dashed;

@@ -12093,31 +12093,37 @@ function fitWidth(updateStatus = true) {
 }
 
 function fitWidthScale(page) {
-	if (state.pageLayout > 1) {
-		const size = pageGroupSize();
-		return Math.min(4, Math.max(1, el.viewerPanel.offsetWidth - pageSpace() * 2 - (state.continuous ? 0 : PAGE_LAYOUT_GAP) - scrollbarWidth()) / (size.width * MM_TO_PX));
+	return fitPageScale(page, "width");
+}
+
+function fitPageScale(page, mode) {
+	const size = state.pageLayout > 1 ? pageGroupSize(page.index) : pageViewSize(page);
+	const width = Math.max(1, size.width * MM_TO_PX), height = Math.max(1, size.height * MM_TO_PX);
+	const space = pageSpace(), gap = state.pageLayout > 1 && !state.continuous ? PAGE_LAYOUT_GAP : 0;
+	let contentWidth = 0, contentHeight = 0, rows = 0;
+	for (let index = 0; index < state.doc.pages.length; index += state.pageLayout) {
+		const item = state.pageLayout > 1 ? pageGroupSize(index) : pageViewSize(state.doc.pages[index]);
+		const factor = mode === "width" && state.pageLayout === 1 ? size.width / item.width : 1;
+		contentWidth = Math.max(contentWidth, item.width * MM_TO_PX * factor);
+		contentHeight += item.height * MM_TO_PX * factor;
+		rows++;
 	}
-	page = pageViewSize(page);
-	const space = pageSpace();
-	const width = Math.max(1, page.width * MM_TO_PX);
-	const frameWidth = Number.parseFloat(getComputedStyle(el.pageFrame).width) || el.viewerPanel.clientWidth;
-	let available = Math.max(1, frameWidth - space * 2);
-	if (!viewerHasVerticalScrollbar()) {
-		const limit = Math.max(1, el.viewerPanel.clientHeight - space * 2);
-		let height = Math.max(1, page.height * MM_TO_PX) * (available / width);
-		if (state.continuous) {
-			height = 0;
-			for (const item of state.doc.pages) {
-				const size = pageViewSize(item);
-				height += available * size.height / size.width;
-				if (height > limit) break;
-			}
-		}
-		if (height > limit) {
-			available = Math.max(1, available - scrollbarWidth());
-		}
+	const scrollbar = scrollbarWidth();
+	let vertical = false, horizontal = false, scale = 1;
+	for (let pass = 0; pass < 3; pass++) {
+		const availableWidth = Math.max(1, el.viewerPanel.offsetWidth - (vertical ? scrollbar : 0));
+		const availableHeight = Math.max(1, el.viewerPanel.offsetHeight - (horizontal ? scrollbar : 0));
+		scale = Math.min(4, Math.max(1, availableWidth - space * 2 - gap) / width);
+		if (mode === "height") scale = Math.min(scale, Math.max(1, availableHeight - space * 2) / height);
+		const blockSpace = state.continuous ? 0 : Math.max(space, (availableHeight - height * scale) / 2);
+		const rowGap = state.continuous ? 0 : Math.max(gap, blockSpace > space ? blockSpace + 1 : blockSpace);
+		const nextVertical = contentHeight * scale + rowGap * (rows - 1) + blockSpace * 2 > availableHeight + 0.5;
+		const nextHorizontal = contentWidth * scale + gap + space * 2 > availableWidth + 0.5;
+		if ((!nextVertical || vertical) && (!nextHorizontal || horizontal)) break;
+		vertical ||= nextVertical;
+		horizontal ||= nextHorizontal;
 	}
-	return Math.min(4, available / width);
+	return scale;
 }
 
 function fitHeight(updateStatus = true) {
@@ -12125,42 +12131,7 @@ function fitHeight(updateStatus = true) {
 	if (!page) {
 		return;
 	}
-	if (state.pageLayout > 1) {
-		const size = pageGroupSize(), space = pageSpace(), gap = state.continuous ? 0 : PAGE_LAYOUT_GAP;
-		const width = Math.max(1, el.viewerPanel.offsetWidth - space * 2 - gap - scrollbarWidth());
-		const height = Math.max(1, el.viewerPanel.clientHeight - space * 2);
-		setScale(Math.min(width / (size.width * MM_TO_PX), height / (size.height * MM_TO_PX)), updateStatus, "height");
-		if (updateStatus) scrollToPage(state.pageIndex);
-		return;
-	}
-	const space = pageSpace();
-	let availableWidth = Math.max(1, el.viewerPanel.clientWidth - space * 2);
-	let availableHeight = Math.max(1, el.viewerPanel.clientHeight - space * 2);
-	const size = pageViewSize(page);
-	const width = Math.max(1, size.width * MM_TO_PX);
-	const height = Math.max(1, size.height * MM_TO_PX);
-	if (state.continuous) {
-		availableWidth = Math.max(1, el.viewerPanel.offsetWidth);
-		availableHeight = Math.max(1, el.viewerPanel.offsetHeight);
-		const contentWidth = state.doc.pages.reduce((max, item) => Math.max(max, pageViewSize(item).width), 0) * MM_TO_PX;
-		const contentHeight = state.doc.pages.reduce((total, item) => total + pageViewSize(item).height, 0) * MM_TO_PX;
-		const scale = Math.min(availableWidth / width, availableHeight / height);
-		const needsVerticalScrollbar = scale > availableHeight / contentHeight;
-		const needsHorizontalScrollbar = scale > availableWidth / contentWidth;
-		if (needsVerticalScrollbar || needsHorizontalScrollbar) {
-			const scrollbar = scrollbarWidth();
-			availableWidth = Math.max(1, availableWidth - (needsVerticalScrollbar ? scrollbar : 0));
-			availableHeight = Math.max(1, availableHeight - (needsHorizontalScrollbar ? scrollbar : 0));
-			const nextScale = Math.min(availableWidth / width, availableHeight / height);
-			if (!needsVerticalScrollbar && nextScale > availableHeight / contentHeight) {
-				availableWidth = Math.max(1, availableWidth - scrollbar);
-			}
-			if (!needsHorizontalScrollbar && nextScale > availableWidth / contentWidth) {
-				availableHeight = Math.max(1, availableHeight - scrollbar);
-			}
-		}
-	}
-	setScale(Math.min(availableWidth / width, availableHeight / height), updateStatus, "height");
+	setScale(fitPageScale(page, "height"), updateStatus, "height");
 	if (updateStatus) {
 		scrollToPage(state.pageIndex);
 	}
@@ -12249,10 +12220,6 @@ function pageSpace() {
 
 function pageBlockSpace() {
 	return Number.parseFloat(getComputedStyle(el.pageFrame).paddingTop) || pageSpace();
-}
-
-function viewerHasVerticalScrollbar() {
-	return el.viewerPanel.scrollHeight > el.viewerPanel.clientHeight;
 }
 
 function scrollbarWidth() {

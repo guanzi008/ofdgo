@@ -607,9 +607,6 @@ export class CanvasEditor {
 			node.className = "edit-object";
 			node.classList.toggle("read-only", !canEditObject(object, "move"));
 			node.title = objectEditReason(object);
-			if (lineShape(object.shape)) {
-				node.classList.add("edit-line");
-			}
 			node.tabIndex = 0;
 			const item = { ...object, index, page: { width: page.width, height: page.height }, node, surface };
 			item.artwork = artwork.get(object.id)?.node;
