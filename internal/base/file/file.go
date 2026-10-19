@@ -183,9 +183,9 @@ func (w *Writer) Write(data []byte) (int, error) {
 	return n, err
 }
 
-// Close 完成写入并替换目标，成功后刷新目标状态
+// Commit 完成写入并替换目标，成功后刷新目标状态
 // 返回: error 提交错误
-func (w *Writer) Close() error {
+func (w *Writer) Commit() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.closed {

@@ -34,6 +34,28 @@ import (
 	basefile "github.com/xiaoqidun/ofdgo/internal/base/file"
 )
 
+// Output 创建完整文档的输出事务，可用于文件或远程存储
+// 实现需支持并发调用Begin，按目标协调并发写入并校验版本冲突
+// Begin失败时由实现释放资源；事务持有ctx，提交前应检查取消状态
+type Output interface {
+	Begin(ctx context.Context) (WriteTransaction, error)
+}
+
+// WriteTransaction 暂存文档并提交完整内容，不直接覆盖已提交版本
+// Commit成功后释放资源并更新目标版本；失败时不得自动重试提交
+// Abort释放未提交资源且可重复调用，不撤销已提交内容
+// 远程提交结果不确定时，由实现返回可识别错误并重新确认目标版本
+type WriteTransaction interface {
+	io.Writer
+	Commit() error
+	Abort() error
+}
+
+// fileOutput 使用本地文件事务保存文档
+type fileOutput struct {
+	target *basefile.Target
+}
+
 // editorProgress 编辑与保存阶段的进度回调，nil表示不回报进度
 type editorProgress func(stage string, completed, total int) error
 
@@ -63,11 +85,12 @@ var ErrSaveTarget = errors.New("save target is not set")
 // ErrSaveConflict 表示保存目标在打开或最近保存后被其他操作修改
 var ErrSaveConflict = basefile.ErrChanged
 
-// ErrSaveBusy 表示目标文件正在提交其他写入事务
+// ErrSaveBusy 表示保存目标已有其他写入事务
 var ErrSaveBusy = basefile.ErrBusy
 
 // Snapshot 创建独立编辑快照，完成后可与原编辑器并行使用
 // 创建过程需与原实例串行，保留修订及保存目标，不复制撤销记录和进度回调
+// 保存目标与原实例共享，由输出实现协调并发事务及提交版本
 // 原包压缩数据直接复制，快照不依赖原阅读器及文件句柄，内存随快照释放
 // 自定义后端及字体文件系统仍由调用方提供，需支持并行读取
 // 入参: ctx 取消上下文
@@ -120,76 +143,86 @@ func (e *Editor) Snapshot(ctx context.Context) (*Editor, error) {
 	return snapshot, nil
 }
 
-// SetSavePath 绑定保存目标并记录当前文件状态，不读取或修改编辑内容
-// 绑定已有文件时应在打开后立即调用；空路径解除绑定，调用需与编辑操作串行
-// 入参: name 目标路径
-// 返回: error 路径或文件状态错误
-func (e *Editor) SetSavePath(name string) error {
-	if name == "" {
-		e.saveTarget = nil
-		return nil
-	}
+// NewFileOutput 创建本地保存目标并记录当前文件状态，不创建或修改文件
+// 同一目标应复用返回值，以便后续保存检测外部修改
+// 替换前比较文件标识、大小和修改时间，不提供跨进程排他锁
+// 入参: name 文件路径
+// 返回: Output 保存目标, error 路径或文件状态错误
+func NewFileOutput(name string) (Output, error) {
 	target, err := basefile.NewTarget(name)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	e.saveTarget = target
-	return nil
+	return &fileOutput{target: target}, nil
 }
 
-// SavePath 返回当前保存目标，未绑定时返回空字符串
-// 返回: string 绝对文件路径
-func (e *Editor) SavePath() string {
-	if e.saveTarget == nil {
-		return ""
-	}
-	return e.saveTarget.Name()
+// Begin 创建本地文件写入事务
+// 入参: ctx 取消上下文
+// 返回: WriteTransaction 写入事务, error 文件状态错误
+func (o *fileOutput) Begin(ctx context.Context) (WriteTransaction, error) {
+	return o.target.Begin(ctx)
+}
+
+// SetOutput 绑定保存目标，不读取或修改编辑内容，nil解除绑定
+// 调用需与编辑操作串行，目标生命周期由调用方管理
+// 入参: output 保存目标
+func (e *Editor) SetOutput(output Output) {
+	e.saveTarget = output
+}
+
+// Output 返回当前保存目标，未绑定时返回nil
+// 返回: Output 保存目标
+func (e *Editor) Output() Output {
+	return e.saveTarget
 }
 
 // Save 将当前完整文档写回已绑定目标，不改变编辑状态及撤销记录
-// 调用需与编辑操作串行，支持取消；失败保留原文件，成功后可继续编辑和保存
+// 调用需与编辑操作串行；后台保存应先创建Snapshot，成功后可继续编辑和保存
 // 入参: ctx 取消上下文, options 输出配置
 // 返回: int64 输出字节数, error 保存错误
 func (e *Editor) Save(ctx context.Context, options WriteOptions) (int64, error) {
-	if e.saveTarget == nil {
-		return 0, ErrSaveTarget
-	}
-	return e.saveFile(ctx, e.saveTarget, options)
+	return e.saveOutput(ctx, e.saveTarget, options)
 }
 
 // SaveAs 将完整文档另存，成功后切换保存目标，不改变撤销记录
 // 调用需与编辑操作串行，取消或失败时保持原目标
-// 入参: ctx 取消上下文, name 目标路径, options 输出配置
+// 入参: ctx 取消上下文, output 保存目标, options 输出配置
 // 返回: int64 输出字节数, error 保存错误
-func (e *Editor) SaveAs(ctx context.Context, name string, options WriteOptions) (int64, error) {
-	target, err := basefile.NewTarget(name)
-	if err != nil {
-		return 0, err
-	}
-	if e.saveTarget != nil && target.Name() == e.saveTarget.Name() {
-		target = e.saveTarget
-	}
-	n, err := e.saveFile(ctx, target, options)
+func (e *Editor) SaveAs(ctx context.Context, output Output, options WriteOptions) (int64, error) {
+	n, err := e.saveOutput(ctx, output, options)
 	if err == nil {
-		e.saveTarget = target
+		e.saveTarget = output
 	}
 	return n, err
 }
 
-// saveFile 使用共用文件事务提交文档
+// saveOutput 使用输出事务提交文档并释放失败事务
 // 入参: ctx 取消上下文, target 保存目标, options 输出配置
 // 返回: int64 输出字节数, error 保存错误
-func (e *Editor) saveFile(ctx context.Context, target *basefile.Target, options WriteOptions) (int64, error) {
+func (e *Editor) saveOutput(ctx context.Context, target Output, options WriteOptions) (n int64, err error) {
+	if target == nil {
+		return 0, ErrSaveTarget
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	writer, err := target.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
-	defer writer.Abort()
-	n, err := e.WriteToWithOptions(ctx, writer, options)
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, writer.Abort())
+		}
+	}()
+	n, err = e.WriteToWithOptions(ctx, writer, options)
 	if err != nil {
 		return n, err
 	}
-	return n, writer.Close()
+	if err = ctx.Err(); err != nil {
+		return n, err
+	}
+	return n, writer.Commit()
 }
 
 // WriteTo 逐个条目写出OFD，不关闭调用方输出流，出错时应丢弃本次输出

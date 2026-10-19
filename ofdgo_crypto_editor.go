@@ -64,7 +64,7 @@ func (e *Editor) writeEncrypted(writer io.Writer) (int64, error) {
 		return 0, err
 	}
 	defer clear(plaintext.Bytes())
-	r, err := NewReader(&Source{reader: bytes.NewReader(plaintext.Bytes()), size: int64(plaintext.Len())})
+	r, err := NewReader(&Input{reader: bytes.NewReader(plaintext.Bytes()), size: int64(plaintext.Len())})
 	if err != nil {
 		return 0, err
 	}

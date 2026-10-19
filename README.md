@@ -77,6 +77,7 @@ go get -u github.com/xiaoqidun/ofdgo
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 
@@ -105,12 +106,11 @@ func main() {
 		log.Fatal(err)
 	}
 	// 3. 保存文档
-	ofdFile, err := os.Create("test.ofd")
+	output, err := ofdgo.NewFileOutput("test.ofd")
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer ofdFile.Close()
-	if _, err := editor.WriteTo(ofdFile); err != nil {
+	if _, err := editor.SaveAs(context.Background(), output, ofdgo.WriteOptions{}); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -123,19 +123,18 @@ package main
 import (
 	"context"
 	"log"
-	"os"
 
 	"github.com/xiaoqidun/ofdgo"
 )
 
 func main() {
 	// 1. 打开文档
-	source, err := ofdgo.OpenFile(context.Background(), "test.ofd", ofdgo.SourceOptions{})
+	input, err := ofdgo.OpenFile(context.Background(), "test.ofd", ofdgo.InputOptions{})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer source.Close()
-	reader, err := ofdgo.NewReader(source)
+	defer input.Close()
+	reader, err := ofdgo.NewReader(input)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -147,12 +146,11 @@ func main() {
 	}
 	editor.Info.Title = "编辑后的"
 	// 3. 另存文档
-	ofdFile, err := os.Create("edited.ofd")
+	output, err := ofdgo.NewFileOutput("edited.ofd")
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer ofdFile.Close()
-	if _, err := editor.WriteTo(ofdFile); err != nil {
+	if _, err := editor.SaveAs(context.Background(), output, ofdgo.WriteOptions{}); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -172,11 +170,11 @@ import (
 
 func main() {
 	// 1. 打开文档
-	source, err := ofdgo.OpenFile(context.Background(), "test.pdf", ofdgo.SourceOptions{})
+	input, err := ofdgo.OpenFile(context.Background(), "test.pdf", ofdgo.InputOptions{})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer source.Close()
+	defer input.Close()
 	// 2. 创建文件
 	ofdFile, err := os.Create("test.ofd")
 	if err != nil {
@@ -184,7 +182,7 @@ func main() {
 	}
 	defer ofdFile.Close()
 	// 3. 转换文档
-	report, err := ofdgo.ConvertPDF(context.Background(), source, ofdFile, ofdgo.PDFImportOptions{})
+	report, err := ofdgo.ConvertPDF(context.Background(), input, ofdFile, ofdgo.PDFImportOptions{})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -209,12 +207,12 @@ import (
 
 func main() {
 	// 1. 打开OFD文件
-	source, err := ofdgo.OpenFile(context.Background(), "test.ofd", ofdgo.SourceOptions{})
+	input, err := ofdgo.OpenFile(context.Background(), "test.ofd", ofdgo.InputOptions{})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer source.Close()
-	reader, err := ofdgo.NewReader(source)
+	defer input.Close()
+	reader, err := ofdgo.NewReader(input)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -247,13 +245,13 @@ import (
 
 func main() {
 	// 1. 打开OFD文件
-	source, err := ofdgo.OpenFile(context.Background(), "test.ofd", ofdgo.SourceOptions{})
+	input, err := ofdgo.OpenFile(context.Background(), "test.ofd", ofdgo.InputOptions{})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer source.Close()
+	defer input.Close()
 	// 2. 验证OFD签名
-	reports, err := ofdgo.VerifySignatures(source)
+	reports, err := ofdgo.VerifySignatures(input)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -296,12 +294,12 @@ import (
 
 func main() {
 	// 1. 打开OFD文件
-	source, err := ofdgo.OpenFile(context.Background(), "invoice.ofd", ofdgo.SourceOptions{})
+	input, err := ofdgo.OpenFile(context.Background(), "invoice.ofd", ofdgo.InputOptions{})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer source.Close()
-	reader, err := ofdgo.NewReader(source)
+	defer input.Close()
+	reader, err := ofdgo.NewReader(input)
 	if err != nil {
 		log.Fatal(err)
 	}

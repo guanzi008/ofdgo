@@ -33,7 +33,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	basefile "github.com/xiaoqidun/ofdgo/internal/base/file"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
@@ -41,7 +40,7 @@ import (
 const editorPathValidationLimit = 1024
 
 // Editor 编辑OFD文档，长度单位为毫米，页面索引从0开始，实例需串行使用
-// Info可修改文档元数据，通过方法管理页面、对象和资源，WriteTo输出副本，Save和SaveAs通过绑定路径保存
+// Info可修改文档元数据，通过方法管理页面、对象和资源，WriteTo输出副本，Save和SaveAs通过输出事务保存
 // OnWriteProgress可选，按fonts、pages、references、resources、compress、write阶段同步回报进度，返回错误则停止保存
 // completed和total为当前阶段已处理及总工作项，compress累计完成条目数且total为0，write阶段不计数
 // 阶段可重复，准备完成不代表保存成功
@@ -74,7 +73,7 @@ type Editor struct {
 	outlines         []byte
 	encryption       *encryptionState
 	output           *outputOptimization
-	saveTarget       *basefile.Target
+	saveTarget       Output
 	validatedPaths   *renderCache[string, bool]
 	richIndex        *richTextIndex
 }

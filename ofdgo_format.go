@@ -24,16 +24,16 @@ import (
 
 // DetectFormat 按文件内容识别PDF或OFD，不读取压缩内容或关闭输入
 // 识别结果不代表文档完整有效，仍需通过对应阅读器解析
-// 入参: source 输入源
+// 入参: input 输入源
 // 返回: string 格式标识pdf或ofd, error 读取错误或不支持的格式
-func DetectFormat(source *Source) (string, error) {
-	if source == nil || source.Size() <= 0 {
-		return "", fmt.Errorf("empty document source")
+func DetectFormat(input *Input) (string, error) {
+	if input == nil || input.Size() <= 0 {
+		return "", fmt.Errorf("empty document input")
 	}
-	size := source.Size()
+	size := input.Size()
 	var header [1024]byte
 	data := header[:min(size, int64(len(header)))]
-	n, err := source.ReadAt(data, 0)
+	n, err := input.ReadAt(data, 0)
 	if err != nil && err != io.EOF {
 		return "", err
 	}
@@ -43,7 +43,7 @@ func DetectFormat(source *Source) (string, error) {
 	if bytes.HasPrefix(data, []byte("%PDF-")) {
 		return "pdf", nil
 	}
-	archive, err := zip.NewReader(source, size)
+	archive, err := zip.NewReader(input, size)
 	if err == nil {
 		reader := &Reader{Zip: archive}
 		if err := reader.indexPackage(); err != nil {

@@ -161,7 +161,7 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 		return err
 	}
 	if stamp.Type == "ofd" {
-		reader, err := NewReader(&Source{reader: bytes.NewReader(stamp.Data), size: int64(len(stamp.Data))})
+		reader, err := NewReader(&Input{reader: bytes.NewReader(stamp.Data), size: int64(len(stamp.Data))})
 		if err != nil {
 			return err
 		}

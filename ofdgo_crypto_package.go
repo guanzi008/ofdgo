@@ -93,7 +93,7 @@ type encryptionEntry struct {
 // 入参: data 明文OFD包, options 加密策略
 // 返回: []byte 加密OFD包, error 错误信息
 func EncryptPackage(data []byte, options EncryptionOptions) ([]byte, error) {
-	r, err := NewReader(&Source{reader: bytes.NewReader(data), size: int64(len(data))})
+	r, err := NewReader(&Input{reader: bytes.NewReader(data), size: int64(len(data))})
 	if err != nil {
 		return nil, err
 	}

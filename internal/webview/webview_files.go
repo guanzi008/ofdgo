@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xiaoqidun/ofdgo"
 	basefile "github.com/xiaoqidun/ofdgo/internal/base/file"
 )
 
@@ -43,7 +44,7 @@ type fileEntry struct {
 	directory  bool
 	owned      bool
 	temporary  bool
-	saveTarget *basefile.Target
+	saveTarget ofdgo.Output
 	readers    int
 	retired    bool
 }
@@ -61,7 +62,7 @@ type fileStore struct {
 type fileWriter struct {
 	id     string
 	store  *fileStore
-	output *basefile.Writer
+	output ofdgo.WriteTransaction
 }
 
 // newFileStore 创建独立文件授权表
@@ -127,7 +128,7 @@ func (s *fileStore) add(name string, directory bool) (map[string]any, error) {
 	id := rand.Text()
 	entry := &fileEntry{path: name, name: filepath.Base(name), directory: directory}
 	if !directory {
-		entry.saveTarget, err = basefile.NewTarget(name)
+		entry.saveTarget, err = ofdgo.NewFileOutput(name)
 		if err != nil {
 			return nil, err
 		}
@@ -417,7 +418,7 @@ func (s *fileStore) begin(ctx context.Context, id string) (*fileWriter, error) {
 	}
 	if entry.saveTarget == nil {
 		var err error
-		entry.saveTarget, err = basefile.NewTarget(entry.path)
+		entry.saveTarget, err = ofdgo.NewFileOutput(entry.path)
 		if err != nil {
 			return nil, err
 		}
@@ -489,7 +490,10 @@ func (w *fileWriter) Write(data []byte) (int, error) {
 // 返回: error 提交错误
 func (w *fileWriter) Close() error {
 	defer w.release()
-	return w.output.Close()
+	if err := w.output.Commit(); err != nil {
+		return errors.Join(err, w.output.Abort())
+	}
+	return nil
 }
 
 // Abort 删除未提交的临时输出

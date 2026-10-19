@@ -31,10 +31,10 @@ import (
 	basefile "github.com/xiaoqidun/ofdgo/internal/base/file"
 )
 
-// Source 统一文件、内存及顺序流的随机读取，可并发读取和关闭，不可复制
+// Input 统一文件、内存及顺序流的随机读取，可并发读取和关闭，不可复制
 // 调用方应在阅读、编辑及转换结束后调用Close，借入的数据需在此期间保持不变
 // 借入的随机读取器应支持并发ReadAt，Close不会关闭调用方传入的读取器
-type Source struct {
+type Input struct {
 	mu     sync.RWMutex
 	reader io.ReaderAt
 	size   int64
@@ -43,12 +43,12 @@ type Source struct {
 	temp   bool
 }
 
-// SourceOptions 设置顺序输入的缓存及大小限制，单位为字节
+// InputOptions 设置顺序输入的缓存及大小限制，单位为字节
 // MemoryLimit为0时使用8MiB，浏览器WASM仅用内存；负值表示仅用内存
 // TempDir为空时使用系统临时目录，不自动创建调用方指定的目录
-// MaxSize为0时不限制输入大小，OpenFile和ReadSource均检查此限制
+// MaxSize为0时不限制输入大小，OpenFile和ReadInput均检查此限制
 // 无临时文件系统的平台可显式使用仅内存模式，并通过MaxSize限制输入
-type SourceOptions struct {
+type InputOptions struct {
 	MemoryLimit int64
 	MaxSize     int64
 	TempDir     string
@@ -56,8 +56,8 @@ type SourceOptions struct {
 
 // OpenFile 打开文件输入，不复制文件内容，Close释放文件句柄
 // 入参: ctx 取消上下文, path 文件路径, options 输入选项
-// 返回: *Source 输入源, error 打开或大小错误
-func OpenFile(ctx context.Context, path string, options SourceOptions) (*Source, error) {
+// 返回: *Input 输入源, error 打开或大小错误
+func OpenFile(ctx context.Context, path string, options InputOptions) (*Input, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -72,39 +72,39 @@ func OpenFile(ctx context.Context, path string, options SourceOptions) (*Source,
 	}
 	if !info.Mode().IsRegular() {
 		f.Close()
-		return nil, fmt.Errorf("source is not a regular file")
+		return nil, fmt.Errorf("input is not a regular file")
 	}
-	source, err := NewSource(f, info.Size())
+	input, err := NewInput(f, info.Size())
 	if err != nil {
 		f.Close()
 		return nil, err
 	}
-	source.file, source.path = f, path
-	if err := source.checkOptions(ctx, options); err != nil {
-		source.Close()
+	input.file, input.path = f, path
+	if err := input.checkOptions(ctx, options); err != nil {
+		input.Close()
 		return nil, err
 	}
-	return source, nil
+	return input, nil
 }
 
-// NewSource 借用指定长度的随机读取源，不复制数据或接管其生命周期
+// NewInput 借用指定长度的随机读取源，不复制数据或接管其生命周期
 // 入参: reader 随机读取器, size 数据大小
-// 返回: *Source 输入源, error 参数错误
-func NewSource(reader io.ReaderAt, size int64) (*Source, error) {
+// 返回: *Input 输入源, error 参数错误
+func NewInput(reader io.ReaderAt, size int64) (*Input, error) {
 	if reader == nil || size < 0 {
-		return nil, fmt.Errorf("invalid source")
+		return nil, fmt.Errorf("invalid input")
 	}
-	return &Source{reader: reader, size: size}, nil
+	return &Input{reader: reader, size: size}, nil
 }
 
-// ReadSource 从当前位置接收顺序输入，超过内存阈值后转入临时文件
+// ReadInput 从当前位置接收顺序输入，超过内存阈值后转入临时文件
 // 已知大小且支持随机访问的可定位读取器直接复用，不移动其当前位置
 // 不关闭传入流；取消无法中断阻塞的Read，调用方应自行设置超时或关闭流
 // 入参: ctx 取消上下文, reader 输入流, options 输入选项
-// 返回: *Source 输入源, error 读取、缓存或取消错误
-func ReadSource(ctx context.Context, reader io.Reader, options SourceOptions) (*Source, error) {
+// 返回: *Input 输入源, error 读取、缓存或取消错误
+func ReadInput(ctx context.Context, reader io.Reader, options InputOptions) (*Input, error) {
 	if reader == nil || options.MaxSize < 0 {
-		return nil, fmt.Errorf("invalid source options")
+		return nil, fmt.Errorf("invalid input options")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -129,16 +129,16 @@ func ReadSource(ctx context.Context, reader io.Reader, options SourceOptions) (*
 					return nil, err
 				}
 				if offset < 0 || offset > size {
-					return nil, fmt.Errorf("invalid source offset")
+					return nil, fmt.Errorf("invalid input offset")
 				}
-				source, err := NewSource(io.NewSectionReader(random, offset, size-offset), size-offset)
+				input, err := NewInput(io.NewSectionReader(random, offset, size-offset), size-offset)
 				if err != nil {
 					return nil, err
 				}
-				if err := source.checkOptions(ctx, options); err != nil {
+				if err := input.checkOptions(ctx, options); err != nil {
 					return nil, err
 				}
-				return source, nil
+				return input, nil
 			}
 		}
 	}
@@ -149,11 +149,11 @@ func ReadSource(ctx context.Context, reader io.Reader, options SourceOptions) (*
 			limit = -1
 		}
 	}
-	source := &Source{}
+	input := &Input{}
 	success := false
 	defer func() {
 		if !success {
-			source.Close()
+			input.Close()
 		}
 	}()
 	var memory bytes.Buffer
@@ -165,7 +165,7 @@ func ReadSource(ctx context.Context, reader io.Reader, options SourceOptions) (*
 		}
 		n, err := reader.Read(buffer)
 		if n < 0 || n > len(buffer) {
-			return nil, fmt.Errorf("invalid source read count")
+			return nil, fmt.Errorf("invalid input read count")
 		}
 		if err != nil && err != io.EOF {
 			return nil, err
@@ -175,28 +175,28 @@ func ReadSource(ctx context.Context, reader io.Reader, options SourceOptions) (*
 		}
 		if n > 0 {
 			empty = 0
-			if source.size > int64(^uint64(0)>>1)-int64(n) || options.MaxSize > 0 && int64(n) > options.MaxSize-source.size {
-				return nil, fmt.Errorf("source exceeds size limit")
+			if input.size > int64(^uint64(0)>>1)-int64(n) || options.MaxSize > 0 && int64(n) > options.MaxSize-input.size {
+				return nil, fmt.Errorf("input exceeds size limit")
 			}
-			if source.file == nil && limit >= 0 && source.size+int64(n) > limit {
+			if input.file == nil && limit >= 0 && input.size+int64(n) > limit {
 				file, failure := basefile.NewTemp(options.TempDir)
 				if failure != nil {
 					return nil, failure
 				}
-				source.file, source.temp = file, true
+				input.file, input.temp = file, true
 				if _, failure = file.Write(memory.Bytes()); failure != nil {
 					return nil, failure
 				}
 				memory = bytes.Buffer{}
 			}
 			var output io.Writer = &memory
-			if source.file != nil {
-				output = source.file
+			if input.file != nil {
+				output = input.file
 			}
 			if _, failure := output.Write(buffer[:n]); failure != nil {
 				return nil, failure
 			}
-			source.size += int64(n)
+			input.size += int64(n)
 		} else if err == nil {
 			empty++
 			if empty >= 100 {
@@ -210,34 +210,34 @@ func ReadSource(ctx context.Context, reader io.Reader, options SourceOptions) (*
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	source.reader = bytes.NewReader(memory.Bytes())
-	if source.file != nil {
-		source.reader = source.file
+	input.reader = bytes.NewReader(memory.Bytes())
+	if input.file != nil {
+		input.reader = input.file
 	}
 	success = true
-	return source, nil
+	return input, nil
 }
 
 // checkOptions 检查取消状态及输入大小
 // 入参: ctx 取消上下文, options 输入选项
 // 返回: error 取消或大小错误
-func (s *Source) checkOptions(ctx context.Context, options SourceOptions) error {
+func (s *Input) checkOptions(ctx context.Context, options InputOptions) error {
 	if options.MaxSize < 0 || options.MaxSize > 0 && s.size > options.MaxSize {
-		return fmt.Errorf("source exceeds size limit")
+		return fmt.Errorf("input exceeds size limit")
 	}
 	return ctx.Err()
 }
 
 // Size 返回输入字节数，关闭后仍可查询
 // 返回: int64 数据大小
-func (s *Source) Size() int64 {
+func (s *Input) Size() int64 {
 	return s.size
 }
 
 // ReadAt 读取指定位置的数据，关闭后返回os.ErrClosed
 // 入参: data 目标缓冲区, offset 字节偏移
 // 返回: int 读取字节数, error 读取错误
-func (s *Source) ReadAt(data []byte, offset int64) (int, error) {
+func (s *Input) ReadAt(data []byte, offset int64) (int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.reader == nil {
@@ -248,7 +248,7 @@ func (s *Source) ReadAt(data []byte, offset int64) (int, error) {
 
 // Close 释放自有文件和缓存，等待正在进行的读取结束，可重复调用
 // 返回: error 文件关闭或临时文件删除错误
-func (s *Source) Close() error {
+func (s *Input) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reader = nil
@@ -266,18 +266,18 @@ func (s *Source) Close() error {
 
 // NewReader 从统一输入源创建OFD阅读器，不接管输入源生命周期
 // 阅读器及其派生编辑器使用结束后，调用方再关闭输入源
-// 入参: source 输入源, options 阅读选项
+// 入参: input 输入源, options 阅读选项
 // 返回: *Reader 阅读器实例, error 错误信息
-func NewReader(source *Source, options ...ReaderOption) (*Reader, error) {
-	if source == nil {
-		return nil, fmt.Errorf("missing source")
+func NewReader(input *Input, options ...ReaderOption) (*Reader, error) {
+	if input == nil {
+		return nil, fmt.Errorf("missing input")
 	}
-	zr, err := zip.NewReader(source, source.Size())
+	zr, err := zip.NewReader(input, input.Size())
 	if err != nil {
 		return nil, err
 	}
 	reader := &Reader{
-		Path: source.path,
+		Path: input.path,
 		Zip:  zr,
 	}
 	if err := reader.open(options); err != nil {
