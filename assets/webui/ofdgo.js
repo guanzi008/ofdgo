@@ -122,7 +122,10 @@ const state = {
 	pan: null,
 	fitMode: "width",
 	continuous: false,
-	pageLayout: 1,
+	pageLayoutPreference: 1,
+	get pageLayout() {
+		return this.doc?.pageCount > 1 ? this.pageLayoutPreference : 1;
+	},
 	renderAnnotations: true,
 	renderBackend: "canvas",
 	renderMode: "svg",
@@ -10044,12 +10047,10 @@ function pageGroupSize(index = state.pageIndex) {
 }
 
 async function togglePageLayout() {
-	if (!state.doc || document.body.hasAttribute("data-busy")) return;
+	if (!(state.doc?.pageCount > 1) || document.body.hasAttribute("data-busy")) return;
 	const openSeq = state.openSeq;
 	if (!await canvasEditor.commitNudge() || !await canvasEditor.commitText() || !await canvasEditor.commitCrop() || openSeq !== state.openSeq) return;
-	state.pageLayout = state.pageLayout === 1 ? 2 : 1;
-	el.pageLayoutButton.textContent = state.pageLayout === 1 ? "一页" : "两页";
-	el.pageLayoutButton.dataset.short = state.pageLayout === 1 ? "一" : "两";
+	state.pageLayoutPreference = state.pageLayout === 1 ? 2 : 1;
 	layoutPages();
 	layoutThumbnails();
 	if (state.showPages && !el.pageList.hidden) revealThumbnail(state.pageIndex);
@@ -12356,7 +12357,9 @@ function updateControls() {
 	el.rotateButton.disabled = !hasDoc;
 	el.panButton.disabled = !hasDoc;
 	el.continuousButton.disabled = !hasDoc;
-	el.pageLayoutButton.disabled = !hasDoc || document.body.hasAttribute("data-busy");
+	el.pageLayoutButton.disabled = pageCount < 2 || document.body.hasAttribute("data-busy");
+	el.pageLayoutButton.textContent = state.pageLayout === 1 ? "单页" : "双页";
+	el.pageLayoutButton.dataset.short = state.pageLayout === 1 ? "单" : "双";
 	el.fitButton.toggleAttribute("data-pressed", hasDoc && state.fitMode === "width");
 	el.fitHeightButton.toggleAttribute("data-pressed", hasDoc && state.fitMode === "height");
 	updateAnnotationButton();
@@ -12564,7 +12567,7 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("data-busy", busy);
-	el.pageLayoutButton.disabled = busy || !state.doc;
+	el.pageLayoutButton.disabled = busy || !(state.doc?.pageCount > 1);
 	el.closeButton.disabled = busy || !state.doc || state.exporting || state.saving;
 	el.refreshAppButton.disabled = busy;
 	updateStructureControls();
