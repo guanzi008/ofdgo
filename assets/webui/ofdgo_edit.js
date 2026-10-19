@@ -838,7 +838,7 @@ export class CanvasEditor {
 				if (this.input.composing) this.commitText();
 				else {
 					event.preventDefault();
-					this.selectAfterText(this.targetAt(event));
+					this.selectAfterText(this.targetAt(event), this.pages.get(event.target.closest(".page-surface"))?.index);
 				}
 			}
 			return;
@@ -860,6 +860,8 @@ export class CanvasEditor {
 			return;
 		}
 		if (this.tool) {
+			const page = this.pages.get(event.target.closest(".page-surface"));
+			if (page) this.options.onPage?.(page.index);
 			if (this.tool.startsWith("erase-")) this.startErase(event);
 			else if (this.tool.startsWith("pen-")) this.startInk(event);
 			else this.startShape(event);
@@ -870,6 +872,8 @@ export class CanvasEditor {
 			return;
 		}
 		const target = this.targetAt(event), node = target?.node;
+		const page = this.pages.get(event.target.closest(".page-surface"));
+		if (page) this.options.onPage?.(page.index);
 		if (event.target.closest(".edit-object, .edit-selection") || target) event.preventDefault();
 		this.focus();
 		const additive = event.shiftKey || event.ctrlKey || event.metaKey || this.multiple;
@@ -939,12 +943,13 @@ export class CanvasEditor {
 			: this.contains(item, point, tolerance));
 	}
 
-	async selectAfterText(target) {
+	async selectAfterText(target, index) {
 		if (!await this.commitText() || this.input || !this.enabled || this.options.busy() || this.tool) return;
+		if (index !== undefined) this.options.onPage?.(index);
 		if (target) {
 			const item = this.pageItems(target.index).find(item => item.id === target.id);
 			if (item) this.select(item);
-		}
+		} else if (index !== undefined) this.select(null);
 		this.focus();
 	}
 

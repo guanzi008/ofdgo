@@ -7,6 +7,7 @@ const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
 const DEFAULT_IMAGE_DPI = 300;
 const PAGE_CACHE_LIMIT = 16;
 const PAGE_CACHE_BYTES = 32 * 1024 * 1024;
+const PAGE_LAYOUT_GAP = 16;
 const SCROLL_SEGMENT_SIZE = 1000000;
 const OBJECT_CLIPBOARD_TYPE = "application/x-ofdgo-objects";
 const STATUS = {
@@ -121,6 +122,7 @@ const state = {
 	pan: null,
 	fitMode: "width",
 	continuous: false,
+	pageLayout: 1,
 	renderAnnotations: true,
 	renderBackend: "canvas",
 	renderMode: "svg",
@@ -474,6 +476,7 @@ const el = {
 	rotateButton: document.querySelector("#rotateButton"),
 	panButton: document.querySelector("#panButton"),
 	continuousButton: document.querySelector("#continuousButton"),
+	pageLayoutButton: document.querySelector("#pageLayoutButton"),
 	annotationButton: document.querySelector("#annotationButton"),
 	imageDPI: document.querySelector("#imageDPI"),
 	outputCompression: document.querySelector("#outputCompression"),
@@ -618,7 +621,11 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	busy: () => document.body.hasAttribute("data-busy"),
 	rotation: () => state.rotation,
 	canInsert: (index) => pageCan("insert", index),
+	onPage: (index) => {
+		if (index !== state.pageIndex) setCurrentPage(index);
+	},
 	onSelect: (item, previous) => {
+		if (item && item.index !== state.pageIndex) setCurrentPage(item.index);
 		updateObjectControls(item);
 		const reason = objectEditReason(item), previousReason = objectEditReason(previous);
 		if (state.editing && state.doc && !document.body.hasAttribute("data-busy")
@@ -1609,11 +1616,11 @@ el.localFontButton.addEventListener("click", loadLocalFonts);
 el.ofdInput.addEventListener("change", () => openOFD(el.ofdInput.files[0]));
 el.fontInput.addEventListener("change", openSelectedFonts);
 el.fontDirectoryInput.addEventListener("change", openSelectedFonts);
-el.prevButton.addEventListener("click", () => renderPage(state.pageIndex - 1));
+el.prevButton.addEventListener("click", () => renderPage(pageGroupStart() - state.pageLayout));
 el.imageDPI.addEventListener("change", () => changeDisplayMode());
 el.renderVectorButton.addEventListener("click", () => changeDisplayMode("svg"));
 el.renderRasterButton.addEventListener("click", () => changeDisplayMode("raster"));
-el.nextButton.addEventListener("click", () => renderPage(state.pageIndex + 1));
+el.nextButton.addEventListener("click", () => renderPage(pageGroupStart() + state.pageLayout));
 el.zoomOutButton.addEventListener("click", () => setScale(state.scale - 0.1));
 el.zoomInButton.addEventListener("click", () => setScale(state.scale + 0.1));
 el.fitButton.addEventListener("click", fitWidth);
@@ -1621,6 +1628,7 @@ el.fitHeightButton.addEventListener("click", fitHeight);
 el.rotateButton.addEventListener("click", rotatePages);
 el.panButton.addEventListener("click", togglePan);
 el.continuousButton.addEventListener("click", toggleContinuous);
+el.pageLayoutButton.addEventListener("click", togglePageLayout);
 el.annotationButton.addEventListener("click", toggleAnnotations);
 document.addEventListener("copy", copySelection);
 document.addEventListener("cut", copySelection);
@@ -1704,6 +1712,11 @@ for (const [viewport, current] of [[el.viewerPanel, () => state.pageWindow], [el
 	});
 }
 el.viewerPanel.addEventListener("pointerdown", startPan);
+el.viewerPanel.addEventListener("pointerdown", event => {
+	if (event.button !== 0 || state.editing || document.body.hasAttribute("data-busy")) return;
+	const shell = event.target.closest(".page-shell");
+	if (shell && state.doc) setCurrentPage(Number(shell.dataset.pageIndex));
+});
 el.viewerPanel.addEventListener("pointermove", movePan);
 el.viewerPanel.addEventListener("pointerup", endPan);
 el.viewerPanel.addEventListener("pointercancel", endPan);
@@ -5435,7 +5448,7 @@ async function openDocument(options = {}) {
 			state.rotation = 0;
 			setContinuous(window.matchMedia("(max-width: 640px)").matches);
 		}
-		state.fitMode = options.fitMode || (!state.continuous && pageCount === 1 ? "height" : "width");
+		state.fitMode = options.fitMode || (state.pageLayout > 1 || !state.continuous && pageCount === 1 ? "height" : "width");
 		if (!options.skipAutoFonts && await autoLoadDocumentLocalFonts(openSeq)) {
 			if (openSeq !== state.openSeq) {
 				return;
@@ -5593,6 +5606,9 @@ async function renderPage(index, options = {}) {
 	const pageCount = state.doc.pageCount || 0;
 	if (index < 0 || index >= pageCount) {
 		return null;
+	}
+	if (!options.keepBusy && index !== state.pageIndex) {
+		if (!await canvasEditor.commitNudge() || !await canvasEditor.commitText() || !await canvasEditor.commitCrop() || openSeq !== state.openSeq) return null;
 	}
 	const pageSeq = ++state.pageSeq;
 	if (!state.exporting) {
@@ -8851,8 +8867,12 @@ function syncPageWindow(view, target = null) {
 	view.scrollTop = viewport.scrollTop;
 	view.logicalTop = logical;
 	view.origin = logical - viewport.scrollTop + inset;
-	const first = virtualIndex(offsets, Math.max(view.origin, logical - view.overscan));
-	const last = virtualIndex(offsets, Math.min(view.origin + extent, logical + height + view.overscan));
+	let first = virtualIndex(offsets, Math.max(view.origin, logical - view.overscan));
+	let last = virtualIndex(offsets, Math.min(view.origin + extent, logical + height + view.overscan));
+	if (view.columns) {
+		first -= first % view.columns;
+		last = Math.min(offsets.length - 2, last + view.columns - 1 - last % view.columns);
+	}
 	const selection = host === el.svgHost && state.documentSelection ? document.getSelection() : null;
 	const selected = selection?.rangeCount && isDocumentSelection(selection.getRangeAt(0));
 	let changed = false;
@@ -8875,7 +8895,11 @@ function syncPageWindow(view, target = null) {
 	}
 	for (const [index, node] of nodes) {
 		const top = offsets[index] - view.origin;
-		const itemHeight = offsets[index + 1] - offsets[index] - view.gap;
+		const itemHeight = view.heights?.[index] ?? offsets[index + 1] - offsets[index] - view.gap;
+		if (view.lefts) {
+			node.style.left = `${view.lefts[index]}px`;
+			node.style.transform = "none";
+		}
 		node.style.top = `${Math.max(-itemHeight, Math.min(extent, top))}px`;
 		node.style.visibility = top + itemHeight < 0 || top >= extent ? "hidden" : "";
 	}
@@ -8890,7 +8914,7 @@ function pageWindowAnchor(view) {
 }
 
 function releaseFlowShell(shell, index) {
-	if (shell.contains(document.activeElement) || canvasEditor.drag?.item?.index === index) return false;
+	if (shell.contains(document.activeElement) || canvasEditor.drag?.item?.index === index || canvasEditor.drag?.page?.index === index) return false;
 	unmountPage(index);
 	if (state.selectedPages.has(index)) return false;
 	state.pageObserver?.unobserve(shell);
@@ -9825,7 +9849,8 @@ function markFlowPageError(index, err) {
 }
 
 function queueNearbyPages(index, openSeq = state.openSeq) {
-	for (let i = Math.max(0, index - 1); i <= Math.min((state.doc?.pageCount || 1) - 1, index + 2); i += 1) {
+	const start = pageGroupStart(index);
+	for (let i = Math.max(0, start - 1); i <= Math.min((state.doc?.pageCount || 1) - 1, start + state.pageLayout + 1); i += 1) {
 		renderFlowPage(i, { openSeq, priority: 2 });
 	}
 }
@@ -9835,6 +9860,21 @@ function pageShell(index) {
 }
 
 function scrollToPage(index) {
+	if (state.pageLayout > 1 && state.pageWindow) {
+		const view = state.pageWindow, start = pageGroupStart(index);
+		const size = pageGroupSize(start), gap = PAGE_LAYOUT_GAP;
+		const height = size.height * MM_TO_PX * state.scale + (size.rows - 1) * gap;
+		const whole = height <= el.viewerPanel.clientHeight - pageBlockSpace() * 2 + 1;
+		const space = state.fitMode === "height" && !state.continuous
+			? Math.max(pageBlockSpace(), (el.viewerPanel.clientHeight - height) / 2) : pageBlockSpace();
+		syncPageWindow(view, view.offsets[whole ? start : index] - space);
+		el.viewerPanel.scrollLeft = Math.max(0, (el.viewerPanel.scrollWidth - el.viewerPanel.clientWidth) / 2);
+		if (size.width * MM_TO_PX * state.scale + gap > el.viewerPanel.clientWidth) {
+			const shell = pageShell(index);
+			if (shell) centerPageInline(shell);
+		}
+		return;
+	}
 	if (state.pageWindow) syncPageWindow(state.pageWindow, state.pageWindow.offsets[index]);
 	const shell = pageShell(index);
 	if (shell) {
@@ -9875,6 +9915,7 @@ function schedulePageSync() {
 function syncCurrentPageFromScroll() {
 	if (state.openActionTask?.navigating) return;
 	syncPageWindow(state.pageWindow);
+	if (canvasEditor.input || canvasEditor.drag || canvasEditor.crop) return;
 	const shell = pageShellFromView();
 	if (!shell) {
 		return;
@@ -9900,6 +9941,19 @@ function prunePageRenderQueue() {
 
 function pageShellFromView() {
 	const rect = el.viewerPanel.getBoundingClientRect();
+	if (state.pageLayout > 1) {
+		let best = null, area = 0;
+		const current = pageShell(state.pageIndex);
+		for (const shell of [current, ...(state.pageWindow?.nodes.values() || [])]) {
+			if (!shell || shell.style.visibility === "hidden") continue;
+			const bounds = shell.getBoundingClientRect();
+			const visible = Math.max(0, Math.min(rect.right, bounds.right) - Math.max(rect.left, bounds.left))
+				* Math.max(0, Math.min(rect.bottom, bounds.bottom) - Math.max(rect.top, bounds.top));
+			const ratio = visible / Math.max(1, bounds.width * bounds.height);
+			if (ratio > area + 0.01) { best = shell; area = ratio; }
+		}
+		return best;
+	}
 	const x = rect.left + rect.width / 2;
 	if (el.viewerPanel.scrollTop + el.viewerPanel.clientHeight >= el.viewerPanel.scrollHeight - 1) {
 		const shell = pageShell(state.pageIndex);
@@ -9924,7 +9978,7 @@ function setCurrentPage(index) {
 	if (state.composite && state.composite.index !== index) resetCompositeScope();
 	state.pageIndex = index;
 	if (state.editing) state.openActionPage = state.doc?.pages[index]?.id;
-	if (state.fitMode === "width") {
+	if (state.fitMode === "width" && state.pageLayout === 1) {
 		state.scale = fitWidthScale(currentPageInfo());
 		el.zoomLabel.textContent = `${Math.round(state.scale * 100)}%`;
 	}
@@ -9971,6 +10025,37 @@ function setPageItemCurrent(item, current) {
 	item.removeAttribute("data-current");
 }
 
+function pageGroupStart(index = state.pageIndex) {
+	return Math.floor(index / state.pageLayout) * state.pageLayout;
+}
+
+function pageGroupSize(index = state.pageIndex) {
+	const start = pageGroupStart(index), rows = state.pageLayout === 4 ? 2 : 1;
+	const widths = [0, 0], heights = Array(rows).fill(0);
+	for (let offset = 0; offset < state.pageLayout; offset++) {
+		const page = state.doc.pages[start + offset];
+		if (!page) continue;
+		const size = pageViewSize(page);
+		widths[offset % 2] = Math.max(widths[offset % 2], size.width);
+		heights[Math.floor(offset / 2)] = Math.max(heights[Math.floor(offset / 2)], size.height);
+	}
+	if (!widths[1]) widths[1] = widths[0];
+	for (let row = 0; row < rows; row++) if (!heights[row]) heights[row] = heights[0];
+	return { widths, heights, rows, width: widths[0] + widths[1], height: heights.reduce((sum, height) => sum + height, 0) };
+}
+
+async function togglePageLayout() {
+	if (!state.doc || document.body.hasAttribute("data-busy")) return;
+	const openSeq = state.openSeq;
+	if (!await canvasEditor.commitNudge() || !await canvasEditor.commitText() || !await canvasEditor.commitCrop() || openSeq !== state.openSeq) return;
+	state.pageLayout = state.pageLayout === 1 ? 2 : state.pageLayout === 2 ? 4 : 1;
+	el.pageLayoutButton.textContent = { 1: "一页", 2: "两页", 4: "四页" }[state.pageLayout];
+	el.pageLayoutButton.dataset.short = { 1: "一", 2: "两", 4: "四" }[state.pageLayout];
+	layoutPages();
+	fitHeight();
+	queueNearbyPages(state.pageIndex);
+}
+
 function layoutPages() {
 	if (!state.doc) {
 		return;
@@ -9979,7 +10064,53 @@ function layoutPages() {
 	const view = state.pageWindow;
 	if (!view) return;
 	const anchor = view.offsets.length > 1 ? pageWindowAnchor(view) : { index: state.pageIndex, offset: 0 };
-	const gap = Number.parseFloat(getComputedStyle(el.svgHost).rowGap) || 0;
+	const gap = Math.max(state.pageLayout > 1 ? PAGE_LAYOUT_GAP : 0, Number.parseFloat(getComputedStyle(el.svgHost).rowGap) || 0);
+	if (state.pageLayout > 1) {
+		const count = state.doc.pages.length, spacing = PAGE_LAYOUT_GAP;
+		view.columns = 2;
+		view.offsets = new Float64Array(count + 1);
+		view.heights = new Float64Array(count);
+		view.lefts = new Float64Array(count);
+		let top = 0, width = 0;
+		const groups = [];
+		for (let start = 0; start < count; start += state.pageLayout) {
+			const size = pageGroupSize(start), factor = MM_TO_PX * state.scale;
+			const groupWidth = size.width * factor + spacing;
+			groups.push({ start, size, width: groupWidth });
+			width = Math.max(width, groupWidth);
+			for (let row = 0; row < size.rows; row++) {
+				for (let column = 0; column < 2; column++) {
+					const index = start + row * 2 + column;
+					if (index >= count) break;
+					view.offsets[index] = top;
+					view.heights[index] = pageViewSize(state.doc.pages[index]).height * factor;
+				}
+				top += size.heights[row] * factor + (row + 1 === size.rows ? gap : spacing);
+			}
+		}
+		for (const group of groups) {
+			for (let index = group.start; index < Math.min(count, group.start + state.pageLayout); index++) {
+				const column = (index - group.start) % 2, factor = MM_TO_PX * state.scale;
+				view.lefts[index] = (width - group.width) / 2
+					+ (column ? group.size.widths[0] * factor + spacing : 0)
+					+ (group.size.widths[column] - pageViewSize(state.doc.pages[index]).width) * factor / 2;
+			}
+		}
+		view.offsets[count] = top;
+		view.gap = gap;
+		view.total = Math.max(0, top - gap);
+		view.host.style.width = `${width}px`;
+		for (const [index, shell] of view.nodes) layoutPageShell(shell, state.doc.pages[index]);
+		syncPageWindow(view, view.offsets[Math.min(anchor.index, count - 1)] + anchor.offset);
+		return;
+	}
+	view.columns = 0;
+	view.heights = null;
+	view.lefts = null;
+	for (const shell of view.nodes.values()) {
+		shell.style.removeProperty("left");
+		shell.style.removeProperty("transform");
+	}
 	const offsets = new Float64Array(state.doc.pages.length + 1);
 	const fittedWidth = state.scale * pageViewSize(currentPageInfo()).width;
 	let width = 1;
@@ -10003,7 +10134,7 @@ function layoutPageShell(shell, page) {
 	const size = pageViewSize(page);
 	const viewWidth = Math.max(1, size.width * MM_TO_PX);
 	const viewHeight = Math.max(1, size.height * MM_TO_PX);
-	const scale = state.fitMode === "width" ? state.scale * pageViewSize(currentPageInfo()).width / size.width : state.scale;
+	const scale = state.fitMode === "width" && state.pageLayout === 1 ? state.scale * pageViewSize(currentPageInfo()).width / size.width : state.scale;
 	shell.style.width = `${viewWidth * scale}px`;
 	shell.style.height = `${viewHeight * scale}px`;
 	const surface = shell.querySelector(".page-surface");
@@ -11917,6 +12048,10 @@ function fitWidth(updateStatus = true) {
 }
 
 function fitWidthScale(page) {
+	if (state.pageLayout > 1) {
+		const size = pageGroupSize();
+		return Math.min(4, Math.max(1, el.viewerPanel.clientWidth - pageSpace() * 2 - PAGE_LAYOUT_GAP - scrollbarWidth()) / (size.width * MM_TO_PX));
+	}
 	page = pageViewSize(page);
 	const space = pageSpace();
 	const width = Math.max(1, page.width * MM_TO_PX);
@@ -11943,6 +12078,14 @@ function fitWidthScale(page) {
 function fitHeight(updateStatus = true) {
 	const page = currentPageInfo();
 	if (!page) {
+		return;
+	}
+	if (state.pageLayout > 1) {
+		const size = pageGroupSize(), space = pageSpace(), gap = PAGE_LAYOUT_GAP;
+		const width = Math.max(1, el.viewerPanel.clientWidth - space * 2 - gap - scrollbarWidth());
+		const height = Math.max(1, el.viewerPanel.clientHeight - space * 2 - (size.rows - 1) * gap);
+		setScale(Math.min(width / (size.width * MM_TO_PX), height / (size.height * MM_TO_PX)), updateStatus, "height");
+		if (updateStatus) scrollToPage(state.pageIndex);
 		return;
 	}
 	const space = pageSpace();
@@ -12001,7 +12144,8 @@ function setScale(nextScale, updateStatus = true, fitMode = "free") {
 		layoutPages();
 	}
 	updateFitSpace();
-	if (state.pageWindow && state.pageWindow.gap !== (Number.parseFloat(getComputedStyle(el.svgHost).rowGap) || 0)) layoutPages();
+	const gap = Math.max(state.pageLayout > 1 ? PAGE_LAYOUT_GAP : 0, Number.parseFloat(getComputedStyle(el.svgHost).rowGap) || 0);
+	if (state.pageWindow && state.pageWindow.gap !== gap) layoutPages();
 	if (layoutChanged) {
 		restoreScaleAnchor(anchor);
 	}
@@ -12037,7 +12181,7 @@ function restoreScaleAnchor(anchor) {
 	}
 	if (state.pageWindow) {
 		const view = state.pageWindow;
-		const height = view.offsets[anchor.index + 1] - view.offsets[anchor.index] - view.gap;
+		const height = view.heights?.[anchor.index] ?? view.offsets[anchor.index + 1] - view.offsets[anchor.index] - view.gap;
 		syncPageWindow(view, view.offsets[anchor.index] + height * anchor.y - el.viewerPanel.clientHeight * anchor.viewY);
 	}
 	const shell = pageShell(anchor.index);
@@ -12091,7 +12235,9 @@ function updateFitSpace() {
 		return;
 	}
 	const shell = pageShell(state.pageIndex);
-	const height = shell ? shell.getBoundingClientRect().height : Math.max(1, pageViewSize(page).height * MM_TO_PX * state.scale);
+	const group = state.pageLayout > 1 ? pageGroupSize() : null;
+	const height = group ? group.height * MM_TO_PX * state.scale + (group.rows - 1) * PAGE_LAYOUT_GAP
+		: shell ? shell.getBoundingClientRect().height : Math.max(1, pageViewSize(page).height * MM_TO_PX * state.scale);
 	const base = pageSpace();
 	el.viewerPanel.classList.toggle("single-page-fits-height", state.doc.pageCount === 1 && height <= el.viewerPanel.clientHeight - base * 2);
 	const space = state.continuous ? 0 : Math.max(base, (el.viewerPanel.clientHeight - height) / 2);
@@ -12153,8 +12299,8 @@ function updateControls() {
 	updateDisplayControls();
 	updateEditorTools();
 	const pageCount = state.doc ? state.doc.pageCount : 0;
-	el.prevButton.disabled = !hasDoc || state.pageIndex <= 0;
-	el.nextButton.disabled = !hasDoc || state.pageIndex >= pageCount - 1;
+	el.prevButton.disabled = !hasDoc || pageGroupStart() === 0;
+	el.nextButton.disabled = !hasDoc || pageGroupStart() + state.pageLayout >= pageCount;
 	el.pageInput.disabled = !hasDoc;
 	el.pageInput.max = String(pageCount || 1);
 	el.pageInput.value = String(hasDoc ? state.pageIndex + 1 : 0);
@@ -12166,6 +12312,7 @@ function updateControls() {
 	el.rotateButton.disabled = !hasDoc;
 	el.panButton.disabled = !hasDoc;
 	el.continuousButton.disabled = !hasDoc;
+	el.pageLayoutButton.disabled = !hasDoc || document.body.hasAttribute("data-busy");
 	el.fitButton.toggleAttribute("data-pressed", hasDoc && state.fitMode === "width");
 	el.fitHeightButton.toggleAttribute("data-pressed", hasDoc && state.fitMode === "height");
 	updateAnnotationButton();
@@ -12373,6 +12520,7 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("data-busy", busy);
+	el.pageLayoutButton.disabled = busy || !state.doc;
 	el.closeButton.disabled = busy || !state.doc || state.exporting || state.saving;
 	el.refreshAppButton.disabled = busy;
 	updateStructureControls();
