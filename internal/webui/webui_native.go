@@ -253,7 +253,7 @@ func (e *NativeEngine) Close() error {
 	return err
 }
 
-// Input 读取授权源并以宿主报告的大小为准
+// input 读取授权源并以宿主报告的大小为准
 func (e *NativeEngine) input(ctx context.Context, value any) (io.ReaderAt, int64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err

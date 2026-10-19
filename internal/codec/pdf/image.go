@@ -28,6 +28,18 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// StencilImage 按当前填充色读取模板图像，不分配整幅彩色样本
+type StencilImage struct {
+	Source image.Image
+	Fill   color.NRGBA64
+}
+
+// NativeImage 按源像素输出原生过程色，不分配完整显示颜色缓冲
+type NativeImage struct {
+	Source *pdfgo.ImageProcess
+	Space  *pdfgo.ColorSpace
+}
+
 // EncodeCMYKTIFF 将直接四色图像保存为十六位无损TIFF，不经过显示颜色转换
 // 入参: ctx 取消上下文, source PDF源图像
 // 返回: []byte 含ICC和非预乘透明度的TIFF，非四色图像为nil, error 解码或编码错误
@@ -141,18 +153,6 @@ func EncodeCMYKTIFF(ctx context.Context, source *pdfgo.Image) ([]byte, error) {
 	copy(data[int(profileOffset):], profile)
 	copy(data[int(stripOffset):], compressed.Bytes())
 	return data, nil
-}
-
-// StencilImage 按当前填充色读取模板图像，不分配整幅彩色样本
-type StencilImage struct {
-	Source image.Image
-	Fill   color.NRGBA64
-}
-
-// NativeImage 按源像素输出原生过程色，不分配完整显示颜色缓冲
-type NativeImage struct {
-	Source *pdfgo.ImageProcess
-	Space  *pdfgo.ColorSpace
 }
 
 // ColorModel 保留填充色和模板的有效采样精度

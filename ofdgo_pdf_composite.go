@@ -32,6 +32,9 @@ const (
 	pdfTransferShape    uint8 = 16
 )
 
+// pdfCompositeTileSize 限定单次合成块的像素边长
+const pdfCompositeTileSize = codecpdf.CompositeTileSize
+
 // pdfCompositeNode 保留局部合成所需的原始图元和透明组层级
 type pdfCompositeNode struct {
 	path       *pdfgo.PathMark
@@ -141,9 +144,6 @@ type pdfCompositeCache struct {
 	textDisjoint    map[*pdfgo.GroupMark]bool
 	groups          map[*pdfgo.GroupMark]Box
 }
-
-// pdfCompositeTileSize 限定单次合成块的像素边长
-const pdfCompositeTileSize = codecpdf.CompositeTileSize
 
 // pdfCompositeScratch 复用像素及蒙版缓冲，不跨页持有活动内容
 type pdfCompositeScratch struct {

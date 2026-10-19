@@ -31,6 +31,14 @@ import (
 	"github.com/emmansun/gmsm/smx509"
 )
 
+// 加密错误可通过errors.Is识别，不包含口令或私钥
+var (
+	ErrCredentialsRequired      = errors.New("document credentials required")
+	ErrInvalidCredentials       = errors.New("invalid credentials or damaged encrypted document")
+	ErrUnsupportedEncryption    = errors.New("unsupported document encryption")
+	ErrEncryptionPolicyRequired = errors.New("explicit encryption policy required")
+)
+
 // Credentials 解密凭据，UserName用于筛选接收者，留空自动匹配，不参与口令派生；证书采用DER编码
 // Password与Decrypter分别用于口令和证书方案，私钥可由外部密码设备持有
 type Credentials struct {
@@ -96,14 +104,6 @@ type encryptionState struct {
 
 // GMCryptoProvider 使用纯Go国密实现，可在原生环境和WASM使用
 type GMCryptoProvider struct{}
-
-// 加密错误可通过errors.Is识别，不包含口令或私钥
-var (
-	ErrCredentialsRequired      = errors.New("document credentials required")
-	ErrInvalidCredentials       = errors.New("invalid credentials or damaged encrypted document")
-	ErrUnsupportedEncryption    = errors.New("unsupported document encryption")
-	ErrEncryptionPolicyRequired = errors.New("explicit encryption policy required")
-)
 
 // WithCredentials 添加解密凭据，多次调用可解开多层加密
 // 入参: credentials 解密凭据

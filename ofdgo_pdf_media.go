@@ -28,6 +28,9 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// errPDFMediaRead 标识媒体读取失败，避免作为可恢复的导航问题忽略
+var errPDFMediaRead = errors.New("PDF media read failed")
+
 // pdfMediaFileKey 区分媒体文件及注册用途，避免重复解码或调用文件解析器
 type pdfMediaFileKey struct {
 	Stream        *pdfgo.Stream
@@ -58,9 +61,6 @@ type pdfAttachmentKey struct {
 	name   string
 	digest [32]byte
 }
-
-// errPDFMediaRead 标识媒体读取失败，避免作为可恢复的导航问题忽略
-var errPDFMediaRead = errors.New("PDF media read failed")
 
 // mediaInstance 为播放目标分配独立标识，同一目标的动作继续共用控制状态
 // 入参: id 已注册的媒体资源, target 目标注解, page 所属页面索引

@@ -34,6 +34,15 @@ import (
 	basefile "github.com/xiaoqidun/ofdgo/internal/base/file"
 )
 
+// ErrSaveTarget 表示编辑器尚未绑定保存目标
+var ErrSaveTarget = errors.New("save target is not set")
+
+// ErrSaveConflict 表示保存目标在打开或最近保存后被其他操作修改
+var ErrSaveConflict = basefile.ErrChanged
+
+// ErrSaveBusy 表示保存目标已有其他写入事务
+var ErrSaveBusy = basefile.ErrBusy
+
 // Output 创建完整文档的输出事务，可用于文件或远程存储
 // 实现需支持并发调用Begin，按目标协调并发写入并校验版本冲突
 // Begin失败时由实现释放资源；事务持有ctx，提交前应检查取消状态
@@ -78,15 +87,6 @@ type ofdXML struct {
 
 // ofdAttrs OFD节点属性
 type ofdAttrs []xml.Attr
-
-// ErrSaveTarget 表示编辑器尚未绑定保存目标
-var ErrSaveTarget = errors.New("save target is not set")
-
-// ErrSaveConflict 表示保存目标在打开或最近保存后被其他操作修改
-var ErrSaveConflict = basefile.ErrChanged
-
-// ErrSaveBusy 表示保存目标已有其他写入事务
-var ErrSaveBusy = basefile.ErrBusy
 
 // Snapshot 创建独立编辑快照，完成后可与原编辑器并行使用
 // 创建过程需与原实例串行，保留修订及保存目标，不复制撤销记录和进度回调
