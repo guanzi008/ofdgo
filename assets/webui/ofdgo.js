@@ -9862,7 +9862,7 @@ function pageShell(index) {
 function scrollToPage(index) {
 	if (state.pageLayout > 1 && state.pageWindow) {
 		const view = state.pageWindow, start = pageGroupStart(index);
-		const size = pageGroupSize(start), gap = PAGE_LAYOUT_GAP;
+		const size = pageGroupSize(start), gap = state.continuous ? 0 : PAGE_LAYOUT_GAP;
 		const height = size.height * MM_TO_PX * state.scale;
 		const whole = height <= el.viewerPanel.clientHeight - pageBlockSpace() * 2 + 1;
 		const space = state.fitMode === "height" && !state.continuous
@@ -10067,7 +10067,7 @@ function layoutPages() {
 	const anchor = view.offsets.length > 1 ? pageWindowAnchor(view) : { index: state.pageIndex, offset: 0 };
 	const gap = state.continuous ? 0 : Math.max(state.pageLayout > 1 ? PAGE_LAYOUT_GAP : 0, Number.parseFloat(getComputedStyle(el.svgHost).rowGap) || 0);
 	if (state.pageLayout > 1) {
-		const count = state.doc.pages.length, spacing = PAGE_LAYOUT_GAP;
+		const count = state.doc.pages.length, spacing = state.continuous ? 0 : PAGE_LAYOUT_GAP;
 		view.columns = 2;
 		view.offsets = new Float64Array(count + 1);
 		view.heights = new Float64Array(count);
@@ -12094,7 +12094,7 @@ function fitWidth(updateStatus = true) {
 function fitWidthScale(page) {
 	if (state.pageLayout > 1) {
 		const size = pageGroupSize();
-		return Math.min(4, Math.max(1, el.viewerPanel.clientWidth - pageSpace() * 2 - PAGE_LAYOUT_GAP - scrollbarWidth()) / (size.width * MM_TO_PX));
+		return Math.min(4, Math.max(1, el.viewerPanel.clientWidth - pageSpace() * 2 - (state.continuous ? 0 : PAGE_LAYOUT_GAP) - scrollbarWidth()) / (size.width * MM_TO_PX));
 	}
 	page = pageViewSize(page);
 	const space = pageSpace();
@@ -12125,7 +12125,7 @@ function fitHeight(updateStatus = true) {
 		return;
 	}
 	if (state.pageLayout > 1) {
-		const size = pageGroupSize(), space = pageSpace(), gap = PAGE_LAYOUT_GAP;
+		const size = pageGroupSize(), space = pageSpace(), gap = state.continuous ? 0 : PAGE_LAYOUT_GAP;
 		const width = Math.max(1, el.viewerPanel.clientWidth - space * 2 - gap - scrollbarWidth());
 		const height = Math.max(1, el.viewerPanel.clientHeight - space * 2);
 		setScale(Math.min(width / (size.width * MM_TO_PX), height / (size.height * MM_TO_PX)), updateStatus, "height");
