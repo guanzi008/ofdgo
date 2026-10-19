@@ -59,7 +59,7 @@ type CryptoProvider interface {
 	EncryptKey(certificate, key []byte) ([]byte, error)
 }
 
-// ReaderOption 阅读器的凭据与密码提供者选项
+// ReaderOption 阅读器的凭据、密码提供者与资源选项
 type ReaderOption func(*readerOptions)
 
 // EncryptionRecipient 证书加密接收者，Certificate为SM2公钥证书的DER编码
@@ -92,6 +92,7 @@ type EncryptionInfo struct {
 
 // readerOptions 保存打开文档时的会话参数
 type readerOptions struct {
+	resources   *Resources
 	credentials []Credentials
 	provider    CryptoProvider
 }

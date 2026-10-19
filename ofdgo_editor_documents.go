@@ -453,6 +453,7 @@ func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader) error 
 		next.encryption = e.encryption
 		next.saveTarget = e.saveTarget
 		next.backends, next.fontDirs, next.fontFS = e.backends, e.fontDirs, e.fontFS
+		next.SetResources(e.runtimeResources)
 		next.validatedPaths = e.validatedPaths
 		*e = *next
 	}

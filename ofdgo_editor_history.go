@@ -53,6 +53,7 @@ func (e *Editor) Transaction(edit func(*Editor) error) error {
 		e.clearFontResourceCache()
 	}
 	e.backends, e.fontDirs, e.fontFS = before.backends, before.fontDirs, before.fontFS
+	e.SetResources(before.runtimeResources)
 	e.fontSourcesCache = before.fontSourcesCache
 	if e.sameResourceView(&before) {
 		e.fontRenderer, e.fontMetrics = before.fontRenderer, before.fontMetrics
@@ -168,6 +169,7 @@ func (e *Editor) restoreTransaction(state Editor) {
 		state.clearFontResourceCache()
 	}
 	state.backends, state.fontDirs, state.fontFS = e.backends, e.fontDirs, e.fontFS
+	state.SetResources(e.runtimeResources)
 	state.fontSourcesCache = e.fontSourcesCache
 	state.validatedPaths = e.validatedPaths
 	state.encryption, state.output, state.OnWriteProgress = e.encryption, e.output, e.OnWriteProgress

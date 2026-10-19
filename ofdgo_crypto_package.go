@@ -113,6 +113,7 @@ func (r *Reader) open(options []ReaderOption) error {
 	for _, option := range options {
 		option(&settings)
 	}
+	r.resources = settings.resources
 	if settings.provider == nil {
 		settings.provider = GMCryptoProvider{}
 	}

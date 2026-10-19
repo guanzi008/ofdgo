@@ -20,9 +20,49 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"sync"
 
 	"github.com/tdewolff/canvas"
 )
+
+// canvasGeometryMu 保护底层路径运算的共享扫描线对象池
+var canvasGeometryMu sync.Mutex
+
+// settleCanvasPath 在共享对象池保护下归整路径
+// 入参: path 路径, rule 填充规则
+// 返回: *canvas.Path 归整路径
+func settleCanvasPath(path *canvas.Path, rule canvas.FillRule) *canvas.Path {
+	canvasGeometryMu.Lock()
+	defer canvasGeometryMu.Unlock()
+	return path.Settle(rule)
+}
+
+// combineCanvasPaths 在共享对象池保护下计算路径布尔运算
+// 入参: left 左路径, right 右路径, operation 运算名称
+// 返回: *canvas.Path 运算结果
+func combineCanvasPaths(left, right *canvas.Path, operation string) *canvas.Path {
+	canvasGeometryMu.Lock()
+	defer canvasGeometryMu.Unlock()
+	switch operation {
+	case "or":
+		return left.Or(right)
+	case "not":
+		return left.Not(right)
+	case "xor":
+		return left.Xor(right)
+	default:
+		return left.And(right)
+	}
+}
+
+// strokeCanvasPath 在共享对象池保护下生成描边轮廓
+// 入参: path 路径, width 线宽, cap 端点, join 连接, tolerance 容差
+// 返回: *canvas.Path 描边轮廓
+func strokeCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner, tolerance float64) *canvas.Path {
+	canvasGeometryMu.Lock()
+	defer canvasGeometryMu.Unlock()
+	return path.Stroke(width, cap, join, tolerance)
+}
 
 // Curves 在输出边界转换椭圆弧，其他曲线保持原样
 // 入参: path 页面路径
@@ -108,7 +148,7 @@ func (CanvasBackend) Normalize(path GeometryPath, evenOdd bool) (GeometryPath, e
 	if evenOdd {
 		rule = canvas.EvenOdd
 	}
-	p = p.Settle(rule)
+	p = settleCanvasPath(p, rule)
 	if p.Empty() {
 		return nil, nil
 	}
@@ -132,11 +172,11 @@ func (CanvasBackend) Combine(left, right GeometryPath, operation GeometryOperati
 	case GeometryIntersect:
 		result = applyClipPath(a, b)
 	case GeometryUnion:
-		result = a.Or(b)
+		result = combineCanvasPaths(a, b, "or")
 	case GeometrySubtract:
-		result = a.Not(b)
+		result = combineCanvasPaths(a, b, "not")
 	case GeometryXor:
-		result = a.Xor(b)
+		result = combineCanvasPaths(a, b, "xor")
 	default:
 		return nil, fmt.Errorf("unsupported geometry operation %d", operation)
 	}
@@ -178,7 +218,7 @@ func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (result Ge
 	style.lineCap = pathLineCap(options.Cap, style.lineCap)
 	p = p.Dash(options.DashOffset, options.Dashes...)
 	p = flattenCanvasPath(p, tolerance)
-	p = p.Stroke(options.Width, style.lineCap, style.lineJoin, tolerance)
+	p = strokeCanvasPath(p, options.Width, style.lineCap, style.lineJoin, tolerance)
 	return *geometryFromCanvasPath(p), nil
 }
 

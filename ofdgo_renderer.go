@@ -89,6 +89,11 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	next.fontPreparations = r.fontPreparations
 	next.fontMetrics = r.fontMetrics
 	next.glyphOutlines = r.glyphOutlines
+	next.sharedBackendStates[canvasPathCacheKey{}] = r.canvasParsedPaths()
+	next.sharedBackendStates[canvasClipCacheKey{}] = r.canvasClipIntersections()
+	next.sharedBackendStates[canvasFillCacheKey{}] = r.canvasSettledPaths()
+	next.sharedBackendStates[canvasDrawClipCacheKey{}] = r.canvasDrawClips()
+	next.sharedBackendStates[svgResourceCacheKey{}] = r.svgImageResources()
 	return next, nil
 }
 
@@ -108,8 +113,9 @@ func (r *Renderer) deviceLineWidth(width float64) float64 {
 
 // ClearCache 释放派生字体、图片、模板与后端缓存，不改变文档和渲染配置
 func (r *Renderer) ClearCache() {
+	r.imageCache.clear()
 	r.backendStates = make(map[any]any)
-	r.imageCache = &renderCache[string, image.Image]{limit: imageCacheLimit}
+	r.imageCache = resourceCache[string, image.Image](r.Reader.resources, imageCacheLimit)
 	r.templatePageCache = make(map[string]*PageContent)
 	r.resetFontCache()
 }

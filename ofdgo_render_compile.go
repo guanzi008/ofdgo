@@ -77,7 +77,7 @@ func newSemanticCompiler(r *Renderer) (*semanticCompiler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &semanticCompiler{renderer: r, geometry: geometry, patterns: &renderCache[patternCellKey, []RasterCommand]{limit: 8 << 20}}, nil
+	return &semanticCompiler{renderer: r, geometry: geometry, patterns: resourceCache[patternCellKey, []RasterCommand](r.Reader.resources, 8<<20)}, nil
 }
 
 // segments 转换光栅曲线，仅在输出边界展开椭圆弧

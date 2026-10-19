@@ -170,7 +170,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			}
 			m := canvas.Matrix{{boundaryCTM.a, -boundaryCTM.c, boundaryCTM.e}, {-boundaryCTM.b, boundaryCTM.d, pageH - boundaryCTM.f}}
 			path := canvas.Rectangle(box.W, box.H).Translate(0, -box.H).Transform(m)
-			box = textPathBox(applyClipPath(path, clipPath), pageH)
+			box = textPathBox(r.applyCachedClipPath(path, clipPath), pageH)
 			for i := range textRun.Boxes {
 				textRun.Boxes[i] = box
 			}
@@ -292,7 +292,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 						m = m.Mul(glyphMatrix)
 					}
 					path := glyphPath.Copy().Transform(m.Scale(scaleX, 1))
-					box := textPathBox(applyClipPath(path, clipPath), pageH)
+					box := textPathBox(r.applyCachedClipPath(path, clipPath), pageH)
 					for j := spans[i][0]; j < spans[i][1]; j++ {
 						textRun.Boxes[textPos+j] = unionTextBox(textRun.Boxes[textPos+j], box)
 					}
@@ -321,7 +321,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					r.drawShdPath(ctx, applyClipPath(path.Copy(), fillClip), fillView)
 				}
 				path = r.strokeDashedCanvasPath(path, strokeStyle.lineWidth, strokeStyle.lineCap, strokeStyle.lineJoin, strokeStyle.dashOffset, strokeStyle.dashPattern, false)
-				path = applyClipPath(path, strokeClip)
+				path = r.applyCachedClipPath(path, strokeClip)
 				if strokeStyle.strokePattern != nil {
 					r.renderPattern(ctx, strokeStyle.strokePattern, pageH, path, objectCTM)
 				} else {
@@ -378,7 +378,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					if useTextMatrix {
 						textTransform = textTransform.Mul(glyphMatrix)
 					}
-					glyphPath = applyClipPath(glyphPath.Copy().Transform(textTransform.Scale(scaleX, 1)), glyphClip)
+					glyphPath = r.applyCachedClipPath(glyphPath.Copy().Transform(textTransform.Scale(scaleX, 1)), glyphClip)
 					if fillPattern != nil {
 						r.renderPattern(ctx, fillPattern, pageH, glyphPath, objectCTM)
 					} else {

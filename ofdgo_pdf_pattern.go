@@ -69,7 +69,7 @@ func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Pain
 		return p.buildTilingPattern(source, base)
 	}
 	if p.patternCells == nil {
-		p.patternCells = &renderCache[pdfPatternCellKey, pdfPatternCell]{limit: pdfPatternCellLimit}
+		p.patternCells = resourceCache[pdfPatternCellKey, pdfPatternCell](p.resources, pdfPatternCellLimit)
 	}
 	key := pdfPatternCellKey{source: source, matrix: p.matrix, dpi: p.rasterDPI, editor: p.editor, space: p.compositeSpace}
 	if source.PaintType == 2 {

@@ -40,6 +40,9 @@ type canvasPathCacheKey struct{}
 // canvasFillCacheKey 区分按填充规则规范化的共享路径缓存
 type canvasFillCacheKey struct{}
 
+// canvasDrawClipCacheKey 区分绘制轮廓的共享裁剪缓存
+type canvasDrawClipCacheKey struct{}
+
 // canvasOutlineCacheKey 区分子渲染器共享的字体轮廓解析缓存
 type canvasOutlineCacheKey struct{}
 
@@ -57,6 +60,7 @@ type canvasPathKey struct {
 
 // canvasBackendState 保存Canvas字体、字形和编码图片适配缓存
 type canvasBackendState struct {
+	resources          *Resources
 	images             renderCache[*EncodedImage, image.Image]
 	fontMap            map[string]*canvas.FontFamily
 	svgFontCache       map[*canvas.Font]SVGFont
@@ -74,7 +78,7 @@ func (r *Renderer) canvasClipIntersections() *renderCache[[32]byte, *canvas.Path
 	if r.sharedBackendStates == nil {
 		r.sharedBackendStates = make(map[any]any)
 	}
-	cache := &renderCache[[32]byte, *canvas.Path]{limit: 8 << 20}
+	cache := resourceCache[[32]byte, *canvas.Path](r.Reader.resources, 8<<20)
 	r.sharedBackendStates[key] = cache
 	return cache
 }
@@ -89,7 +93,7 @@ func (r *Renderer) canvasParsedPaths() *renderCache[canvasPathKey, *canvas.Path]
 	if r.sharedBackendStates == nil {
 		r.sharedBackendStates = make(map[any]any)
 	}
-	cache := &renderCache[canvasPathKey, *canvas.Path]{limit: 16 << 20}
+	cache := resourceCache[canvasPathKey, *canvas.Path](r.Reader.resources, 16<<20)
 	r.sharedBackendStates[key] = cache
 	return cache
 }
@@ -104,7 +108,7 @@ func (r *Renderer) canvasSettledPaths() *renderCache[canvasFillKey, *canvas.Path
 	if r.sharedBackendStates == nil {
 		r.sharedBackendStates = make(map[any]any)
 	}
-	cache := &renderCache[canvasFillKey, *canvas.Path]{limit: 16 << 20}
+	cache := resourceCache[canvasFillKey, *canvas.Path](r.Reader.resources, 16<<20)
 	r.sharedBackendStates[key] = cache
 	return cache
 }
@@ -116,9 +120,43 @@ func (r *Renderer) canvasFontFamilies() *renderCache[canvasFontKey, *canvas.Font
 	if state, ok := r.sharedBackendStates[key]; ok {
 		return state.(*renderCache[canvasFontKey, *canvas.FontFamily])
 	}
-	cache := &renderCache[canvasFontKey, *canvas.FontFamily]{limit: 32 << 20}
+	cache := resourceCache[canvasFontKey, *canvas.FontFamily](r.Reader.resources, 32<<20)
 	r.sharedBackendStates[key] = cache
 	return cache
+}
+
+// canvasDrawClips 获取派生渲染器共享的绘制裁剪缓存
+// 返回: *renderCache 绘制裁剪缓存
+func (r *Renderer) canvasDrawClips() *renderCache[[32]byte, *canvas.Path] {
+	key := canvasDrawClipCacheKey{}
+	if state, ok := r.sharedBackendStates[key]; ok {
+		return state.(*renderCache[[32]byte, *canvas.Path])
+	}
+	cache := resourceCache[[32]byte, *canvas.Path](r.Reader.resources, 16<<20)
+	r.sharedBackendStates[key] = cache
+	return cache
+}
+
+// applyCachedClipPath 复用绘制轮廓的裁剪结果，返回可独立变换的副本
+// 入参: path 绘制轮廓, clip 裁剪轮廓
+// 返回: *canvas.Path 裁剪结果
+func (r *Renderer) applyCachedClipPath(path, clip *canvas.Path) *canvas.Path {
+	if path == nil || clip == nil {
+		return path
+	}
+	if rect, ok := rectangularPath(clip); ok && rect.Contains(path.Bounds()) {
+		return reduceRepeatedNonZeroPath(path)
+	}
+	key := canvasGeometryDigest(path, clip)
+	result, err := r.canvasDrawClips().load(r.pageContext, key, func() (*canvas.Path, int, error) {
+		result := applyClipPath(path, clip).Copy()
+		return result, len(result.Data())*8 + 256, nil
+	})
+	if err != nil {
+		r.renderError = err
+		return &canvas.Path{}
+	}
+	return result.Copy()
 }
 
 // canvasFontOutlines 获取子渲染器共享的字体轮廓解析缓存，限制字体及解析数据保留量
@@ -128,7 +166,7 @@ func (r *Renderer) canvasFontOutlines() *renderCache[*canvas.Font, *basefont.Out
 	if state, ok := r.sharedBackendStates[key]; ok {
 		return state.(*renderCache[*canvas.Font, *basefont.Outliner])
 	}
-	cache := &renderCache[*canvas.Font, *basefont.Outliner]{limit: 32 << 20}
+	cache := resourceCache[*canvas.Font, *basefont.Outliner](r.Reader.resources, 32<<20)
 	r.sharedBackendStates[key] = cache
 	return cache
 }
@@ -141,7 +179,8 @@ func (r *Renderer) canvasState() *canvasBackendState {
 		return state.(*canvasBackendState)
 	}
 	state := &canvasBackendState{
-		images: renderCache[*EncodedImage, image.Image]{limit: imageCacheLimit},
+		resources: r.Reader.resources,
+		images:    *resourceCache[*EncodedImage, image.Image](r.Reader.resources, imageCacheLimit),
 	}
 	state.resetFonts()
 	r.backendStates[key] = state
@@ -150,9 +189,10 @@ func (r *Renderer) canvasState() *canvasBackendState {
 
 // resetFonts 清除Canvas字体及字形缓存，保留编码图片适配对象
 func (s *canvasBackendState) resetFonts() {
+	s.textGlyphPathCache.clear()
 	s.fontMap = make(map[string]*canvas.FontFamily)
 	s.svgFontCache = make(map[*canvas.Font]SVGFont)
-	s.textGlyphPathCache = renderCache[textGlyphPathCacheKey, textGlyphPathCacheValue]{limit: 16 << 20}
+	s.textGlyphPathCache = *resourceCache[textGlyphPathCacheKey, textGlyphPathCacheValue](s.resources, 16<<20)
 	s.fontOutlines = make(map[*canvas.Font]*basefont.Outliner)
 }
 
@@ -189,14 +229,14 @@ func canvasGeometryDigest(paths ...*canvas.Path) [32]byte {
 // 返回: *canvas.Path 规范化填充轮廓
 func (r *Renderer) settleCanvasPath(path *canvas.Path, rule canvas.FillRule) *canvas.Path {
 	if len(path.Data()) < 256 {
-		return path.Settle(rule)
+		return settleCanvasPath(path, rule)
 	}
 	key := canvasFillKey{digest: canvasGeometryDigest(path), rule: rule}
 	cache := r.canvasSettledPaths()
 	if result, ok := cache.get(key); ok {
 		return result.Copy()
 	}
-	result := path.Settle(rule)
+	result := settleCanvasPath(path, rule)
 	if cost := len(result.Data())*8 + 256; cost <= cache.limit {
 		cache.put(key, result.Copy(), cost)
 	}

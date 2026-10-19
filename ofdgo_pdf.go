@@ -41,7 +41,9 @@ var ErrPDFPassword = pdfgo.ErrPassword
 // ResolveReference可提供已解密的引用页面，目标阅读器由调用方维护
 // Halftones提供只读设备命名网屏，所属阅读器由调用方维护，连续色调输出不网屏化
 // Compression配置转换输出，有损模式按图片实际尺寸降采样，原始及无损模式保持完整采样
+// Resources用于导入、局部合成与返回编辑器的共享资源预算
 type PDFImportOptions struct {
+	Resources        *Resources
 	Password         []byte
 	PasswordUTF8     bool
 	Backends         *RenderBackends
@@ -68,6 +70,7 @@ type PDFImportReport struct {
 
 // pdfImporter 保存单次转换的对象与资源状态
 type pdfImporter struct {
+	resources          *Resources
 	ctx                context.Context
 	reader             *pdfgo.Reader
 	editor             *Editor
@@ -207,6 +210,10 @@ func (o pdfObjectOrigin) merge(other pdfObjectOrigin) pdfObjectOrigin {
 // 入参: ctx 取消上下文, input 输入源, options 转换选项
 // 返回: *Editor 编辑文档, PDFImportReport 转换统计, error 错误信息
 func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Editor, PDFImportReport, error) {
+	if options.Resources == nil {
+		options.Resources, _ = NewResources(ResourceOptions{})
+	}
+	ctx = options.Resources.context(ctx)
 	if input == nil {
 		return nil, PDFImportReport{}, fmt.Errorf("missing source")
 	}
@@ -219,7 +226,7 @@ func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Ed
 	if !finite(options.RasterDPI) || options.RasterDPI < 0 {
 		return nil, PDFImportReport{}, fmt.Errorf("invalid PDF raster DPI")
 	}
-	renderer := NewRenderer(&Reader{}, options.RendererOptions...)
+	renderer := NewRenderer(&Reader{resources: options.Resources}, options.RendererOptions...)
 	if options.Backends != nil {
 		WithRenderBackends(*options.Backends)(renderer)
 	}
@@ -234,10 +241,11 @@ func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Ed
 		return nil, PDFImportReport{}, err
 	}
 	editor := NewEditor()
+	editor.runtimeResources = options.Resources
 	editor.SetRenderBackends(renderer.Backends())
 	editor.fontDirs, editor.fontFS = renderer.FontSources()
 	editor.fontSourcesCache = renderer.fontSourcesCache
-	importer := pdfImporter{ctx: ctx, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, fontIDs: map[*pdfgo.Font]string{}, fonts: map[*pdfgo.Font]*pdfImportedFont{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}, structureBindings: &pdfStructureBindings{}}
+	importer := pdfImporter{resources: options.Resources, ctx: ctx, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, fontIDs: map[*pdfgo.Font]string{}, fonts: map[*pdfgo.Font]*pdfImportedFont{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}, structureBindings: &pdfStructureBindings{}}
 	readOptions := pdfgo.ReaderOptions{Password: options.Password, PasswordUTF8: options.PasswordUTF8, ShapeText: importer.shapePDFText}
 	var diagnostics []pdfgo.Diagnostic
 	var readWarning func(pdfgo.Diagnostic)

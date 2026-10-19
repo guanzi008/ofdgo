@@ -136,7 +136,7 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		}
 		if cacheable {
 			if p.imageContents == nil {
-				p.imageContents = &renderCache[pdfImageContentKey, pdfImageContent]{limit: 8 << 20}
+				p.imageContents = resourceCache[pdfImageContentKey, pdfImageContent](p.resources, 8<<20)
 			}
 			if cached, found := p.imageContents.get(contentKey); found && cached.matches(source) {
 				id = cached.id

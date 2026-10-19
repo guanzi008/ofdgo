@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"html"
 	"image"
@@ -59,11 +60,74 @@ type svgImageKey struct {
 	size  image.Point
 }
 
+// svgResourceCacheKey 区分共享的图片编码缓存
+type svgResourceCacheKey struct{}
+
+// svgImageResourceKey 按像素、压缩策略及目标尺寸区分编码结果
+type svgImageResourceKey struct {
+	digest  [32]byte
+	options CompressionOptions
+	target  image.Point
+}
+
 // svgObjectGroup 记录编辑分组的稳定路径，不把底纹内部绘制当作成员
 type svgObjectGroup struct {
 	path      string
 	next      int
 	composite bool
+}
+
+// svgImageResources 获取派生渲染器共享的图片编码缓存
+// 返回: *renderCache 图片编码缓存
+func (r *Renderer) svgImageResources() *renderCache[svgImageResourceKey, SVGImage] {
+	key := svgResourceCacheKey{}
+	if state, ok := r.sharedBackendStates[key]; ok {
+		return state.(*renderCache[svgImageResourceKey, SVGImage])
+	}
+	cache := resourceCache[svgImageResourceKey, SVGImage](r.Reader.resources, 4<<20)
+	r.sharedBackendStates[key] = cache
+	return cache
+}
+
+// svgPixelDigest 对标准像素缓冲计算完整摘要，不展开延迟图像
+// 入参: ctx 取消上下文, img 原始图像, limit 可参与缓存的像素字节上限
+// 返回: [32]byte 像素摘要, bool 是否为支持的像素布局
+func svgPixelDigest(ctx context.Context, img image.Image, limit int) ([32]byte, bool) {
+	var pixels []byte
+	var stride, kind int
+	switch source := img.(type) {
+	case *image.NRGBA:
+		pixels, stride, kind = source.Pix, source.Stride, 1
+	case *image.NRGBA64:
+		pixels, stride, kind = source.Pix, source.Stride, 2
+	case *image.RGBA:
+		pixels, stride, kind = source.Pix, source.Stride, 3
+	case *image.RGBA64:
+		pixels, stride, kind = source.Pix, source.Stride, 4
+	default:
+		return [32]byte{}, false
+	}
+	if len(pixels) > limit {
+		return [32]byte{}, false
+	}
+	bounds := img.Bounds()
+	var header [48]byte
+	for i, value := range [...]int{kind, stride, bounds.Min.X, bounds.Min.Y, bounds.Max.X, bounds.Max.Y} {
+		binary.LittleEndian.PutUint64(header[i*8:], uint64(value))
+	}
+	hash := sha256.New()
+	hash.Write(header[:])
+	for len(pixels) > 0 {
+		if ctx.Err() != nil {
+			return [32]byte{}, false
+		}
+		count := min(len(pixels), 256<<10)
+		hash.Write(pixels[:count])
+		pixels = pixels[count:]
+	}
+	var digest [32]byte
+	hash.Sum(digest[:0])
+	return digest, true
 }
 
 // RenderImage 按输出策略编码图片，分离资源时保持尺寸和变换
@@ -134,11 +198,33 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 	}
 }
 
-// imageResource 保留原编码或压缩已解码像素，先降采样再编码并响应取消
-// 优化失败时回退原图PNG，取消时终止，不改变SVG中的图片尺寸和变换
+// imageResource 复用相同像素的编码结果，不持有源图像或改变输出策略
 // 入参: ctx 取消上下文, img 原图, target 压缩像素需求
 // 返回: SVGImage 图片资源, error 编码或取消错误
 func (s *svgResourceRenderer) imageResource(ctx context.Context, img image.Image, target image.Point) (SVGImage, error) {
+	if err := ctx.Err(); err != nil {
+		return SVGImage{}, err
+	}
+	if s.renderer != nil {
+		cache := s.renderer.svgImageResources()
+		if digest, ok := svgPixelDigest(ctx, img, cache.limit); ok {
+			key := svgImageResourceKey{digest: digest, options: s.renderer.Compression, target: target}
+			result, err := cache.load(ctx, key, func() (SVGImage, int, error) {
+				result, err := s.encodeImageResource(ctx, img, target)
+				return result, cap(result.Data) + 256, err
+			})
+			result.Data = bytes.Clone(result.Data)
+			return result, err
+		}
+	}
+	return s.encodeImageResource(ctx, img, target)
+}
+
+// encodeImageResource 保留原编码或压缩已解码像素，先降采样再编码并响应取消
+// 优化失败时回退原图PNG，取消时终止，不改变SVG中的图片尺寸和变换
+// 入参: ctx 取消上下文, img 原图, target 压缩像素需求
+// 返回: SVGImage 图片资源, error 编码或取消错误
+func (s *svgResourceRenderer) encodeImageResource(ctx context.Context, img image.Image, target image.Point) (SVGImage, error) {
 	options := CompressionOptions{}
 	if s.renderer != nil {
 		options = s.renderer.Compression

@@ -419,6 +419,7 @@ type outputContext struct {
 
 // businessEngine 独立文档、编辑、剪贴板及操作上下文
 type businessEngine struct {
+	resources      *ofdgo.Resources
 	currentSession *Session
 	currentEditor  *ofdgo.Editor
 	saveSnapshot   *ofdgo.Editor
@@ -1396,7 +1397,7 @@ func (e *businessEngine) convertPDFDocument(args []platformValue) (any, error) {
 		return nil, err
 	}
 	var output bytes.Buffer
-	options := ofdgo.PDFImportOptions{OnProgress: e.editorOperationProgress(args[4]), PasswordUTF8: true}
+	options := ofdgo.PDFImportOptions{Resources: e.resources, OnProgress: e.editorOperationProgress(args[4]), PasswordUTF8: true}
 	if !args[2].IsNull() && !args[2].IsUndefined() {
 		options.Password, err = e.bytesFromJS(args[2])
 		if err != nil {
@@ -1450,7 +1451,8 @@ func (e *businessEngine) convertFile(args []platformValue) (any, error) {
 		return nil, err
 	}
 	options := ofdgo.ConvertOptions{
-		Format: settings.Get("format").String(), PageRange: settings.Get("pages").String(),
+		Resources: e.resources,
+		Format:    settings.Get("format").String(), PageRange: settings.Get("pages").String(),
 		Pool:            e.conversionPool,
 		SkipUnchanged:   true,
 		Backends:        &backends,
@@ -1608,7 +1610,7 @@ func (e *businessEngine) openDocument(args []platformValue) (any, error) {
 		return nil, err
 	}
 	renderAnnotations := args[2].Bool()
-	options := OpenOptions{Fonts: fonts, RenderAnnotations: renderAnnotations}
+	options := OpenOptions{Fonts: fonts, RenderAnnotations: renderAnnotations, ReaderOptions: []ofdgo.ReaderOption{ofdgo.WithResources(e.resources)}}
 	if len(args) > 3 && !args[3].IsNull() && !args[3].IsUndefined() {
 		credentials, err := e.credentialsFromJS(args[3])
 		if err != nil {
@@ -4047,6 +4049,7 @@ func (e *businessEngine) previewText(args []platformValue) (any, error) {
 			return nil, err
 		}
 		editor = ofdgo.NewEditor()
+		editor.SetResources(e.resources)
 		fontID, err = editor.AddFont(FontFile{Data: data}, 0)
 		if err != nil {
 			return nil, err
@@ -5568,6 +5571,7 @@ func (e *businessEngine) loadImport(args []platformValue) (any, error) {
 		}
 	}()
 	var options []ofdgo.ReaderOption
+	options = append(options, ofdgo.WithResources(e.resources))
 	if len(args) > 1 && !args[1].IsNull() && !args[1].IsUndefined() {
 		credentials, err := e.credentialsFromJS(args[1])
 		if err != nil {
@@ -5685,6 +5689,7 @@ func (e *businessEngine) importImages(args []platformValue) (any, error) {
 	editor := e.currentEditor
 	if at < 0 {
 		editor = ofdgo.NewEditor()
+		editor.SetResources(e.resources)
 		editor.Info.Title = args[3].String()
 	} else if editor == nil {
 		return nil, fmt.Errorf("document is not editable")
@@ -5721,6 +5726,7 @@ func (e *businessEngine) importImages(args []platformValue) (any, error) {
 func (e *businessEngine) createDocument(args []platformValue) (any, error) {
 	e.clearImport()
 	editor := ofdgo.NewEditor()
+	editor.SetResources(e.resources)
 	editor.Info.Title = args[0].String()
 	if _, err := editor.AddPage(args[1].Float(), args[2].Float()); err != nil {
 		return nil, err
@@ -7124,6 +7130,7 @@ func (e *businessEngine) previewSignatureSeal(args []platformValue) (any, error)
 		pages = append(pages, map[string]any{"index": index, "x": box.X, "y": box.Y, "width": box.W, "height": box.H})
 	}
 	editor := ofdgo.NewEditor()
+	editor.SetResources(e.resources)
 	if _, err := editor.AddPage(seal.Width, seal.Height); err != nil {
 		return nil, err
 	}

@@ -34,8 +34,9 @@ type stampContentKey struct {
 
 // stampContentState 保存有界的共享签章编译结果及配置
 type stampContentState struct {
-	config RenderBackends
-	cache  renderCache[stampContentKey, []RasterCommand]
+	resources *Resources
+	config    RenderBackends
+	cache     renderCache[stampContentKey, []RasterCommand]
 }
 
 // stampContentStateKey 隔离渲染器私有的共享签章数据
@@ -52,7 +53,8 @@ type patternCellKey struct {
 
 // resetFonts 使包含文字的签章编译结果随字体配置失效
 func (s *stampContentState) resetFonts() {
-	s.cache = renderCache[stampContentKey, []RasterCommand]{limit: 16 << 20}
+	s.cache.clear()
+	s.cache = *resourceCache[stampContentKey, []RasterCommand](s.resources, 16<<20)
 }
 
 // sharedStamp 复用相同签章的解码、嵌套文档编译及局部裁剪，不缓存放置位置
@@ -74,7 +76,7 @@ func (c *semanticCompiler) sharedStamp(stamp Stamp, compile func(*semanticCompil
 	config := r.backends
 	if state == nil || !sameBackend(state.config.Fonts, config.Fonts) || !sameBackend(state.config.Geometry, config.Geometry) ||
 		!sameBackend(state.config.Compiler, config.Compiler) || !sameBackend(state.config.Raster, config.Raster) {
-		state = &stampContentState{config: config}
+		state = &stampContentState{config: config, resources: r.Reader.resources}
 		state.resetFonts()
 		r.backendStates[stampContentStateKey{}] = state
 	}

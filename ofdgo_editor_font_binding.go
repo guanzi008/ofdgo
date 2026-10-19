@@ -907,6 +907,7 @@ func (e *Editor) restoreResourceSnapshot(state Editor) {
 		state.clearFontResourceCache()
 	}
 	state.backends, state.fontDirs, state.fontFS = e.backends, e.fontDirs, e.fontFS
+	state.SetResources(e.runtimeResources)
 	state.encryption, state.output, state.OnWriteProgress = e.encryption, e.output, e.OnWriteProgress
 	state.saveTarget = e.saveTarget
 	state.fontRenderer, state.fontSourcesCache = nil, nil

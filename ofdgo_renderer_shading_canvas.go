@@ -127,7 +127,7 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.
 		if g.gradient.Mesh != nil && g.gradient.Mesh.Background.A == 0 {
 			outline := g.gradient.Mesh.outline()
 			clip, _ := canvasObjectPath(outline)
-			return g, clip.Settle(canvas.NonZero).Transform(s.view), s.view
+			return g, settleCanvasPath(clip, canvas.NonZero).Transform(s.view), s.view
 		}
 		return g, nil, s.view
 	case *canvas.LinearGradient:
@@ -259,7 +259,7 @@ func (r *Renderer) drawShdPath(ctx *canvas.Context, path *canvas.Path, view canv
 func drawRepeatAxialPath(ctx *canvas.Context, path *canvas.Path, gradient *repeatAxialGradient, view canvas.Matrix) {
 	p := path.Copy()
 	if ctx.FillRule == canvas.EvenOdd {
-		p = p.Settle(canvas.EvenOdd)
+		p = settleCanvasPath(p, canvas.EvenOdd)
 	}
 	p = p.Transform(view.Inv())
 	d := gradient.End.Sub(gradient.Start).Mul(gradient.period)
@@ -335,7 +335,7 @@ func radialShdClip(g *canvas.RadialGradient, extend int, bounds canvas.Rect) *ca
 		clip = bounds.ToPath()
 	}
 	if extend&1 == 0 && r0 > 0 {
-		clip = clip.Not(canvas.Circle(r0).Translate(inner.X, inner.Y))
+		clip = combineCanvasPaths(clip, canvas.Circle(r0).Translate(inner.X, inner.Y), "not")
 	}
 	return clip
 }

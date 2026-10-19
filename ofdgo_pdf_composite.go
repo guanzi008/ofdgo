@@ -126,6 +126,7 @@ type pdfCompositeImageColor struct {
 
 // pdfCompositeCache 在单页内复用几何、图像分量及蒙版内容
 type pdfCompositeCache struct {
+	resources       *Resources
 	geometry        *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry]
 	clips           *renderCache[[32]byte, GeometryPath]
 	bounds          map[pdfCompositeKey]Box
@@ -157,7 +158,7 @@ type pdfCompositeScratch struct {
 // 返回: *pdfCompositeCache 当前页面缓存
 func (p *pdfImporter) compositingCache() *pdfCompositeCache {
 	if p.compositeCache == nil {
-		p.compositeCache = &pdfCompositeCache{images: map[*pdfgo.Image]*pdfgo.ImageComponents{}, masks: map[*pdfgo.SoftMask][]pdfCompositeNode{}, meshes: map[*pdfgo.MeshGradient][]codecpdf.MeshTriangle{}}
+		p.compositeCache = &pdfCompositeCache{resources: p.resources, images: map[*pdfgo.Image]*pdfgo.ImageComponents{}, masks: map[*pdfgo.SoftMask][]pdfCompositeNode{}, meshes: map[*pdfgo.MeshGradient][]codecpdf.MeshTriangle{}}
 	}
 	return p.compositeCache
 }
@@ -166,7 +167,7 @@ func (p *pdfImporter) compositingCache() *pdfCompositeCache {
 // 返回: *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry] 单页场景缓存
 func (c *pdfCompositeCache) geometryCache() *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry] {
 	if c.geometry == nil {
-		c.geometry = &renderCache[pdfCompositeSceneKey, pdfCompositeGeometry]{limit: 64 << 20}
+		c.geometry = resourceCache[pdfCompositeSceneKey, pdfCompositeGeometry](c.resources, 64<<20)
 	}
 	return c.geometry
 }
@@ -175,7 +176,7 @@ func (c *pdfCompositeCache) geometryCache() *renderCache[pdfCompositeSceneKey, p
 // 返回: *renderCache[[32]byte, GeometryPath] 裁剪缓存
 func (c *pdfCompositeCache) clipCache() *renderCache[[32]byte, GeometryPath] {
 	if c.clips == nil {
-		c.clips = &renderCache[[32]byte, GeometryPath]{limit: 8 << 20}
+		c.clips = resourceCache[[32]byte, GeometryPath](c.resources, 8<<20)
 	}
 	return c.clips
 }

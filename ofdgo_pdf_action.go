@@ -246,6 +246,7 @@ func (p *pdfImporter) destinationBounds(page *pdfgo.Page) (Box, error) {
 	}
 	matrix, width, height := codecpdf.PageMatrix(page)
 	editor := NewEditor()
+	editor.SetResources(p.resources)
 	editor.SetRenderBackends(p.editor.Backends())
 	editor.SetFontDirs(p.editor.fontDirs...)
 	editor.SetFontFS(p.editor.fontFS...)
@@ -255,7 +256,8 @@ func (p *pdfImporter) destinationBounds(page *pdfgo.Page) (Box, error) {
 		return Box{}, err
 	}
 	local := pdfImporter{
-		ctx: p.ctx, reader: p.reader, editor: editor, renderer: p.renderer,
+		resources: p.resources,
+		ctx:       p.ctx, reader: p.reader, editor: editor, renderer: p.renderer,
 		matrix: matrix, pageBox: page.CropBox, pageWidth: width, pageHeight: height,
 		rasterDPI: p.rasterDPI, fontIDs: make(map[*pdfgo.Font]string),
 		resolveFile: p.resolveFile, resolveReference: p.resolveReference,

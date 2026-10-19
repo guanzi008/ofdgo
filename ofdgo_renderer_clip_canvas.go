@@ -42,7 +42,7 @@ func (r *clipRenderer) RenderPath(path *canvas.Path, style canvas.Style, m canva
 		r.add(applyClipPath(path.Copy().Transform(m), r.clip))
 	}
 	if style.HasStroke() {
-		p := path.Dash(style.DashOffset, style.Dashes...).Stroke(style.StrokeWidth, style.StrokeCapper, style.StrokeJoiner, canvas.Tolerance)
+		p := strokeCanvasPath(path.Dash(style.DashOffset, style.Dashes...), style.StrokeWidth, style.StrokeCapper, style.StrokeJoiner, canvas.Tolerance)
 		r.add(applyClipPath(p.Transform(m), r.clip))
 	}
 }
@@ -164,7 +164,7 @@ func (r *Renderer) buildClipAreaPath(obj PathObject, drawParam string, parent Ma
 		}
 		result = paths.Merge()
 		if obj.Rule == "Even-Odd" {
-			result = result.Settle(canvas.EvenOdd)
+			result = settleCanvasPath(result, canvas.EvenOdd)
 		}
 	}
 	if stroke {
@@ -255,12 +255,12 @@ func intersectClipPath(parent, current *canvas.Path) *canvas.Path {
 		return result
 	}
 	if result, ok := intersectLinearCanvasContours(parent, current); ok {
-		return result.Settle(canvas.NonZero)
+		return settleCanvasPath(result, canvas.NonZero)
 	}
 	if result, ok := intersectLinearCanvasContours(current, parent); ok {
-		return result.Settle(canvas.NonZero)
+		return settleCanvasPath(result, canvas.NonZero)
 	}
-	return parent.And(current)
+	return combineCanvasPaths(parent, current, "and")
 }
 
 // intersectConvexCanvasPaths 逐边裁剪单个凸多边形，避免仿射矩形共边进入曲线扫线
@@ -396,7 +396,7 @@ func unionClipPath(left, right *canvas.Path) *canvas.Path {
 			return bounds.ToPath()
 		}
 	}
-	return left.Or(right)
+	return combineCanvasPaths(left, right, "or")
 }
 
 // applyClipPath 应用裁剪路径
@@ -432,12 +432,12 @@ func applyClipPath(path, clip *canvas.Path) *canvas.Path {
 		return result
 	}
 	if result, ok := intersectLinearCanvasContours(path, clip); ok {
-		return result.Settle(canvas.NonZero)
+		return settleCanvasPath(result, canvas.NonZero)
 	}
 	if result, ok := intersectLinearCanvasContours(clip, path); ok {
-		return result.Settle(canvas.NonZero)
+		return settleCanvasPath(result, canvas.NonZero)
 	}
-	return path.And(clip)
+	return combineCanvasPaths(path, clip, "and")
 }
 
 // pruneCanvasContours 排除与裁剪边界分离的完整轮廓，保留相交轮廓的曲线和绕向

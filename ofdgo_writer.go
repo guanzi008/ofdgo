@@ -76,7 +76,7 @@ type fileOutput struct {
 type editorSnapshotArchive struct {
 	files    []*zip.File
 	archive  weak.Pointer[zip.Reader]
-	retained *zip.Reader
+	retained *renderCache[int, *zip.Reader]
 }
 
 // editorSnapshotBuffer 分块保存压缩数据，写入完成后支持并发随机读取
@@ -121,7 +121,7 @@ func (e *Editor) Snapshot(ctx context.Context) (*Editor, error) {
 		return nil, err
 	}
 	defer reader.Close()
-	next := &Reader{files: make(map[string][]byte, len(reader.files)), encryption: reader.encryption, documentIndex: reader.documentIndex, selectedVersion: cloneEditorData(reader.selectedVersion)}
+	next := &Reader{files: make(map[string][]byte, len(reader.files)), encryption: reader.encryption, documentIndex: reader.documentIndex, selectedVersion: cloneEditorData(reader.selectedVersion), resources: e.runtimeResources}
 	if reader.encryption != nil {
 		next.encryption = &encryptionState{info: cloneEditorData(reader.encryption.info), options: cloneEncryptionOptions(reader.encryption.options)}
 	}
@@ -157,6 +157,11 @@ func (e *Editor) copySnapshotArchive(ctx context.Context, source *zip.Reader) (*
 		return nil, err
 	}
 	if cached := e.snapshotArchive; cached != nil && slices.Equal(cached.files, source.File) {
+		if cached.retained != nil {
+			if archive, ok := cached.retained.get(0); ok {
+				return archive, nil
+			}
+		}
 		if archive := cached.archive.Value(); archive != nil {
 			return archive, nil
 		}
@@ -183,8 +188,14 @@ func (e *Editor) copySnapshotArchive(ctx context.Context, source *zip.Reader) (*
 		return nil, err
 	}
 	cached := &editorSnapshotArchive{files: slices.Clone(source.File), archive: weak.Make(reader)}
-	if len(data.chunks) <= editorSnapshotArchiveLimit/editorSnapshotChunkSize {
-		cached.retained = reader
+	limit := int64(editorSnapshotArchiveLimit)
+	if e.runtimeResources != nil {
+		limit = e.runtimeResources.options.SnapshotBytes
+	}
+	if int64(len(data.chunks)) <= limit/editorSnapshotChunkSize {
+		cached.retained = resourceCache[int, *zip.Reader](e.runtimeResources, editorSnapshotArchiveLimit)
+		cached.retained.limit = int(min(limit, int64(int(^uint(0)>>1)-1)))
+		cached.retained.put(0, reader, len(data.chunks)*editorSnapshotChunkSize)
 	}
 	e.snapshotArchive = cached
 	return reader, nil
@@ -530,7 +541,7 @@ func (e *Editor) readerContext(ctx context.Context, progress editorProgress) (*R
 	if e.source != nil {
 		return e.sourceReader(ctx, progress)
 	}
-	r := &Reader{files: make(map[string][]byte), encryption: e.encryption}
+	r := &Reader{files: make(map[string][]byte), encryption: e.encryption, resources: e.runtimeResources}
 	if err := e.writeParts(ctx, func(name string, data []byte, _ bool) error {
 		r.files[name] = data
 		return nil
@@ -562,7 +573,7 @@ func (e *Editor) resourceReader() (*Reader, error) {
 	if err := e.validate(); err != nil {
 		return nil, err
 	}
-	r := &Reader{files: make(map[string][]byte)}
+	r := &Reader{files: make(map[string][]byte), resources: e.runtimeResources}
 	if err := e.writePartsWithPages(ctx, func(name string, data []byte, _ bool) error {
 		r.files[name] = data
 		return nil

@@ -50,6 +50,7 @@ type Editor struct {
 	Info             DocInfo
 	pages            []PageContent
 	resources        []editorResource
+	runtimeResources *Resources
 	fonts            map[string]*FontResource
 	fontRegistration editorFontRegistration
 	fontDirs         []string
@@ -154,11 +155,13 @@ func (e *Editor) Backends() RenderBackends {
 // NewEditor 创建空白文档，保存前至少添加一页
 // 返回: *Editor 文档编辑器
 func NewEditor() *Editor {
+	resources, _ := NewResources(ResourceOptions{})
 	var id [16]byte
 	rand.Read(id[:])
 	id[6] = id[6]&0x0f | 0x40
 	id[8] = id[8]&0x3f | 0x80
 	return &Editor{
+		runtimeResources: resources,
 		Info: DocInfo{
 			DocID:        hex.EncodeToString(id[:]),
 			CreationDate: time.Now().Format("2006-01-02"),
@@ -169,6 +172,30 @@ func NewEditor() *Editor {
 		resourceID:  make(map[editorResourceKey]string),
 		fontMetrics: make(map[string]FontMetrics),
 		backends:    defaultRenderBackends(),
+	}
+}
+
+// SetResources 替换后续操作的资源策略，需与编辑操作串行调用
+// 已创建的阅读器和快照继续使用原策略，不修改文档或撤销记录
+// 入参: resources 共享策略，nil使用默认策略
+func (e *Editor) SetResources(resources *Resources) {
+	if resources == nil {
+		resources, _ = NewResources(ResourceOptions{})
+	}
+	if resources == e.runtimeResources {
+		return
+	}
+	e.runtimeResources = resources
+	e.snapshotArchive = nil
+	e.fontRenderer = nil
+	e.fontSourcesCache = newFontSourceCache(resources)
+	e.validatedPaths = nil
+	if e.source != nil {
+		source := *e.source
+		e.source = &source
+		e.source.reader = cloneEditorReader(e.source.reader)
+		e.source.reader.resources = resources
+		e.source.reader.pageContents = resourceCache[pageContentKey, PageContent](resources, 16<<20)
 	}
 }
 
@@ -773,7 +800,7 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 // 返回: *Renderer 度量器
 func (e *Editor) newRenderer(reader *Reader) *Renderer {
 	if e.fontSourcesCache == nil {
-		e.fontSourcesCache = newFontSourceCache()
+		e.fontSourcesCache = newFontSourceCache(e.runtimeResources)
 	}
 	renderer := NewRenderer(reader, WithFontDirs(e.fontDirs...), WithFontFS(e.fontFS...), WithRenderBackends(e.backends))
 	renderer.fontSourcesCache = e.fontSourcesCache.child()
@@ -1325,7 +1352,7 @@ func (v *editorValidation) creationPath(value string) error {
 // 返回: *renderCache[string, bool] 校验缓存
 func (e *Editor) pathValidationCache() *renderCache[string, bool] {
 	if e.validatedPaths == nil {
-		e.validatedPaths = &renderCache[string, bool]{limit: 8 << 20}
+		e.validatedPaths = resourceCache[string, bool](e.runtimeResources, 8<<20)
 	}
 	return e.validatedPaths
 }

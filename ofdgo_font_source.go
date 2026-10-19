@@ -79,15 +79,16 @@ type fontSourceData struct {
 }
 
 // newFontSourceCache 创建独立字体来源缓存
+// 入参: resources 共享资源策略
 // 返回: *fontSourceCache 字体来源缓存
-func newFontSourceCache() *fontSourceCache {
-	return &fontSourceCache{candidates: make(map[string][]fontSource), directories: make(map[string][]basefont.FileCandidate), filesystems: make(map[int][]basefont.FileCandidate), data: make(map[fontSourceKey]fontSourceData), collections: &renderCache[fontSourceKey, []byte]{limit: 32 << 20}}
+func newFontSourceCache(resources *Resources) *fontSourceCache {
+	return &fontSourceCache{candidates: make(map[string][]fontSource), directories: make(map[string][]basefont.FileCandidate), filesystems: make(map[int][]basefont.FileCandidate), data: make(map[fontSourceKey]fontSourceData), collections: resourceCache[fontSourceKey, []byte](resources, 32<<20)}
 }
 
 // child 复用相同来源的文件索引与数据，匹配和回退状态保持独立
 // 返回: *fontSourceCache 独立文档缓存
 func (c *fontSourceCache) child() *fontSourceCache {
-	cache := newFontSourceCache()
+	cache := newFontSourceCache(nil)
 	cache.directories, cache.filesystems, cache.data = c.directories, c.filesystems, c.data
 	cache.collections = c.collections
 	return cache

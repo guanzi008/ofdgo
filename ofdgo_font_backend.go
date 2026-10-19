@@ -269,23 +269,35 @@ func (r *Renderer) fontDigest(data []byte) [32]byte {
 
 // resetFontCache 重置字体解析及字形缓存，保留图片和非字体后端状态
 func (r *Renderer) resetFontCache() {
-	r.fontSourcesCache = newFontSourceCache()
+	if r.fontSourcesCache != nil {
+		r.fontSourcesCache.collections.clear()
+	}
+	r.fontSourcesCache = newFontSourceCache(r.Reader.resources)
 	r.resetFontBackendCache()
 }
 
 // resetFontBackendCache 清理后端字体对象，保留字体文件和图片缓存
 func (r *Renderer) resetFontBackendCache() {
+	r.fontDigests.clear()
+	r.fontPreparations.clear()
+	r.fontMetrics.clear()
+	r.glyphOutlines.clear()
+	for _, state := range r.sharedBackendStates {
+		if cache, ok := state.(interface{ clear() }); ok {
+			cache.clear()
+		}
+	}
 	r.sharedBackendStates = make(map[any]any)
 	r.preparedFonts = make(map[string]*PreparedFont)
-	r.fontDigests = &renderCache[fontDataKey, [32]byte]{limit: 4 << 20}
-	r.fontPreparations = &renderCache[[32]byte, PreparedFont]{limit: 16 << 20}
+	r.fontDigests = resourceCache[fontDataKey, [32]byte](r.Reader.resources, 4<<20)
+	r.fontPreparations = resourceCache[[32]byte, PreparedFont](r.Reader.resources, 16<<20)
 	r.resolvedFonts = make(map[resolvedFontKey]resolvedFontResult)
 	if r.fontSourcesCache != nil {
 		r.fontSourcesCache.fallback = ResolvedFont{}
 		r.fontSourcesCache.fallbackRead = false
 	}
-	r.fontMetrics = &renderCache[[32]byte, FontMetrics]{limit: 32 << 20}
-	r.glyphOutlines = &renderCache[glyphOutlineKey, GeometryPath]{limit: 16 << 20}
+	r.fontMetrics = resourceCache[[32]byte, FontMetrics](r.Reader.resources, 32<<20)
+	r.glyphOutlines = resourceCache[glyphOutlineKey, GeometryPath](r.Reader.resources, 16<<20)
 	for _, state := range r.backendStates {
 		if fonts, ok := state.(interface{ resetFonts() }); ok {
 			fonts.resetFonts()

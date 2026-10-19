@@ -151,10 +151,10 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	}
 	start := buf.Len()
 	p := pdf.New(buf, pages[0].Box.W, pages[0].Box.H, nil)
-	renderer := &pdfRenderer{PDF: p, glyphPaths: renderCache[*canvas.Path, *canvas.Path]{limit: 16 << 20}, images: make([][]image.Image, 1), text: make([]codecpdf.TextPage, 1), navigation: navigation}
+	renderer := &pdfRenderer{PDF: p, glyphPaths: *resourceCache[*canvas.Path, *canvas.Path](r.Reader.resources, 16<<20), images: make([][]image.Image, 1), text: make([]codecpdf.TextPage, 1), navigation: navigation}
 	defer func() {
 		if renderer.imageError != nil {
-			r.canvasState().images = renderCache[*EncodedImage, image.Image]{limit: imageCacheLimit}
+			r.canvasState().images = *resourceCache[*EncodedImage, image.Image](r.Reader.resources, imageCacheLimit)
 		}
 	}()
 	var info DocInfo

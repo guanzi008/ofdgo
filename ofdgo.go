@@ -290,6 +290,9 @@ func NewReader(input *Input, options ...ReaderOption) (*Reader, error) {
 // 入参: reader 阅读器, opts 渲染选项
 // 返回: *Renderer 渲染器实例
 func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
+	if reader.resources == nil {
+		reader.resources, _ = NewResources(ResourceOptions{})
+	}
 	r := &Renderer{
 		Reader:                reader,
 		DPI:                   300.0,
@@ -297,7 +300,7 @@ func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
 		DrawParams:            reader.drawParamCache,
 		CompositeGraphicUnits: reader.compositeGraphicUnitCache,
 		templatePageCache:     make(map[string]*PageContent),
-		imageCache:            &renderCache[string, image.Image]{limit: imageCacheLimit},
+		imageCache:            resourceCache[string, image.Image](reader.resources, imageCacheLimit),
 		backends:              defaultRenderBackends(),
 		backendStates:         make(map[any]any),
 	}

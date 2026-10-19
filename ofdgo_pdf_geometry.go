@@ -419,7 +419,7 @@ func (p *pdfImporter) clipPath(path pdfgo.Path) (pdfClipPath, error) {
 		return pdfClipPath{}, err
 	}
 	if p.clipPaths == nil {
-		p.clipPaths = &renderCache[[32]byte, pdfClipPath]{limit: 8 << 20}
+		p.clipPaths = resourceCache[[32]byte, pdfClipPath](p.resources, 8<<20)
 	}
 	if cached, ok := p.clipPaths.get(key); ok {
 		return cached, nil

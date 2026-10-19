@@ -70,6 +70,8 @@ type NativeOutputTarget struct {
 // hooks应在首次Call前配置，Resolve返回的资源需保持有效直到相应会话关闭
 type NativeEngine struct {
 	businessEngine
+	// Resources 协调会话的计算与缓存，需在首次Call前配置
+	Resources *ofdgo.Resources
 	// ConversionPool 协调不同会话的批量转换资源
 	ConversionPool *ofdgo.ConversionPool
 	// RenderParallelism 限制同时渲染的页面数，零值使用可用处理器数
@@ -152,6 +154,7 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 		e.renderSlots = make(chan struct{}, e.renderParallelism())
 		e.resolveInput = e.input
 		e.conversionPool = e.ConversionPool
+		e.resources = e.Resources
 	})
 	if ctx == nil {
 		ctx = context.Background()
@@ -162,6 +165,13 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 			defer func() { <-e.renderSlots }()
 		case <-ctx.Done():
 			return nativeFailure(ctx.Err())
+		}
+		if e.resources != nil {
+			release, err := e.resources.Acquire(ctx, 64<<20)
+			if err != nil {
+				return nativeFailure(err)
+			}
+			defer release()
 		}
 	}
 	select {

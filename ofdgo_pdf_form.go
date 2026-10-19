@@ -108,7 +108,7 @@ func (p *pdfImporter) compositeForm(nodes []pdfCompositeNode) (bool, error) {
 		return true, nil
 	}
 	if p.formResources == nil || p.formResources.editor != p.editor {
-		p.formResources = &pdfFormCache{editor: p.editor, entries: renderCache[[32]byte, pdfFormResource]{limit: 32 << 20}}
+		p.formResources = &pdfFormCache{editor: p.editor, entries: *resourceCache[[32]byte, pdfFormResource](p.resources, 32<<20)}
 	}
 	cache := p.formResources
 	defer cache.reset()

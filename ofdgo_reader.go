@@ -37,6 +37,7 @@ type Reader struct {
 	OFD                       *OFD
 	RootDir                   string
 	ResMap                    map[string]string
+	resources                 *Resources
 	resourcesRead             map[string]bool
 	resourceFiles             map[string]string
 	imageCatalog              []ImageInfo
@@ -113,7 +114,7 @@ func (r *Reader) Fork(ctx context.Context) (*Reader, error) {
 		return nil, err
 	}
 	if r.pageContents == nil {
-		r.pageContents = &renderCache[pageContentKey, PageContent]{limit: 16 << 20}
+		r.pageContents = resourceCache[pageContentKey, PageContent](r.resources, 16<<20)
 	}
 	next := *r
 	next.Closer = nil
@@ -210,7 +211,7 @@ func (r *Reader) DocumentContext(ctx context.Context, index int) (*Reader, error
 	if index < 0 || index >= r.DocumentCount() {
 		return nil, fmt.Errorf("document index %d out of range", index)
 	}
-	next := &Reader{Path: r.Path, Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: index}
+	next := &Reader{Path: r.Path, Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: index, resources: r.resources}
 	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}
@@ -762,6 +763,9 @@ func (r *Reader) initRoot() error {
 // 入参: ctx 取消上下文
 // 返回: error 索引、读取、解析或取消错误
 func (r *Reader) initRootContext(ctx context.Context) error {
+	if r.resources == nil {
+		r.resources, _ = NewResources(ResourceOptions{})
+	}
 	view := *r
 	if err := view.indexPackageContext(ctx); err != nil {
 		return err
@@ -780,7 +784,7 @@ func (r *Reader) initRootContext(ctx context.Context) error {
 	}
 	r.fileIndex, r.fileNames = view.fileIndex, view.fileNames
 	if r.pageContents == nil {
-		r.pageContents = &renderCache[pageContentKey, PageContent]{limit: 16 << 20}
+		r.pageContents = resourceCache[pageContentKey, PageContent](r.resources, 16<<20)
 	}
 	r.OFD = &ofd
 	r.doc, r.versionInfo = nil, nil
@@ -1100,7 +1104,7 @@ func (r *Reader) readPageContent(ctx context.Context, page Page, textOnly, templ
 		return nil, err
 	}
 	if r.pageContents == nil {
-		r.pageContents = &renderCache[pageContentKey, PageContent]{limit: 16 << 20}
+		r.pageContents = resourceCache[pageContentKey, PageContent](r.resources, 16<<20)
 	}
 	var content PageContent
 	if len(data) > (r.pageContents.limit/4-4096)/16 {

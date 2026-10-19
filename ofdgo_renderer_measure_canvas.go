@@ -106,7 +106,7 @@ func (r *boundsRenderer) RenderPath(path *canvas.Path, style canvas.Style, m can
 		r.addContour(path.Copy().Transform(m), style.FillRule == canvas.EvenOdd)
 	}
 	if style.HasStroke() {
-		p := path.Dash(style.DashOffset, style.Dashes...).Stroke(style.StrokeWidth, style.StrokeCapper, style.StrokeJoiner, canvas.Tolerance)
+		p := strokeCanvasPath(path.Dash(style.DashOffset, style.Dashes...), style.StrokeWidth, style.StrokeCapper, style.StrokeJoiner, canvas.Tolerance)
 		r.add(p.Transform(m))
 	}
 }

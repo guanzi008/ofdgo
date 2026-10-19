@@ -20,16 +20,12 @@ import (
 	"crypto/sha256"
 	"image"
 	"io"
-	"strconv"
 	"sync"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
-// outputImageBatchLimit 限制并行任务持有的原始编码，超限图片单独处理
-const outputImageBatchLimit = 16 << 20
-
-// outputImageWorkingSetLimit 限制64位并行任务的像素工作量总估算，32位使用64MiB，超限图片单独处理
+// outputImageWorkingSetLimit 指定未提供任务预算时的图像成本估算上限
 const outputImageWorkingSetLimit = 256 << 20
 
 // outputImageJob 保存独立图片任务，不访问编辑文档或调用进度回调
@@ -82,19 +78,21 @@ func (e *Editor) outputImageOptions(key string) (CompressionOptions, image.Point
 // 入参: keys 资源路径, load 串行读取方法，空值表示跳过, results 候选缓存, sources 原始资源摘要，可为空
 // 返回: error 读取、进度或取消错误
 func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, error), results map[outputImageKey][]byte, sources map[string]outputImageSource) error {
-	workers := conversionWorkers(e.output.ctx, 4)
+	workers := conversionWorkers(e.output.ctx)
 	if workers < 2 || len(keys) < 2 {
 		return nil
 	}
-	limit, encodedLimit := outputImageWorkingSetLimit, outputImageBatchLimit
+	limit := int(min(int64(workers)*(64<<20), int64(int(^uint(0)>>1)-1)))
+	encodedLimit := limit
 	if pool, _ := e.output.ctx.Value(conversionPoolKey{}).(*ConversionPool); pool != nil {
-		if available := pool.memoryLimit(); available > 0 {
+		available := pool.memoryLimit()
+		if available == 0 {
+			return nil
+		}
+		if available > 0 {
 			limit = int(min(available, int64(int(^uint(0)>>1))))
 			encodedLimit = limit
 		}
-	}
-	if strconv.IntSize == 32 {
-		limit = 64 << 20
 	}
 	base, cancel := context.WithCancel(e.output.ctx)
 	ctx := outputImageContext{Context: base, parent: e.output.ctx}

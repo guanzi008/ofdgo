@@ -51,6 +51,7 @@ type Host struct {
 	engines        map[string]*webui.NativeEngine
 	engineStops    map[string]func() bool
 	conversionPool *ofdgo.ConversionPool
+	resources      *ofdgo.Resources
 	cancels        map[string]context.CancelFunc
 	batchResults   map[string]any
 	fontOnce       sync.Once
@@ -79,11 +80,16 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 		return err
 	}
 	h := &Host{files: files, engines: make(map[string]*webui.NativeEngine), cancels: make(map[string]context.CancelFunc), fontFiles: make(map[string]string), pendingPaths: append([]string(nil), paths...)}
-	h.conversionPool, err = ofdgo.NewConversionPool(ofdgo.ConversionPoolOptions{AvailableMemory: conversionMemory})
+	cacheBytes := int64(256 << 20)
+	if memory := conversionMemory; memory != nil {
+		cacheBytes = max(32<<20, memory()/8)
+	}
+	h.resources, err = ofdgo.NewResources(ofdgo.ResourceOptions{CacheBytes: cacheBytes, AvailableMemory: conversionMemory})
 	if err != nil {
 		files.close()
 		return err
 	}
+	h.conversionPool = h.resources.ConversionPool()
 	defer h.close()
 	bindings := make(map[string]guigo.HandlerFunc)
 	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title"} {
@@ -271,11 +277,11 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		parallelism, cacheBytes := runtime.GOMAXPROCS(0), int64(128<<20)
 		if memory := conversionMemory; memory != nil {
 			available := memory()
-			parallelism = max(1, min(parallelism, int(available/(256<<20))))
-			cacheBytes = max(32<<20, min(256<<20, available/16))
+			cacheBytes = max(32<<20, available/32)
 		}
 		engine.RenderParallelism = parallelism
 		engine.ConversionPool = h.conversionPool
+		engine.Resources = h.resources
 		engine.OpenWriter = h.openWriter
 		engine.ReserveOutput = h.reserveOutput
 		engine.CleanupOutput = h.cleanupOutput
@@ -797,6 +803,9 @@ func (h *Host) close() {
 	}
 	for _, result := range results {
 		h.discard(result)
+	}
+	if h.resources != nil {
+		h.resources.Clear()
 	}
 	_ = h.files.close()
 }

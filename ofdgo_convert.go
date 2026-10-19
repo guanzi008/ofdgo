@@ -52,6 +52,7 @@ type ConvertProgress struct {
 // PageRange使用一基页码表达式，与Pages互斥，空字符串表示全部页面
 // SkipUnchanged仅在未压缩、源格式与目标相同且未选页时不写出数据
 // Pool可由多个独立转换共享，nil时不限制文件间并发
+// Resources提供共享计算与缓存策略，显式Pool优先控制计算调度
 // 整份PDF同格式压缩直接重写PDF对象，其余PDF先转换为OFD对象再输出
 // RendererOptions同时用于PDF局部合成和输出，在PDF.RendererOptions之后应用
 // Backends统一配置转换与输出，优先于PDF和RendererOptions中的后端设置
@@ -60,6 +61,7 @@ type ConvertProgress struct {
 // PageOutput仅用于逐页格式，同步调用export写出一页并自行处理提交或回滚；此时output可为nil
 // 未提供PageOutput时，逐页格式打包ZIP；所有回调返回错误均会停止转换
 type ConvertOptions struct {
+	Resources       *Resources
 	Input           string
 	Format          string
 	Pages           []int
@@ -145,6 +147,13 @@ func OutputFormats() []OutputFormat {
 // 入参: ctx 取消上下文, input 输入源, output 输出流, options 转换选项
 // 返回: ConvertReport 转换报告, error 错误信息
 func Convert(ctx context.Context, input *Input, output io.Writer, options ConvertOptions) (report ConvertReport, err error) {
+	if options.Resources != nil {
+		if options.Pool == nil {
+			options.Pool = options.Resources.pool
+		}
+		options.ReaderOptions = append(slices.Clone(options.ReaderOptions), WithResources(options.Resources))
+		options.PDF.Resources = options.Resources
+	}
 	if options.Pool != nil {
 		if err = options.Pool.acquire(ctx, false, 0); err != nil {
 			return report, err
@@ -534,7 +543,7 @@ func (p *ConversionPool) acquire(ctx context.Context, image bool, size int64) er
 		p.mu.Lock()
 		allowed := p.active < p.options.Parallelism && (p.active == 0 || limit != 0)
 		if image {
-			allowed = p.images < runtime.GOMAXPROCS(0) && (p.images == 0 || limit < 0 || size <= limit-p.memory)
+			allowed = p.images < p.options.Parallelism && (p.images == 0 || limit < 0 || size <= limit-p.memory)
 		}
 		if allowed {
 			if image {
@@ -584,15 +593,15 @@ func (p *ConversionPool) release(image bool, size int64) {
 }
 
 // conversionWorkers 按当前文件数量分配内部计算任务
-// 入参: ctx 转换上下文, fallback 非共享模式并行上限
+// 入参: ctx 转换上下文
 // 返回: int 内部并行数
-func conversionWorkers(ctx context.Context, fallback int) int {
+func conversionWorkers(ctx context.Context) int {
 	p, _ := ctx.Value(conversionPoolKey{}).(*ConversionPool)
 	if p == nil {
-		return min(fallback, runtime.GOMAXPROCS(0))
+		return runtime.GOMAXPROCS(0)
 	}
 	p.mu.Lock()
 	active := p.active
 	p.mu.Unlock()
-	return max(1, runtime.GOMAXPROCS(0)/max(1, active))
+	return max(1, p.options.Parallelism/max(1, active))
 }

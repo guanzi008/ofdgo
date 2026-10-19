@@ -108,6 +108,7 @@ func (e *Editor) WriteToWithOptions(ctx context.Context, writer io.Writer, optio
 // 入参: ctx 取消上下文, writer 输出流, indexes 零基页码, options 输出配置
 // 返回: int64 已写入字节数, error 错误信息
 func (e *Editor) WritePagesTo(ctx context.Context, writer io.Writer, indexes []int, options WriteOptions) (int64, error) {
+	ctx = e.runtimeResources.context(ctx)
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -125,6 +126,7 @@ func (e *Editor) WritePagesTo(ctx context.Context, writer io.Writer, indexes []i
 // 入参: ctx 取消上下文, options 输出配置
 // 返回: *Editor 输出快照, error 配置或资源错误
 func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Editor, error) {
+	ctx = e.runtimeResources.context(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

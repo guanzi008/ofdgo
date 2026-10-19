@@ -887,7 +887,7 @@ func (p *pdfImporter) linearMeshTriangles(mesh *pdfgo.MeshGradient, index int) (
 	}
 	cache := p.compositingCache()
 	if cache.linearMeshes == nil {
-		cache.linearMeshes = &renderCache[pdfLinearMeshKey, []pdfgo.MeshTriangle]{limit: 8 << 20}
+		cache.linearMeshes = resourceCache[pdfLinearMeshKey, []pdfgo.MeshTriangle](p.resources, 8<<20)
 	}
 	key := pdfLinearMeshKey{mesh: mesh, index: index}
 	if triangles, ok := cache.linearMeshes.get(key); ok {
@@ -1047,7 +1047,7 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, 
 		}
 		c.cache.meshes[mesh] = triangles
 	}
-	options := codecpdf.MeshRasterOptions{Matrix: c.importer.matrix, Origin: pdfgo.Point{X: c.box.X, Y: c.box.Y}, DPI: c.importer.rasterDPI, Width: c.width, Height: c.height, Workers: conversionWorkers(c.importer.ctx, 4), SoftMask: c.softMask}
+	options := codecpdf.MeshRasterOptions{Matrix: c.importer.matrix, Origin: pdfgo.Point{X: c.box.X, Y: c.box.Y}, DPI: c.importer.rasterDPI, Width: c.width, Height: c.height, Workers: conversionWorkers(c.importer.ctx), SoftMask: c.softMask}
 	pixels, err := codecpdf.MeshPixels(c.importer.ctx, mesh, triangles, space, converter, options)
 	if err != nil {
 		return nil, err

@@ -39,7 +39,8 @@ type platformValue = js.Value
 
 // RunWASM 注册浏览器WASM接口并阻塞运行
 func RunWASM() {
-	e := &businessEngine{}
+	resources, _ := ofdgo.NewResources(ofdgo.ResourceOptions{Parallelism: 1, MemoryLimit: 64 << 20, CacheBytes: 48 << 20, SnapshotBytes: 32 << 20})
+	e := &businessEngine{resources: resources}
 	asynchronous := map[string]bool{
 		"ofdgoDetectFormat":     true,
 		"ofdgoExportVersion":    true,
