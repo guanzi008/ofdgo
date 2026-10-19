@@ -84,15 +84,15 @@ type ConvertReport struct {
 
 // convertReader 将取消上下文传递到随机读取
 type convertReader struct {
-	context context.Context
-	source  io.ReaderAt
+	ctx   context.Context
+	input io.ReaderAt
 }
 
 // convertWriter 将取消上下文传递到写入并统计实际字节数
 type convertWriter struct {
-	context context.Context
-	writer  io.Writer
-	count   *int64
+	ctx    context.Context
+	writer io.Writer
+	count  *int64
 }
 
 // OutputFormats 返回独立的输出格式列表，不依赖WebUI或具体渲染后端
@@ -113,9 +113,9 @@ func OutputFormats() []OutputFormat {
 // 原始模式完整OFD另存保持源字节；选页和跨格式输出重新生成文档，压缩仅作用于输出副本
 // 输入按需随机读取，输出分块写出；解析对象及后端可能缓存资源，不保证恒定内存
 // 出错时报告保留已有诊断，调用方应丢弃未完成输出；只有返回nil才表示转换成功
-// 入参: ctx 取消上下文, source 源数据, size 源字节数, output 输出流, options 转换选项
+// 入参: ctx 取消上下文, input 输入源, output 输出流, options 转换选项
 // 返回: ConvertReport 转换报告, error 错误信息
-func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writer, options ConvertOptions) (report ConvertReport, err error) {
+func Convert(ctx context.Context, input *Input, output io.Writer, options ConvertOptions) (report ConvertReport, err error) {
 	if options.Pool != nil {
 		if err = options.Pool.acquire(ctx, false, 0); err != nil {
 			return report, err
@@ -174,13 +174,14 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 	if err = progress("open", 0, 0); err != nil {
 		return report, err
 	}
-	if source == nil || size <= 0 {
-		return report, fmt.Errorf("empty document source")
+	if input == nil || input.Size() <= 0 {
+		return report, fmt.Errorf("empty document input")
 	}
-	source = convertReader{context: ctx, source: source}
+	size := input.Size()
+	operationInput := &Input{reader: convertReader{ctx: ctx, input: input}, size: size}
 	report.Input = strings.ToLower(strings.TrimSpace(options.Input))
 	if report.Input == "" {
-		report.Input, err = DetectFormat(source, size)
+		report.Input, err = DetectFormat(operationInput)
 		if err != nil {
 			return report, err
 		}
@@ -199,7 +200,7 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 		return report, fmt.Errorf("missing output writer")
 	}
 	if report.Input == "pdf" && format == "pdf" && options.Compression.Mode != CompressionUnchanged && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
-		pdfReader, openErr := pdfgo.NewReaderWithOptions(source, size, pdfgo.ReaderOptions{Password: options.PDF.Password, PasswordUTF8: options.PDF.PasswordUTF8})
+		pdfReader, openErr := pdfgo.NewReaderWithOptions(operationInput, size, pdfgo.ReaderOptions{Password: options.PDF.Password, PasswordUTF8: options.PDF.PasswordUTF8})
 		if openErr != nil {
 			return report, openErr
 		}
@@ -233,13 +234,13 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 			}
 			return nil
 		}
-		editor, report.PDF, err = ImportPDF(ctx, source, size, pdfOptions)
+		editor, report.PDF, err = ImportPDF(ctx, operationInput, pdfOptions)
 		if err != nil {
 			return report, err
 		}
 		count = editor.PageCount()
 	case "ofd":
-		reader, err = NewReader(source, size, options.ReaderOptions...)
+		reader, err = NewReader(operationInput, options.ReaderOptions...)
 		if err != nil {
 			return report, err
 		}
@@ -260,13 +261,13 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 		return report, err
 	}
 	report.Pages = len(indices)
-	writer := convertWriter{context: ctx, writer: output, count: &report.Bytes}
+	writer := convertWriter{ctx: ctx, writer: output, count: &report.Bytes}
 	if format == "ofd" {
 		if options.Pages == nil && editor == nil && options.Fonts == FontKeep && options.Compression.Mode == CompressionUnchanged {
 			if err = progress("write", 0, 0); err != nil {
 				return report, err
 			}
-			_, err = io.Copy(writer, io.NewSectionReader(source, 0, size))
+			_, err = io.Copy(writer, io.NewSectionReader(operationInput, 0, size))
 			report.Unchanged = err == nil
 			return report, err
 		}
@@ -301,7 +302,7 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 				if err = progress("write", 0, 0); err != nil {
 					return report, err
 				}
-				_, err = io.Copy(writer, io.NewSectionReader(source, 0, size))
+				_, err = io.Copy(writer, io.NewSectionReader(operationInput, 0, size))
 				report.Unchanged = err == nil
 				return report, err
 			}
@@ -352,7 +353,7 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 				return report, readErr
 			}
 			if err = options.PageOutput(index, func(output io.Writer) error {
-				return renderer.RenderTo(page, convertWriter{context: ctx, writer: output, count: &report.Bytes}, format)
+				return renderer.RenderTo(page, convertWriter{ctx: ctx, writer: output, count: &report.Bytes}, format)
 			}); err != nil {
 				return report, fmt.Errorf("export page %d: %w", index+1, err)
 			}
@@ -366,12 +367,12 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 // 入参: data 目标缓冲, offset 源偏移
 // 返回: int 读取字节数, error 读取错误
 func (r convertReader) ReadAt(data []byte, offset int64) (int, error) {
-	if err := r.context.Err(); err != nil {
+	if err := r.ctx.Err(); err != nil {
 		return 0, err
 	}
-	n, err := r.source.ReadAt(data, offset)
+	n, err := r.input.ReadAt(data, offset)
 	if err == nil {
-		err = r.context.Err()
+		err = r.ctx.Err()
 	}
 	return n, err
 }
@@ -380,7 +381,7 @@ func (r convertReader) ReadAt(data []byte, offset int64) (int, error) {
 // 入参: data 待写数据
 // 返回: int 写入字节数, error 写入错误
 func (w convertWriter) Write(data []byte) (int, error) {
-	if err := w.context.Err(); err != nil {
+	if err := w.ctx.Err(); err != nil {
 		return 0, err
 	}
 	n, err := w.writer.Write(data)
@@ -389,7 +390,7 @@ func (w convertWriter) Write(data []byte) (int, error) {
 		err = io.ErrShortWrite
 	}
 	if err == nil {
-		err = w.context.Err()
+		err = w.ctx.Err()
 	}
 	return n, err
 }
@@ -398,7 +399,7 @@ func (w convertWriter) Write(data []byte) (int, error) {
 // 入参: data 待写文本
 // 返回: int 写入字节数, error 写入、短写或取消错误
 func (w convertWriter) WriteString(data string) (int, error) {
-	if err := w.context.Err(); err != nil {
+	if err := w.ctx.Err(); err != nil {
 		return 0, err
 	}
 	n, err := io.WriteString(w.writer, data)
@@ -407,7 +408,7 @@ func (w convertWriter) WriteString(data string) (int, error) {
 		err = io.ErrShortWrite
 	}
 	if err == nil {
-		err = w.context.Err()
+		err = w.ctx.Err()
 	}
 	return n, err
 }

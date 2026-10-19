@@ -208,7 +208,7 @@ func imageWorkingSet(ctx context.Context, data []byte, limit int) int {
 		}
 		return len(data) + tiffImageWorkingSet(layout, available)
 	}
-	config, _, err := baseimage.DecodeConfig(imageInput{ReadCloser: io.NopCloser(input), context: ctx})
+	config, _, err := baseimage.DecodeConfig(imageInput{ReadCloser: io.NopCloser(input), ctx: ctx})
 	if err != nil || config.Width <= 0 || config.Height <= 0 {
 		return limit
 	}

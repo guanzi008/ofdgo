@@ -22,14 +22,14 @@ import (
 // contextInput 在读取图像编码时检查调用方取消状态
 type contextInput struct {
 	io.ReadCloser
-	context context.Context
+	ctx context.Context
 }
 
 // Read 检查取消状态后读取原始数据
 // 入参: data 数据缓冲区
 // 返回: int 读取字节数, error 读取或取消错误
 func (r contextInput) Read(data []byte) (int, error) {
-	if err := r.context.Err(); err != nil {
+	if err := r.ctx.Err(); err != nil {
 		return 0, err
 	}
 	return r.ReadCloser.Read(data)

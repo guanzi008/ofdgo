@@ -129,7 +129,7 @@ func (r *Reader) fontCleanupCandidate(ctx context.Context, name string) (bool, e
 	} else if file, ok := r.packageFile(name); ok {
 		size = file.UncompressedSize64
 	}
-	candidate, err := fontCleanupDirectory(imageInput{ReadCloser: input, context: ctx}, size)
+	candidate, err := fontCleanupDirectory(imageInput{ReadCloser: input, ctx: ctx}, size)
 	if err == io.EOF || err == io.ErrUnexpectedEOF {
 		err = nil
 	}

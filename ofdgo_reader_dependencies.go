@@ -247,7 +247,7 @@ func (r *Reader) scanDocumentFileReferences(ctx context.Context, name string, re
 		return err
 	}
 	defer input.Close()
-	decoder := xml.NewDecoder(imageInput{ReadCloser: input, context: ctx})
+	decoder := xml.NewDecoder(imageInput{ReadCloser: input, ctx: ctx})
 	var stack []xml.Name
 	var positions []*editorXML
 	root, base := "", ""

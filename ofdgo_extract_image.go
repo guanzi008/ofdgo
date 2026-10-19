@@ -37,14 +37,14 @@ type ImageInfo struct {
 
 // imageOutput 在分块写出图片时检查调用方取消状态
 type imageOutput struct {
-	context context.Context
-	writer  io.Writer
+	ctx    context.Context
+	writer io.Writer
 }
 
 // imageInput 在读取资源数据时检查调用方取消状态
 type imageInput struct {
 	io.ReadCloser
-	context context.Context
+	ctx context.Context
 }
 
 // imageResourceKey 合并有效十进制标识，非标准标识保留原值，不相互混淆
@@ -61,7 +61,7 @@ func imageResourceKey(id string) string {
 // 入参: data 数据缓冲区
 // 返回: int 读取字节数, error 读取或取消错误
 func (r imageInput) Read(data []byte) (int, error) {
-	if err := r.context.Err(); err != nil {
+	if err := r.ctx.Err(); err != nil {
 		return 0, err
 	}
 	return r.ReadCloser.Read(data)
@@ -71,7 +71,7 @@ func (r imageInput) Read(data []byte) (int, error) {
 // 入参: data 数据块
 // 返回: int 写入字节数, error 写入或取消错误
 func (w imageOutput) Write(data []byte) (int, error) {
-	if err := w.context.Err(); err != nil {
+	if err := w.ctx.Err(); err != nil {
 		return 0, err
 	}
 	return w.writer.Write(data)
@@ -128,7 +128,7 @@ func (r *Reader) Images(ctx context.Context) ([]ImageInfo, error) {
 			return nil, err
 		}
 		var res Res
-		decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+		decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 		if err := decoder.Decode(&res); err != nil {
 			return nil, err
 		}
@@ -185,7 +185,7 @@ func (r *Reader) Image(ctx context.Context, id string) (ImageInfo, error) {
 			return ImageInfo{}, err
 		}
 		var res Res
-		decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+		decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 		if err := decoder.Decode(&res); err != nil {
 			return ImageInfo{}, err
 		}
@@ -233,7 +233,7 @@ func (r *Reader) OpenImage(ctx context.Context, id string) (io.ReadCloser, error
 	if err != nil {
 		return nil, err
 	}
-	return imageInput{ReadCloser: input, context: ctx}, nil
+	return imageInput{ReadCloser: input, ctx: ctx}, nil
 }
 
 // WriteImages 将原始图片逐个写入ZIP，不改变图片编码，文件序号避免同名覆盖

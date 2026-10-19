@@ -67,7 +67,7 @@ func (e *Editor) compressPatternPaints() error {
 				}
 				hash := sha256.New()
 				var size int64
-				x := newOFDXML(convertWriter{writer: hash, count: &size, context: e.output.ctx})
+				x := newOFDXML(convertWriter{writer: hash, count: &size, ctx: e.output.ctx})
 				x.ctx = e.output.ctx
 				x.color("FillColor", fill)
 				x.color("StrokeColor", (*FillColor)(stroke))

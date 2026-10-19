@@ -185,9 +185,9 @@ func editorDocInfoXML(data []byte, docID string, index int) ([]byte, *editorXML,
 // 返回: []byte 修改后的XML, error 编码错误
 func editorCustomDatas(data []byte, info *editorXML, values *CustomDatas) ([]byte, error) {
 	container := info.child("CustomDatas")
-	context := info
+	ctx := info
 	if container != nil {
-		context = container
+		ctx = container
 	}
 	var items []CustomData
 	if values != nil {
@@ -226,7 +226,7 @@ func editorCustomDatas(data []byte, info *editorXML, values *CustomDatas) ([]byt
 		if node == nil {
 			var value bytes.Buffer
 			_ = xml.EscapeText(&value, []byte(item.Value))
-			entry, err := context.containerXML("CustomData", ofdAttrs{{Name: xml.Name{Local: "Name"}, Value: item.Name}}, value.Bytes())
+			entry, err := ctx.containerXML("CustomData", ofdAttrs{{Name: xml.Name{Local: "Name"}, Value: item.Name}}, value.Bytes())
 			if err != nil {
 				return nil, err
 			}

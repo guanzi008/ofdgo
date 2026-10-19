@@ -293,7 +293,7 @@ func (r *Reader) versionFileUnchanged(ctx context.Context, name string, data []b
 	if len(*buffer) == 0 {
 		*buffer = make([]byte, 32*1024)
 	}
-	reader := imageInput{ReadCloser: input, context: ctx}
+	reader := imageInput{ReadCloser: input, ctx: ctx}
 	for len(data) != 0 {
 		block := (*buffer)[:min(len(*buffer), len(data))]
 		if _, err := io.ReadFull(&reader, block); err != nil {

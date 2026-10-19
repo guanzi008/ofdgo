@@ -276,7 +276,7 @@ func (r *Reader) parseAnnotations(ctx context.Context, doc *Document) error {
 			continue
 		}
 		var pageAnnot PageAnnot
-		err = xml.NewDecoder(imageInput{ReadCloser: af, context: ctx}).Decode(&pageAnnot)
+		err = xml.NewDecoder(imageInput{ReadCloser: af, ctx: ctx}).Decode(&pageAnnot)
 		_ = af.Close()
 		if err != nil {
 			continue
@@ -310,7 +310,7 @@ func (r *Reader) annotationIndexContext(ctx context.Context, doc *Document) (Ann
 	}
 	defer f.Close()
 	var annotations Annotations
-	if err := xml.NewDecoder(imageInput{ReadCloser: f, context: ctx}).Decode(&annotations); err != nil {
+	if err := xml.NewDecoder(imageInput{ReadCloser: f, ctx: ctx}).Decode(&annotations); err != nil {
 		return Annotations{}, err
 	}
 	pageIDs := make(map[string]string, len(doc.Pages.Page))

@@ -211,11 +211,11 @@ func (s *u3dLineState) accumulateCorners(mesh *U3DMesh, shadingIndex uint32, cor
 }
 
 // value 按指定上下文和位宽读取点集或线集字段
-// 入参: context 压缩上下文, small 是否为8位字段
+// 入参: ctx 压缩上下文, small 是否为8位字段
 // 返回: uint32 字段值
-func (r *u3dLineReader) value(context int, small bool) uint32 {
+func (r *u3dLineReader) value(ctx int, small bool) uint32 {
 	if r.bits != nil {
-		return r.bits.dynamicValue(&r.hist[context], small)
+		return r.bits.dynamicValue(&r.hist[ctx], small)
 	}
 	if small {
 		return uint32(r.values.u8())

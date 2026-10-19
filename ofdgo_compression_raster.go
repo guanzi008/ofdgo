@@ -108,7 +108,7 @@ func optimizeBMPResource(ctx context.Context, data []byte, options CompressionOp
 	if depth == 16 || compression == 3 {
 		pixels, err = baseimage.DecodeBMPContext(ctx, data)
 	} else {
-		pixels, _, err = image.Decode(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+		pixels, _, err = image.Decode(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 	}
 	if err != nil {
 		return nil, err

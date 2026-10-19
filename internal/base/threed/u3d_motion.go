@@ -167,15 +167,15 @@ func (r *u3dResourceReader) motionFrame(frame *U3DKeyFrame, previous U3DKeyFrame
 }
 
 // motionDifference 用共享幅值上下文恢复一至三个差分分量
-// 入参: previous 前一帧分量, scale 逆量化系数, context 符号上下文，下一项为幅值上下文
+// 入参: previous 前一帧分量, scale 逆量化系数, ctx 符号上下文，下一项为幅值上下文
 // 返回: [3]float32 重建分量, error 符号、数值或读取错误
-func (r *u3dResourceReader) motionDifference(previous []float32, scale float32, context int) (values [3]float32, err error) {
-	signs := r.value(context, true)
+func (r *u3dResourceReader) motionDifference(previous []float32, scale float32, ctx int) (values [3]float32, err error) {
+	signs := r.value(ctx, true)
 	if signs >= 1<<len(previous) {
 		return values, fmt.Errorf("invalid U3D motion difference signs")
 	}
 	for index, prior := range previous {
-		difference := float64(r.value(context+1, false)) * float64(scale)
+		difference := float64(r.value(ctx+1, false)) * float64(scale)
 		if signs&(1<<index) != 0 {
 			difference = -difference
 		}

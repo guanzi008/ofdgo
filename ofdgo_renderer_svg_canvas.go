@@ -106,7 +106,7 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 	size := img.Bounds().Size()
 	m = m.Translate(0, float64(size.Y))
 	matrix := Matrix{a: m[0][0], b: -m[1][0], c: -m[0][1], d: m[1][1], e: m[0][2], f: height - m[1][2]}
-	writer := imageOutput{context: ctx, writer: s.writer}
+	writer := imageOutput{ctx: ctx, writer: s.writer}
 	if _, s.err = fmt.Fprintf(writer, `<image transform="matrix(%s)" width="%d" height="%d" xlink:href="`, matrix.String(), size.X, size.Y); s.err != nil {
 		return
 	}

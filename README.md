@@ -121,6 +121,7 @@ func main() {
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 
@@ -129,7 +130,12 @@ import (
 
 func main() {
 	// 1. 打开文档
-	reader, err := ofdgo.Open("test.ofd")
+	input, err := ofdgo.OpenFile(context.Background(), "test.ofd", ofdgo.InputOptions{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer input.Close()
+	reader, err := ofdgo.NewReader(input)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -166,15 +172,11 @@ import (
 
 func main() {
 	// 1. 打开文档
-	pdfFile, err := os.Open("test.pdf")
+	input, err := ofdgo.OpenFile(context.Background(), "test.pdf", ofdgo.InputOptions{})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer pdfFile.Close()
-	info, err := pdfFile.Stat()
-	if err != nil {
-		log.Fatal(err)
-	}
+	defer input.Close()
 	// 2. 创建文件
 	ofdFile, err := os.Create("test.ofd")
 	if err != nil {
@@ -182,7 +184,7 @@ func main() {
 	}
 	defer ofdFile.Close()
 	// 3. 转换文档
-	report, err := ofdgo.ConvertPDF(context.Background(), pdfFile, info.Size(), ofdFile, ofdgo.PDFImportOptions{})
+	report, err := ofdgo.ConvertPDF(context.Background(), input, ofdFile, ofdgo.PDFImportOptions{})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -198,6 +200,7 @@ func main() {
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 
@@ -206,7 +209,12 @@ import (
 
 func main() {
 	// 1. 打开OFD文件
-	reader, err := ofdgo.Open("test.ofd")
+	input, err := ofdgo.OpenFile(context.Background(), "test.ofd", ofdgo.InputOptions{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer input.Close()
+	reader, err := ofdgo.NewReader(input)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -230,6 +238,7 @@ func main() {
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 
@@ -238,12 +247,13 @@ import (
 
 func main() {
 	// 1. 打开OFD文件
-	data, err := os.ReadFile("test.ofd")
+	input, err := ofdgo.OpenFile(context.Background(), "test.ofd", ofdgo.InputOptions{})
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer input.Close()
 	// 2. 验证OFD签名
-	reports, err := ofdgo.VerifySignaturesBytes(data)
+	reports, err := ofdgo.VerifySignatures(input)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -276,6 +286,7 @@ func main() {
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"os"
@@ -285,7 +296,12 @@ import (
 
 func main() {
 	// 1. 打开OFD文件
-	reader, err := ofdgo.Open("invoice.ofd")
+	input, err := ofdgo.OpenFile(context.Background(), "invoice.ofd", ofdgo.InputOptions{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer input.Close()
+	reader, err := ofdgo.NewReader(input)
 	if err != nil {
 		log.Fatal(err)
 	}

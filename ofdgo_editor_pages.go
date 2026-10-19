@@ -88,7 +88,7 @@ func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][
 				return err
 			}
 		} else if known := generated[name]; data == nil && known.staged != nil {
-			input := imageInput{ReadCloser: known.staged.open(), context: ctx}
+			input := imageInput{ReadCloser: known.staged.open(), ctx: ctx}
 			var err error
 			data, err = io.ReadAll(input)
 			input.Close()
@@ -196,7 +196,7 @@ func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][
 // 入参: ctx 取消上下文, data 创作XML, removed 已删除页面标识
 // 返回: []byte 更新后的XML, error 解析或取消错误
 func pruneCreatedPageReferences(ctx context.Context, data []byte, removed map[string]bool) ([]byte, error) {
-	d := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	d := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 	var stack []pageReferenceNode
 	var patches []editorXMLPatch
 	root := false

@@ -180,7 +180,7 @@ func (r *Reader) readDocumentVersionContext(ctx context.Context, id, location st
 		return DocumentVersionInfo{}, err
 	}
 	defer input.Close()
-	decoder := xml.NewDecoder(imageInput{ReadCloser: input, context: ctx})
+	decoder := xml.NewDecoder(imageInput{ReadCloser: input, ctx: ctx})
 	var info DocumentVersionInfo
 	var root, parent *editorXML
 	var files, entry bool

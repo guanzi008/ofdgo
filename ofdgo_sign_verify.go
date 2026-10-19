@@ -235,29 +235,11 @@ func WithSignatureVerifyTime(t time.Time) SignatureVerifyOption {
 	}
 }
 
-// VerifySignaturesBytes 验证OFD字节数据签名
-// 入参: data OFD字节数据, opts 签名验证选项
+// VerifySignatures 验证输入源中的OFD签名，不接管输入源生命周期
+// 入参: input 输入源, opts 签名验证选项
 // 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
-func VerifySignaturesBytes(data []byte, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
-	return VerifySignaturesReader(bytes.NewReader(data), int64(len(data)), opts...)
-}
-
-// VerifySignaturesStream 验证OFD顺序流签名
-// 入参: r IO顺序读取器, opts 签名验证选项
-// 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
-func VerifySignaturesStream(r io.Reader, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-	return VerifySignaturesBytes(data, opts...)
-}
-
-// VerifySignaturesReader 验证OFD读取器签名
-// 入参: r IO读取器, size 数据大小, opts 签名验证选项
-// 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
-func VerifySignaturesReader(r io.ReaderAt, size int64, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
-	reader, err := NewReader(r, size)
+func VerifySignatures(input *Input, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	reader, err := NewReader(input)
 	if err != nil {
 		return nil, err
 	}

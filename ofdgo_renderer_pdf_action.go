@@ -271,7 +271,7 @@ func (n *pdfNavigation) writeAttachments(ctx context.Context, options *pdfgo.Rew
 		if err != nil {
 			return fmt.Errorf("read attachment %s: %w", id, err)
 		}
-		data, err := io.ReadAll(imageInput{ReadCloser: input, context: ctx})
+		data, err := io.ReadAll(imageInput{ReadCloser: input, ctx: ctx})
 		closeErr := input.Close()
 		if err != nil {
 			return fmt.Errorf("read attachment %s: %w", id, err)

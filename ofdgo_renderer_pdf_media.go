@@ -78,7 +78,7 @@ func (n *pdfNavigation) loadMediaFiles(ctx context.Context, files map[string]*pd
 		if err != nil {
 			return err
 		}
-		data, err := io.ReadAll(imageInput{ReadCloser: input, context: ctx})
+		data, err := io.ReadAll(imageInput{ReadCloser: input, ctx: ctx})
 		closeErr := input.Close()
 		if err != nil {
 			return err

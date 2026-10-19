@@ -165,7 +165,7 @@ func readTIFFDirectory(ctx context.Context, input io.Reader, order binary.ByteOr
 		if offset < position {
 			return result, position, ErrTIFFRandomAccess
 		}
-		reader := contextInput{ReadCloser: io.NopCloser(input), context: ctx}
+		reader := contextInput{ReadCloser: io.NopCloser(input), ctx: ctx}
 		if _, err := io.CopyN(io.Discard, reader, offset-position); err != nil {
 			return result, position, err
 		}

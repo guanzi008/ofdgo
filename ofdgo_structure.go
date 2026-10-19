@@ -133,7 +133,7 @@ func (r *Reader) readStructureContext(ctx context.Context, tag CustomTag) (Struc
 // 返回: *StructureNode 根节点, error 解析、限额或取消错误
 func parseStructure(ctx context.Context, data []byte, tag CustomTag) (*StructureNode, error) {
 	data = bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
-	d := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	d := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 	var root *StructureNode
 	var stack []*StructureNode
 	var text []*strings.Builder

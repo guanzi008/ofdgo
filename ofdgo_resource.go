@@ -156,7 +156,7 @@ func (r *Reader) OpenResource(ctx context.Context, kind, id string) (io.ReadClos
 	if err != nil {
 		return nil, err
 	}
-	return imageInput{ReadCloser: stream, context: ctx}, nil
+	return imageInput{ReadCloser: stream, ctx: ctx}, nil
 }
 
 // resourceList 缓存当前阅读视图的资源摘要，不保留扫描使用的XML树

@@ -335,7 +335,7 @@ func (r *editorResourceRefs) scanContext(ctx context.Context, input io.Reader, n
 		if ctx.Err() != nil {
 			return false, false
 		}
-		input = imageInput{ReadCloser: io.NopCloser(input), context: ctx}
+		input = imageInput{ReadCloser: io.NopCloser(input), ctx: ctx}
 	}
 	buffer := bufio.NewReader(input)
 	found, err := editorXMLPrefix(buffer)

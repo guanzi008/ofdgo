@@ -89,7 +89,7 @@ type NativeEngine struct {
 // nativeReader 在会话当前操作上下文中分块读取，不捕获已结束请求的上下文
 type nativeReader struct {
 	engine *NativeEngine
-	source io.ReaderAt
+	input  io.ReaderAt
 }
 
 // nativeCall 保存单次worker适配状态
@@ -139,7 +139,7 @@ func NewNativeEngine(resolve NativeResolver) *NativeEngine { return &NativeEngin
 func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit func(any)) (result map[string]any) {
 	e.once.Do(func() {
 		e.gate = make(chan struct{}, 1)
-		e.resolveSource = e.source
+		e.resolveInput = e.input
 		e.conversionPool = e.ConversionPool
 	})
 	if ctx == nil {
@@ -236,7 +236,7 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 
 // Close 释放会话，不关闭宿主持有的ReaderAt资源
 func (e *NativeEngine) Close() error {
-	e.once.Do(func() { e.gate = make(chan struct{}, 1); e.resolveSource = e.source })
+	e.once.Do(func() { e.gate = make(chan struct{}, 1); e.resolveInput = e.input })
 	e.gate <- struct{}{}
 	defer func() { <-e.gate }()
 	e.closed = true
@@ -253,8 +253,8 @@ func (e *NativeEngine) Close() error {
 	return err
 }
 
-// source 读取授权源并以宿主报告的大小为准
-func (e *NativeEngine) source(ctx context.Context, value any) (io.ReaderAt, int64, error) {
+// input 读取授权源并以宿主报告的大小为准
+func (e *NativeEngine) input(ctx context.Context, value any) (io.ReaderAt, int64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
@@ -262,7 +262,7 @@ func (e *NativeEngine) source(ctx context.Context, value any) (io.ReaderAt, int6
 		value = p.value
 	}
 	if data, ok := value.([]byte); ok {
-		return nativeReader{engine: e, source: bytes.NewReader(data)}, int64(len(data)), nil
+		return nativeReader{engine: e, input: bytes.NewReader(data)}, int64(len(data)), nil
 	}
 	descriptor, ok := value.(map[string]any)
 	if !ok {
@@ -272,14 +272,14 @@ func (e *NativeEngine) source(ctx context.Context, value any) (io.ReaderAt, int6
 	if !ok || token == "" || e.Resolve == nil {
 		return nil, 0, fmt.Errorf("unauthorized native file")
 	}
-	source, size, err := e.Resolve(token)
+	input, size, err := e.Resolve(token)
 	if err != nil {
 		return nil, 0, err
 	}
-	if source == nil || size < 0 {
-		return nil, 0, fmt.Errorf("invalid native file source")
+	if input == nil || size < 0 {
+		return nil, 0, fmt.Errorf("invalid native file input")
 	}
-	return nativeReader{engine: e, source: source}, size, nil
+	return nativeReader{engine: e, input: input}, size, nil
 }
 
 // ReadAt 分块传递取消检查，宿主ReadAt自身阻塞时由宿主控制超时
@@ -290,7 +290,7 @@ func (r nativeReader) ReadAt(data []byte, offset int64) (int, error) {
 			return total, err
 		}
 		n := min(len(data), 256<<10)
-		got, err := r.source.ReadAt(data[:n], offset)
+		got, err := r.input.ReadAt(data[:n], offset)
 		total += got
 		if err != nil {
 			return total, err
@@ -307,7 +307,7 @@ func (r nativeReader) ReadAt(data []byte, offset int64) (int, error) {
 // 入参: ctx 调用上下文, value 资源参数
 // 返回: []byte 资源数据, error 读取错误
 func (e *NativeEngine) readBytes(ctx context.Context, value any) ([]byte, error) {
-	source, size, err := e.source(ctx, value)
+	input, size, err := e.input(ctx, value)
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +320,7 @@ func (e *NativeEngine) readBytes(ctx context.Context, value any) ([]byte, error)
 			return nil, err
 		}
 		n := int(min(int64(256<<10), size-offset))
-		got, err := source.ReadAt(output[int(offset):int(offset)+n], offset)
+		got, err := input.ReadAt(output[int(offset):int(offset)+n], offset)
 		if got != n {
 			return nil, io.ErrUnexpectedEOF
 		}
@@ -540,7 +540,7 @@ func (c *nativeCall) progress(kind, stage string, phased bool) nativeCallback {
 
 // readCallback 创建有界随机读取回调
 func (c *nativeCall) readCallback(value any) (nativeCallback, int64, error) {
-	source, size, err := c.engine.source(c.ctx, value)
+	input, size, err := c.engine.input(c.ctx, value)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -553,7 +553,7 @@ func (c *nativeCall) readCallback(value any) (nativeCallback, int64, error) {
 			return nil, fmt.Errorf("invalid native read range")
 		}
 		data := make([]byte, n)
-		got, err := source.ReadAt(data, offset)
+		got, err := input.ReadAt(data, offset)
 		if got != n {
 			return nil, io.ErrUnexpectedEOF
 		}
@@ -876,9 +876,13 @@ func nativeOutputBase(value platformValue) string {
 	return base
 }
 
-// sourceFromValue 读取宿主授权的随机读取源
-func (e *businessEngine) sourceFromValue(value platformValue) (io.ReaderAt, int64, error) {
-	return e.resolveSource(e.operationContext(), value.value)
+// inputFromValue 读取宿主授权的随机读取源
+func (e *businessEngine) inputFromValue(value platformValue) (*ofdgo.Input, error) {
+	reader, size, err := e.resolveInput(e.operationContext(), value.value)
+	if err != nil {
+		return nil, err
+	}
+	return ofdgo.NewInput(reader, size)
 }
 
 // platformValueOf 包装参数
@@ -1024,11 +1028,12 @@ func (e *businessEngine) bytesFromJS(v platformValue) ([]byte, error) {
 	if data, ok := v.value.([]byte); ok {
 		return append([]byte(nil), data...), nil
 	}
-	source, size, err := e.sourceFromValue(v)
+	input, err := e.inputFromValue(v)
 	if err != nil {
 		return nil, err
 	}
-	return io.ReadAll(io.NewSectionReader(source, 0, size))
+	defer input.Close()
+	return io.ReadAll(io.NewSectionReader(input, 0, input.Size()))
 }
 
 // successResult 保留二进制返回结构

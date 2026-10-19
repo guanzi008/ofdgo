@@ -51,7 +51,7 @@ func editorBinaryImage(ctx context.Context, data []byte, img image.Image) ([]byt
 			return nil, ctx.Err()
 		}
 		var err error
-		img, _, err = image.Decode(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+		img, _, err = image.Decode(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 		if err != nil {
 			return nil, ctx.Err()
 		}

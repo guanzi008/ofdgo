@@ -311,7 +311,7 @@ func (e *Editor) prepareFontBinding(ctx context.Context, scan *editorFontDocumen
 		}
 		file, node := text.file, text.node
 		var object TextObject
-		decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(file.data[node.start:node.end])), context: ctx})
+		decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(file.data[node.start:node.end])), ctx: ctx})
 		if err := decoder.Decode(&object); err != nil {
 			return nil, err
 		}

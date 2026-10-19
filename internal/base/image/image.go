@@ -170,7 +170,7 @@ func DecodeContext(ctx context.Context, data []byte) (img image.Image, format st
 		img, err := DecodeTIFF(ctx, data, layout)
 		return img, "tiff", err
 	}
-	img, format, err = image.Decode(contextInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	img, format, err = image.Decode(contextInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 	if err == nil {
 		return img, NormalizeFormat(format), nil
 	}
@@ -267,7 +267,7 @@ func DecodeConfigDataContext(ctx context.Context, data []byte) (config image.Con
 		cfg.Width, cfg.Height = size.X, size.Y
 		return cfg, "tiff", nil
 	}
-	cfg, format, err := image.DecodeConfig(contextInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	cfg, format, err := image.DecodeConfig(contextInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 	if err == nil {
 		return cfg, NormalizeFormat(format), nil
 	}

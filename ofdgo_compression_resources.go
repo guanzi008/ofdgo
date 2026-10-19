@@ -460,7 +460,7 @@ func outputResourceDigest(ctx context.Context, reader *Reader, parts map[string]
 		}
 	}
 	hash := sha256.New()
-	_, err := io.CopyBuffer(hash, imageInput{ReadCloser: input, context: ctx}, buffer)
+	_, err := io.CopyBuffer(hash, imageInput{ReadCloser: input, ctx: ctx}, buffer)
 	closeErr := input.Close()
 	if err != nil {
 		return [32]byte{}, err

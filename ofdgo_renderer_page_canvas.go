@@ -21,7 +21,7 @@ import (
 // canvasPageVisitor 将公共页面遍历结果交给Canvas解释器
 type canvasPageVisitor struct {
 	renderer *Renderer
-	context  *canvas.Context
+	ctx      *canvas.Context
 	height   float64
 }
 
@@ -98,11 +98,11 @@ func (v *canvasPageVisitor) DrawObject(object *GraphicObject, state RenderState)
 	}
 	switch object.Type {
 	case "TextObject":
-		v.renderer.renderText(v.context, object.TextObject, v.height, state.Defaults, state.Parent, state.BoundaryInCTM, clip)
+		v.renderer.renderText(v.ctx, object.TextObject, v.height, state.Defaults, state.Parent, state.BoundaryInCTM, clip)
 	case "PathObject":
-		v.renderer.renderPath(v.context, object.PathObject, v.height, state.Defaults, state.Parent, state.BoundaryInCTM, clip)
+		v.renderer.renderPath(v.ctx, object.PathObject, v.height, state.Defaults, state.Parent, state.BoundaryInCTM, clip)
 	case "ImageObject":
-		v.renderer.renderImage(v.context, object.ImageObject, v.height, state.Parent, state.BoundaryInCTM, clip)
+		v.renderer.renderImage(v.ctx, object.ImageObject, v.height, state.Parent, state.BoundaryInCTM, clip)
 	}
 	return v.renderer.renderError
 }
@@ -111,7 +111,7 @@ func (v *canvasPageVisitor) DrawObject(object *GraphicObject, state RenderState)
 // 入参: stamp 签章
 // 返回: error 绘制错误
 func (v *canvasPageVisitor) DrawStamp(stamp Stamp) error {
-	v.renderer.renderStamp(v.context, stamp, v.height)
+	v.renderer.renderStamp(v.ctx, stamp, v.height)
 	return v.renderer.renderError
 }
 
@@ -119,7 +119,7 @@ func (v *canvasPageVisitor) DrawStamp(stamp Stamp) error {
 // 入参: object 源对象
 // 返回: bool 是否建立分组
 func (v *canvasPageVisitor) BeginObject(object *GraphicObject) bool {
-	groups, ok := v.context.Renderer.(interface {
+	groups, ok := v.ctx.Renderer.(interface {
 		beginObject(*GraphicObject) bool
 		endObject()
 	})
@@ -130,7 +130,7 @@ func (v *canvasPageVisitor) BeginObject(object *GraphicObject) bool {
 // 入参: id 注解标识
 // 返回: bool 是否建立分组
 func (v *canvasPageVisitor) BeginAnnotation(id string) bool {
-	groups, ok := v.context.Renderer.(interface {
+	groups, ok := v.ctx.Renderer.(interface {
 		beginAnnotation(string) bool
 		endObject()
 	})
@@ -139,13 +139,13 @@ func (v *canvasPageVisitor) BeginAnnotation(id string) bool {
 
 // EndObject 结束对象或注解分组
 func (v *canvasPageVisitor) EndObject() {
-	v.context.Renderer.(interface{ endObject() }).endObject()
+	v.ctx.Renderer.(interface{ endObject() }).endObject()
 }
 
 // SkipObjects 保留不可见对象的编号
 // 入参: count 对象数量
 func (v *canvasPageVisitor) SkipObjects(count int) {
-	if groups, ok := v.context.Renderer.(interface{ skipObjects(int) }); ok {
+	if groups, ok := v.ctx.Renderer.(interface{ skipObjects(int) }); ok {
 		groups.skipObjects(count)
 	}
 }

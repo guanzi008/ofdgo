@@ -186,7 +186,7 @@ func (r *Reader) parseSignatures(ctx context.Context, doc *Document) error {
 	}
 	defer f.Close()
 	var signatures Signatures
-	if err := xml.NewDecoder(imageInput{ReadCloser: f, context: ctx}).Decode(&signatures); err != nil {
+	if err := xml.NewDecoder(imageInput{ReadCloser: f, ctx: ctx}).Decode(&signatures); err != nil {
 		return err
 	}
 	pages := signaturePageNumbers(doc)
@@ -202,7 +202,7 @@ func (r *Reader) parseSignatures(ctx context.Context, doc *Document) error {
 			}
 			defer sf.Close()
 			var sigFile SignatureFile
-			if err := xml.NewDecoder(imageInput{ReadCloser: sf, context: ctx}).Decode(&sigFile); err != nil {
+			if err := xml.NewDecoder(imageInput{ReadCloser: sf, ctx: ctx}).Decode(&sigFile); err != nil {
 				return
 			}
 			var sealType string

@@ -120,7 +120,7 @@ func (r *Renderer) RenderToZIP(writer io.Writer, format string, indices ...int) 
 		return err
 	}
 	var countWritten int64
-	archive := zip.NewWriter(convertWriter{context: ctx, writer: writer, count: &countWritten})
+	archive := zip.NewWriter(convertWriter{ctx: ctx, writer: writer, count: &countWritten})
 	configureArchive(archive, r.Compression)
 	method := zip.Deflate
 	if extension == "png" || extension == "jpg" {
@@ -176,7 +176,7 @@ func (r *Renderer) RenderToText(page *PageContent, writer io.Writer) error {
 		return err
 	}
 	var written int64
-	writer = convertWriter{context: ctx, writer: writer, count: &written}
+	writer = convertWriter{ctx: ctx, writer: writer, count: &written}
 	_, err = text.WriteTo(writer)
 	if err != nil {
 		return err
@@ -207,7 +207,7 @@ func (r *Renderer) RenderToMultiPageText(writer io.Writer, indices ...int) error
 		return err
 	}
 	var count int64
-	writer = convertWriter{context: ctx, writer: writer, count: &count}
+	writer = convertWriter{ctx: ctx, writer: writer, count: &count}
 	written := false
 	for i, index := range indices {
 		text, err := r.PageTextByIndexContext(ctx, index)
@@ -248,7 +248,7 @@ func (r *Renderer) RenderToPNG(page *PageContent, writer io.Writer) error {
 		return err
 	}
 	var written int64
-	writer = convertWriter{context: r.outputContext(), writer: writer, count: &written}
+	writer = convertWriter{ctx: r.outputContext(), writer: writer, count: &written}
 	img, err := r.RenderToImage(page)
 	if err != nil {
 		return err
@@ -277,7 +277,7 @@ func (r *Renderer) RenderToJPEG(page *PageContent, writer io.Writer, options *jp
 		return err
 	}
 	var written int64
-	writer = convertWriter{context: r.outputContext(), writer: writer, count: &written}
+	writer = convertWriter{ctx: r.outputContext(), writer: writer, count: &written}
 	img, err := r.RenderToImage(page)
 	if err != nil {
 		return err
@@ -340,7 +340,7 @@ func (r *Renderer) RenderToEPS(page *PageContent, writer io.Writer) error {
 		return fmt.Errorf("eps: %w", ErrBackendUnavailable)
 	}
 	var written int64
-	writer = convertWriter{context: r.outputContext(), writer: writer, count: &written}
+	writer = convertWriter{ctx: r.outputContext(), writer: writer, count: &written}
 	return r.backends.EPS.RenderEPS(r, page, writer)
 }
 

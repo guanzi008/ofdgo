@@ -205,17 +205,17 @@ func (e *Editor) SetOutlineActions(path []int, actions []Action) error {
 	if err != nil {
 		return err
 	}
-	context := node
+	ctx := node
 	if existing := node.child("Actions"); existing != nil {
-		context = existing
+		ctx = existing
 	}
-	encoded, err = editorXMLGenerated(encoded, context.name.Space)
+	encoded, err = editorXMLGenerated(encoded, ctx.name.Space)
 	if err != nil {
 		return err
 	}
 	var patch editorXMLPatch
-	if context != node {
-		patch = editorXMLPatch{context.start, context.end, encoded}
+	if ctx != node {
+		patch = editorXMLPatch{ctx.start, ctx.end, encoded}
 	} else {
 		if node.open != node.end {
 			encoded = append(encoded, data[node.open:node.close]...)

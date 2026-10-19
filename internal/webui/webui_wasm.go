@@ -21,8 +21,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"syscall/js"
+
+	"github.com/xiaoqidun/ofdgo"
 )
 
 const (
@@ -220,8 +221,11 @@ func platformParseJSON(data []byte) map[string]any {
 	return result
 }
 
-// sourceFromValue 读取浏览器二进制源
-func (e *businessEngine) sourceFromValue(value platformValue) (io.ReaderAt, int64, error) {
+// inputFromValue 读取浏览器二进制源
+func (e *businessEngine) inputFromValue(value platformValue) (*ofdgo.Input, error) {
 	data, err := e.bytesFromJS(value)
-	return bytes.NewReader(data), int64(len(data)), err
+	if err != nil {
+		return nil, err
+	}
+	return ofdgo.NewInput(bytes.NewReader(data), int64(len(data)))
 }

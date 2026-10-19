@@ -109,7 +109,7 @@ func (c *resourceCatalog) styleDefinition(ctx context.Context, item ResourceInfo
 	if err != nil {
 		return err
 	}
-	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}
@@ -488,7 +488,7 @@ func validateResourceColors(ctx context.Context, catalog *resourceCatalog, space
 			}
 			if resourceColorNode(node) && sameResourceID(id, space.ID) {
 				var paint FillColor
-				decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(file.data[node.start:node.end])), context: ctx})
+				decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(file.data[node.start:node.end])), ctx: ctx})
 				if err := decoder.Decode(&paint); err != nil {
 					return err
 				}

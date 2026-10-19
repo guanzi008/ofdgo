@@ -104,7 +104,7 @@ func packageDataEqual(ctx context.Context, reader *Reader, name string, data []b
 		return false, err
 	}
 	defer stream.Close()
-	input := imageInput{ReadCloser: stream, context: ctx}
+	input := imageInput{ReadCloser: stream, ctx: ctx}
 	var buffer [32 << 10]byte
 	for len(data) != 0 {
 		block := buffer[:min(len(buffer), len(data))]

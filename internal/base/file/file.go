@@ -52,6 +52,28 @@ type Writer struct {
 	closed bool
 }
 
+// NewTemp 创建私有输入缓存文件，调用方负责关闭和删除
+// 入参: directory 缓存目录，空值使用系统临时目录
+// 返回: *os.File 缓存文件, error 创建错误
+func NewTemp(directory string) (*os.File, error) {
+	if directory == "" {
+		directory = os.TempDir()
+	}
+	for range 100 {
+		n, err := rand.Int(rand.Reader, big.NewInt(10000000))
+		if err != nil {
+			return nil, err
+		}
+		name := filepath.Join(directory, fmt.Sprintf("ofdgo-%07d.tmp", n.Int64()))
+		file, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return file, err
+	}
+	return nil, os.ErrExist
+}
+
 // NewTarget 记录目标当前状态，允许目标尚不存在
 // 入参: name 目标路径
 // 返回: *Target 保存目标, error 路径或文件错误

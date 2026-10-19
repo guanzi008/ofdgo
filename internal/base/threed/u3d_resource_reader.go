@@ -30,9 +30,9 @@ type u3dResourceReader struct {
 }
 
 // value 读取指定上下文的压缩字段，首次使用时初始化算术区间
-// 入参: context 压缩上下文, small 是否为8位字段
+// 入参: ctx 压缩上下文, small 是否为8位字段
 // 返回: uint32 字段值
-func (r *u3dResourceReader) value(context int, small bool) uint32 {
+func (r *u3dResourceReader) value(ctx int, small bool) uint32 {
 	if r.err() != nil {
 		return 0
 	}
@@ -52,7 +52,7 @@ func (r *u3dResourceReader) value(context int, small bool) uint32 {
 			return nil
 		}
 	}
-	return r.bits.dynamicValue(&r.hist[context], small)
+	return r.bits.dynamicValue(&r.hist[ctx], small)
 }
 
 // u32 读取普通32位字段，压缩开始后沿用当前算术区间

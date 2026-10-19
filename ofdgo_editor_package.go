@@ -101,7 +101,7 @@ func (e *Editor) sourcePartsPrepared(ctx context.Context, progress editorProgres
 				}
 				generated[name] = known
 				if (reader.DocumentCount() > 1 || reader.OFD.DocBody[reader.documentIndex].versioned) && !known.stagedLeaf(nil) || bound && known.objects == nil {
-					input := imageInput{ReadCloser: data.open(), context: ctx}
+					input := imageInput{ReadCloser: data.open(), ctx: ctx}
 					parts[name], err = io.ReadAll(input)
 					input.Close()
 					if err != nil {
@@ -454,15 +454,15 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 		}
 	}
 	var added []byte
-	context := source.root.child("Content")
-	if context == nil {
-		context = source.root
+	ctx := source.root.child("Content")
+	if ctx == nil {
+		ctx = source.root
 	}
 	for _, layer := range page.Content.Layer[len(source.original.Content.Layer):] {
 		if len(layer.Objects) == 0 {
 			continue
 		}
-		encoded, err := e.sourceLayerXML(layer, context.name.Space)
+		encoded, err := e.sourceLayerXML(layer, ctx.name.Space)
 		if err != nil {
 			return nil, err
 		}
@@ -471,7 +471,7 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 	if len(added) != 0 {
 		content := source.root.child("Content")
 		if content == nil {
-			value, err := context.containerXML("Content", nil, added)
+			value, err := ctx.containerXML("Content", nil, added)
 			if err != nil {
 				return nil, err
 			}
@@ -492,12 +492,12 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 			return nil, err
 		}
 		patch := editorXMLPatch{source.root.close, source.root.close, encoded}
-		context := source.root
+		ctx := source.root
 		if node := source.root.child("Actions"); node != nil {
 			patch.start, patch.end = node.start, node.end
-			context = node
+			ctx = node
 		}
-		patch.data, err = editorXMLGenerated(encoded, context.name.Space)
+		patch.data, err = editorXMLGenerated(encoded, ctx.name.Space)
 		if err != nil {
 			return nil, err
 		}

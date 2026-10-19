@@ -99,7 +99,7 @@ func (e *Editor) WriteToWithOptions(ctx context.Context, writer io.Writer, optio
 		return 0, err
 	}
 	var count int64
-	return snapshot.WriteTo(convertWriter{context: ctx, writer: writer, count: &count})
+	return snapshot.WriteTo(convertWriter{ctx: ctx, writer: writer, count: &count})
 }
 
 // WritePagesToWithOptions 按指定顺序另存页面，仅为所选页面准备资源和压缩计划
@@ -116,7 +116,7 @@ func (e *Editor) WritePagesToWithOptions(ctx context.Context, writer io.Writer, 
 	snapshot.OnWriteProgress = editorProgress(e.OnWriteProgress).withContext(ctx)
 	snapshot.output = &outputOptimization{ctx: ctx, options: options.Compression}
 	var count int64
-	return snapshot.WritePagesTo(convertWriter{context: ctx, writer: writer, count: &count}, indexes)
+	return snapshot.WritePagesTo(convertWriter{ctx: ctx, writer: writer, count: &count}, indexes)
 }
 
 // outputSnapshot 创建只读输出配置，原签名存在时仅调整ZIP封装
@@ -211,7 +211,7 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 		if err != nil {
 			return nil, false, err
 		}
-		buffer := bufio.NewReader(imageInput{ReadCloser: input, context: ctx})
+		buffer := bufio.NewReader(imageInput{ReadCloser: input, ctx: ctx})
 		found, err := editorXMLPrefix(buffer)
 		if err != nil || !found && (structured || strings.EqualFold(path.Ext(name), ".xml")) {
 			safe = false
@@ -432,7 +432,7 @@ func (e *Editor) compressOutputFile(file *zip.File, buffer []byte, limit int) ([
 		deflater.Reset(output)
 	}
 	defer deflater.Close()
-	source := imageInput{ReadCloser: input, context: e.output.ctx}
+	source := imageInput{ReadCloser: input, ctx: e.output.ctx}
 	_, err = io.CopyBuffer(deflater, source, buffer)
 	if output.exceeded {
 		_, err = io.CopyBuffer(io.Discard, source, buffer)
@@ -542,7 +542,7 @@ func (e *Editor) writeOutputFile(archive *zip.Writer, file *zip.File, buffer []b
 	if err != nil {
 		return err
 	}
-	if _, err := io.CopyBuffer(entry, imageInput{ReadCloser: io.NopCloser(payload), context: e.output.ctx}, buffer); err != nil {
+	if _, err := io.CopyBuffer(entry, imageInput{ReadCloser: io.NopCloser(payload), ctx: e.output.ctx}, buffer); err != nil {
 		return err
 	}
 	e.output.completed++

@@ -140,7 +140,7 @@ func (r *Reader) DocumentPageCountContext(ctx context.Context, index int) (int, 
 		return 0, err
 	}
 	var doc documentPageList
-	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 	if err := decoder.Decode(&doc); err != nil {
 		return 0, fmt.Errorf("failed to unmarshal document.xml: %w", err)
 	}
@@ -278,7 +278,7 @@ func (r *Reader) docStructureContext(ctx context.Context) (*Document, error) {
 		return nil, err
 	}
 	var doc Document
-	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 	if err := decoder.Decode(&doc); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal document.xml: %w", err)
 	}
@@ -581,7 +581,7 @@ func (r *Reader) OpenAttachmentContext(ctx context.Context, id string) (io.ReadC
 				stream.Close()
 				return nil, err
 			}
-			return imageInput{ReadCloser: stream, context: ctx}, nil
+			return imageInput{ReadCloser: stream, ctx: ctx}, nil
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -733,7 +733,7 @@ func (r *Reader) initRootContext(ctx context.Context) error {
 		return fmt.Errorf("failed to read ofd.xml: %w", err)
 	}
 	var ofd OFD
-	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 	if err := decoder.Decode(&ofd); err != nil {
 		return fmt.Errorf("failed to unmarshal ofd.xml: %w", err)
 	}
@@ -856,7 +856,7 @@ func (r *Reader) readFileViewContext(ctx context.Context, name string) ([]byte, 
 		return nil, err
 	}
 	defer input.Close()
-	data, err := io.ReadAll(imageInput{ReadCloser: input, context: ctx})
+	data, err := io.ReadAll(imageInput{ReadCloser: input, ctx: ctx})
 	if err != nil {
 		return nil, err
 	}
@@ -949,7 +949,7 @@ func (r *Reader) loadResContext(ctx context.Context, resPath string) error {
 		return ctx.Err()
 	}
 	var res Res
-	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 	if err := decoder.Decode(&res); err != nil {
 		return ctx.Err()
 	}
@@ -1059,7 +1059,7 @@ func (r *Reader) readPageContent(ctx context.Context, page Page, textOnly, templ
 		return nil, err
 	}
 	var content PageContent
-	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 	if textOnly {
 		err = xml.NewTokenDecoder(&textPageTokens{Decoder: decoder}).Decode(&content)
 	} else {
@@ -1123,7 +1123,7 @@ func (r *Reader) readPageHeaderContext(ctx context.Context, page Page) (PageCont
 	}
 	defer f.Close()
 	var content PageContent
-	d := xml.NewDecoder(imageInput{ReadCloser: f, context: ctx})
+	d := xml.NewDecoder(imageInput{ReadCloser: f, ctx: ctx})
 	var root xml.Name
 scan:
 	for {
@@ -1239,7 +1239,7 @@ func (r *Reader) readDocumentPartContext(ctx context.Context, loc string, value 
 	if err != nil {
 		return "", err
 	}
-	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 	if err := decoder.Decode(value); err != nil {
 		return "", fmt.Errorf("failed to unmarshal %s: %w", path.Base(fullPath), err)
 	}

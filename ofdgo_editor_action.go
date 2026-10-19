@@ -66,10 +66,10 @@ func (e *Editor) SetDocumentActions(actions []Action) error {
 		return err
 	}
 	patch := editorXMLPatch{root.close, root.close, encoded}
-	context := root
+	ctx := root
 	if node := root.child("Actions"); node != nil {
 		patch.start, patch.end = node.start, node.end
-		context = node
+		ctx = node
 	} else {
 		for _, child := range root.children {
 			if child.matchesOFD(child.name.Local) && slices.Contains([]string{"VPreferences", "Bookmarks", "Annotations", "CustomTags", "Attachments", "Extensions"}, child.name.Local) {
@@ -78,7 +78,7 @@ func (e *Editor) SetDocumentActions(actions []Action) error {
 			}
 		}
 	}
-	patch.data, err = editorXMLGenerated(encoded, context.name.Space)
+	patch.data, err = editorXMLGenerated(encoded, ctx.name.Space)
 	if err != nil {
 		return err
 	}

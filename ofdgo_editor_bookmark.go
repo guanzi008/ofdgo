@@ -396,19 +396,19 @@ func editorBookmarkDefinition(data []byte, name string, next *Bookmark, add bool
 	}
 	container := root.child("Bookmarks")
 	if add {
-		context := container
-		if context == nil {
-			context = root
+		ctx := container
+		if ctx == nil {
+			ctx = root
 		}
 		attrs, err := next.Dest.attributes()
 		if err != nil {
 			return nil, err
 		}
-		dest, err := context.containerXML("Dest", attrs, nil)
+		dest, err := ctx.containerXML("Dest", attrs, nil)
 		if err != nil {
 			return nil, err
 		}
-		item, err := context.containerXML("Bookmark", ofdAttrs{{Name: xml.Name{Local: "Name"}, Value: next.Name}}, dest)
+		item, err := ctx.containerXML("Bookmark", ofdAttrs{{Name: xml.Name{Local: "Name"}, Value: next.Name}}, dest)
 		if err != nil {
 			return nil, err
 		}

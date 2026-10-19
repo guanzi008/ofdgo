@@ -49,7 +49,7 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 			}
 			return
 		}
-		reader, err := NewReader(bytes.NewReader(s.Data), int64(len(s.Data)))
+		reader, err := NewReader(&Input{reader: bytes.NewReader(s.Data), size: int64(len(s.Data))})
 		if err == nil {
 			defer reader.Close()
 			doc, err := reader.DocContext(pageContext)
@@ -114,7 +114,7 @@ func (r *Renderer) renderOFDStampImage(data []byte) image.Image {
 		r.renderError = err
 		return nil
 	}
-	reader, err := NewReader(bytes.NewReader(data), int64(len(data)))
+	reader, err := NewReader(&Input{reader: bytes.NewReader(data), size: int64(len(data))})
 	if err != nil {
 		r.renderError = err
 		return nil

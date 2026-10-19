@@ -344,7 +344,7 @@ func (r *Reader) invoiceData(ctx context.Context, location string) ([]byte, erro
 		return nil, err
 	}
 	defer stream.Close()
-	data, err := io.ReadAll(io.LimitReader(imageInput{ReadCloser: stream, context: ctx}, invoiceXMLLimit+1))
+	data, err := io.ReadAll(io.LimitReader(imageInput{ReadCloser: stream, ctx: ctx}, invoiceXMLLimit+1))
 	if err != nil {
 		return data, err
 	}

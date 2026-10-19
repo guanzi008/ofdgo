@@ -96,7 +96,7 @@ func pngColorProfile(ctx context.Context, data []byte) ([]byte, *pngColor, error
 		if err != nil {
 			return nil, nil, err
 		}
-		profile, err := io.ReadAll(io.LimitReader(contextInput{ReadCloser: reader, context: ctx}, profileLimit+1))
+		profile, err := io.ReadAll(io.LimitReader(contextInput{ReadCloser: reader, ctx: ctx}, profileLimit+1))
 		closeErr := reader.Close()
 		if err != nil {
 			return nil, nil, err

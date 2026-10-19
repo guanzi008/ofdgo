@@ -73,6 +73,6 @@ func (r *Renderer) renderSVG(page *PageContent, writer io.Writer, mode SVGMode) 
 		return SVGResources{}, fmt.Errorf("svg: %w", ErrBackendUnavailable)
 	}
 	var written int64
-	writer = convertWriter{context: r.outputContext(), writer: writer, count: &written}
+	writer = convertWriter{ctx: r.outputContext(), writer: writer, count: &written}
 	return r.backends.SVG.RenderSVG(r, page, writer, mode)
 }

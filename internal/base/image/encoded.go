@@ -139,7 +139,7 @@ func (img *EncodedImage) decodeContext(ctx context.Context, pending chan struct{
 		close(pending)
 		img.mu.Unlock()
 	}()
-	pixels, _, err := image.Decode(contextInput{ReadCloser: io.NopCloser(bytes.NewReader(img.data)), context: ctx})
+	pixels, _, err := image.Decode(contextInput{ReadCloser: io.NopCloser(bytes.NewReader(img.data)), ctx: ctx})
 	if err == nil && (img.format == "jpeg" || img.profile != nil) {
 		var profile *pdfgo.ColorSpace
 		if img.profile != nil {
@@ -184,7 +184,7 @@ func newEncodedImage(data []byte) (*EncodedImage, error) {
 // 入参: ctx 取消上下文, data 只读图片编码
 // 返回: *EncodedImage 惰性图片, error 头信息、格式或取消错误
 func newEncodedImageContext(ctx context.Context, data []byte) (*EncodedImage, error) {
-	config, format, err := image.DecodeConfig(contextInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), context: ctx})
+	config, format, err := image.DecodeConfig(contextInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 	if cancelErr := ctx.Err(); cancelErr != nil {
 		return nil, cancelErr
 	}

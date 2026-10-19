@@ -84,7 +84,7 @@ type signatureIDSequence uint64
 // 入参: data 最终包字节, options 签署选项
 // 返回: []byte 签署后的完整包, error 错误信息
 func SignPackage(data []byte, options SignatureWriteOptions) ([]byte, error) {
-	r, err := NewReader(bytes.NewReader(data), int64(len(data)), options.ReaderOptions...)
+	r, err := NewReader(&Input{reader: bytes.NewReader(data), size: int64(len(data))}, options.ReaderOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +109,7 @@ func SignEditorTo(writer io.Writer, editor *Editor, options SignatureWriteOption
 	if _, err := editor.writePlaintext(&plain); err != nil {
 		return 0, err
 	}
-	r, err := NewReader(bytes.NewReader(plain.Bytes()), int64(plain.Len()))
+	r, err := NewReader(&Input{reader: bytes.NewReader(plain.Bytes()), size: int64(plain.Len())})
 	if err != nil {
 		return 0, err
 	}
@@ -192,7 +192,7 @@ func signatureWriteOutput(r *Reader, options SignatureWriteOptions) ([]byte, err
 	if encryption != nil {
 		defer clear(data)
 		if options.progress != nil {
-			signed, err := NewReader(bytes.NewReader(data), int64(len(data)))
+			signed, err := NewReader(&Input{reader: bytes.NewReader(data), size: int64(len(data))})
 			if err != nil {
 				return nil, err
 			}
@@ -434,7 +434,7 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 	if err != nil {
 		return nil, err
 	}
-	check, err := NewReader(bytes.NewReader(output), int64(len(output)))
+	check, err := NewReader(&Input{reader: bytes.NewReader(output), size: int64(len(output))})
 	if err != nil {
 		return nil, err
 	}

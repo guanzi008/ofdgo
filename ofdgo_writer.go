@@ -85,7 +85,7 @@ func (e *Editor) Snapshot(ctx context.Context) (*Editor, error) {
 	if reader.Zip != nil {
 		var data bytes.Buffer
 		var count int64
-		archive := zip.NewWriter(convertWriter{context: ctx, writer: &data, count: &count})
+		archive := zip.NewWriter(convertWriter{ctx: ctx, writer: &data, count: &count})
 		for _, file := range reader.Zip.File {
 			if err := ctx.Err(); err != nil {
 				return nil, err
