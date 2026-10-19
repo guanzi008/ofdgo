@@ -2592,6 +2592,18 @@ button.outline-link:hover {
 	aspect-ratio: auto;
 }
 
+.page-list.grouped-pages .thumb-paper {
+	width: var(--thumb-paper-width);
+	height: var(--thumb-paper-height);
+	justify-self: center;
+	align-self: start;
+}
+
+.page-list.grouped-pages .page-list-item[data-pressed] .thumb-label,
+.page-list.grouped-pages .page-list-item[data-pressed] .thumb-size {
+	padding-right: 24px;
+}
+
 .page-list.virtual-pages .thumb-label {
 	line-height: 20px;
 }
@@ -3101,6 +3113,17 @@ button.outline-link:hover {
 
 .page-list-item.drop-before::before { top: -6px; }
 .page-list-item.drop-after::after { bottom: -6px; }
+
+.grouped-pages .page-list-item.drop-before::before,
+.grouped-pages .page-list-item.drop-after::after {
+	top: 0;
+	bottom: 0;
+	width: 2px;
+	height: auto;
+}
+
+.grouped-pages .page-list-item.drop-before::before { left: -5px; right: auto; }
+.grouped-pages .page-list-item.drop-after::after { right: -5px; left: auto; }
 
 .edit-line::before {
 	position: absolute;

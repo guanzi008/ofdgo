@@ -9863,7 +9863,7 @@ function scrollToPage(index) {
 	if (state.pageLayout > 1 && state.pageWindow) {
 		const view = state.pageWindow, start = pageGroupStart(index);
 		const size = pageGroupSize(start), gap = PAGE_LAYOUT_GAP;
-		const height = size.height * MM_TO_PX * state.scale + (size.rows - 1) * gap;
+		const height = size.height * MM_TO_PX * state.scale;
 		const whole = height <= el.viewerPanel.clientHeight - pageBlockSpace() * 2 + 1;
 		const space = state.fitMode === "height" && !state.continuous
 			? Math.max(pageBlockSpace(), (el.viewerPanel.clientHeight - height) / 2) : pageBlockSpace();
@@ -10030,28 +10030,29 @@ function pageGroupStart(index = state.pageIndex) {
 }
 
 function pageGroupSize(index = state.pageIndex) {
-	const start = pageGroupStart(index), rows = state.pageLayout === 4 ? 2 : 1;
-	const widths = [0, 0], heights = Array(rows).fill(0);
+	const start = pageGroupStart(index), widths = [0, 0];
+	let height = 0;
 	for (let offset = 0; offset < state.pageLayout; offset++) {
 		const page = state.doc.pages[start + offset];
 		if (!page) continue;
 		const size = pageViewSize(page);
-		widths[offset % 2] = Math.max(widths[offset % 2], size.width);
-		heights[Math.floor(offset / 2)] = Math.max(heights[Math.floor(offset / 2)], size.height);
+		widths[offset] = size.width;
+		height = Math.max(height, size.height);
 	}
 	if (!widths[1]) widths[1] = widths[0];
-	for (let row = 0; row < rows; row++) if (!heights[row]) heights[row] = heights[0];
-	return { widths, heights, rows, width: widths[0] + widths[1], height: heights.reduce((sum, height) => sum + height, 0) };
+	return { widths, width: widths[0] + widths[1], height };
 }
 
 async function togglePageLayout() {
 	if (!state.doc || document.body.hasAttribute("data-busy")) return;
 	const openSeq = state.openSeq;
 	if (!await canvasEditor.commitNudge() || !await canvasEditor.commitText() || !await canvasEditor.commitCrop() || openSeq !== state.openSeq) return;
-	state.pageLayout = state.pageLayout === 1 ? 2 : state.pageLayout === 2 ? 4 : 1;
-	el.pageLayoutButton.textContent = { 1: "一页", 2: "两页", 4: "四页" }[state.pageLayout];
-	el.pageLayoutButton.dataset.short = { 1: "一", 2: "两", 4: "四" }[state.pageLayout];
+	state.pageLayout = state.pageLayout === 1 ? 2 : 1;
+	el.pageLayoutButton.textContent = state.pageLayout === 1 ? "一页" : "两页";
+	el.pageLayoutButton.dataset.short = state.pageLayout === 1 ? "一" : "两";
 	layoutPages();
+	layoutThumbnails();
+	if (state.showPages && !el.pageList.hidden) revealThumbnail(state.pageIndex);
 	fitHeight();
 	queueNearbyPages(state.pageIndex);
 }
@@ -10064,7 +10065,7 @@ function layoutPages() {
 	const view = state.pageWindow;
 	if (!view) return;
 	const anchor = view.offsets.length > 1 ? pageWindowAnchor(view) : { index: state.pageIndex, offset: 0 };
-	const gap = Math.max(state.pageLayout > 1 ? PAGE_LAYOUT_GAP : 0, Number.parseFloat(getComputedStyle(el.svgHost).rowGap) || 0);
+	const gap = state.continuous ? 0 : Math.max(state.pageLayout > 1 ? PAGE_LAYOUT_GAP : 0, Number.parseFloat(getComputedStyle(el.svgHost).rowGap) || 0);
 	if (state.pageLayout > 1) {
 		const count = state.doc.pages.length, spacing = PAGE_LAYOUT_GAP;
 		view.columns = 2;
@@ -10078,15 +10079,13 @@ function layoutPages() {
 			const groupWidth = size.width * factor + spacing;
 			groups.push({ start, size, width: groupWidth });
 			width = Math.max(width, groupWidth);
-			for (let row = 0; row < size.rows; row++) {
-				for (let column = 0; column < 2; column++) {
-					const index = start + row * 2 + column;
-					if (index >= count) break;
-					view.offsets[index] = top;
-					view.heights[index] = pageViewSize(state.doc.pages[index]).height * factor;
-				}
-				top += size.heights[row] * factor + (row + 1 === size.rows ? gap : spacing);
+			for (let column = 0; column < 2; column++) {
+				const index = start + column;
+				if (index >= count) break;
+				view.offsets[index] = top;
+				view.heights[index] = pageViewSize(state.doc.pages[index]).height * factor;
 			}
+			top += size.height * factor + gap;
 		}
 		for (const group of groups) {
 			for (let index = group.start; index < Math.min(count, group.start + state.pageLayout); index++) {
@@ -10786,7 +10785,8 @@ el.pageList.addEventListener("keydown", event => {
 	const button = event.target?.closest(".page-list-item");
 	if (state.thumbnailWindow && button && !event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing) {
 		const index = Number(button.dataset.pageIndex);
-		const next = { ArrowUp: index - 1, ArrowDown: index + 1, Home: 0, End: state.doc.pageCount - 1,
+		const columns = state.pageLayout > 1 ? 2 : 1;
+		const next = { ArrowUp: index - columns, ArrowDown: index + columns, ArrowLeft: index - 1, ArrowRight: index + 1, Home: 0, End: state.doc.pageCount - 1,
 			Tab: index + (event.shiftKey ? -1 : 1) }[event.key];
 		if (next >= 0 && next < state.doc.pageCount) {
 			event.preventDefault();
@@ -10853,7 +10853,6 @@ function createThumbnail(page) {
 	button.append(thumb, label, size);
 	if (state.editing && pageCan("move", page.index)) enablePageDrag(button, page.index);
 	button.addEventListener("click", event => selectThumbnailPage(event, page.index));
-	button.style.height = `${state.thumbnailWindow.offsets[page.index + 1] - state.thumbnailWindow.offsets[page.index] - 12}px`;
 	return button;
 }
 
@@ -10872,18 +10871,42 @@ function layoutThumbnails() {
 	const width = el.navigationContent.clientWidth || view.width || 180;
 	view.width = width;
 	view.rotation = state.rotation;
+	view.layout = state.pageLayout;
+	view.host.classList.toggle("grouped-pages", state.pageLayout > 1);
 	const offsets = new Float64Array(state.doc.pages.length + 1);
-	for (let index = 0; index < state.doc.pages.length; index++) {
-		const size = pageViewSize(state.doc.pages[index]);
-		const ratio = size.width > 0 && size.height > 0 ? size.height / size.width : 1 / 0.707;
-		offsets[index + 1] = offsets[index] + Math.max(1, width - 20) * ratio + 70 + 12;
+	view.heights = new Float64Array(state.doc.pages.length);
+	view.lefts = state.pageLayout > 1 ? new Float64Array(state.doc.pages.length) : null;
+	view.scales = state.pageLayout > 1 ? new Float64Array(state.doc.pages.length) : null;
+	view.columns = state.pageLayout > 1 ? state.pageLayout : 0;
+	view.itemWidth = state.pageLayout > 1 ? Math.max(1, (width - 8) / 2) : width;
+	let top = 0;
+	for (let start = 0; start < state.doc.pages.length; start += state.pageLayout) {
+		if (state.pageLayout === 1) {
+			const size = pageViewSize(state.doc.pages[start]);
+			const ratio = size.width > 0 && size.height > 0 ? size.height / size.width : 1 / 0.707;
+			view.heights[start] = Math.max(1, width - 20) * ratio + 70;
+			offsets[start] = top;
+			top += view.heights[start] + 12;
+			continue;
+		}
+		const group = pageGroupSize(start), scale = Math.max(1, view.itemWidth - 20) / Math.max(...group.widths);
+		const height = group.height * scale + 70;
+		for (let column = 0; column < 2; column++) {
+			const index = start + column;
+			if (index >= state.doc.pages.length) break;
+			offsets[index] = top;
+			view.heights[index] = height;
+			view.lefts[index] = column * (view.itemWidth + 8);
+			view.scales[index] = scale;
+		}
+		top += height + 20;
 	}
+	offsets[state.doc.pages.length] = top;
 	view.offsets = offsets;
 	view.gap = 12;
 	view.total = Math.ceil(offsets.at(-1));
 	for (const [index, button] of view.nodes) {
 		layoutThumbnail(button, state.doc.pages[index]);
-		button.style.height = `${offsets[index + 1] - offsets[index] - 12}px`;
 	}
 	view.pendingTop = offsets[anchor.index] + anchor.offset;
 	view.host.style.height = `${Math.min(SCROLL_SEGMENT_SIZE, view.total)}px`;
@@ -10896,7 +10919,7 @@ function layoutThumbnails() {
 function syncThumbnailWindow() {
 	const view = state.thumbnailWindow;
 	if (!view || el.pageList.hidden || !state.showPages) return;
-	if (el.navigationContent.clientWidth && (view.width !== el.navigationContent.clientWidth || view.rotation !== state.rotation)) layoutThumbnails();
+	if (el.navigationContent.clientWidth && (view.width !== el.navigationContent.clientWidth || view.rotation !== state.rotation || view.layout !== state.pageLayout)) layoutThumbnails();
 	syncPageWindow(view, view.pendingTop ?? null);
 	view.pendingTop = null;
 	prunePageRenderQueue();
@@ -10907,8 +10930,14 @@ function revealThumbnail(index) {
 	const view = state.thumbnailWindow;
 	if (!view) return;
 	const top = pageWindowTop(view);
-	const start = view.offsets[index], end = view.offsets[index + 1] - view.gap;
+	let start = view.offsets[index], end = start + view.heights[index];
 	if (start < top || end > top + el.navigationContent.clientHeight) {
+		const first = pageGroupStart(index), last = Math.min(state.doc.pageCount - 1, first + state.pageLayout - 1);
+		const groupEnd = view.offsets[last] + view.heights[last];
+		if (groupEnd - view.offsets[first] <= el.navigationContent.clientHeight) {
+			start = view.offsets[first];
+			end = groupEnd;
+		}
 		const target = start < top ? Math.floor(start) : Math.min(start, Math.ceil(end - el.navigationContent.clientHeight));
 		syncPageWindow(view, target);
 	}
@@ -10958,7 +10987,7 @@ function enablePageDrag(button, index) {
 			position = null;
 			const node = document.elementFromPoint(x, y)?.closest(".page-list-item");
 			if (!node || !el.pageList.contains(node)) return;
-			const rect = node.getBoundingClientRect(), after = y > rect.top + rect.height / 2;
+			const rect = node.getBoundingClientRect(), after = state.pageLayout > 1 ? x > rect.left + rect.width / 2 : y > rect.top + rect.height / 2;
 			const target = Number(node.dataset.pageIndex), to = pageDropIndex(indexes, target, after);
 			if (indexes.some((index, offset) => index !== to + offset)) {
 				position = target + Number(after);
@@ -11030,6 +11059,18 @@ function layoutThumbnail(button, page) {
 		return;
 	}
 	const size = pageViewSize(page);
+	const view = state.thumbnailWindow;
+	button.style.height = `${view.heights[page.index]}px`;
+	button.style.width = `${view.itemWidth}px`;
+	if (view.scales) {
+		button.style.setProperty("--thumb-paper-width", `${size.width * view.scales[page.index]}px`);
+		button.style.setProperty("--thumb-paper-height", `${size.height * view.scales[page.index]}px`);
+	} else {
+		button.style.removeProperty("left");
+		button.style.removeProperty("transform");
+		button.style.removeProperty("--thumb-paper-width");
+		button.style.removeProperty("--thumb-paper-height");
+	}
 	button.style.setProperty("--thumb-ratio", `${size.width} / ${size.height}`);
 	button.style.setProperty("--thumb-width", `${page.width / size.width * 100}%`);
 	button.style.setProperty("--thumb-height", `${page.height / size.height * 100}%`);
@@ -11946,7 +11987,10 @@ function setContinuous(continuous) {
 	el.continuousButton.setAttribute("data-pressed", String(state.continuous));
 }
 
-function toggleContinuous() {
+async function toggleContinuous() {
+	if (!state.doc || document.body.hasAttribute("data-busy")) return;
+	const openSeq = state.openSeq;
+	if (!await canvasEditor.commitNudge() || !await canvasEditor.commitText() || !await canvasEditor.commitCrop() || openSeq !== state.openSeq) return;
 	const anchor = state.fitMode === "free" ? scaleAnchor() : null;
 	setContinuous(!state.continuous);
 	if (state.pageWindow) {
@@ -12083,7 +12127,7 @@ function fitHeight(updateStatus = true) {
 	if (state.pageLayout > 1) {
 		const size = pageGroupSize(), space = pageSpace(), gap = PAGE_LAYOUT_GAP;
 		const width = Math.max(1, el.viewerPanel.clientWidth - space * 2 - gap - scrollbarWidth());
-		const height = Math.max(1, el.viewerPanel.clientHeight - space * 2 - (size.rows - 1) * gap);
+		const height = Math.max(1, el.viewerPanel.clientHeight - space * 2);
 		setScale(Math.min(width / (size.width * MM_TO_PX), height / (size.height * MM_TO_PX)), updateStatus, "height");
 		if (updateStatus) scrollToPage(state.pageIndex);
 		return;
@@ -12144,7 +12188,7 @@ function setScale(nextScale, updateStatus = true, fitMode = "free") {
 		layoutPages();
 	}
 	updateFitSpace();
-	const gap = Math.max(state.pageLayout > 1 ? PAGE_LAYOUT_GAP : 0, Number.parseFloat(getComputedStyle(el.svgHost).rowGap) || 0);
+	const gap = state.continuous ? 0 : Math.max(state.pageLayout > 1 ? PAGE_LAYOUT_GAP : 0, Number.parseFloat(getComputedStyle(el.svgHost).rowGap) || 0);
 	if (state.pageWindow && state.pageWindow.gap !== gap) layoutPages();
 	if (layoutChanged) {
 		restoreScaleAnchor(anchor);
@@ -12236,7 +12280,7 @@ function updateFitSpace() {
 	}
 	const shell = pageShell(state.pageIndex);
 	const group = state.pageLayout > 1 ? pageGroupSize() : null;
-	const height = group ? group.height * MM_TO_PX * state.scale + (group.rows - 1) * PAGE_LAYOUT_GAP
+	const height = group ? group.height * MM_TO_PX * state.scale
 		: shell ? shell.getBoundingClientRect().height : Math.max(1, pageViewSize(page).height * MM_TO_PX * state.scale);
 	const base = pageSpace();
 	el.viewerPanel.classList.toggle("single-page-fits-height", state.doc.pageCount === 1 && height <= el.viewerPanel.clientHeight - base * 2);
