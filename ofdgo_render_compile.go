@@ -16,10 +16,15 @@ package ofdgo
 
 import (
 	"fmt"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
+	"image/color"
 	"math"
 	"strconv"
+
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
+
+// OFDCompiler 使用库自有页面语义，字体和几何操作交给当前后端配置
+type OFDCompiler struct{}
 
 // semanticCompiler 将公共页面语义编译为路径和原始图片，绘制、搜索和度量共享定位
 type semanticCompiler struct {
@@ -497,4 +502,79 @@ func (c *semanticCompiler) fillPattern(clip GeometryPath, pattern *PatternPaint,
 		}
 	}
 	return nil
+}
+
+// Name 返回页面编译器标识
+// 返回: string 编译器标识
+func (OFDCompiler) Name() string { return "ofd" }
+
+// CompilePage 使用公共OFD语义和配置的字形、几何能力编译页面
+// 入参: r 渲染器, page 页面
+// 返回: *RasterPage 绘制页面, error 编译错误
+func (OFDCompiler) CompilePage(r *Renderer, page *PageContent) (*RasterPage, error) {
+	box, err := r.GetPageBox(page)
+	if err != nil {
+		return nil, err
+	}
+	c, err := newSemanticCompiler(r)
+	if err != nil {
+		return nil, err
+	}
+	c.page = &RasterPage{Width: box.W, Height: box.H, DPI: r.DPI}
+	if _, _, err := c.page.PixelSize(); err != nil {
+		return nil, err
+	}
+	if !r.TransparentBackground {
+		if err := c.fill(GeometryPath(basegeom.Rectangle(Box{W: box.W, H: box.H})), Paint{Kind: PaintSolid, Color: color.RGBA{255, 255, 255, 255}}, false, nil, IdentityMatrix, IdentityMatrix); err != nil {
+			return nil, err
+		}
+	}
+	if err := r.WalkPage(page, c); err != nil {
+		return nil, err
+	}
+	if r.OnPageText != nil {
+		r.OnPageText(page, &c.text)
+	}
+	return c.page, nil
+}
+
+// PageText 提取与页面绘制相同定位的原文，不读取图片像素
+// 入参: r 渲染器, page 页面
+// 返回: *PageText 页面文字, error 定位错误
+func (OFDCompiler) PageText(r *Renderer, page *PageContent) (*PageText, error) {
+	if _, err := r.GetPageBox(page); err != nil {
+		return nil, err
+	}
+	c, err := newSemanticCompiler(r)
+	if err != nil {
+		return nil, err
+	}
+	c.textOnly = true
+	if err := r.WalkPage(page, c); err != nil {
+		return nil, err
+	}
+	return &c.text, nil
+}
+
+// MeasureObject 复用文字和图形编译规则收集范围，不分配页面像素
+// 入参: r 渲染器, object 对象, options 度量上下文
+// 返回: ObjectMeasurement 对象范围与轮廓, error 度量错误
+func (OFDCompiler) MeasureObject(r *Renderer, object GraphicObject, options MeasureOptions) (ObjectMeasurement, error) {
+	c, err := newSemanticCompiler(r)
+	if err != nil {
+		return ObjectMeasurement{}, err
+	}
+	boundary, ctm := editorGeometry(object)
+	if _, err := creationBox(boundary); err != nil {
+		return ObjectMeasurement{}, err
+	}
+	if ctm != "" {
+		if _, err := creationNumbers(ctm, 6); err != nil {
+			return ObjectMeasurement{}, err
+		}
+	}
+	c.measure = true
+	c.contours = options.Contours
+	err = r.WalkObject(&object, RenderState{Defaults: options.Defaults, Parent: options.Parent, BoundaryInCTM: options.BoundaryInCTM, Clip: options.Clip}, c)
+	return c.measurement, err
 }

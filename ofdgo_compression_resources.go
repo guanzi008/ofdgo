@@ -35,6 +35,12 @@ type outputImageKey struct {
 	size    image.Point
 }
 
+// editorProfileReference 记录颜色配置文件所在的资源索引及颜色空间标识
+type editorProfileReference struct {
+	index string
+	id    string
+}
+
 // compressResourceParts 优化输出图片并合并相同资源文件，保留资源标识及各自属性
 // 入参: parts 输出改动, reader 原包，可为空, removed 已移除条目
 // 返回: error 读取或取消错误
@@ -469,4 +475,201 @@ func outputResourceDigest(ctx context.Context, reader *Reader, parts map[string]
 		return [32]byte{}, closeErr
 	}
 	return [32]byte(hash.Sum(nil)), ctx.Err()
+}
+
+// compressionFontUsage 按文档合并共享字体用字，版本编辑仅统计选中入口
+// 入参: ctx 取消上下文, documents 文档入口, resources 资源索引, references 各文件引用, read 输出文件读取方法
+// 返回: map[string]*editorFontUsage 各字体文件的用字，无法确定作用域时为空, error 读取或取消错误
+func (r *Reader) compressionFontUsage(ctx context.Context, documents map[string]bool, resources []string, references map[string]*editorResourceRefs, read func(string) ([]byte, error)) (map[string]*editorFontUsage, error) {
+	selected := ""
+	if r.OFD.DocBody[r.documentIndex].versioned {
+		var err error
+		selected, err = r.DocumentRootContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	scoped, err := resourceReferenceScopes(ctx, documents, resources, references, selected)
+	if err != nil || scoped == nil {
+		return nil, err
+	}
+	return resourceFontUsage(ctx, resources, scoped, read)
+}
+
+// resourceFontUsage 按已确认的文档作用域合并各字体文件的字符和字形引用
+// 入参: ctx 取消上下文, resources 资源索引, scoped 各索引的用字范围, read 输出文件读取方法
+// 返回: map[string]*editorFontUsage 各字体文件的用字, error 读取或取消错误
+func resourceFontUsage(ctx context.Context, resources []string, scoped map[string]*editorResourceRefs, read func(string) ([]byte, error)) (map[string]*editorFontUsage, error) {
+	result := make(map[string]*editorFontUsage)
+	protected := make(map[string]bool)
+	for _, name := range resources {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		refs := scoped[name]
+		if refs == nil {
+			continue
+		}
+		data, err := read(name)
+		if err != nil {
+			return nil, err
+		}
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			return nil, err
+		}
+		for font := range editorResourceNodes(root, "Fonts", "Font") {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			file := font.child("FontFile")
+			if file == nil {
+				continue
+			}
+			var value string
+			if err := xml.Unmarshal(data[file.start:file.end], &value); err != nil {
+				return nil, err
+			}
+			location := editorResourceLocation(name, root.attr("BaseLoc"), value)
+			alternate := cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))
+			id, charset := editorResourceID(font.attr("ID")), font.attr("Charset")
+			unsafe := id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != alternate
+			for i, path := range [2]string{location, alternate} {
+				if i == 1 && path == location {
+					continue
+				}
+				if result[path] == nil {
+					result[path] = newEditorFontUsage()
+				}
+				result[path].merge(refs.fonts[id], unsafe)
+			}
+		}
+		for media := range editorResourceNodes(root, "MultiMedias", "MultiMedia") {
+			file := media.child("MediaFile")
+			if file == nil {
+				continue
+			}
+			var value string
+			if err := xml.Unmarshal(data[file.start:file.end], &value); err != nil {
+				return nil, err
+			}
+			for _, location := range []string{editorResourceLocation(name, root.attr("BaseLoc"), value), cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))} {
+				protected[location] = true
+			}
+		}
+	}
+	for location := range protected {
+		if usage := result[location]; usage != nil {
+			usage.unsafe = true
+		}
+	}
+	return result, ctx.Err()
+}
+
+// compactResourceProfiles 合并相同颜色配置文件，保留颜色空间声明和独立文件引用
+// 入参: ctx 取消上下文, reader 原包，可为空, parts 输出改动, profiles 配置文件引用, protected 不可替换的文件, removed 待移除文件
+// 返回: error 读取、改写或取消错误
+func compactResourceProfiles(ctx context.Context, reader *Reader, parts map[string][]byte, profiles map[string][]editorProfileReference, protected, removed map[string]bool) error {
+	if len(profiles) < 2 {
+		return ctx.Err()
+	}
+	seen := make(map[[32]byte]string)
+	aliases := make(map[string]string)
+	indexes := make(map[string]map[string]string)
+	ordered := slices.Sorted(maps.Keys(profiles))
+	sizes := make(map[string]uint64, len(profiles))
+	counts := make(map[uint64]int)
+	for _, name := range ordered {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if protected[name] {
+			continue
+		}
+		size, err := outputResourceSize(reader, parts, name)
+		if err != nil {
+			return err
+		}
+		sizes[name] = size
+		counts[size]++
+	}
+	var buffer []byte
+	for _, name := range ordered {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if protected[name] || counts[sizes[name]] < 2 {
+			continue
+		}
+		if buffer == nil {
+			buffer = make([]byte, 32*1024)
+		}
+		key, err := outputResourceDigest(ctx, reader, parts, name, buffer)
+		if err != nil {
+			return err
+		}
+		first, found := seen[key]
+		if !found {
+			seen[key] = name
+			continue
+		}
+		aliases[name] = first
+		for _, reference := range profiles[name] {
+			if indexes[reference.index] == nil {
+				indexes[reference.index] = make(map[string]string)
+			}
+			indexes[reference.index][reference.id] = first
+		}
+	}
+	updates := make(map[string][]byte, len(indexes))
+	for _, name := range slices.Sorted(maps.Keys(indexes)) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		data, ok := parts[name]
+		if !ok {
+			if reader == nil {
+				return fmt.Errorf("file not found: %s", name)
+			}
+			var err error
+			data, err = reader.readFileViewContext(ctx, name)
+			if err != nil {
+				return err
+			}
+		}
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			return err
+		}
+		var patches []editorXMLPatch
+		for _, group := range root.children {
+			if !group.matchesOFD("ColorSpaces") {
+				continue
+			}
+			for _, node := range group.children {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				location := indexes[name][editorResourceID(node.attr("ID"))]
+				if !node.matchesOFD("ColorSpace") || location == "" {
+					continue
+				}
+				patch, err := editorXMLAttributePatch(data, node, "Profile", "/"+location)
+				if err != nil {
+					return err
+				}
+				patches = append(patches, patch)
+			}
+		}
+		updates[name] = editorPatchXML(data, patches)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	maps.Copy(parts, updates)
+	for name := range aliases {
+		removed[name] = true
+		delete(parts, name)
+	}
+	return nil
 }

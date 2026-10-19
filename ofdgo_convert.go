@@ -15,11 +15,17 @@
 package ofdgo
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -82,6 +88,26 @@ type ConvertReport struct {
 	Fonts     []FontChange    `json:"fonts,omitempty"`
 }
 
+// ConversionPoolOptions 设置共享转换并行度及图像工作集预算
+// Parallelism为0时使用GOMAXPROCS，MemoryLimit为0时不指定固定预算
+// AvailableMemory返回可用于新增任务的字节数，nil表示不探测，回调须支持并发调用
+// 内存预算用于调度，不限制解析器及运行时的实际分配
+type ConversionPoolOptions struct {
+	Parallelism     int
+	MemoryLimit     int64
+	AvailableMemory func() int64
+}
+
+// ConversionPool 协调独立转换和图像任务，配置在创建后不变，可跨会话复用
+type ConversionPool struct {
+	options ConversionPoolOptions
+	mu      sync.Mutex
+	changed chan struct{}
+	active  int
+	images  int
+	memory  int64
+}
+
 // convertReader 将取消上下文传递到随机读取
 type convertReader struct {
 	ctx   context.Context
@@ -94,6 +120,9 @@ type convertWriter struct {
 	writer io.Writer
 	count  *int64
 }
+
+// conversionPoolKey 标识单次转换使用的共享预算
+type conversionPoolKey struct{}
 
 // OutputFormats 返回独立的输出格式列表，不依赖WebUI或具体渲染后端
 // 返回: []OutputFormat 输出格式列表
@@ -411,4 +440,159 @@ func (w convertWriter) WriteString(data string) (int, error) {
 		err = w.ctx.Err()
 	}
 	return n, err
+}
+
+// DetectFormat 按文件内容识别PDF或OFD，不读取压缩内容或关闭输入
+// 识别结果不代表文档完整有效，仍需通过对应阅读器解析
+// 入参: input 输入源
+// 返回: string 格式标识pdf或ofd, error 读取错误或不支持的格式
+func DetectFormat(input *Input) (string, error) {
+	if input == nil || input.Size() <= 0 {
+		return "", fmt.Errorf("empty document input")
+	}
+	size := input.Size()
+	var header [1024]byte
+	data := header[:min(size, int64(len(header)))]
+	n, err := input.ReadAt(data, 0)
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	if n != len(data) {
+		return "", io.ErrUnexpectedEOF
+	}
+	if bytes.HasPrefix(data, []byte("%PDF-")) {
+		return "pdf", nil
+	}
+	archive, err := zip.NewReader(input, size)
+	if err == nil {
+		reader := &Reader{Zip: archive}
+		if err := reader.indexPackage(); err != nil {
+			return "", err
+		}
+		if reader.fileNames["OFD.xml"] || reader.fileNames["Encryptions.xml"] {
+			return "ofd", nil
+		}
+	} else {
+		if !errors.Is(err, zip.ErrFormat) {
+			return "", err
+		}
+		if bytes.Contains(data, []byte("%PDF-")) {
+			return "pdf", nil
+		}
+	}
+	return "", fmt.Errorf("unsupported input format")
+}
+
+// NewConversionPool 创建共享转换调度器，不启动后台任务
+// 入参: options 并行及内存选项
+// 返回: *ConversionPool 调度器, error 配置错误
+func NewConversionPool(options ConversionPoolOptions) (*ConversionPool, error) {
+	if options.Parallelism < 0 || options.MemoryLimit < 0 {
+		return nil, fmt.Errorf("invalid conversion pool options")
+	}
+	if options.Parallelism == 0 {
+		options.Parallelism = runtime.GOMAXPROCS(0)
+	}
+	return &ConversionPool{options: options, changed: make(chan struct{})}, nil
+}
+
+// Parallelism 返回同时运行的转换数量上限
+// 返回: int 并行上限
+func (p *ConversionPool) Parallelism() int { return p.options.Parallelism }
+
+// memoryLimit 读取当前可分配的图像工作量预算
+// 返回: int64 可用字节数，负值表示未设置预算
+func (p *ConversionPool) memoryLimit() int64 {
+	limit := int64(-1)
+	if p.options.MemoryLimit > 0 {
+		limit = p.options.MemoryLimit
+	}
+	if p.options.AvailableMemory != nil {
+		available := max(0, p.options.AvailableMemory())
+		if limit < 0 || available < limit {
+			limit = available
+		}
+	}
+	return limit
+}
+
+// acquire 等待转换或图像预算，超预算图像可独占运行
+// 入参: ctx 取消上下文, image 是否为图像任务, size 图像工作量
+// 返回: error 取消错误
+func (p *ConversionPool) acquire(ctx context.Context, image bool, size int64) error {
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		limit := p.memoryLimit()
+		p.mu.Lock()
+		allowed := p.active < p.options.Parallelism && (p.active == 0 || limit != 0)
+		if image {
+			allowed = p.images < runtime.GOMAXPROCS(0) && (p.images == 0 || limit < 0 || size <= limit-p.memory)
+		}
+		if allowed {
+			if image {
+				p.images++
+				p.memory += size
+			} else {
+				p.active++
+			}
+			p.mu.Unlock()
+			return nil
+		}
+		changed := p.changed
+		p.mu.Unlock()
+		var tick <-chan time.Time
+		if p.options.AvailableMemory != nil {
+			if timer == nil {
+				timer = time.NewTimer(250 * time.Millisecond)
+			} else {
+				timer.Reset(250 * time.Millisecond)
+			}
+			tick = timer.C
+		}
+		select {
+		case <-ctx.Done():
+		case <-changed:
+		case <-tick:
+		}
+		if timer != nil {
+			timer.Stop()
+		}
+	}
+}
+
+// release 归还任务预算并唤醒等待者
+// 入参: image 是否为图像任务, size 图像工作量
+func (p *ConversionPool) release(image bool, size int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if image {
+		p.images--
+		p.memory -= size
+	} else {
+		p.active--
+	}
+	close(p.changed)
+	p.changed = make(chan struct{})
+}
+
+// conversionWorkers 按当前文件数量分配内部计算任务
+// 入参: ctx 转换上下文, fallback 非共享模式并行上限
+// 返回: int 内部并行数
+func conversionWorkers(ctx context.Context, fallback int) int {
+	p, _ := ctx.Value(conversionPoolKey{}).(*ConversionPool)
+	if p == nil {
+		return min(fallback, runtime.GOMAXPROCS(0))
+	}
+	p.mu.Lock()
+	active := p.active
+	p.mu.Unlock()
+	return max(1, runtime.GOMAXPROCS(0)/max(1, active))
 }

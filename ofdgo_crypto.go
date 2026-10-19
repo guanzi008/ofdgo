@@ -18,14 +18,7 @@ import (
 	"bytes"
 	"crypto"
 	"errors"
-)
-
-// 加密错误可通过errors.Is识别，不包含口令或私钥
-var (
-	ErrCredentialsRequired      = errors.New("document credentials required")
-	ErrInvalidCredentials       = errors.New("invalid credentials or damaged encrypted document")
-	ErrUnsupportedEncryption    = errors.New("unsupported document encryption")
-	ErrEncryptionPolicyRequired = errors.New("explicit encryption policy required")
+	"io"
 )
 
 // Credentials 解密凭据，UserName用于筛选接收者，留空自动匹配，不参与口令派生；证书采用DER编码
@@ -50,12 +43,6 @@ type CryptoProvider interface {
 
 // ReaderOption 阅读器的凭据与密码提供者选项
 type ReaderOption func(*readerOptions)
-
-// readerOptions 保存打开文档时的会话参数
-type readerOptions struct {
-	credentials []Credentials
-	provider    CryptoProvider
-}
 
 // EncryptionRecipient 证书加密接收者，Certificate为SM2公钥证书的DER编码
 type EncryptionRecipient struct {
@@ -85,11 +72,25 @@ type EncryptionInfo struct {
 	PolicyRequired bool
 }
 
+// readerOptions 保存打开文档时的会话参数
+type readerOptions struct {
+	credentials []Credentials
+	provider    CryptoProvider
+}
+
 // encryptionState 保存解密来源与可继承的输出策略
 type encryptionState struct {
 	info    EncryptionInfo
 	options *EncryptionOptions
 }
+
+// 加密错误可通过errors.Is识别，不包含口令或私钥
+var (
+	ErrCredentialsRequired      = errors.New("document credentials required")
+	ErrInvalidCredentials       = errors.New("invalid credentials or damaged encrypted document")
+	ErrUnsupportedEncryption    = errors.New("unsupported document encryption")
+	ErrEncryptionPolicyRequired = errors.New("explicit encryption policy required")
+)
 
 // WithCredentials 添加解密凭据，多次调用可解开多层加密
 // 入参: credentials 解密凭据
@@ -144,4 +145,70 @@ func cloneEncryptionOptions(options *EncryptionOptions) *EncryptionOptions {
 		copy.Recipients[i].Certificate = bytes.Clone(copy.Recipients[i].Certificate)
 	}
 	return &copy
+}
+
+// Encryption 获取当前保存策略，不暴露口令或私钥
+// 返回: EncryptionInfo 加密状态
+func (e *Editor) Encryption() EncryptionInfo {
+	return e.encryption.summary()
+}
+
+// SetEncryption 设置后续保存的加密策略，nil显式选择明文保存
+// 打开单用户口令或证书加密文档时默认继承原策略；多人口令和多层加密需显式选择输出策略
+// 新的加密密钥与初始向量在每次保存时独立生成，设置不改变文档内容或撤销历史
+// 入参: options 加密策略
+// 返回: error 错误信息
+func (e *Editor) SetEncryption(options *EncryptionOptions) error {
+	if options == nil {
+		e.encryption = nil
+		return nil
+	}
+	if err := validateEncryptionOptions(*options); err != nil {
+		return err
+	}
+	info := EncryptionInfo{Encrypted: true, Method: "1.1.1", Layers: 1}
+	if len(options.Password) != 0 {
+		info.Users = []string{options.UserName}
+	} else {
+		info.Method = "1.1.2"
+		for _, recipient := range options.Recipients {
+			info.Users = append(info.Users, recipient.UserName)
+		}
+	}
+	e.encryption = &encryptionState{info: info, options: cloneEncryptionOptions(options)}
+	return nil
+}
+
+// writeEncrypted 在全部准备及加密成功后写出结果，取消不产生输出
+// 输出流自身写入失败时调用方仍需丢弃本次输出
+// 入参: writer 输出流
+// 返回: int64 写入字节数, error 错误信息
+func (e *Editor) writeEncrypted(writer io.Writer) (int64, error) {
+	if e.encryption.options == nil {
+		return 0, ErrEncryptionPolicyRequired
+	}
+	var plaintext bytes.Buffer
+	if _, err := e.writePlaintext(&plaintext); err != nil {
+		return 0, err
+	}
+	defer clear(plaintext.Bytes())
+	r, err := NewReader(&Input{reader: bytes.NewReader(plaintext.Bytes()), size: int64(plaintext.Len())})
+	if err != nil {
+		return 0, err
+	}
+	defer r.Close()
+	parts, err := r.packageData()
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		for _, data := range parts {
+			clear(data)
+		}
+	}()
+	data, err := encryptPackageParts(parts, *e.encryption.options, editorProgress(e.OnWriteProgress))
+	if err != nil {
+		return 0, err
+	}
+	return io.Copy(writer, bytes.NewReader(data))
 }
