@@ -18,6 +18,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -48,6 +49,7 @@ type Reader struct {
 	drawParamCache            map[string]*DrawParam
 	compositeGraphicUnitCache map[string]*CompositeGraphicUnit
 	pageHeaderCache           map[string]PageContent
+	pageContents              *renderCache[pageContentKey, PageContent]
 	doc                       *Document
 	relatedPending            bool
 	documentIndex             int
@@ -61,6 +63,12 @@ type Reader struct {
 	files                     map[string][]byte
 	fileNames                 map[string]bool
 	encryption                *encryptionState
+}
+
+// pageContentKey 按页面原文及解析模式区分缓存，不包含文档资源和区域继承
+type pageContentKey struct {
+	digest   [32]byte
+	textOnly bool
 }
 
 // documentPageList 仅读取文档中的页面索引，统计页数时不构建其他结构
@@ -103,6 +111,9 @@ func (r *Reader) Close() error {
 func (r *Reader) Fork(ctx context.Context) (*Reader, error) {
 	if _, err := r.DocContext(ctx); err != nil {
 		return nil, err
+	}
+	if r.pageContents == nil {
+		r.pageContents = &renderCache[pageContentKey, PageContent]{limit: 16 << 20}
 	}
 	next := *r
 	next.Closer = nil
@@ -768,6 +779,9 @@ func (r *Reader) initRootContext(ctx context.Context) error {
 		return err
 	}
 	r.fileIndex, r.fileNames = view.fileIndex, view.fileNames
+	if r.pageContents == nil {
+		r.pageContents = &renderCache[pageContentKey, PageContent]{limit: 16 << 20}
+	}
 	r.OFD = &ofd
 	r.doc, r.versionInfo = nil, nil
 	r.documentRoot, r.RootDir = "", ""
@@ -1085,12 +1099,21 @@ func (r *Reader) readPageContent(ctx context.Context, page Page, textOnly, templ
 	if err != nil {
 		return nil, err
 	}
+	if r.pageContents == nil {
+		r.pageContents = &renderCache[pageContentKey, PageContent]{limit: 16 << 20}
+	}
 	var content PageContent
-	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
-	if textOnly {
-		err = xml.NewTokenDecoder(&textPageTokens{Decoder: decoder}).Decode(&content)
+	if len(data) > (r.pageContents.limit/4-4096)/16 {
+		content, err = decodePageContent(ctx, data, textOnly)
 	} else {
-		err = decoder.Decode(&content)
+		var parsed PageContent
+		parsed, err = r.pageContents.load(ctx, pageContentKey{sha256.Sum256(data), textOnly}, func() (PageContent, int, error) {
+			content, err := decodePageContent(ctx, data, textOnly)
+			return content, len(data)*16 + 4096, err
+		})
+		if err == nil {
+			content = cloneEditorData(parsed)
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal page content: %w", err)
@@ -1112,6 +1135,21 @@ func (r *Reader) readPageContent(ctx context.Context, page Page, textOnly, templ
 		return nil, err
 	}
 	return &content, nil
+}
+
+// decodePageContent 解析未应用页面资源和区域继承的原始内容
+// 入参: ctx 取消上下文, data 页面XML, textOnly 是否仅读取文字
+// 返回: PageContent 页面内容, error 解析错误
+func decodePageContent(ctx context.Context, data []byte, textOnly bool) (PageContent, error) {
+	var content PageContent
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
+	var err error
+	if textOnly {
+		err = xml.NewTokenDecoder(&textPageTokens{Decoder: decoder}).Decode(&content)
+	} else {
+		err = decoder.Decode(&content)
+	}
+	return content, err
 }
 
 // loadPageResources 加载页面资源，不解析图元

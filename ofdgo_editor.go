@@ -74,6 +74,7 @@ type Editor struct {
 	encryption       *encryptionState
 	output           *outputOptimization
 	saveTarget       Output
+	snapshotArchive  *editorSnapshotArchive
 	validatedPaths   *renderCache[string, bool]
 	richIndex        *richTextIndex
 }

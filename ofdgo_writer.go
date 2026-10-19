@@ -30,9 +30,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"weak"
 
 	basefile "github.com/xiaoqidun/ofdgo/internal/base/file"
 )
+
+// editorSnapshotArchiveLimit 限制编辑器常驻的快照压缩包字节数
+const editorSnapshotArchiveLimit = 32 << 20
 
 // ErrSaveTarget 表示编辑器尚未绑定保存目标
 var ErrSaveTarget = errors.New("save target is not set")
@@ -65,6 +69,13 @@ type fileOutput struct {
 	target *basefile.Target
 }
 
+// editorSnapshotArchive 复用独立压缩包，超预算时仅在已有快照存活期间共享
+type editorSnapshotArchive struct {
+	files    []*zip.File
+	archive  weak.Pointer[zip.Reader]
+	retained *zip.Reader
+}
+
 // editorProgress 编辑与保存阶段的进度回调，nil表示不回报进度
 type editorProgress func(stage string, completed, total int) error
 
@@ -91,7 +102,7 @@ type ofdAttrs []xml.Attr
 // Snapshot 创建独立编辑快照，完成后可与原编辑器并行使用
 // 创建过程需与原实例串行，保留修订及保存目标，不复制撤销记录和进度回调
 // 保存目标与原实例共享，由输出实现协调并发事务及提交版本
-// 原包压缩数据直接复制，快照不依赖原阅读器及文件句柄，内存随快照释放
+// 原包压缩数据独立复制并在快照间复用，超预算数据随最后一个快照释放
 // 自定义后端及字体文件系统仍由调用方提供，需支持并行读取
 // 入参: ctx 取消上下文
 // 返回: *Editor 独立快照, error 准备或取消错误
@@ -106,21 +117,7 @@ func (e *Editor) Snapshot(ctx context.Context) (*Editor, error) {
 		next.encryption = &encryptionState{info: cloneEditorData(reader.encryption.info), options: cloneEncryptionOptions(reader.encryption.options)}
 	}
 	if reader.Zip != nil {
-		var data bytes.Buffer
-		var count int64
-		archive := zip.NewWriter(convertWriter{ctx: ctx, writer: &data, count: &count})
-		for _, file := range reader.Zip.File {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			if err := archive.Copy(file); err != nil {
-				return nil, err
-			}
-		}
-		if err := archive.Close(); err != nil {
-			return nil, err
-		}
-		next.Zip, err = zip.NewReader(bytes.NewReader(data.Bytes()), int64(data.Len()))
+		next.Zip, err = e.copySnapshotArchive(ctx, reader.Zip)
 		if err != nil {
 			return nil, err
 		}
@@ -141,6 +138,47 @@ func (e *Editor) Snapshot(ctx context.Context) (*Editor, error) {
 	snapshot.revision, snapshot.serial, snapshot.saveTarget = e.revision, e.serial, e.saveTarget
 	snapshot.backends, snapshot.fontDirs, snapshot.fontFS = e.backends, slices.Clone(e.fontDirs), slices.Clone(e.fontFS)
 	return snapshot, nil
+}
+
+// copySnapshotArchive 复用条目未变的独立压缩包，取消或失败不发布缓存
+// 入参: ctx 取消上下文, source 原压缩包
+// 返回: *zip.Reader 独立压缩包, error 复制错误
+func (e *Editor) copySnapshotArchive(ctx context.Context, source *zip.Reader) (*zip.Reader, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if cached := e.snapshotArchive; cached != nil && slices.Equal(cached.files, source.File) {
+		if archive := cached.archive.Value(); archive != nil {
+			return archive, nil
+		}
+	}
+	var data bytes.Buffer
+	var count int64
+	archive := zip.NewWriter(convertWriter{ctx: ctx, writer: &data, count: &count})
+	for _, file := range source.File {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := archive.Copy(file); err != nil {
+			return nil, err
+		}
+	}
+	if err := archive.Close(); err != nil {
+		return nil, err
+	}
+	reader, err := zip.NewReader(bytes.NewReader(data.Bytes()), int64(data.Len()))
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cached := &editorSnapshotArchive{files: slices.Clone(source.File), archive: weak.Make(reader)}
+	if data.Cap() <= editorSnapshotArchiveLimit {
+		cached.retained = reader
+	}
+	e.snapshotArchive = cached
+	return reader, nil
 }
 
 // NewFileOutput 创建本地保存目标并记录当前文件状态，不创建或修改文件

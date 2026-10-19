@@ -7,6 +7,7 @@ const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
 const DEFAULT_IMAGE_DPI = 300;
 const PAGE_CACHE_LIMIT = 16;
 const PAGE_CACHE_BYTES = 32 * 1024 * 1024;
+const svgFontBytes = new WeakMap();
 const PAGE_LAYOUT_GAP = 16;
 const SCROLL_SEGMENT_SIZE = 1000000;
 const OBJECT_CLIPBOARD_TYPE = "application/x-ofdgo-objects";
@@ -139,6 +140,8 @@ const state = {
 	documentSelection: null,
 	pageInFlight: new Map(),
 	pageRenderQueue: [],
+	pagePrefetchIndex: null,
+	pagePrefetchDirection: 1,
 	pageRenderRunning: false,
 	pageRenderWorkers: 0,
 	pageObserver: null,
@@ -8982,6 +8985,8 @@ function resetPageLoading() {
 		task.resolve(null);
 	}
 	state.pageRenderQueue = [];
+	state.pagePrefetchIndex = null;
+	state.pagePrefetchDirection = 1;
 	state.pageInFlight.clear();
 	resetThumbnails();
 	if (state.pageObserver) {
@@ -9209,17 +9214,21 @@ function trimPageCache() {
 	for (const task of state.pageInFlight.values()) {
 		protectedPages.add(task.index);
 	}
-	const references = new Map();
+	const references = new Map(), fontReferences = new Map();
 	let bytes = 0;
 	for (const page of state.pageCache.values()) {
 		bytes += page.cacheBytes;
 		for (const name of page.imageNames) {
 			references.set(name, (references.get(name) || 0) + 1);
 		}
+		for (const font of page.fonts || []) {
+			fontReferences.set(font.name, (fontReferences.get(font.name) || 0) + 1);
+		}
 	}
 	for (const image of state.svgImages.values()) {
 		bytes += image.size;
 	}
+	for (const face of state.svgFonts.values()) bytes += svgFontBytes.get(face) || 0;
 	const budget = nativeHost?.cacheBytes || PAGE_CACHE_BYTES;
 	for (const [index, page] of state.pageCache) {
 		if (state.pageCache.size <= PAGE_CACHE_LIMIT * Math.max(1, budget / PAGE_CACHE_BYTES) && bytes <= budget) {
@@ -9235,9 +9244,23 @@ function trimPageCache() {
 			references.set(name, count);
 			if (count === 0 && !state.pageInFlight.size) {
 				const image = state.svgImages.get(name);
-				bytes -= image.size;
-				URL.revokeObjectURL(image.url);
-				state.svgImages.delete(name);
+				if (image) {
+					bytes -= image.size;
+					URL.revokeObjectURL(image.url);
+					state.svgImages.delete(name);
+				}
+			}
+		}
+		for (const font of page.fonts || []) {
+			const count = fontReferences.get(font.name) - 1;
+			fontReferences.set(font.name, count);
+			if (count === 0 && !state.pageInFlight.size) {
+				const face = state.svgFonts.get(font.name);
+				if (face) {
+					bytes -= svgFontBytes.get(face) || 0;
+					document.fonts.delete(face);
+					state.svgFonts.delete(font.name);
+				}
 			}
 		}
 	}
@@ -9274,6 +9297,7 @@ async function loadSVGFont(font, openSeq) {
 		return;
 	}
 	document.fonts.add(face);
+	svgFontBytes.set(face, data.bytes.byteLength);
 	state.svgFonts.set(font.name, face);
 }
 
@@ -9889,10 +9913,22 @@ function markFlowPageError(index, err) {
 
 function queueNearbyPages(index, openSeq = state.openSeq) {
 	const start = pageGroupStart(index);
-	const before = nativeHost ? state.pageLayout : 1;
-	const after = nativeHost ? Math.max(1, Math.min(nativeHost.parallelism, state.pageLayout * 2)) : 1;
-	for (let i = Math.max(0, start - before); i <= Math.min((state.doc?.pageCount || 1) - 1, start + state.pageLayout + after); i += 1) {
-		renderFlowPage(i, { openSeq, priority: 2 });
+	if (state.pagePrefetchIndex !== null && start !== state.pagePrefetchIndex) state.pagePrefetchDirection = Math.sign(start - state.pagePrefetchIndex);
+	const direction = state.pagePrefetchDirection;
+	state.pagePrefetchIndex = start;
+	let bytes = 0;
+	for (const page of state.pageCache.values()) bytes += page.cacheBytes || 0;
+	for (const image of state.svgImages.values()) bytes += image.size;
+	for (const face of state.svgFonts.values()) bytes += svgFontBytes.get(face) || 0;
+	const budget = nativeHost?.cacheBytes || PAGE_CACHE_BYTES;
+	const cost = Math.max(1 << 20, bytes / Math.max(1, state.pageCache.size));
+	const count = Math.max(0, Math.min(nativeHost?.parallelism || 1, state.pageLayout * 2, Math.floor((budget - bytes) / cost)));
+	for (let i = start; i < Math.min(state.doc?.pageCount || 1, start + state.pageLayout); i += 1) {
+		renderFlowPage(i, { openSeq, priority: 1 });
+	}
+	for (let offset = 1; offset <= count; offset += 1) {
+		const next = direction > 0 ? start + state.pageLayout + offset - 1 : start - offset;
+		if (next >= 0 && next < (state.doc?.pageCount || 1)) renderFlowPage(next, { openSeq, priority: 6 });
 	}
 }
 
