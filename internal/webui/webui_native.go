@@ -214,8 +214,14 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 		defer func() {
 			worker.Renderer.OutputContext = context.Background()
 			e.renderMu.Lock()
-			e.currentSession.svgFonts = maps.Clone(worker.svgFonts)
-			e.renderIdle = append(e.renderIdle, worker)
+			if result != nil && result["ok"] == true && ctx.Err() == nil {
+				e.currentSession.svgFonts = maps.Clone(worker.svgFonts)
+				clear(worker.pageCache)
+				clear(worker.textCache)
+				worker.textOrder = nil
+				clear(worker.svgFonts)
+				e.renderIdle = append(e.renderIdle, worker)
+			}
 			e.renderCount--
 			if e.renderCount == 0 {
 				close(e.renderDone)
@@ -391,6 +397,7 @@ func (e *NativeEngine) renderSession(ctx context.Context) (*Session, error) {
 	defer e.renderMu.Unlock()
 	if count := len(e.renderIdle); count > 0 {
 		worker := e.renderIdle[count-1]
+		e.renderIdle[count-1] = nil
 		e.renderIdle = e.renderIdle[:count-1]
 		worker.Renderer.OutputContext = ctx
 		return worker, nil
