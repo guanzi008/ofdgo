@@ -4128,6 +4128,7 @@ async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 }
 
 function releasePageResources() {
+	if (state.pageInFlight.size) return;
 	const images = new Set(), fonts = new Set();
 	for (const page of state.pageCache.values()) {
 		for (const name of page.imageNames) images.add(name);
@@ -4568,7 +4569,7 @@ async function loadWASM() {
 	state.ready = false;
 	state.wasmExited = false;
 	await new Promise((resolve, reject) => {
-		const worker = createEngineWorker();
+		const worker = createEngineWorker({pages: true});
 		wasmWorker = worker;
 		const fail = (err) => {
 			markWASMExited(wasmSeq, err);
@@ -5473,6 +5474,9 @@ async function openDocument(options = {}) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
+		wasmWorker.configurePages?.(!state.editorInfo && !doc.encrypted && state.ofdBytes ? {
+			file: state.ofdBytes, fonts, annotations: state.renderAnnotations, document: doc.documentIndex, version: doc.documentVersion
+		} : null);
 		if (options.keepPreview) {
 			resetPageLoading();
 			state.pageCache.clear();
@@ -8724,7 +8728,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			updateControls();
 		}
 		const result = readingSave
-			? { label: "OFD", size: state.ofdBytes.byteLength, mime, blob: state.ofdBytes }
+			? { label: "OFD", size: state.ofdBytes.size ?? state.ofdBytes.byteLength, mime, blob: state.ofdBytes }
 			: saving ? await callWASM(background ? "ofdgoSaveSnapshot" : "ofdgoSaveDocument", indices, ...outputOptions, destination) : whole
 			? await callWASM("ofdgoExportDocument", format.value, dpi, indices, state.renderBackend, ...outputOptions, file)
 			: await callWASM("ofdgoExportPage", pageIndex, format.value, dpi, state.renderBackend, ...outputOptions, file);
@@ -8971,10 +8975,8 @@ function resetPageFlow(keepCache = false) {
 
 function resetPageLoading() {
 	releaseMediaPlayers();
-	if (nativeHost) {
-		for (const [id, request] of wasmRequests) {
-			if (request.name === "ofdgoRenderPage") wasmWorker?.postMessage({ type: "cancel", id });
-		}
+	for (const [id, request] of wasmRequests) {
+		if (request.name === "ofdgoRenderPage") wasmWorker?.postMessage({ type: "cancel", id });
 	}
 	for (const task of state.pageInFlight.values()) {
 		task.resolve(null);
@@ -9088,9 +9090,10 @@ function loadPageData(index, options = {}) {
 	const current = state.pageInFlight.get(key);
 	if (current) {
 		current.priority = Math.min(current.priority, priority);
+		if (current.preview && !options.preview) return current.promise.then(() => loadPageData(index, options));
 		return current.promise;
 	}
-	if (!options.refresh && state.pageCache.has(index)) {
+	if (!options.refresh && state.pageCache.has(index) && (options.preview || !state.pageCache.get(index).previewOnly)) {
 		const page = state.pageCache.get(index);
 		state.pageCache.delete(index);
 		state.pageCache.set(index, page);
@@ -9102,7 +9105,7 @@ function loadPageData(index, options = {}) {
 		resolve = done;
 		reject = fail;
 	});
-	const task = { key, index, openSeq, priority, refresh: options.refresh, resolve, reject, promise };
+	const task = { key, index, openSeq, priority, preview: !!options.preview, refresh: options.refresh, resolve, reject, promise };
 	state.pageInFlight.set(key, task);
 	state.pageRenderQueue.push(task);
 	schedulePageRender();
@@ -9112,7 +9115,7 @@ function loadPageData(index, options = {}) {
 function schedulePageRender() {
 	if (state.pageRenderRunning) {
 		if (state.pageRenderWorkers) {
-			while (state.pageRenderQueue.length && state.pageRenderWorkers < (nativeHost?.parallelism || 1)) processPageRenderTasks();
+			while (state.pageRenderQueue.length && state.pageRenderWorkers < (nativeHost?.parallelism || wasmWorker?.parallelism || 1)) processPageRenderTasks();
 		}
 		return;
 	}
@@ -9122,7 +9125,7 @@ function schedulePageRender() {
 
 async function processPageRenderQueue() {
 	await nextFrame();
-	await Promise.all(Array.from({ length: nativeHost?.parallelism || 1 }, () => processPageRenderTasks()));
+	await Promise.all(Array.from({ length: nativeHost?.parallelism || wasmWorker?.parallelism || 1 }, () => processPageRenderTasks()));
 }
 
 async function processPageRenderTasks() {
@@ -9139,12 +9142,12 @@ async function processPageRenderTasks() {
 					task.resolve(null);
 					continue;
 				}
-				if (!task.refresh && state.pageCache.has(task.index)) {
+				if (!task.refresh && state.pageCache.has(task.index) && (task.preview || !state.pageCache.get(task.index).previewOnly)) {
 					task.resolve(state.pageCache.get(task.index));
 					continue;
 				}
 				const args = [task.index, state.renderBackend, state.renderDPI, displayMode() === "raster"];
-				if (nativeHost) args.push([...state.svgFonts.keys()]);
+				args.push([...state.svgFonts.keys()], [...state.svgImages.keys()], task.preview);
 				const page = await callWASM("ofdgoRenderPage", ...args);
 				if (state.pageInFlight.get(task.key) !== task) {
 					task.resolve(null);
@@ -9230,7 +9233,7 @@ function trimPageCache() {
 		for (const name of page.imageNames) {
 			const count = references.get(name) - 1;
 			references.set(name, count);
-			if (count === 0) {
+			if (count === 0 && !state.pageInFlight.size) {
 				const image = state.svgImages.get(name);
 				bytes -= image.size;
 				URL.revokeObjectURL(image.url);
@@ -11197,7 +11200,7 @@ async function renderThumbnail(index, openSeq = state.openSeq) {
 	}
 	state.thumbnailInFlight.add(key);
 	try {
-		const page = await loadPageData(index, { openSeq, priority: 5 });
+		const page = await loadPageData(index, { openSeq, priority: 5, preview: true });
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -12547,11 +12550,11 @@ async function callWASM(name, ...args) {
 		}
 		try {
 			const transfer = [];
-			if (name === "ofdgoOpen" && !nativeHost) {
+			if (name === "ofdgoOpen" && !nativeHost && ArrayBuffer.isView(args[0])) {
 				args[0] = args[0].slice();
 				transfer.push(args[0].buffer);
 			}
-			if (name === "ofdgoLoadImport" && args[0] && !nativeHost) transfer.push(args[0].buffer);
+			if (name === "ofdgoLoadImport" && ArrayBuffer.isView(args[0]) && !nativeHost) transfer.push(args[0].buffer);
 			wasmWorker.postMessage({ id, name, args }, transfer);
 		} catch (err) {
 			wasmRequests.delete(id);

@@ -221,8 +221,11 @@ func platformParseJSON(data []byte) map[string]any {
 	return result
 }
 
-// inputFromValue 读取浏览器二进制源
+// inputFromValue 读取浏览器随机输入或二进制数据
 func (e *businessEngine) inputFromValue(value platformValue) (*ofdgo.Input, error) {
+	if value.Type() == platformTypeObject && !value.IsNull() && value.Get("read").Type() == platformTypeFunction {
+		return ofdgo.NewInput(&browserReaderAt{read: value.Get("read"), size: int64(value.Get("size").Float())}, int64(value.Get("size").Float()))
+	}
 	data, err := e.bytesFromJS(value)
 	if err != nil {
 		return nil, err

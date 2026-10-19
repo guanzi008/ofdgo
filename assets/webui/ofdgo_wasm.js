@@ -190,6 +190,10 @@ async function handleMessage({ id, name, args }) {
 	const password = converting ? args[2] : name === "ofdgoSetEncryption" ? args[0]?.password : name === "ofdgoOpen" ? args[3]?.password : name === "ofdgoLoadImport" ? args[1]?.password : null;
 	try {
 		signal?.throwIfAborted();
+		if (["ofdgoOpen", "ofdgoLoadImport", "ofdgoConvertPDF"].includes(name) && args[0] instanceof Blob) {
+			const file = args[0], reader = new FileReaderSync();
+			args[0] = {size: file.size, read: (offset, size) => new Uint8Array(reader.readAsArrayBuffer(file.slice(offset, offset + size)))};
+		}
 		if (name === "ofdgoDetectFormat") {
 			const file = args[0], reader = new FileReaderSync();
 			channel = new MessageChannel();
@@ -299,8 +303,8 @@ async function handleMessage({ id, name, args }) {
 			await output.abort();
 		}
 		output = null;
-		const transfer = result.data?.bytes ? [result.data.bytes.buffer] : (result.data?.images || []).map((image) => image.bytes.buffer);
-		self.postMessage({ id, ...result }, transfer);
+		const transfer = [...new Set([result.data?.bytes, ...(result.data?.images || []).map(image => image.bytes), ...(result.data?.fonts || []).map(font => font.data)].filter(bytes => bytes?.byteLength).map(bytes => bytes.buffer))];
+		self.postMessage({ id, ...result, memory: engineMemory.buffer.byteLength }, transfer);
 	} catch (err) {
 		await output?.abort().catch(() => {});
 		const result = { id, ok: false, error: err.message, errorName: err.name };

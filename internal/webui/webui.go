@@ -313,6 +313,7 @@ type exportWriter struct {
 
 // browserReaderAt 分块读取浏览器文件，只缓存最近的一个数据块
 type browserReaderAt struct {
+	mu         sync.Mutex
 	read       platformValue
 	checkpoint platformValue
 	size       int64
@@ -461,14 +462,14 @@ func (s *Session) Close() error {
 		return nil
 	}
 	reader := s.Reader
-	source := s.input
+	input := s.input
 	*s = Session{}
 	var err error
 	if reader != nil {
 		err = reader.Close()
 	}
-	if source != nil {
-		err = errors.Join(err, source.Close())
+	if input != nil {
+		err = errors.Join(err, input.Close())
 	}
 	return err
 }
@@ -744,6 +745,13 @@ func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
 // 入参: index 页面索引, backend 后端组合，空值沿用会话配置, dpi 光栅分辨率, raster 是否光栅显示
 // 返回: PageSVG 页面结果, error 错误信息
 func (s *Session) RenderPage(index int, backend string, dpi float64, raster bool) (PageSVG, error) {
+	return s.renderPage(index, backend, dpi, raster, false, nil)
+}
+
+// renderPage 按需生成预览及交互数据，省略调用方已持有的资源字节
+// 入参: index 页面索引, backend 后端组合, dpi 光栅分辨率, raster 光栅显示, preview 仅预览, known 已持有资源
+// 返回: PageSVG 页面结果, error 渲染错误
+func (s *Session) renderPage(index int, backend string, dpi float64, raster, preview bool, known map[string]bool) (PageSVG, error) {
 	if backend != "" {
 		if err := s.SetRenderBackend(backend); err != nil {
 			return PageSVG{}, err
@@ -759,7 +767,7 @@ func (s *Session) RenderPage(index int, backend string, dpi float64, raster bool
 	}
 	var buf bytes.Buffer
 	renderer := *s.Renderer
-	if s.cachedPageText(index) == nil {
+	if !preview && s.cachedPageText(index) == nil {
 		renderer.OnPageText = func(_ *ofdgo.PageContent, text *ofdgo.PageText) {
 			s.cachePageText(index, text)
 		}
@@ -767,9 +775,17 @@ func (s *Session) RenderPage(index int, backend string, dpi float64, raster bool
 	if raster {
 		renderer.DPI = dpi
 	}
-	resources, err := renderer.RenderPreview(page, &buf, ofdgo.PreviewOptions{Raster: raster, Objects: !raster && s.editing})
+	resources, err := renderer.RenderPreview(page, &buf, ofdgo.PreviewOptions{Raster: raster, Objects: !raster && s.editing && !preview, KnownResources: known})
 	if err != nil {
 		return PageSVG{}, err
+	}
+	clear(s.svgFonts)
+	for i, font := range resources.Fonts {
+		s.svgFonts[font.Name] = font.Data
+		resources.Fonts[i].Data = nil
+	}
+	if preview {
+		return PageSVG{Index: index, Number: index + 1, ID: page.ID, Width: box.W, Height: box.H, SVG: buf.String(), Fonts: resources.Fonts, Images: resources.Images}, nil
 	}
 	links, err := s.Renderer.PageLinks(page)
 	if err != nil {
@@ -789,11 +805,6 @@ func (s *Session) RenderPage(index int, backend string, dpi float64, raster bool
 		if err == nil {
 			annotations[i].Bounds, annotations[i].Contours = bounds, contours
 		}
-	}
-	clear(s.svgFonts)
-	for i, font := range resources.Fonts {
-		s.svgFonts[font.Name] = font.Data
-		resources.Fonts[i].Data = nil
 	}
 	return PageSVG{Index: index, Number: index + 1, ID: page.ID, Width: box.W, Height: box.H, SVG: buf.String(), Links: links, Fonts: resources.Fonts, Images: resources.Images, Annotations: annotations}, nil
 }
@@ -1282,31 +1293,51 @@ func (r *browserReaderAt) ReadAt(data []byte, offset int64) (int, error) {
 		if offset >= r.size {
 			return n, io.EOF
 		}
-		if time.Since(r.checked) >= 50*time.Millisecond {
+		r.mu.Lock()
+		check := r.checkpoint.Type() == platformTypeFunction && time.Since(r.checked) >= 50*time.Millisecond
+		if check {
+			r.checked = time.Now()
+		}
+		r.mu.Unlock()
+		if check {
 			if err := awaitExport(r.checkpoint); err != nil {
 				return n, err
 			}
-			r.checked = time.Now()
 		}
-		if len(r.data) == 0 || offset < r.offset || offset-r.offset >= int64(len(r.data)) {
-			r.offset = offset / (256 << 10) * (256 << 10)
-			size := int(min(int64(256<<10), r.size-r.offset))
-			if cap(r.data) < size {
-				r.data = make([]byte, size)
-			} else {
-				r.data = r.data[:size]
-			}
-			value := r.read.Invoke(float64(r.offset), size)
-			if platformCopyBytes(r.data, value) != size {
-				return n, io.ErrUnexpectedEOF
-			}
+		copied, err := r.readChunk(data, offset)
+		if err != nil {
+			return n, err
 		}
-		copied := copy(data, r.data[offset-r.offset:])
 		n += copied
 		offset += int64(copied)
 		data = data[copied:]
 	}
 	return n, nil
+}
+
+// readChunk 串行读取和复用缓存块，仅保留完整读取的内容
+// 入参: data 目标缓冲, offset 文件内偏移
+// 返回: int 复制字节数, error 读取错误
+func (r *browserReaderAt) readChunk(data []byte, offset int64) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.data) == 0 || offset < r.offset || offset-r.offset >= int64(len(r.data)) {
+		start := offset / (256 << 10) * (256 << 10)
+		size := int(min(int64(256<<10), r.size-start))
+		buffer := r.data
+		r.data = nil
+		if cap(buffer) < size {
+			buffer = make([]byte, size)
+		} else {
+			buffer = buffer[:size]
+		}
+		value := r.read.Invoke(float64(start), size)
+		if platformCopyBytes(buffer, value) != size {
+			return 0, io.ErrUnexpectedEOF
+		}
+		r.offset, r.data = start, buffer
+	}
+	return copy(data, r.data[offset-r.offset:]), nil
 }
 
 // renderBackends 返回库提供的内置后端能力
@@ -2440,7 +2471,7 @@ func (e *businessEngine) svgFontData(args []platformValue) (any, error) {
 }
 
 // renderPage 渲染OFD页面
-// 入参: args 页面索引、后端组合、DPI和光栅显示开关
+// 入参: args 页面索引、后端组合、DPI、光栅开关、已持有字体和图片、仅预览开关
 // 返回: any 页面SVG结果, error 错误信息
 func (e *businessEngine) renderPage(args []platformValue) (any, error) {
 	if e.currentSession == nil {
@@ -2457,6 +2488,13 @@ func (e *businessEngine) renderPage(args []platformValue) (any, error) {
 		dpi = args[2].Float()
 	}
 	raster := len(args) > 3 && args[3].Bool()
+	preview := len(args) > 6 && args[6].Bool()
+	known := make(map[string]bool)
+	for i := 4; i < min(len(args), 6); i++ {
+		for j := 0; j < args[i].Length(); j++ {
+			known[args[i].Index(j).String()] = true
+		}
+	}
 	if e.currentEditor != nil {
 		page, err := e.currentEditor.Page(args[0].Int())
 		if err != nil {
@@ -2466,24 +2504,30 @@ func (e *businessEngine) renderPage(args []platformValue) (any, error) {
 			return nil, err
 		}
 	}
-	page, err := e.currentSession.RenderPage(args[0].Int(), backend, dpi, raster)
+	page, err := e.currentSession.renderPage(args[0].Int(), backend, dpi, raster, preview, known)
 	if err != nil {
 		return nil, err
 	}
 	if e.currentEditor != nil && !reflect.DeepEqual(e.currentEditor.Backends(), e.currentSession.Renderer.Backends()) {
 		e.currentEditor.SetRenderBackends(e.currentSession.Renderer.Backends())
 	}
-	text, err := e.currentSession.PageText(args[0].Int())
-	if err != nil {
-		return nil, err
+	text := &ofdgo.PageText{}
+	if !preview {
+		text, err = e.currentSession.PageText(args[0].Int())
+		if err != nil {
+			return nil, err
+		}
 	}
 	textData, err := json.Marshal(text)
 	if err != nil {
 		return nil, err
 	}
-	objects, err := e.editorObjects(args[0].Int(), text)
-	if err != nil {
-		return nil, err
+	var objects []any
+	if !preview {
+		objects, err = e.editorObjects(args[0].Int(), text)
+		if err != nil {
+			return nil, err
+		}
 	}
 	links, err := e.linkResults(page.Links)
 	if err != nil {
@@ -2492,12 +2536,16 @@ func (e *businessEngine) renderPage(args []platformValue) (any, error) {
 	fonts := make([]any, len(page.Fonts))
 	for i, font := range page.Fonts {
 		fonts[i] = map[string]any{"name": font.Name, "weight": font.Weight, "style": font.Style}
+		if len(args) > 4 && !known[font.Name] {
+			fonts[i].(map[string]any)["data"] = bytesToJS(e.currentSession.svgFonts[font.Name])
+		}
 	}
 	annotations, err := json.Marshal(page.Annotations)
 	if err != nil {
 		return nil, err
 	}
 	return successResult(map[string]any{
+		"previewOnly": preview,
 		"annotations": string(annotations),
 		"index":       page.Index,
 		"number":      page.Number,
@@ -5502,7 +5550,7 @@ func (e *businessEngine) clearImport() {
 }
 
 // loadImport 加载待导入文件的索引，null参数清除待处理文件
-// 入参: args OFD字节数组或null
+// 入参: args 文档输入或null及可选凭据
 // 返回: any 文档列表、页数及签名提示, error 错误信息
 func (e *businessEngine) loadImport(args []platformValue) (any, error) {
 	e.clearImport()

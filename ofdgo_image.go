@@ -320,16 +320,13 @@ func (r *Renderer) cachedImageResource(resPath string) (image.Image, error) {
 		}
 	}
 	resPath = cleanPackagePath(r.Reader.ResPath(resPath))
-	img, ok := r.imageCache.get(resPath)
-	if !ok {
-		var err error
-		img, err = r.readImageResource(resPath)
+	return r.imageCache.load(r.pageContext, resPath, func() (image.Image, int, error) {
+		img, err := r.readImageResource(resPath)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		r.imageCache.put(resPath, img, baseimage.StorageCost(img, r.imageCache.limit))
-	}
-	return img, nil
+		return img, baseimage.StorageCost(img, r.imageCache.limit), nil
+	})
 }
 
 // decodeImageResource 读取或复用图片资源，按输出需要解码像素

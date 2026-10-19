@@ -50,6 +50,8 @@ type SVGResources struct {
 type PreviewOptions struct {
 	Raster  bool
 	Objects bool
+	// KnownResources 标识调用方仍持有的资源，返回引用但不重复返回数据
+	KnownResources map[string]bool
 }
 
 // RenderToSVGWithFonts 渲染为SVG并返回页面引用的字体资源，不在SVG中嵌入字体
@@ -92,7 +94,19 @@ func (r *Renderer) renderSVG(page *PageContent, writer io.Writer, mode SVGMode) 
 // RenderPreview 生成统一SVG容器及独立资源，原生程序与WebUI使用相同绘制入口
 // 入参: page 页面内容, writer 输出流, options 显示方式
 // 返回: SVGResources 需由调用方映射地址的资源, error 错误信息
-func (r *Renderer) RenderPreview(page *PageContent, writer io.Writer, options PreviewOptions) (SVGResources, error) {
+func (r *Renderer) RenderPreview(page *PageContent, writer io.Writer, options PreviewOptions) (resources SVGResources, err error) {
+	defer func() {
+		for i := range resources.Fonts {
+			if options.KnownResources[resources.Fonts[i].Name] {
+				resources.Fonts[i].Data = nil
+			}
+		}
+		for i := range resources.Images {
+			if options.KnownResources[resources.Images[i].Name] {
+				resources.Images[i].Data = nil
+			}
+		}
+	}()
 	if !options.Raster {
 		if options.Objects {
 			return r.RenderToSVGWithObjects(page, writer)

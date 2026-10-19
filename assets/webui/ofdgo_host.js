@@ -1,7 +1,8 @@
 let engineModule = null;
 
-export function createEngineWorker() {
+export function createEngineWorker(options = {}) {
 	if (nativeHost) return nativeHost.worker();
+	if (options.pages) return new BrowserEngine();
 	const worker = new Worker("./ofdgo_wasm.js");
 	worker.addEventListener("message", event => {
 		if (event.data.type !== "module") return;
@@ -13,7 +14,156 @@ export function createEngineWorker() {
 }
 
 export async function documentBytes(file) {
-	return file?.nativeFile ? file : new Uint8Array(await file.arrayBuffer());
+	if (file?.nativeFile) return file;
+	if (file instanceof Blob) return new Response(file.stream()).blob();
+	return new Uint8Array(await file.arrayBuffer());
+}
+
+class BrowserEngine {
+	constructor() {
+		this.primary = createEngineWorker();
+		this.primary.onmessage = event => {
+			const data = event.data;
+			if (data.memory) this.memory = data.memory;
+			if (data.id != null && !data.type) this.requests.delete(data.id);
+			this.onmessage?.(event);
+		};
+		this.primary.onerror = event => this.onerror?.(event);
+		this.primary.onmessageerror = event => this.onmessageerror?.(event);
+		this.requests = new Map();
+		this.slots = new Set();
+		this.sequence = 0;
+		this.revision = 0;
+		this.memory = 0;
+		this.parallelism = 1;
+		this.budget = Math.max(128, Math.min(1024, (navigator.deviceMemory || 2) * 128)) * 1024 * 1024;
+		this.closed = false;
+		this.source = null;
+	}
+
+	configurePages(source) {
+		this.invalidatePages();
+		if (!source || this.closed) return;
+		this.source = {...source, file: source.file instanceof Blob ? source.file : new Blob([source.file])};
+		this.parallelism = Math.max(1, Math.min(2, (navigator.hardwareConcurrency || 2) - 1, Math.floor(this.budget / (256 * 1024 * 1024))));
+	}
+
+	invalidatePages() {
+		this.revision++;
+		this.source = null;
+		this.parallelism = 1;
+		for (const slot of this.slots) this.closeSlot(slot);
+	}
+
+	closeSlot(slot, error = new DOMException("页面加载已取消", "AbortError")) {
+		if (!this.slots.delete(slot)) return;
+		slot.worker.terminate();
+		slot.rejectReady(error);
+		for (const pending of slot.pending.values()) pending.reject(error);
+		slot.pending.clear();
+	}
+
+	createSlot(source) {
+		const worker = createEngineWorker();
+		const slot = {worker, pending: new Map(), busy: false, memory: Math.max(128 << 20, this.memory)};
+		const ready = new Promise((resolve, reject) => {
+			slot.rejectReady = reject;
+			worker.onmessage = ({data}) => {
+				if (data.memory) slot.memory = data.memory;
+				if (data.type === "ready") { resolve(); return; }
+				if (data.type === "exit") { this.closeSlot(slot, new Error("页面加载失败")); return; }
+				if (data.type) return;
+				const request = slot.pending.get(data.id);
+				if (!request) return;
+				slot.pending.delete(data.id);
+				if (data.ok) request.resolve(data);
+				else request.reject(Object.assign(new Error(data.error), {code: data.code}));
+			};
+			worker.onerror = worker.onmessageerror = () => this.closeSlot(slot, new Error("页面加载失败"));
+		});
+		this.slots.add(slot);
+		slot.ready = ready.then(async () => {
+			let opened = await this.callSlot(slot, "ofdgoOpen", [source.file, source.fonts, source.annotations]);
+			if ((source.document || 0) !== (opened.data.documentIndex || 0)) opened = await this.callSlot(slot, "ofdgoSelectDocument", [source.document]);
+			if ((source.version || "") !== (opened.data.documentVersion || "")) await this.callSlot(slot, "ofdgoSelectVersion", [source.version || ""]);
+		});
+		slot.ready.catch(() => {});
+		return slot;
+	}
+
+	callSlot(slot, name, args) {
+		return new Promise((resolve, reject) => {
+			if (!this.slots.has(slot)) { reject(new DOMException("页面加载已取消", "AbortError")); return; }
+			const id = --this.sequence;
+			slot.pending.set(id, {resolve, reject});
+			try { slot.worker.postMessage({id, name, args}); }
+			catch (error) { slot.pending.delete(id); reject(error); }
+		});
+	}
+
+	postMessage(data, transfer) {
+		if (this.closed) return;
+		if (data.type === "cancel") {
+			const slot = this.requests.get(data.id);
+			if (slot) this.closeSlot(slot);
+			else this.primary.postMessage(data);
+			return;
+		}
+		if (!data.type && data.name !== "ofdgoRenderPage" && ![
+			"ofdgoDocumentInfo", "ofdgoDocumentVersions", "ofdgoDocumentNavigation", "ofdgoOpenLinks", "ofdgoOutlineLinks", "ofdgoRenderBackends", "ofdgoSVGFontData",
+			"ofdgoSearchPage", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences", "ofdgoResourceTargets",
+			"ofdgoResourceLocations", "ofdgoFontPreview", "ofdgoFontFaces", "ofdgoFontFace", "ofdgoMatchFontFiles",
+			"ofdgoImages", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoPackageDocuments", "ofdgoVerifySignatures",
+			"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoExportInvoice", "ofdgoValidateInvoice",
+			"ofdgoActionList", "ofdgoPageSettings", "ofdgoReadAnnotation", "ofdgoPreviewSignatureSeal",
+			"ofdgoExportFormats", "ofdgoOutputFormats", "ofdgoParsePageRange", "ofdgoExportPage", "ofdgoExportDocument",
+			"ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion"
+		].includes(data.name)) this.invalidatePages();
+		if (data.name !== "ofdgoRenderPage" || !this.source || ![...this.requests.values()].includes(null)) {
+			if (data.name === "ofdgoRenderPage") this.requests.set(data.id, null);
+			this.primary.postMessage(data, transfer);
+			return;
+		}
+		let slot = [...this.slots].find(slot => !slot.busy);
+		const memory = this.memory + [...this.slots].reduce((total, item) => total + item.memory, 0);
+		if (!slot && this.slots.size < this.parallelism - 1 && memory + Math.max(128 << 20, this.memory) <= this.budget) slot = this.createSlot(this.source);
+		if (!slot) {
+			this.requests.set(data.id, null);
+			this.primary.postMessage(data, transfer);
+			return;
+		}
+		slot.busy = true;
+		this.requests.set(data.id, slot);
+		const revision = this.revision;
+		let fallback = false;
+		slot.ready.then(() => this.callSlot(slot, data.name, data.args)).then(result => {
+			if (revision !== this.revision) throw new DOMException("页面加载已取消", "AbortError");
+			if (!this.closed) this.onmessage?.({data: {...result, id: data.id}});
+		}).catch(error => {
+			if (!this.closed && revision === this.revision && error.name !== "AbortError") {
+				this.closeSlot(slot, error);
+				this.parallelism = Math.max(1, this.slots.size + 1);
+				this.requests.set(data.id, null);
+				fallback = true;
+				this.primary.postMessage(data, transfer);
+				return;
+			}
+			if (!this.closed) this.onmessage?.({data: {id: data.id, ok: false, error: error.message, canceled: error.name === "AbortError"}});
+		}).finally(() => {
+			if (!fallback) this.requests.delete(data.id);
+			slot.busy = false;
+			const memory = this.memory + [...this.slots].reduce((total, item) => total + item.memory, 0);
+			if (memory > this.budget) { this.closeSlot(slot); this.parallelism = Math.max(1, this.slots.size + 1); }
+		});
+	}
+
+	terminate() {
+		if (this.closed) return;
+		this.closed = true;
+		this.invalidatePages();
+		this.primary.terminate();
+		this.requests.clear();
+	}
 }
 
 export function saveFilePicker(options) {

@@ -40,9 +40,10 @@ type PositionedText struct {
 
 // glyphOutlineKey 区分字体、字形与毫米字号
 type glyphOutlineKey struct {
-	font  *PreparedFont
-	glyph uint16
-	size  float64
+	digest [32]byte
+	font   *PreparedFont
+	glyph  uint16
+	size   float64
 }
 
 // PositionText 定位文字、字形与搜索范围，不依赖页面输出后端
@@ -279,21 +280,20 @@ func (r *Renderer) preparedMetrics(prepared *PreparedFont) (FontMetrics, error) 
 		prepared.digest = r.fontDigest(prepared.Data)
 	}
 	key := prepared.digest
-	if metrics, ok := r.fontMetrics.get(key); ok {
-		return metrics, nil
-	}
-	metrics, err := r.backends.Fonts.OpenFont(prepared.Data)
-	if err != nil {
-		return nil, err
-	}
-	r.fontMetrics.put(key, metrics, len(prepared.Data)*2+256)
-	return metrics, nil
+	return r.fontMetrics.load(r.pageContext, key, func() (FontMetrics, int, error) {
+		metrics, err := r.backends.Fonts.OpenFont(prepared.Data)
+		return metrics, len(prepared.Data)*2 + 256, err
+	})
 }
 
 // preparedOutlines 批量提取缓存未命中的字形，保留原始编号顺序，不触发塑形
 // 入参: prepared 字体, metrics 度量, glyphs 字形编号, size 毫米字号
 // 返回: []GeometryPath 同序只读轮廓, error 能力或解析错误
 func (r *Renderer) preparedOutlines(prepared *PreparedFont, metrics FontMetrics, glyphs []uint16, size float64) ([]GeometryPath, error) {
+	key := glyphOutlineKey{digest: prepared.digest, size: size}
+	if key.digest == ([32]byte{}) {
+		key.font = prepared
+	}
 	result := make([]GeometryPath, len(glyphs))
 	var indices []int
 	missing := make([]uint16, 0)
@@ -304,7 +304,8 @@ func (r *Renderer) preparedOutlines(prepared *PreparedFont, metrics FontMetrics,
 				return nil, err
 			}
 		}
-		if path, ok := r.glyphOutlines.get(glyphOutlineKey{prepared, glyph, size}); ok {
+		key.glyph = glyph
+		if path, ok := r.glyphOutlines.get(key); ok {
 			result[i] = path
 			continue
 		}
@@ -360,7 +361,8 @@ func (r *Renderer) preparedOutlines(prepared *PreparedFont, metrics FontMetrics,
 		}
 	}
 	for i, path := range paths {
-		r.glyphOutlines.put(glyphOutlineKey{prepared, missing[i], size}, path, len(path)*96+128)
+		key.glyph = missing[i]
+		r.glyphOutlines.put(key, path, len(path)*96+128)
 	}
 	for i, index := range indices {
 		if index >= 0 {

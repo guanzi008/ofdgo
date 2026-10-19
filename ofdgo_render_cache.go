@@ -16,6 +16,8 @@ package ofdgo
 
 import (
 	"container/list"
+	"context"
+	"errors"
 	"image"
 	"reflect"
 	"sync"
@@ -29,6 +31,14 @@ type renderCache[K comparable, V any] struct {
 	limit, used int
 	entries     map[K]*list.Element
 	order       list.List
+	loading     map[K]*renderCacheLoad[V]
+}
+
+// renderCacheLoad 合并同一资源的并发加载，不持有已完成任务
+type renderCacheLoad[V any] struct {
+	done  chan struct{}
+	value V
+	err   error
 }
 
 // renderCacheEntry 保存缓存值及内存成本
@@ -77,6 +87,61 @@ func (c *renderCache[K, V]) put(key K, value V, cost int) {
 	}
 	c.entries[key] = c.order.PushFront(renderCacheEntry[K, V]{key, value, cost})
 	c.used += cost
+}
+
+// load 复用缓存并合并并发请求，等待取消不影响正在读取的任务
+// 入参: ctx 当前任务上下文, key 缓存键, read 加载资源及其内存成本
+// 返回: V 缓存值, error 读取或取消错误
+func (c *renderCache[K, V]) load(ctx context.Context, key K, read func() (V, int, error)) (V, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var zero V
+	for {
+		if err := ctx.Err(); err != nil {
+			return zero, err
+		}
+		c.mu.Lock()
+		if item := c.entries[key]; item != nil {
+			c.order.MoveToFront(item)
+			value := item.Value.(renderCacheEntry[K, V]).value
+			c.mu.Unlock()
+			return value, nil
+		}
+		if pending := c.loading[key]; pending != nil {
+			c.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return zero, ctx.Err()
+			case <-pending.done:
+				if errors.Is(pending.err, context.Canceled) || errors.Is(pending.err, context.DeadlineExceeded) {
+					continue
+				}
+				return pending.value, pending.err
+			}
+		}
+		if c.loading == nil {
+			c.loading = make(map[K]*renderCacheLoad[V])
+		}
+		pending := &renderCacheLoad[V]{done: make(chan struct{}), err: errors.New("resource loading interrupted")}
+		c.loading[key] = pending
+		c.mu.Unlock()
+		defer func() {
+			c.mu.Lock()
+			delete(c.loading, key)
+			close(pending.done)
+			c.mu.Unlock()
+		}()
+		value, cost, err := read()
+		if err == nil {
+			err = ctx.Err()
+		}
+		pending.value, pending.err = value, err
+		if err == nil {
+			c.put(key, value, cost)
+		}
+		return value, err
+	}
 }
 
 // rasterCommandCost 按保留容量估算中立指令成本，不含临时后端路径及借用图片

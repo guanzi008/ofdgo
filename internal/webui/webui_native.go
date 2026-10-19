@@ -249,7 +249,7 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 				font["data"] = worker.svgFonts[name]
 			}
 		}
-		if e.currentEditor != nil {
+		if e.currentEditor != nil && !(len(values) > 6 && values[6].Bool()) {
 			objects, textErr := e.renderObjects(operation, values[0].Int())
 			if textErr != nil {
 				return nativeFailure(textErr)
