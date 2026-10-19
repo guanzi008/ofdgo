@@ -102,10 +102,12 @@ func (e *Editor) WriteToWithOptions(ctx context.Context, writer io.Writer, optio
 	return snapshot.WriteTo(convertWriter{ctx: ctx, writer: writer, count: &count})
 }
 
-// WritePagesToWithOptions 按指定顺序另存页面，仅为所选页面准备资源和压缩计划
+// WritePagesTo 按指定顺序另存页面，仅为所选页面准备资源和压缩计划
+// 保留关联资源、目录、注释和签章外观，生成新文档标识，不改变原文档和撤销记录
+// 签章外观不代表原签名在导出文档中仍有效，页码不可重复或为空
 // 入参: ctx 取消上下文, writer 输出流, indexes 零基页码, options 输出配置
 // 返回: int64 已写入字节数, error 错误信息
-func (e *Editor) WritePagesToWithOptions(ctx context.Context, writer io.Writer, indexes []int, options WriteOptions) (int64, error) {
+func (e *Editor) WritePagesTo(ctx context.Context, writer io.Writer, indexes []int, options WriteOptions) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -116,7 +118,7 @@ func (e *Editor) WritePagesToWithOptions(ctx context.Context, writer io.Writer, 
 	snapshot.OnWriteProgress = editorProgress(e.OnWriteProgress).withContext(ctx)
 	snapshot.output = &outputOptimization{ctx: ctx, options: options.Compression}
 	var count int64
-	return snapshot.WritePagesTo(convertWriter{ctx: ctx, writer: writer, count: &count}, indexes)
+	return snapshot.writePagesTo(convertWriter{ctx: ctx, writer: writer, count: &count}, indexes)
 }
 
 // outputSnapshot 创建只读输出配置，原签名存在时仅调整ZIP封装

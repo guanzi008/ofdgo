@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+
 	"encoding/xml"
 	"fmt"
 	"path"
@@ -201,7 +202,7 @@ func (e *Editor) CreateTemplateFromPage(page int, name, zOrder string) (string, 
 		if err := e.prepareSourceIDs(); err != nil {
 			return err
 		}
-		r, err := e.Reader()
+		r, err := e.reader(nil)
 		if err != nil {
 			return err
 		}
@@ -351,7 +352,7 @@ func (e *Editor) ReplaceTemplateFromPage(id string, page int) error {
 		if err != nil {
 			return err
 		}
-		r, err := e.Reader()
+		r, err := e.reader(nil)
 		if err != nil {
 			return err
 		}
@@ -451,7 +452,7 @@ func editorTemplateDefinition(reader *Reader, id string) (TemplatePage, error) {
 // 返回: error 读取、修改或提交错误
 func (e *Editor) editTemplateDefinition(id string, edit func(*Reader, []byte, *editorXML) ([]byte, error)) error {
 	return e.Transaction(func(_ *Editor) error {
-		r, err := e.Reader()
+		r, err := e.reader(nil)
 		if err != nil {
 			return err
 		}

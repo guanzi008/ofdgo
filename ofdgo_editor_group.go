@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+
 	"encoding/xml"
 	"fmt"
 	"maps"
@@ -48,7 +49,7 @@ func (e *Editor) GroupObjects(page int, ids []string) (id string, err error) {
 			return "", fmt.Errorf("grouping requires consecutive objects in the same container")
 		}
 	}
-	reader, err := e.Reader()
+	reader, err := e.reader(nil)
 	if err != nil {
 		return "", err
 	}

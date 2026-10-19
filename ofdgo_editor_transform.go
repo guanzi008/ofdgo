@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+
 	"encoding/xml"
 	"fmt"
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
@@ -329,7 +330,7 @@ func (e *Editor) transformMatrix(object GraphicObject, matrix Matrix) (GraphicOb
 		return transformEditorMatrix(object, matrix), nil
 	}
 	origin := e.objectOrigin(object.ImageObject.ID)
-	reader, err := e.Reader()
+	reader, err := e.reader(nil)
 	if err != nil {
 		return GraphicObject{}, err
 	}

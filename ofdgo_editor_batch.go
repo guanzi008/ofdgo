@@ -947,7 +947,7 @@ func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) 
 			return nil, fmt.Errorf("object %q cannot be arranged: %w", editorObjectID(object), capability.editError())
 		}
 	}
-	reader, err := e.Reader()
+	reader, err := e.reader(nil)
 	if err != nil {
 		return nil, err
 	}

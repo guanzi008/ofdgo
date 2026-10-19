@@ -481,7 +481,7 @@ func (s *Session) Document(index int) (*Session, error) {
 	reader := s.Reader
 	if s.editor != nil {
 		var err error
-		reader, err = s.editor.Reader()
+		reader, err = s.editor.Reader(context.Background())
 		if err != nil {
 			return nil, err
 		}
@@ -519,7 +519,7 @@ func (s *Session) DocumentVersion(id string) (*Session, error) {
 	reader := s.Reader
 	if s.editor != nil {
 		var err error
-		reader, err = s.editor.Reader()
+		reader, err = s.editor.Reader(context.Background())
 		if err != nil {
 			return nil, err
 		}
@@ -1802,7 +1802,7 @@ func (e *businessEngine) documentInvoices(args []platformValue) (any, error) {
 // 返回: *ofdgo.Reader 当前读取器, func() 快照释放函数, error 快照错误
 func (e *businessEngine) currentInvoiceReader() (*ofdgo.Reader, func(), error) {
 	if e.currentEditor != nil {
-		r, err := e.currentEditor.Reader()
+		r, err := e.currentEditor.Reader(e.operationContext())
 		if err != nil {
 			return nil, nil, err
 		}
@@ -2017,7 +2017,7 @@ func (e *businessEngine) validateInvoiceDraft(ctx context.Context, request invoi
 	if source.Kind == "" {
 		source = request.Source
 	}
-	view, err := editor.ReaderContext(ctx)
+	view, err := editor.Reader(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -2204,7 +2204,7 @@ func (e *businessEngine) applyInvoiceBatch(ctx context.Context, editor *ofdgo.Ed
 	}
 	report, err := ofdgo.DecodeInvoices(ctx, data)
 	if request.Source.Kind == "tag" && len(report.Invoices) == 0 {
-		view, viewErr := editor.ReaderContext(ctx)
+		view, viewErr := editor.Reader(ctx)
 		if viewErr != nil {
 			return result, viewErr
 		}
@@ -5764,7 +5764,7 @@ func (e *businessEngine) documentVersions(args []platformValue) (any, error) {
 	reader := e.currentSession.Reader
 	if e.currentEditor != nil {
 		var err error
-		reader, err = e.currentEditor.Reader()
+		reader, err = e.currentEditor.Reader(e.operationContext())
 		if err != nil {
 			return nil, err
 		}
@@ -6148,7 +6148,7 @@ func (e *businessEngine) exportVersion(args []platformValue) (any, error) {
 	reader := e.currentSession.Reader
 	if e.currentEditor != nil {
 		var err error
-		reader, err = e.currentEditor.ReaderContext(ctx)
+		reader, err = e.currentEditor.Reader(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -6415,7 +6415,7 @@ func (e *businessEngine) syncEditorPageIDs(index int, content *ofdgo.PageContent
 // 入参: editor 编辑文档, annotations 是否显示注解
 // 返回: editorInfo 文档信息, error 错误信息
 func (e *businessEngine) previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
-	reader, err := editor.Reader()
+	reader, err := editor.Reader(e.operationContext())
 	if err != nil {
 		return editorInfo{}, err
 	}
@@ -7075,7 +7075,7 @@ func (e *businessEngine) previewSignatureSeal(args []platformValue) (any, error)
 	if _, err := editor.AddPage(seal.Width, seal.Height); err != nil {
 		return nil, err
 	}
-	reader, err := editor.Reader()
+	reader, err := editor.Reader(e.operationContext())
 	if err != nil {
 		return nil, err
 	}
@@ -7314,7 +7314,7 @@ func (e *businessEngine) saveEditor(editor *ofdgo.Editor, args []platformValue) 
 		ctx = e.newOutputContext(args[4])
 	}
 	if len(args) > 2 && !args[2].IsNull() && !args[2].IsUndefined() {
-		_, err = editor.WritePagesToWithOptions(ctx, writer, e.indexesFromJS(args[2]), options)
+		_, err = editor.WritePagesTo(ctx, writer, e.indexesFromJS(args[2]), options)
 	} else {
 		_, err = editor.WriteToWithOptions(ctx, writer, options)
 	}

@@ -163,7 +163,7 @@ func (e *Editor) AnnotationTexts(index int, id string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	reader, err := e.Reader()
+	reader, err := e.reader(nil)
 	if err != nil {
 		return nil, err
 	}
@@ -548,7 +548,7 @@ func (e *Editor) annotationScope(page int, path ObjectPath) (*Reader, *Renderer,
 		return nil, nil, nil, nil, err
 	}
 	root.setStates(e.source.annotationStates[e.pages[page].ID+"/"+editorResourceID(path.Annotation)])
-	reader, err := e.Reader()
+	reader, err := e.reader(nil)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

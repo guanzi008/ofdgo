@@ -205,7 +205,7 @@ func (r *Reader) InvoiceCapabilities(ctx context.Context, source InvoiceSource, 
 func (e *Editor) GenerateInvoicePages(ctx context.Context, source InvoiceSource, index int, layout InvoiceLayout) error {
 	ctx = invoiceWriteContext(ctx)
 	return e.Transaction(func(next *Editor) error {
-		r, err := next.ReaderContext(ctx)
+		r, err := next.Reader(ctx)
 		if err != nil {
 			return err
 		}
@@ -252,7 +252,7 @@ func (e *Editor) InvoicesContext(ctx context.Context) (InvoiceReport, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	r, err := e.ReaderContext(ctx)
+	r, err := e.Reader(ctx)
 	if err != nil {
 		return InvoiceReport{}, err
 	}
@@ -374,7 +374,7 @@ func (e *Editor) UpdateInvoice(ctx context.Context, source InvoiceSource, digest
 				return err
 			}
 			result = InvoiceUpdateResult{Source: updated, Digest: InvoiceDigest(actual), Synchronized: true}
-			r, err := next.ReaderContext(ctx)
+			r, err := next.Reader(ctx)
 			if err != nil {
 				return err
 			}
@@ -411,7 +411,7 @@ func (e *Editor) UpdateInvoice(ctx context.Context, source InvoiceSource, digest
 		if err != nil {
 			return err
 		}
-		r, err := next.ReaderContext(ctx)
+		r, err := next.Reader(ctx)
 		if err != nil {
 			return err
 		}
@@ -611,7 +611,7 @@ func (e *Editor) DeleteInvoice(ctx context.Context, source InvoiceSource, digest
 		ctx = context.Background()
 	}
 	return e.Transaction(func(next *Editor) error {
-		r, err := next.ReaderContext(ctx)
+		r, err := next.Reader(ctx)
 		if err != nil {
 			return err
 		}
@@ -830,7 +830,7 @@ func (e *Editor) SetInvoiceBindings(ctx context.Context, source InvoiceSource, i
 		ctx = context.Background()
 	}
 	return e.Transaction(func(next *Editor) error {
-		r, err := next.ReaderContext(ctx)
+		r, err := next.Reader(ctx)
 		if err != nil {
 			return err
 		}
@@ -1190,7 +1190,7 @@ func invoiceBindingCoverage(before, after Invoice, bindings []InvoiceBinding) er
 // 入参: ctx 取消上下文, ids 页面标识
 // 返回: []invoiceOwnedPage 按指定顺序排列的摘要, error 页面或读取错误
 func (e *Editor) invoiceOwnedPages(ctx context.Context, ids []string) ([]invoiceOwnedPage, error) {
-	r, err := e.ReaderContext(ctx)
+	r, err := e.Reader(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1233,7 +1233,7 @@ func (e *Editor) invoiceOwnedPages(ctx context.Context, ids []string) ([]invoice
 // 入参: ctx 取消上下文, source 来源, index 来源内发票索引, layout 排版选项
 // 返回: error 关联或提交错误
 func (e *Editor) markInvoicePages(ctx context.Context, source InvoiceSource, index int, layout InvoiceLayout) error {
-	r, err := e.ReaderContext(ctx)
+	r, err := e.Reader(ctx)
 	if err != nil {
 		return err
 	}

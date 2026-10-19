@@ -310,7 +310,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 		if options.Pages == nil {
 			_, err = editor.WriteToWithOptions(ctx, writer, WriteOptions{Compression: options.Compression})
 		} else {
-			_, err = editor.WritePagesToWithOptions(ctx, writer, indices, WriteOptions{Compression: options.Compression})
+			_, err = editor.WritePagesTo(ctx, writer, indices, WriteOptions{Compression: options.Compression})
 		}
 		return report, err
 	}

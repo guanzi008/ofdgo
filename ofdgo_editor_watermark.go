@@ -101,7 +101,7 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 	if err != nil {
 		return nil, err
 	}
-	reader, err := preview.Reader()
+	reader, err := preview.reader(nil)
 	if err != nil {
 		return nil, err
 	}

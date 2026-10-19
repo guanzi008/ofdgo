@@ -102,7 +102,7 @@ func (e *Editor) changeFont(ctx context.Context, id string, mode FontMode, file 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	reader, err := e.ReaderContext(ctx)
+	reader, err := e.Reader(ctx)
 	if err != nil {
 		return err
 	}
@@ -156,7 +156,7 @@ func (e *Editor) ProcessFontsWithOptions(ctx context.Context, options FontProces
 	if err := progress("prepare", 0, 0); err != nil {
 		return nil, err
 	}
-	reader, err := e.ReaderContext(ctx)
+	reader, err := e.Reader(ctx)
 	if err != nil {
 		return nil, err
 	}

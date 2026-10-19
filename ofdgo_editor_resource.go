@@ -53,7 +53,7 @@ type resourceImageMaskKey struct {
 // 入参: ctx 取消上下文
 // 返回: []ResourceInfo 资源及引用位置, error 快照或结构错误
 func (e *Editor) Resources(ctx context.Context) ([]ResourceInfo, error) {
-	reader, err := e.ReaderContext(ctx)
+	reader, err := e.Reader(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +108,7 @@ func (e *Editor) ImportMedia(ctx context.Context, kind, format string, data []by
 	if kind != "Audio" && kind != "Video" || len(data) == 0 {
 		return "", fmt.Errorf("nonempty Audio or Video resource required")
 	}
-	reader, err := e.ReaderContext(ctx)
+	reader, err := e.Reader(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -237,7 +237,7 @@ func (e *Editor) DeleteResource(ctx context.Context, kind, id string) error {
 // 入参: ctx 取消上下文, kind 资源类型, id 标识, replace 替换操作，nil表示删除, data 附件替换数据
 // 返回: error 引用、结构或提交错误
 func (e *Editor) changeResource(ctx context.Context, kind, id string, replace func(*resourceCatalog, ResourceInfo, map[string][]byte) error, data []byte) error {
-	reader, err := e.ReaderContext(ctx)
+	reader, err := e.Reader(ctx)
 	if err != nil {
 		return err
 	}
@@ -272,7 +272,7 @@ func (e *Editor) changeResource(ctx context.Context, kind, id string, replace fu
 		if working.Revision() == revision {
 			return ctx.Err()
 		}
-		reader, err = working.ReaderContext(ctx)
+		reader, err = working.Reader(ctx)
 		if err != nil {
 			return err
 		}

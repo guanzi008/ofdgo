@@ -155,7 +155,7 @@ func (e *Editor) AddDocumentContext(ctx context.Context, title string, width, he
 				break
 			}
 		}
-		createdReader, err := created.ReaderContext(ctx)
+		createdReader, err := created.Reader(ctx)
 		if err != nil {
 			return 0, err
 		}

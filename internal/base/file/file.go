@@ -95,12 +95,6 @@ func NewTarget(name string) (*Target, error) {
 	return &Target{name: name, info: info}, nil
 }
 
-// Name 返回目标绝对路径
-// 返回: string 文件路径
-func (t *Target) Name() string {
-	return t.name
-}
-
 // check 检查目标是否保持最近确认的状态
 // 返回: error 文件状态错误
 func (t *Target) check() error {

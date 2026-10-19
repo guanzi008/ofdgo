@@ -650,7 +650,7 @@ func (e *Editor) layoutInvoiceReferenceSlots(ctx context.Context, bindings []Inv
 	if original.String() != before {
 		return fmt.Errorf("invoice slot text changed")
 	}
-	reader, err := e.ReaderContext(ctx)
+	reader, err := e.Reader(ctx)
 	if err != nil {
 		return err
 	}
@@ -857,7 +857,7 @@ func invoiceCheckReflowReferences(ctx context.Context, e *Editor, ownedPageIDs [
 		}
 		owned[key] = true
 	}
-	reader, err := e.ReaderContext(ctx)
+	reader, err := e.Reader(ctx)
 	if err != nil {
 		return err
 	}

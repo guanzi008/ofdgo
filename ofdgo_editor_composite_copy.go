@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+
 	"encoding/xml"
 	"fmt"
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
@@ -217,7 +218,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 	if err := e.prepareSourceIDs(); err != nil {
 		return err
 	}
-	reader, err := e.Reader()
+	reader, err := e.reader(nil)
 	if err != nil {
 		return err
 	}

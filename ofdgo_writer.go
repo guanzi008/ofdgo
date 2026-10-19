@@ -239,13 +239,13 @@ func (e *Editor) WriteTo(writer io.Writer) (int64, error) {
 	return e.writePlaintext(writer)
 }
 
-// WritePagesTo 按指定顺序将页面另存为独立OFD，不修改当前文档或撤销记录
+// writePagesTo 按指定顺序将页面另存为独立OFD，不修改当前文档或撤销记录
 // 保留描述信息并生成新文档标识，迁移相关资源、目录、注释和签章外观，移除指向未选页面的跳转
 // 快照只准备所选页面，关联引用由页面导入流程统一筛选，沿用当前后端及字体来源
 // 签名凭据不代表另存文件验签有效；进度与取消复用OnWriteProgress，另含snapshot、ids和commit阶段
 // 入参: writer 输出流, indexes 从0开始的页面索引，不可重复或为空
 // 返回: int64 已写入字节数, error 错误信息
-func (e *Editor) WritePagesTo(writer io.Writer, indexes []int) (int64, error) {
+func (e *Editor) writePagesTo(writer io.Writer, indexes []int) (int64, error) {
 	ctx := context.Background()
 	if e.output != nil {
 		ctx = e.output.ctx
@@ -307,16 +307,10 @@ func (e *Editor) WritePagesTo(writer io.Writer, indexes []int) (int64, error) {
 
 // Reader 获取当前文档的独立内存快照，不进行ZIP压缩，后续修改不影响已有快照
 // 返回的Reader可用于现有渲染、搜索和导出接口，新增资源仅包含实际引用的部分，二进制数据内部共享只读
-// 返回: *Reader 阅读器, error 错误信息
-func (e *Editor) Reader() (*Reader, error) {
-	return e.reader(nil)
-}
-
-// ReaderContext 获取可取消的独立内存快照，失败时不返回部分结果
-// 快照保持Reader的资源所有权规则，不改变当前编辑状态或撤销记录
+// 失败时不返回部分结果，不改变当前编辑状态或撤销记录
 // 入参: ctx 取消上下文
 // 返回: *Reader 阅读器, error 准备或取消错误
-func (e *Editor) ReaderContext(ctx context.Context) (*Reader, error) {
+func (e *Editor) Reader(ctx context.Context) (*Reader, error) {
 	return e.readerContext(ctx, nil)
 }
 

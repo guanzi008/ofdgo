@@ -277,7 +277,7 @@ func (e *Editor) selectionGeometry(page int, objects, annotations []string) ([]B
 	if err != nil {
 		return nil, nil, Box{}, err
 	}
-	reader, err := e.Reader()
+	reader, err := e.reader(nil)
 	if err != nil {
 		return nil, nil, Box{}, err
 	}

@@ -242,7 +242,7 @@ func (e *Editor) ExportInvoice(ctx context.Context, source InvoiceSource) ([]byt
 	if len(e.pages) == 0 {
 		return e.source.reader.ExportInvoice(invoiceWriteContext(ctx), source)
 	}
-	r, err := e.ReaderContext(invoiceWriteContext(ctx))
+	r, err := e.Reader(invoiceWriteContext(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +297,7 @@ func (e *Editor) changeInvoiceSource(ctx context.Context, source InvoiceSource, 
 			return InvoiceSource{}, fmt.Errorf("invoice data limit exceeded")
 		}
 		if objectReference {
-			r, err := e.ReaderContext(ctx)
+			r, err := e.Reader(ctx)
 			if err != nil {
 				return InvoiceSource{}, err
 			}
@@ -526,7 +526,7 @@ func (e *Editor) importInvoiceReferences(ctx context.Context, data []byte, optio
 	}
 	var source InvoiceSource
 	err := e.Transaction(func(next *Editor) error {
-		r, err := next.ReaderContext(ctx)
+		r, err := next.Reader(ctx)
 		if err != nil {
 			return err
 		}
@@ -546,7 +546,7 @@ func (e *Editor) importInvoiceReferences(ctx context.Context, data []byte, optio
 		if err := next.editStructure(index, func(_ []byte, _ *editorXML, _ CustomTag) ([]byte, error) { return bytes.Clone(data), nil }); err != nil {
 			return err
 		}
-		r, err = next.ReaderContext(ctx)
+		r, err = next.Reader(ctx)
 		if err != nil {
 			return err
 		}
@@ -631,7 +631,7 @@ func (e *Editor) editInvoiceReferences(ctx context.Context, source InvoiceSource
 	}
 	var result InvoiceUpdateResult
 	err := e.Transaction(func(next *Editor) error {
-		r, err := next.ReaderContext(ctx)
+		r, err := next.Reader(ctx)
 		if err != nil {
 			return err
 		}
@@ -786,7 +786,7 @@ func (e *Editor) editInvoiceReferences(ctx context.Context, source InvoiceSource
 		if err := next.SyncInvoicePages(ctx, invoice, singles); err != nil {
 			return err
 		}
-		view, err := next.ReaderContext(ctx)
+		view, err := next.Reader(ctx)
 		if err != nil {
 			return err
 		}
@@ -865,7 +865,7 @@ func (e *Editor) setInvoiceReferences(ctx context.Context, source InvoiceSource,
 	if index != 0 {
 		return InvoiceUpdateResult{}, fmt.Errorf("invoice index out of range")
 	}
-	r, err := e.ReaderContext(ctx)
+	r, err := e.Reader(ctx)
 	if err != nil {
 		return InvoiceUpdateResult{}, err
 	}

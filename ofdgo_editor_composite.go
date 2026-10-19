@@ -419,7 +419,7 @@ func (e *Editor) compositeScope(page int, path ObjectPath) (*Reader, *Renderer, 
 		return nil, nil, nil, nil, err
 	}
 	root.setStates(object.CompositeGraphicUnit.states)
-	reader, err := e.Reader()
+	reader, err := e.reader(nil)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

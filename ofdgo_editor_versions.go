@@ -42,7 +42,7 @@ func (e *Editor) DocumentVersionsContext(ctx context.Context) ([]DocumentVersion
 	if e.source == nil {
 		return nil, nil
 	}
-	reader, err := e.ReaderContext(ctx)
+	reader, err := e.Reader(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +257,7 @@ func (e *Editor) SetDefaultVersionContext(ctx context.Context, id string) error 
 		}
 		return fmt.Errorf("document version not found: %s", id)
 	}
-	reader, err := e.ReaderContext(ctx)
+	reader, err := e.Reader(ctx)
 	if err != nil {
 		return err
 	}
@@ -314,7 +314,7 @@ func (e *Editor) RenameVersionContext(ctx context.Context, id, name string) erro
 	if e.source == nil {
 		return fmt.Errorf("document version not found: %s", id)
 	}
-	reader, err := e.ReaderContext(ctx)
+	reader, err := e.Reader(ctx)
 	if err != nil {
 		return err
 	}

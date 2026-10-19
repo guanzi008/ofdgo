@@ -331,7 +331,7 @@ func (e *Editor) editLayerPage(page int, edit func(*Reader, []byte, *editorXML) 
 		if _, err := e.page(page); err != nil {
 			return err
 		}
-		r, err := e.Reader()
+		r, err := e.reader(nil)
 		if err != nil {
 			return err
 		}

@@ -203,7 +203,7 @@ func (e *Editor) importResourceStyle(ctx context.Context, create func(*Editor) (
 // 入参: ctx 取消上下文
 // 返回: *Reader 包含待注册字体、颜色空间及参数依赖的独立快照, error 读取或隔离错误
 func (e *Editor) resourceStyleReader(ctx context.Context) (*Reader, error) {
-	reader, err := e.ReaderContext(ctx)
+	reader, err := e.Reader(ctx)
 	if err != nil || len(e.resources) == 0 {
 		return reader, err
 	}

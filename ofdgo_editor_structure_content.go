@@ -27,7 +27,7 @@ import (
 // Structure 获取当前编辑状态的标引，包括页面和图元删除后的引用调整
 // 返回: []Structure 标引结构, error 快照或解析错误
 func (e *Editor) Structure() ([]Structure, error) {
-	r, err := e.Reader()
+	r, err := e.reader(nil)
 	if err != nil {
 		return nil, err
 	}
@@ -397,7 +397,7 @@ func (e *Editor) editStructureContext(ctx context.Context, index int, edit func(
 	}
 	tag := tags[index]
 	name := e.source.reader.ResPath(tag.FileLoc)
-	snapshot, err := e.ReaderContext(ctx)
+	snapshot, err := e.Reader(ctx)
 	if err != nil {
 		return err
 	}
@@ -532,7 +532,7 @@ func (e *Editor) validateStructureReferencesContext(ctx context.Context, root *S
 	}
 	if r == nil {
 		var err error
-		r, err = e.ReaderContext(ctx)
+		r, err = e.Reader(ctx)
 		if err != nil {
 			return nil, err
 		}
