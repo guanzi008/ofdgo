@@ -155,7 +155,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 		if path.Style.SoftMask != nil || path.Style.BlendMode != "" && path.Style.BlendMode != "Normal" && path.Style.BlendMode != "Compatible" {
 			return &pdfgo.UnsupportedError{Feature: "masked or blended transparent group content"}
 		}
-		data, err := p.pathDataContext(p.ctx, path.Path, Box{})
+		data, err := codecpdf.PathData(p.ctx, path.Path, p.matrix, Box{})
 		if err != nil {
 			return err
 		}
@@ -205,7 +205,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 						return fmt.Errorf("invalid PDF stroke matrix")
 					}
 					local := pdfImporter{matrix: inverse}
-					data, err = local.pathDataContext(p.ctx, path.Path, Box{})
+					data, err = codecpdf.PathData(p.ctx, path.Path, local.matrix, Box{})
 					if err != nil {
 						return err
 					}
@@ -677,7 +677,7 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 		if err != nil {
 			return err
 		}
-		data, err := identity.pathDataContext(p.ctx, mark.Path, Box{})
+		data, err := codecpdf.PathData(p.ctx, mark.Path, identity.matrix, Box{})
 		if err != nil {
 			return err
 		}
@@ -693,7 +693,7 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 			if len(clip.Text) != 0 {
 				return &pdfgo.UnsupportedError{Feature: "text-clipped binary mask"}
 			}
-			data, err := identity.pathDataContext(p.ctx, clip, Box{})
+			data, err := codecpdf.PathData(p.ctx, clip, identity.matrix, Box{})
 			if err != nil {
 				return err
 			}

@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -23,6 +24,13 @@ import (
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
+
+// pdfEmbeddedFile 保存目标路径的容器与原始文件，阅读器按需打开
+type pdfEmbeddedFile struct {
+	reader *pdfgo.Reader
+	file   *pdfgo.FileSpecification
+	data   []byte
+}
 
 // annotations 将链接、静态注解和表单外观按页面顺序转换为OFD对象
 // 入参: ctx 取消上下文, page PDF页面, strict 严格检查开关
@@ -574,4 +582,183 @@ func (p *pdfImporter) staticLinkAction(object pdfgo.Object, kind pdfgo.Name, str
 	}
 	p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF " + string(kind) + " action not transferred to OFD; static appearance retained"})
 	return nil, nil
+}
+
+// launchLinkAction 保留文件打开目标，不执行应用程序或猜测平台启动参数
+// 入参: object 启动动作, strict 是否禁止启动语义损失
+// 返回: *Action 附件动作, error 解析、取消或无法表达的语义
+func (p *pdfImporter) launchLinkAction(object pdfgo.Object, strict bool) (*Action, error) {
+	action, err := p.reader.ReadLaunchAction(p.ctx, object)
+	if err != nil {
+		return nil, err
+	}
+	if action.File == nil || action.Windows != nil || action.Mac != nil || action.Unix != nil {
+		if strict {
+			return nil, &pdfgo.UnsupportedError{Feature: "platform launch action conversion"}
+		}
+		p.warning(pdfgo.Diagnostic{Message: "PDF platform launch parameters not transferred to OFD; appearance retained"})
+		return nil, nil
+	}
+	if strict && action.NewWindow == nil {
+		return nil, &pdfgo.UnsupportedError{Feature: "launch reader window preference conversion"}
+	}
+	data, available, err := p.mediaData(p.ctx, *action.File)
+	if err != nil || !available {
+		return nil, err
+	}
+	pdfTarget := bytes.HasPrefix(bytes.TrimSpace(data[:min(len(data), 1024)]), []byte("%PDF-"))
+	if !pdfTarget && strict {
+		return nil, &pdfgo.UnsupportedError{Feature: "application or non-PDF launch action conversion"}
+	}
+	id, err := p.attachmentFile(action.File.Name, data)
+	if err != nil {
+		return nil, err
+	}
+	window := action.NewWindow
+	if !pdfTarget {
+		window = nil
+		p.warning(pdfgo.Diagnostic{Message: "PDF launch target retained as attachment; application execution not transferred to OFD"})
+	} else if window == nil {
+		p.warning(pdfgo.Diagnostic{Message: "PDF launch target retained as attachment; reader window preference not transferred to OFD"})
+	}
+	return &Action{Event: "CLICK", GotoA: &GotoA{AttachID: id, NewWindow: window}}, nil
+}
+
+// remoteLinkAction 保留调用方提供的远程文件，不生成OFD无法表达的文件内目标
+// 入参: object 远程跳转动作, strict 是否禁止目标语义损失
+// 返回: *Action 附件动作, error 结构、取消或转换错误
+func (p *pdfImporter) remoteLinkAction(object pdfgo.Object, strict bool) (*Action, error) {
+	action, err := p.reader.ReadExternalGoToAction(p.ctx, object)
+	if err != nil {
+		return nil, err
+	}
+	if strict {
+		return nil, &pdfgo.UnsupportedError{Feature: "remote document destination conversion"}
+	}
+	if p.resolveFile == nil {
+		p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF remote link file unavailable: " + action.File.Name + "; appearance retained, remote destination not transferred to OFD"})
+		return nil, nil
+	}
+	data, err := p.reader.ReadFileData(p.ctx, *action.File, p.resolveFile)
+	if err != nil {
+		return nil, err
+	}
+	id, err := p.attachmentFile(action.File.Name, data)
+	if err != nil {
+		return nil, err
+	}
+	message := "PDF remote link target retained as attachment; destination inside attached PDF not transferred to OFD"
+	if action.NewWindow == nil {
+		message += "; reader window preference not transferred"
+	}
+	p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: message})
+	return &Action{Event: "CLICK", GotoA: &GotoA{AttachID: id, NewWindow: action.NewWindow}}, nil
+}
+
+// embeddedLinkAction 按目标路径定位附件，回到源文档时保留页内目标
+// 入参: object 嵌入文件动作, strict 是否禁止附件内目标语义损失
+// 返回: *Action 附件动作, pdfgo.Object 源文档目标, error 目标或转换错误
+func (p *pdfImporter) embeddedLinkAction(object pdfgo.Object, strict bool) (*Action, pdfgo.Object, error) {
+	action, err := p.reader.ReadExternalGoToAction(p.ctx, object)
+	if err != nil {
+		return nil, nil, err
+	}
+	stack := []pdfEmbeddedFile{{reader: p.reader}}
+	if action.File != nil {
+		data, available, err := p.mediaData(p.ctx, *action.File)
+		if err != nil || !available {
+			return nil, nil, err
+		}
+		stack[0] = pdfEmbeddedFile{file: action.File, data: data}
+	}
+	var opened []*pdfgo.Reader
+	defer func() {
+		for _, reader := range opened {
+			reader.Close()
+		}
+	}()
+	open := func(file *pdfEmbeddedFile) error {
+		if file.reader != nil {
+			return nil
+		}
+		if err := p.ctx.Err(); err != nil {
+			return err
+		}
+		if file.data == nil {
+			var err error
+			file.data, err = p.reader.ReadFileData(p.ctx, *file.file, p.resolveFile)
+			if err != nil {
+				return err
+			}
+		}
+		reader, err := pdfgo.NewReaderWithOptions(bytes.NewReader(file.data), int64(len(file.data)), pdfgo.ReaderOptions{Warning: p.warning})
+		if err != nil {
+			return err
+		}
+		file.reader = reader
+		opened = append(opened, reader)
+		return p.ctx.Err()
+	}
+	for _, target := range action.Target {
+		if err := p.ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		if target.Relation == "P" {
+			if len(stack) == 1 {
+				if strict {
+					return nil, nil, &pdfgo.UnsupportedError{Feature: "embedded link parent document unavailable"}
+				}
+				p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF embedded link parent document unavailable; link omitted"})
+				return nil, nil, nil
+			}
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		current := &stack[len(stack)-1]
+		if err := open(current); err != nil {
+			return nil, nil, err
+		}
+		file, err := current.reader.ReadEmbeddedTargetFile(p.ctx, target)
+		if err != nil {
+			if !strict && errors.Is(err, pdfgo.ErrDestinationNotFound) {
+				p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: fmt.Sprintf("%v; link omitted", err)})
+				return nil, nil, nil
+			}
+			return nil, nil, err
+		}
+		stack = append(stack, pdfEmbeddedFile{file: &file})
+	}
+	current := &stack[len(stack)-1]
+	if current.file == nil {
+		destination, err := current.reader.ResolveRemoteDestination(p.ctx, action.Destination)
+		if err != nil {
+			if !strict && errors.Is(err, pdfgo.ErrDestinationNotFound) {
+				p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: fmt.Sprintf("%v; link omitted", err)})
+				return nil, nil, nil
+			}
+			return nil, nil, err
+		}
+		if action.NewWindow != nil && *action.NewWindow {
+			if strict {
+				return nil, nil, &pdfgo.UnsupportedError{Feature: "embedded link to source document in new window"}
+			}
+			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF embedded link new window not transferred to OFD; source document destination retained"})
+		}
+		return nil, append(pdfgo.Array{destination.Page, destination.Mode}, destination.Parameters...), nil
+	}
+	if strict {
+		return nil, nil, &pdfgo.UnsupportedError{Feature: "destination inside attached PDF"}
+	}
+	if current.data == nil {
+		current.data, err = p.reader.ReadFileData(p.ctx, *current.file, p.resolveFile)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	id, err := p.attachmentFile(current.file.Name, current.data)
+	if err != nil {
+		return nil, nil, err
+	}
+	p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF embedded link target retained as attachment; destination inside attached PDF not transferred to OFD"})
+	return &Action{Event: "CLICK", GotoA: &GotoA{AttachID: id, NewWindow: action.NewWindow}}, nil, nil
 }

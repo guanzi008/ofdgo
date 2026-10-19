@@ -17,6 +17,8 @@ package pdf
 import (
 	"context"
 	"fmt"
+	"math"
+	"strconv"
 
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"github.com/xiaoqidun/pdfgo"
@@ -98,4 +100,68 @@ func GlyphPath(outline basegeom.Path, matrix pdfgo.Matrix) (pdfgo.Path, error) {
 		current = segment.End
 	}
 	return path, nil
+}
+
+// PathBounds 逐段计算变换后的控制点边界，不创建临时点集合
+// 入参: ctx 取消上下文, path PDF路径, matrix 坐标变换
+// 返回: basegeom.Box 控制点边界，空路径返回零值, error 取消错误
+func PathBounds(ctx context.Context, path pdfgo.Path, matrix pdfgo.Matrix) (basegeom.Box, error) {
+	if err := ctx.Err(); err != nil {
+		return basegeom.Box{}, err
+	}
+	minX, minY, maxX, maxY := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+	found := false
+	for _, segment := range path.Segments {
+		if err := ctx.Err(); err != nil {
+			return basegeom.Box{}, err
+		}
+		for index, point := range segment.Points {
+			if index&255 == 0 {
+				if err := ctx.Err(); err != nil {
+					return basegeom.Box{}, err
+				}
+			}
+			point = matrix.Apply(point)
+			minX, minY = math.Min(minX, point.X), math.Min(minY, point.Y)
+			maxX, maxY = math.Max(maxX, point.X), math.Max(maxY, point.Y)
+			found = true
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return basegeom.Box{}, err
+	}
+	if !found {
+		return basegeom.Box{}, nil
+	}
+	return basegeom.Box{X: minX, Y: minY, W: math.Max(maxX-minX, 1e-6), H: math.Max(maxY-minY, 1e-6)}, nil
+}
+
+// PathData 转换路径并在分段处理时检查取消
+// 入参: ctx 取消上下文, path PDF路径, matrix 坐标变换, origin 对象边界
+// 返回: string OFD路径数据, error 取消错误
+func PathData(ctx context.Context, path pdfgo.Path, matrix pdfgo.Matrix, origin basegeom.Box) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	data := make([]byte, 0, len(path.Segments)*48)
+	for index, segment := range path.Segments {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if index != 0 {
+			data = append(data, ' ')
+		}
+		data = append(data, segment.Operator...)
+		for _, point := range segment.Points {
+			point = matrix.Apply(point)
+			data = append(data, ' ')
+			data = strconv.AppendFloat(data, point.X-origin.X, 'g', -1, 64)
+			data = append(data, ' ')
+			data = strconv.AppendFloat(data, point.Y-origin.Y, 'g', -1, 64)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
