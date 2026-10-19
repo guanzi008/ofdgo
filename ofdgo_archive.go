@@ -27,8 +27,8 @@ import (
 
 // ArchiveFile 描述已生成的归档文件，不关闭调用方提供的源读取器
 type ArchiveFile struct {
-	Name  string
-	Input *Input
+	Name   string
+	Source *Source
 }
 
 // ArchiveOptions 设置ZIP封装，压缩不重新编码归档内已生成的文档
@@ -46,7 +46,7 @@ func WriteArchive(ctx context.Context, writer io.Writer, files []ArchiveFile, op
 	}
 	names := map[string]bool{}
 	for _, file := range files {
-		if !fs.ValidPath(file.Name) || file.Name == "." || strings.Contains(file.Name, "\\") || names[file.Name] || file.Input == nil {
+		if !fs.ValidPath(file.Name) || file.Name == "." || strings.Contains(file.Name, "\\") || names[file.Name] || file.Source == nil {
 			return 0, fmt.Errorf("invalid archive file %q", file.Name)
 		}
 		names[file.Name] = true
@@ -76,15 +76,15 @@ func WriteArchive(ctx context.Context, writer io.Writer, files []ArchiveFile, op
 		if err != nil {
 			return count, err
 		}
-		input := convertReader{ctx: ctx, input: file.Input}
+		source := convertReader{ctx: ctx, source: file.Source}
 		if buffer == nil {
 			buffer = make([]byte, 32<<10)
 		}
-		written, err := io.CopyBuffer(entry, io.NewSectionReader(input, 0, file.Input.Size()), buffer)
+		written, err := io.CopyBuffer(entry, io.NewSectionReader(source, 0, file.Source.Size()), buffer)
 		if err != nil {
 			return count, err
 		}
-		if written != file.Input.Size() {
+		if written != file.Source.Size() {
 			return count, io.ErrUnexpectedEOF
 		}
 	}

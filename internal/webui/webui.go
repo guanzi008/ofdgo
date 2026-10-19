@@ -57,7 +57,7 @@ type FontInfo = ofdgo.FontInfo
 type Session struct {
 	Reader          *ofdgo.Reader
 	Renderer        *ofdgo.Renderer
-	input           *ofdgo.Input
+	source          *ofdgo.Source
 	fontFS          *ofdgo.FontFS
 	doc             *ofdgo.Document
 	pageCache       map[int]*ofdgo.PageContent
@@ -425,7 +425,7 @@ type businessEngine struct {
 	copiedObjects  *editorClipboard
 	copiedStyle    *ofdgo.GraphicObject
 	ctx            context.Context
-	resolveInput   func(context.Context, any) (io.ReaderAt, int64, error)
+	resolveSource  func(context.Context, any) (io.ReaderAt, int64, error)
 	conversionPool *ofdgo.ConversionPool
 }
 
@@ -436,21 +436,21 @@ func Open(data []byte, opts OpenOptions) (*Session, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("empty ofd data")
 	}
-	input, err := ofdgo.NewInput(bytes.NewReader(data), int64(len(data)))
+	source, err := ofdgo.NewSource(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, err
 	}
-	reader, err := ofdgo.NewReader(input, opts.ReaderOptions...)
+	reader, err := ofdgo.NewReader(source, opts.ReaderOptions...)
 	if err != nil {
-		input.Close()
+		source.Close()
 		return nil, err
 	}
 	session, err := newSession(reader, opts)
 	if err != nil {
-		input.Close()
+		source.Close()
 		return nil, err
 	}
-	session.input = input
+	session.source = source
 	return session, nil
 }
 
@@ -461,14 +461,14 @@ func (s *Session) Close() error {
 		return nil
 	}
 	reader := s.Reader
-	input := s.input
+	source := s.source
 	*s = Session{}
 	var err error
 	if reader != nil {
 		err = reader.Close()
 	}
-	if input != nil {
-		err = errors.Join(err, input.Close())
+	if source != nil {
+		err = errors.Join(err, source.Close())
 	}
 	return err
 }
@@ -1336,12 +1336,12 @@ func (e *businessEngine) detectDocumentFormat(args []platformValue) (any, error)
 		return nil, fmt.Errorf("missing detection arguments")
 	}
 	reader := &browserReaderAt{read: args[0], size: int64(args[1].Float()), checkpoint: args[2]}
-	input, err := ofdgo.NewInput(reader, reader.size)
+	source, err := ofdgo.NewSource(reader, reader.size)
 	if err != nil {
 		return nil, err
 	}
-	defer input.Close()
-	return ofdgo.DetectFormat(input)
+	defer source.Close()
+	return ofdgo.DetectFormat(source)
 }
 
 // convertPDFDocument 通过库转换PDF，不替换当前文档会话
@@ -1351,11 +1351,11 @@ func (e *businessEngine) convertPDFDocument(args []platformValue) (any, error) {
 	if len(args) != 6 {
 		return nil, fmt.Errorf("missing PDF data")
 	}
-	input, err := e.inputFromValue(args[0])
+	source, err := e.sourceFromValue(args[0])
 	if err != nil {
 		return nil, err
 	}
-	defer input.Close()
+	defer source.Close()
 	fonts, err := e.fontsFromJS(args[1])
 	if err != nil {
 		return nil, err
@@ -1376,7 +1376,7 @@ func (e *businessEngine) convertPDFDocument(args []platformValue) (any, error) {
 		}))
 	}
 	options.RendererOptions = []ofdgo.RendererOption{ofdgo.WithFontFS(fontSources...)}
-	editor, report, err := ofdgo.ImportPDF(e.operationContext(), input, options)
+	editor, report, err := ofdgo.ImportPDF(e.operationContext(), source, options)
 	if err != nil {
 		return nil, err
 	}
@@ -1478,12 +1478,12 @@ func (e *businessEngine) convertFile(args []platformValue) (any, error) {
 		return nil, err
 	}
 	reader := &browserReaderAt{read: args[0], checkpoint: args[6], size: int64(args[1].Float())}
-	input, err := ofdgo.NewInput(reader, reader.size)
+	source, err := ofdgo.NewSource(reader, reader.size)
 	if err != nil {
 		return nil, err
 	}
-	defer input.Close()
-	report, err := ofdgo.Convert(e.newOutputContext(args[6]), input, writer, options)
+	defer source.Close()
+	report, err := ofdgo.Convert(e.newOutputContext(args[6]), source, writer, options)
 	if err != nil {
 		return nil, err
 	}
@@ -1514,8 +1514,8 @@ func (e *businessEngine) packFiles(args []platformValue) (any, error) {
 	inputs := make([]*browserReaderAt, files.Length())
 	defer func() {
 		for _, entry := range entries {
-			if entry.Input != nil {
-				entry.Input.Close()
+			if entry.Source != nil {
+				entry.Source.Close()
 			}
 		}
 	}()
@@ -1524,12 +1524,12 @@ func (e *businessEngine) packFiles(args []platformValue) (any, error) {
 		name := file.Get("name").String()
 		read := args[1].Invoke(i)
 		reader := &browserReaderAt{read: read, checkpoint: args[4], size: int64(file.Get("size").Float())}
-		input, err := ofdgo.NewInput(reader, reader.size)
+		source, err := ofdgo.NewSource(reader, reader.size)
 		if err != nil {
 			return nil, err
 		}
 		inputs[i] = reader
-		entries[i] = ofdgo.ArchiveFile{Name: name, Input: input}
+		entries[i] = ofdgo.ArchiveFile{Name: name, Source: source}
 	}
 	options := ofdgo.ArchiveOptions{OnProgress: func(completed, total int) error {
 		if completed > 0 {
@@ -1558,14 +1558,14 @@ func (e *businessEngine) openDocument(args []platformValue) (any, error) {
 	if len(args) < 3 {
 		return nil, fmt.Errorf("missing open arguments")
 	}
-	input, err := e.inputFromValue(args[0])
+	source, err := e.sourceFromValue(args[0])
 	if err != nil {
 		return nil, err
 	}
 	keep := false
 	defer func() {
 		if !keep {
-			input.Close()
+			source.Close()
 		}
 	}()
 	fonts, err := e.fontsFromJS(args[1])
@@ -1582,7 +1582,7 @@ func (e *businessEngine) openDocument(args []platformValue) (any, error) {
 		defer clear(credentials.Password)
 		options.ReaderOptions = append(options.ReaderOptions, ofdgo.WithCredentials(credentials))
 	}
-	reader, err := ofdgo.NewReader(input, options.ReaderOptions...)
+	reader, err := ofdgo.NewReader(source, options.ReaderOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -1599,7 +1599,7 @@ func (e *businessEngine) openDocument(args []platformValue) (any, error) {
 		e.currentSession = nil
 	}
 	e.currentSession = session
-	session.input = input
+	session.source = source
 	keep = true
 	return e.currentSession.Summary(), nil
 }
@@ -5505,14 +5505,14 @@ func (e *businessEngine) loadImport(args []platformValue) (any, error) {
 	if args[0].IsNull() {
 		return nil, nil
 	}
-	input, err := e.inputFromValue(args[0])
+	source, err := e.sourceFromValue(args[0])
 	if err != nil {
 		return nil, err
 	}
 	keep := false
 	defer func() {
 		if !keep {
-			input.Close()
+			source.Close()
 		}
 	}()
 	var options []ofdgo.ReaderOption
@@ -5524,11 +5524,11 @@ func (e *businessEngine) loadImport(args []platformValue) (any, error) {
 		defer clear(credentials.Password)
 		options = append(options, ofdgo.WithCredentials(credentials))
 	}
-	reader, err := ofdgo.NewReader(input, options...)
+	reader, err := ofdgo.NewReader(source, options...)
 	if err != nil {
 		return nil, err
 	}
-	reader.Closer = input
+	reader.Closer = source
 	doc, err := reader.Doc()
 	if err != nil {
 		reader.Close()
@@ -6180,7 +6180,7 @@ func (e *businessEngine) selectDocumentVersion(args []platformValue) (any, error
 	if err != nil {
 		return nil, err
 	}
-	session.input, e.currentSession.input = e.currentSession.input, nil
+	session.source, e.currentSession.source = e.currentSession.source, nil
 	_ = e.currentSession.Close()
 	e.currentSession = session
 	e.clearImport()
@@ -6338,7 +6338,7 @@ func (e *businessEngine) selectDocument(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	session.input, e.currentSession.input = e.currentSession.input, nil
+	session.source, e.currentSession.source = e.currentSession.source, nil
 	_ = e.currentSession.Close()
 	e.currentSession, e.currentEditor = session, session.editor
 	if e.pendingImport != nil {
@@ -6440,7 +6440,7 @@ func (e *businessEngine) previewEditor(editor *ofdgo.Editor, annotations bool) (
 			editor.SetFontFS(session.fontFS)
 		}
 		if editor == e.currentEditor {
-			session.input, e.currentSession.input = e.currentSession.input, nil
+			session.source, e.currentSession.source = e.currentSession.source, nil
 		}
 		_ = e.currentSession.Close()
 	}

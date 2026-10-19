@@ -84,8 +84,8 @@ type ConvertReport struct {
 
 // convertReader 将取消上下文传递到随机读取
 type convertReader struct {
-	ctx   context.Context
-	input io.ReaderAt
+	ctx    context.Context
+	source io.ReaderAt
 }
 
 // convertWriter 将取消上下文传递到写入并统计实际字节数
@@ -113,9 +113,9 @@ func OutputFormats() []OutputFormat {
 // 原始模式完整OFD另存保持源字节；选页和跨格式输出重新生成文档，压缩仅作用于输出副本
 // 输入按需随机读取，输出分块写出；解析对象及后端可能缓存资源，不保证恒定内存
 // 出错时报告保留已有诊断，调用方应丢弃未完成输出；只有返回nil才表示转换成功
-// 入参: ctx 取消上下文, input 输入源, output 输出流, options 转换选项
+// 入参: ctx 取消上下文, source 输入源, output 输出流, options 转换选项
 // 返回: ConvertReport 转换报告, error 错误信息
-func Convert(ctx context.Context, input *Input, output io.Writer, options ConvertOptions) (report ConvertReport, err error) {
+func Convert(ctx context.Context, source *Source, output io.Writer, options ConvertOptions) (report ConvertReport, err error) {
 	if options.Pool != nil {
 		if err = options.Pool.acquire(ctx, false, 0); err != nil {
 			return report, err
@@ -174,14 +174,14 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 	if err = progress("open", 0, 0); err != nil {
 		return report, err
 	}
-	if input == nil || input.Size() <= 0 {
-		return report, fmt.Errorf("empty document input")
+	if source == nil || source.Size() <= 0 {
+		return report, fmt.Errorf("empty document source")
 	}
-	size := input.Size()
-	operationInput := &Input{reader: convertReader{ctx: ctx, input: input}, size: size}
+	size := source.Size()
+	operationSource := &Source{reader: convertReader{ctx: ctx, source: source}, size: size}
 	report.Input = strings.ToLower(strings.TrimSpace(options.Input))
 	if report.Input == "" {
-		report.Input, err = DetectFormat(operationInput)
+		report.Input, err = DetectFormat(operationSource)
 		if err != nil {
 			return report, err
 		}
@@ -200,7 +200,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 		return report, fmt.Errorf("missing output writer")
 	}
 	if report.Input == "pdf" && format == "pdf" && options.Compression.Mode != CompressionUnchanged && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
-		pdfReader, openErr := pdfgo.NewReaderWithOptions(operationInput, size, pdfgo.ReaderOptions{Password: options.PDF.Password, PasswordUTF8: options.PDF.PasswordUTF8})
+		pdfReader, openErr := pdfgo.NewReaderWithOptions(operationSource, size, pdfgo.ReaderOptions{Password: options.PDF.Password, PasswordUTF8: options.PDF.PasswordUTF8})
 		if openErr != nil {
 			return report, openErr
 		}
@@ -234,13 +234,13 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 			}
 			return nil
 		}
-		editor, report.PDF, err = ImportPDF(ctx, operationInput, pdfOptions)
+		editor, report.PDF, err = ImportPDF(ctx, operationSource, pdfOptions)
 		if err != nil {
 			return report, err
 		}
 		count = editor.PageCount()
 	case "ofd":
-		reader, err = NewReader(operationInput, options.ReaderOptions...)
+		reader, err = NewReader(operationSource, options.ReaderOptions...)
 		if err != nil {
 			return report, err
 		}
@@ -267,7 +267,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 			if err = progress("write", 0, 0); err != nil {
 				return report, err
 			}
-			_, err = io.Copy(writer, io.NewSectionReader(operationInput, 0, size))
+			_, err = io.Copy(writer, io.NewSectionReader(operationSource, 0, size))
 			report.Unchanged = err == nil
 			return report, err
 		}
@@ -302,7 +302,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 				if err = progress("write", 0, 0); err != nil {
 					return report, err
 				}
-				_, err = io.Copy(writer, io.NewSectionReader(operationInput, 0, size))
+				_, err = io.Copy(writer, io.NewSectionReader(operationSource, 0, size))
 				report.Unchanged = err == nil
 				return report, err
 			}
@@ -370,7 +370,7 @@ func (r convertReader) ReadAt(data []byte, offset int64) (int, error) {
 	if err := r.ctx.Err(); err != nil {
 		return 0, err
 	}
-	n, err := r.input.ReadAt(data, offset)
+	n, err := r.source.ReadAt(data, offset)
 	if err == nil {
 		err = r.ctx.Err()
 	}

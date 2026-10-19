@@ -221,11 +221,11 @@ func platformParseJSON(data []byte) map[string]any {
 	return result
 }
 
-// inputFromValue 读取浏览器二进制源
-func (e *businessEngine) inputFromValue(value platformValue) (*ofdgo.Input, error) {
+// sourceFromValue 读取浏览器二进制源
+func (e *businessEngine) sourceFromValue(value platformValue) (*ofdgo.Source, error) {
 	data, err := e.bytesFromJS(value)
 	if err != nil {
 		return nil, err
 	}
-	return ofdgo.NewInput(bytes.NewReader(data), int64(len(data)))
+	return ofdgo.NewSource(bytes.NewReader(data), int64(len(data)))
 }

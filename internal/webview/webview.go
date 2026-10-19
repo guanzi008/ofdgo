@@ -475,11 +475,11 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		}
 		descriptor, _ := args["data"].(map[string]any)
 		key, _ := descriptor["nativeFile"].(string)
-		input, size, err := h.files.resolve(key)
+		source, size, err := h.files.resolve(key)
 		if err != nil {
 			return nil, err
 		}
-		_, err = io.Copy(writer, io.NewSectionReader(input, 0, size))
+		_, err = io.Copy(writer, io.NewSectionReader(source, 0, size))
 		return nil, err
 	case "fonts":
 		h.fontOnce.Do(h.readFonts)

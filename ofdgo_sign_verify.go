@@ -236,10 +236,10 @@ func WithSignatureVerifyTime(t time.Time) SignatureVerifyOption {
 }
 
 // VerifySignatures 验证输入源中的OFD签名，不接管输入源生命周期
-// 入参: input 输入源, opts 签名验证选项
+// 入参: source 输入源, opts 签名验证选项
 // 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
-func VerifySignatures(input *Input, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
-	reader, err := NewReader(input)
+func VerifySignatures(source *Source, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	reader, err := NewReader(source)
 	if err != nil {
 		return nil, err
 	}

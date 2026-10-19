@@ -204,11 +204,11 @@ func (o pdfObjectOrigin) merge(other pdfObjectOrigin) pdfObjectOrigin {
 
 // ImportPDF 将PDF内容转换为独立OFD编辑文档，失败时不返回部分结果
 // 返回的编辑文档独立于输入源，函数返回后可关闭输入源
-// 入参: ctx 取消上下文, input 输入源, options 转换选项
+// 入参: ctx 取消上下文, source 输入源, options 转换选项
 // 返回: *Editor 编辑文档, PDFImportReport 转换统计, error 错误信息
-func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Editor, PDFImportReport, error) {
-	if input == nil {
-		return nil, PDFImportReport{}, fmt.Errorf("missing input")
+func ImportPDF(ctx context.Context, source *Source, options PDFImportOptions) (*Editor, PDFImportReport, error) {
+	if source == nil {
+		return nil, PDFImportReport{}, fmt.Errorf("missing source")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, PDFImportReport{}, err
@@ -245,7 +245,7 @@ func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Ed
 		readWarning = func(diagnostic pdfgo.Diagnostic) { diagnostics = append(diagnostics, diagnostic) }
 		readOptions.Warning = func(diagnostic pdfgo.Diagnostic) { readWarning(diagnostic) }
 	}
-	reader, err := pdfgo.NewReaderWithOptions(convertReader{ctx: ctx, input: input}, input.Size(), readOptions)
+	reader, err := pdfgo.NewReaderWithOptions(convertReader{ctx: ctx, source: source}, source.Size(), readOptions)
 	if err != nil {
 		return nil, PDFImportReport{}, err
 	}
@@ -374,10 +374,10 @@ func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Ed
 }
 
 // ConvertPDF 将PDF转换并写入OFD，转换阶段失败时不写入目标
-// 入参: ctx 取消上下文, input 输入源, output OFD输出, options 转换选项
+// 入参: ctx 取消上下文, source 输入源, output OFD输出, options 转换选项
 // 返回: PDFImportReport 转换统计, error 错误信息
-func ConvertPDF(ctx context.Context, input *Input, output io.Writer, options PDFImportOptions) (PDFImportReport, error) {
-	editor, report, err := ImportPDF(ctx, input, options)
+func ConvertPDF(ctx context.Context, source *Source, output io.Writer, options PDFImportOptions) (PDFImportReport, error) {
+	editor, report, err := ImportPDF(ctx, source, options)
 	if err != nil {
 		return PDFImportReport{}, err
 	}
