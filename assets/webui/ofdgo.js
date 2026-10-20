@@ -23,7 +23,7 @@ const STATUS = {
 const wasmRequests = new Map();
 const metaContents = new WeakMap();
 const batch = { items: [], formats: [], running: false, canceled: false, workers: new Set(), requests: new Map(), sequence: 0, progress: null, jobs: [], credentials: Promise.resolve() };
-const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Compression", "FontRow", "FontMode", "Destination", "DPIRow", "DPI", "DPIValue", "Parallel", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
+const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Compression", "FontRow", "FontMode", "Destination", "DPIRow", "DPI", "DPIValue", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
 const fontBinding = { font: null, choices: [], sequence: 0 };
 const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name", "SourceRow", "Source", "File", "Hint", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#fontBinding${name}`)]));
 const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Kind", "List", "Empty", "Reference", "ReferenceGroup", "Actions", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "BindingActions", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
@@ -8340,7 +8340,7 @@ function renderBatchList() {
 }
 
 function updateBatchControls() {
-	for (const name of ["Add", "Clear", "Format", "Compression", "FontMode", "Destination", "DPI", "Parallel"]) batchElements[name].disabled = batch.running;
+	for (const name of ["Add", "Clear", "Format", "Compression", "FontMode", "Destination", "DPI"]) batchElements[name].disabled = batch.running;
 	batchElements.FontRow.hidden = !(batch.items.length ? batch.items : [null]).some(item => (item?.format || batchElements.Format.value) === "ofd");
 	batchElements.Compression.disabled ||= (batch.items.length ? batch.items : [null]).every(item => (item?.format || batchElements.Format.value) === "txt");
 	batchElements.Clear.disabled ||= !batch.items.length;
@@ -8562,7 +8562,7 @@ async function runBatch() {
 		const limits = nativeHost ? await nativeHost.call("batch", {}) : engineLimits();
 		const capacity = limits.parallelism;
 		const automatic = nativeHost ? capacity : Math.min(capacity, Math.max(1, Math.floor(limits.memoryBytes / (512 << 20))));
-		const parallel = Math.min(jobs.length, capacity, Number(batchElements.Parallel.value) || automatic);
+		const parallel = Math.min(jobs.length, automatic);
 		const workerMemory = (limits.memoryBytes || 0) / parallel;
 		let next = 0;
 		const run = async initial => {

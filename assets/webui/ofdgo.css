@@ -795,7 +795,7 @@ button:not(:disabled):hover {
 .convert-options {
 	flex: none;
 	display: grid;
-	grid-template-columns: repeat(5, minmax(0, 1fr));
+	grid-template-columns: repeat(4, minmax(0, 1fr));
 	grid-column: 1 / -1;
 	grid-row: 1;
 	width: 100%;
@@ -804,11 +804,11 @@ button:not(:disabled):hover {
 }
 
 .convert-options:has(#convertDPIRow[hidden]):has(#convertFontRow[hidden]) {
-	grid-template-columns: repeat(4, minmax(0, 1fr));
+	grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .convert-options:has(#convertDPIRow:not([hidden])):has(#convertFontRow:not([hidden])) {
-	grid-template-columns: repeat(6, minmax(0, 1fr));
+	grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .convert-options .form-row {
@@ -1067,8 +1067,8 @@ button:not(:disabled):hover {
 	.convert-options:has(#convertDPIRow:not([hidden])):has(#convertFontRow:not([hidden])) {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 	}
-	.convert-options:has(#convertDPIRow[hidden]):has(#convertFontRow:not([hidden])) .form-row:last-child,
-	.convert-options:has(#convertDPIRow:not([hidden])):has(#convertFontRow[hidden]) .form-row:last-child {
+	.convert-options:has(#convertDPIRow[hidden]):has(#convertFontRow[hidden]) .form-row:last-child,
+	.convert-options:has(#convertDPIRow:not([hidden])):has(#convertFontRow:not([hidden])) .form-row:last-child {
 		grid-column: 1 / -1;
 	}
 	.convert-options .form-row {
