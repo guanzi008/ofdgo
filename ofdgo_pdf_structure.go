@@ -927,7 +927,7 @@ func (p *pdfImporter) documentMetadata(ctx context.Context, strict bool) error {
 			return fmt.Errorf("PDF metadata %s: %w", field.name, err)
 		}
 		if text != *field.text {
-			p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Message: "PDF metadata " + field.name + ": time zone separators normalized"})
+			p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Message: "PDF metadata " + field.name + ": date normalized"})
 			*field.text = text
 		}
 	}

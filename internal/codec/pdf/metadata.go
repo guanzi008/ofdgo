@@ -22,7 +22,7 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// NormalizeDate 校验PDF日期，非严格模式补齐完整时区偏移的分隔符
+// NormalizeDate 校验PDF日期，非严格模式修正单层外括号及完整时区偏移的分隔符
 // 入参: text PDF日期字符串, strict 是否严格校验
 // 返回: string 标准日期字符串, error 日期错误
 func NormalizeDate(text string, strict bool) (string, error) {
@@ -33,16 +33,23 @@ func NormalizeDate(text string, strict bool) (string, error) {
 	if err == nil || strict {
 		return text, err
 	}
-	offset := len(text) - 5
-	if offset < 6 || text[offset] != '+' && text[offset] != '-' {
+	normalized := text
+	if strings.HasPrefix(normalized, "(") && strings.HasSuffix(normalized, ")") {
+		normalized = normalized[1 : len(normalized)-1]
+		if _, parseErr := pdfgo.ParseDate(normalized); parseErr == nil {
+			return normalized, nil
+		}
+	}
+	offset := len(normalized) - 5
+	if offset < 6 || normalized[offset] != '+' && normalized[offset] != '-' {
 		return text, err
 	}
-	for _, digit := range text[offset+1:] {
+	for _, digit := range normalized[offset+1:] {
 		if digit < '0' || digit > '9' {
 			return text, err
 		}
 	}
-	normalized := text[:offset+3] + "'" + text[offset+3:] + "'"
+	normalized = normalized[:offset+3] + "'" + normalized[offset+3:] + "'"
 	if _, parseErr := pdfgo.ParseDate(normalized); parseErr != nil {
 		return text, err
 	}
