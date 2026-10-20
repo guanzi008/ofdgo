@@ -75,6 +75,10 @@ go build -o ofdgo_windows_amd64.exe -trimpath -ldflags "-H windowsgui -s -w -bui
 set GOOS=linux
 set GOARCH=amd64
 go build -o ofdgo_linux_amd64 -trimpath -ldflags "-s -w -buildid=" ./cmd/webview
+:: 3. 构建Linux arm64（aarch64）
+set GOOS=linux
+set GOARCH=arm64
+go build -o ofdgo_linux_arm64 -trimpath -ldflags "-s -w -buildid=" ./cmd/webview
 ```
 
 # 安装引擎
