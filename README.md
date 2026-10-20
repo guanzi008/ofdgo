@@ -66,16 +66,19 @@ go build -o ofdgo_webui.exe -trimpath -ldflags "-s -w -buildid=" ./cmd/webui/web
 基于 [GUIGo](https://github.com/xiaoqidun/guigo) 实现，运行前需参照其说明安装系统依赖
 
 ```batch
-:: 1. 构建Windows amd64（x64/x86_64）
 set CGO_ENABLED=0
+
+:: 构建Windows amd64（x64/x86_64）
 set GOOS=windows
 set GOARCH=amd64
 go build -o ofdgo_windows_amd64.exe -trimpath -ldflags "-H windowsgui -s -w -buildid=" ./cmd/webview
-:: 2. 构建Linux amd64（x64/x86_64）
+
+:: 构建Linux amd64（x64/x86_64）
 set GOOS=linux
 set GOARCH=amd64
 go build -o ofdgo_linux_amd64 -trimpath -ldflags "-s -w -buildid=" ./cmd/webview
-:: 3. 构建Linux arm64（aarch64）
+
+:: 构建Linux arm64（aarch64）
 set GOOS=linux
 set GOARCH=arm64
 go build -o ofdgo_linux_arm64 -trimpath -ldflags "-s -w -buildid=" ./cmd/webview
