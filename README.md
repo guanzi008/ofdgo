@@ -64,9 +64,15 @@ go build -o ofdgo_webui.exe -trimpath -ldflags "-s -w -buildid=" ./cmd/webui/web
 
 # 原生桌面
 ```batch
+:: 1. 构建Windows amd64（x64/x86_64）
+set CGO_ENABLED=0
 set GOOS=windows
 set GOARCH=amd64
 go build -o ofdgo_windows_amd64.exe -trimpath -ldflags "-H windowsgui -s -w -buildid=" ./cmd/webview
+:: 2. 构建Linux amd64（x64/x86_64）
+set GOOS=linux
+set GOARCH=amd64
+go build -o ofdgo_linux_amd64 -trimpath -ldflags "-s -w -buildid=" ./cmd/webview
 ```
 
 # 安装引擎
