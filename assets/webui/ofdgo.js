@@ -117,6 +117,7 @@ const state = {
 	fontSyncing: false,
 	doc: null,
 	pageIndex: 0,
+	pageNavigation: null,
 	scale: 1,
 	rotation: 0,
 	panMode: false,
@@ -5632,6 +5633,7 @@ async function renderPage(index, options = {}) {
 	if (index < 0 || index >= pageCount) {
 		return null;
 	}
+	if (options.navigation !== state.pageNavigation) state.pageNavigation = null;
 	if (!options.keepBusy && index !== state.pageIndex) {
 		if (!await canvasEditor.commitNudge() || !await canvasEditor.commitText() || !await canvasEditor.commitCrop() || openSeq !== state.openSeq) return null;
 	}
@@ -8980,6 +8982,7 @@ function renderPageFlow() {
 }
 
 function resetPageFlow(keepCache = false) {
+	state.pageNavigation = null;
 	if (!keepCache) {
 		state.pageCache.clear();
 		releasePageResources();
@@ -9613,40 +9616,48 @@ async function navigateDestination(dest, openAction) {
 		return;
 	}
 	const seq = state.openSeq, scale = state.scale;
-	await renderPage(index, { fit: false, scroll: false, openAction });
-	if (openAction && state.openActionTask !== openAction) return false;
-	if (seq !== state.openSeq || state.pageIndex !== index) return;
-	const page = state.doc.pages[index], size = pageViewSize(page), space = pageSpace();
-	const width = el.viewerPanel.clientWidth - space * 2, height = el.viewerPanel.clientHeight - space * 2;
-	let left = dest.omitLeft ? 0 : (dest.left ?? 0);
-	let top = dest.omitTop ? 0 : (dest.top ?? 0);
-	if (dest.type === "Fit") {
-		fitHeight(false);
-		scrollToPage(index);
-		return;
-	} else if (dest.type === "FitH") {
-		setScale(fitWidthScale(page), false);
-		left = 0;
-	} else if (dest.type === "FitV") {
-		setScale(height / (size.height * MM_TO_PX), false);
-		top = 0;
-	} else if (dest.type === "FitR") {
-		const a = destinationPoint(page, left, top), b = destinationPoint(page, dest.right, dest.bottom);
-		if (dest.right <= left || dest.bottom <= top) return;
-		setScale(Math.min(width / Math.abs(b.x - a.x), height / Math.abs(b.y - a.y)) / MM_TO_PX, false);
-	} else {
-		setScale(!dest.omitZoom && dest.zoom > 0 ? dest.zoom : scale, false);
+	const navigation = state.pageNavigation = { openSeq: seq, index };
+	try {
+		await renderPage(index, { fit: false, scroll: false, openAction, navigation });
+		if (openAction && state.openActionTask !== openAction) return false;
+		if (seq !== state.openSeq || state.pageIndex !== index || state.pageNavigation !== navigation) return;
+		const page = state.doc.pages[index], size = pageViewSize(page), space = pageSpace();
+		const width = el.viewerPanel.clientWidth - space * 2, height = el.viewerPanel.clientHeight - space * 2;
+		let left = dest.omitLeft ? 0 : (dest.left ?? 0);
+		let top = dest.omitTop ? 0 : (dest.top ?? 0);
+		if (dest.type === "Fit") {
+			fitHeight(false);
+			scrollToPage(index);
+			return;
+		} else if (dest.type === "FitH") {
+			setScale(fitWidthScale(page), false);
+			left = 0;
+		} else if (dest.type === "FitV") {
+			setScale(height / (size.height * MM_TO_PX), false);
+			top = 0;
+		} else if (dest.type === "FitR") {
+			const a = destinationPoint(page, left, top), b = destinationPoint(page, dest.right, dest.bottom);
+			if (dest.right <= left || dest.bottom <= top) return;
+			setScale(Math.min(width / Math.abs(b.x - a.x), height / Math.abs(b.y - a.y)) / MM_TO_PX, false);
+		} else {
+			setScale(!dest.omitZoom && dest.zoom > 0 ? dest.zoom : scale, false);
+		}
+		const point = destinationPoint(page, left, top);
+		if (dest.type === "FitR") {
+			const bottom = destinationPoint(page, dest.right, dest.bottom);
+			point.x = Math.min(point.x, bottom.x);
+			point.y = Math.min(point.y, bottom.y);
+		}
+		if (state.pageWindow) syncPageWindow(state.pageWindow, state.pageWindow.offsets[index]);
+		const node = pageShell(index), shell = node.getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
+		el.viewerPanel.scrollLeft += shell.left + (node.clientLeft || 0) - viewer.left - (el.viewerPanel.clientLeft || 0) + point.x * MM_TO_PX * state.scale;
+		scrollViewerBy(shell.top + (node.clientTop || 0) - viewer.top - (el.viewerPanel.clientTop || 0) + point.y * MM_TO_PX * state.scale);
+	} finally {
+		if (state.pageNavigation === navigation) {
+			if (seq !== state.openSeq || index !== state.pageIndex) state.pageNavigation = null;
+			else Object.assign(navigation, { top: state.pageWindow ? pageWindowTop(state.pageWindow) : el.viewerPanel.scrollTop, left: el.viewerPanel.scrollLeft });
+		}
 	}
-	const point = destinationPoint(page, left, top);
-	if (dest.type === "FitR") {
-		const bottom = destinationPoint(page, dest.right, dest.bottom);
-		point.x = Math.min(point.x, bottom.x);
-		point.y = Math.min(point.y, bottom.y);
-	}
-	if (state.pageWindow) syncPageWindow(state.pageWindow, state.pageWindow.offsets[index]);
-	const node = pageShell(index), shell = node.getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
-	el.viewerPanel.scrollLeft += shell.left + (node.clientLeft || 0) - viewer.left - (el.viewerPanel.clientLeft || 0) + point.x * MM_TO_PX * state.scale;
-	scrollViewerBy(shell.top + (node.clientTop || 0) - viewer.top - (el.viewerPanel.clientTop || 0) + point.y * MM_TO_PX * state.scale);
 }
 
 function createTextLayer(text) {
@@ -10006,6 +10017,11 @@ function schedulePageSync() {
 function syncCurrentPageFromScroll() {
 	if (state.openActionTask?.navigating) return;
 	syncPageWindow(state.pageWindow);
+	const navigation = state.pageNavigation;
+	const top = state.pageWindow ? pageWindowTop(state.pageWindow) : el.viewerPanel.scrollTop;
+	if (navigation?.openSeq === state.openSeq && navigation.index === state.pageIndex
+		&& (navigation.top === undefined || Math.abs(navigation.top - top) < 1 && Math.abs(navigation.left - el.viewerPanel.scrollLeft) < 1)) return;
+	state.pageNavigation = null;
 	if (canvasEditor.input || canvasEditor.drag || canvasEditor.crop) return;
 	const shell = pageShellFromView();
 	if (!shell) {
