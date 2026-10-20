@@ -10097,12 +10097,12 @@ function setCurrentPage(index) {
 }
 
 function updatePageListCurrent(force = false) {
+	const current = el.pageList.querySelector(".page-list-item[data-current]");
 	if (state.thumbnailWindow) {
 		if (!force && state.pageListCurrent === state.pageIndex) return;
 		state.pageListCurrent = state.pageIndex;
 		if (state.showPages && !el.pageList.hidden) revealThumbnail(state.pageIndex);
 	}
-	const current = el.pageList.querySelector(".page-list-item[data-current]");
 	if (current) {
 		if (!force && Number.parseInt(current.dataset.pageIndex, 10) === state.pageIndex) {
 			return;
