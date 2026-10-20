@@ -33,7 +33,7 @@ var ErrPDFPassword = pdfgo.ErrPassword
 
 // PDFImportOptions 指定PDF转换的密码、运行时后端、进度通知与检查策略
 // Password默认使用PDF安全处理器编码，PasswordUTF8启用UTF-8输入及标准密码准备，空值尝试空密码
-// Strict禁止恢复缺失资源或丢失内容语义，默认在报告中记录警告
+// Strict禁止日期兼容、恢复缺失资源或丢失内容语义，默认在报告中记录警告
 // RendererOptions复用渲染器字体来源和后端配置，Backends优先于其中的后端设置
 // RasterDPI指定局部合成与三维绘制精度，0沿用渲染器DPI，默认300dpi，Strict禁用局部合成
 // OnProgress按open、pages、convert及write.*阶段报告进度，total为0表示总量未知
@@ -307,7 +307,7 @@ func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Ed
 	}
 	if len(editor.pages) != 0 {
 		importer.page = -1
-		if err := importer.documentMetadata(ctx); err != nil {
+		if err := importer.documentMetadata(ctx, options.Strict); err != nil {
 			return nil, PDFImportReport{}, fmt.Errorf("import PDF metadata: %w", err)
 		}
 		if err := importer.documentAttachments(ctx); err != nil {

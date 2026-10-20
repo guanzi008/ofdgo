@@ -908,15 +908,28 @@ func (b *pdfStructureBindings) reference(pageID string, sequence *pdfgo.ContentS
 }
 
 // documentMetadata 保留PDF元数据原文并映射文档描述，来源软件与扩展字段保存在独立标引中
-// 入参: ctx 取消上下文
+// 入参: ctx 取消上下文, strict 是否严格校验
 // 返回: error 读取、解析、日期或提交错误
-func (p *pdfImporter) documentMetadata(ctx context.Context) error {
+func (p *pdfImporter) documentMetadata(ctx context.Context, strict bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	info, err := p.reader.Info()
 	if err != nil {
 		return err
+	}
+	for _, field := range []struct {
+		name string
+		text *string
+	}{{"CreationDate", &info.CreationDate}, {"ModDate", &info.ModDate}} {
+		text, err := codecpdf.NormalizeDate(*field.text, strict)
+		if err != nil {
+			return fmt.Errorf("PDF metadata %s: %w", field.name, err)
+		}
+		if text != *field.text {
+			p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Message: "PDF metadata " + field.name + ": time zone separators normalized"})
+			*field.text = text
+		}
 	}
 	values, original, err := p.informationMetadata(ctx, info)
 	if err != nil {
@@ -1006,7 +1019,7 @@ func (p *pdfImporter) documentMetadata(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// informationMetadata 收集已声明字段并保存原始文本，XML无法表示的字符使用Base64保留
+// informationMetadata 收集已声明字段并保存文本，日期使用校验结果，XML无法表示的字符使用Base64保留
 // 入参: ctx 取消上下文, info 已解码的信息字典
 // 返回: map[string]pdfMetadataValue 可映射字段, StructureNode 原始字段, error 读取或取消错误
 func (p *pdfImporter) informationMetadata(ctx context.Context, info pdfgo.DocumentInfo) (map[string]pdfMetadataValue, StructureNode, error) {

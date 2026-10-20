@@ -22,6 +22,33 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// NormalizeDate 校验PDF日期，非严格模式补齐完整时区偏移的分隔符
+// 入参: text PDF日期字符串, strict 是否严格校验
+// 返回: string 标准日期字符串, error 日期错误
+func NormalizeDate(text string, strict bool) (string, error) {
+	if text == "" {
+		return text, nil
+	}
+	_, err := pdfgo.ParseDate(text)
+	if err == nil || strict {
+		return text, err
+	}
+	offset := len(text) - 5
+	if offset < 6 || text[offset] != '+' && text[offset] != '-' {
+		return text, err
+	}
+	for _, digit := range text[offset+1:] {
+		if digit < '0' || digit > '9' {
+			return text, err
+		}
+	}
+	normalized := text[:offset+3] + "'" + text[offset+3:] + "'"
+	if _, parseErr := pdfgo.ParseDate(normalized); parseErr != nil {
+		return text, err
+	}
+	return normalized, nil
+}
+
 // MetadataDate 保留当地日历日期，PDF省略时区按GMT，XMP省略日或时区时不推算
 // 入参: text 来源日期, xmp 是否为XMP日期
 // 返回: time.Time 解析值, bool 是否精确到日, bool 是否可比较绝对时间, error 日期错误
