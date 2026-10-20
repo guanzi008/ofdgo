@@ -63,6 +63,8 @@ go build -o ofdgo_webui.exe -trimpath -ldflags "-s -w -buildid=" ./cmd/webui/web
 ```
 
 # 原生桌面
+基于 [GUIGo](https://github.com/xiaoqidun/guigo) 实现，运行前需参照其说明安装系统依赖
+
 ```batch
 :: 1. 构建Windows amd64（x64/x86_64）
 set CGO_ENABLED=0
