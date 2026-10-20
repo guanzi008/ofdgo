@@ -47,6 +47,7 @@ type fileEntry struct {
 	saveTarget ofdgo.Output
 	readers    int
 	retired    bool
+	dropHandle string
 }
 
 // fileStore 管理窗口范围内的文件授权和临时数据
@@ -135,6 +136,59 @@ func (s *fileStore) add(name string, directory bool) (map[string]any, error) {
 	}
 	s.entries[id] = entry
 	return s.descriptor(id), nil
+}
+
+// addDrop 登记拖放文件及读取快照，失败时撤销本次授权
+// 入参: name 拖放文件路径
+// 返回: map[string]any 文件描述, error 登记错误
+func (s *fileStore) addDrop(name string) (map[string]any, error) {
+	handle, err := s.add(name, false)
+	if err != nil {
+		return nil, err
+	}
+	id := handle["nativeHandle"].(string)
+	file, err := s.file(id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err == nil && !s.closed {
+		if entry := s.entries[file["nativeFile"].(string)]; entry != nil && s.entries[id] != nil {
+			entry.dropHandle = id
+			file["drop"] = true
+			return file, nil
+		}
+		err = os.ErrNotExist
+	}
+	delete(s.entries, id)
+	if file != nil {
+		key := file["nativeFile"].(string)
+		if entry := s.entries[key]; entry != nil {
+			delete(s.entries, key)
+			if entry.file != nil {
+				entry.file.Close()
+			}
+		}
+	}
+	if err == nil {
+		err = os.ErrClosed
+	}
+	return nil, err
+}
+
+// discardDrop 撤销未接收的拖放文件及其授权，不删除源文件
+// 入参: id 拖放读取快照标识
+func (s *fileStore) discardDrop(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry := s.entries[id]
+	if entry == nil || entry.dropHandle == "" {
+		return
+	}
+	delete(s.entries, entry.dropHandle)
+	delete(s.entries, id)
+	entry.retired = true
+	if entry.file != nil && entry.readers == 0 {
+		entry.file.Close()
+	}
 }
 
 // save 登记用户选择的输出路径

@@ -529,11 +529,18 @@ class NativeHost {
 	}
 
 	async start(onFiles, onError) {
-		this.bridge.on("ofdgo.files", values => onFiles(values.map(value => new NativeFile(value))));
+		this.bridge.on("ofdgo.files", async values => {
+			try { await onFiles(values.map(value => new NativeFile(value))); }
+			catch (error) { onError(error); }
+		});
 		this.bridge.on("ofdgo.error", message => onError(new Error(message)));
 		const title = document.querySelector("title");
 		if (title) new MutationObserver(() => this.call("title", {title:document.title}).catch(onError)).observe(title, {childList:true});
 		await this.call("ready", {});
+	}
+
+	async discardFiles(files) {
+		await Promise.all(files.filter(file => file.drop && file.nativeFile).map(file => this.call("drop.release", {file:file.nativeFile})));
 	}
 
 	installFileInputs(onError) {

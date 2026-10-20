@@ -4304,12 +4304,7 @@ async function boot() {
 				}).catch((err) => showError(err, !state.doc));
 			});
 		}
-		if (nativeHost) await nativeHost.start(files => {
-			if (document.body.hasAttribute("data-busy")) { setStatus("请等待当前操作完成"); return; }
-			if (batchElements.Panel.open) addBatchFiles(files);
-			else if (files.length === 1) openOFD(files[0]);
-			else if (files.length) setStatus("请选择一个文档");
-		}, error => showError(error, !state.doc));
+		if (nativeHost) await nativeHost.start(openNativeFiles, error => showError(error, !state.doc));
 		try {
 			const remote = remoteDocumentOptions(window.location.hash);
 			if (remote && openSeq === state.openSeq) await openOFD({ name: remote.name }, remote);
@@ -4323,6 +4318,21 @@ async function boot() {
 			setBusy(false);
 		}
 		return;
+	}
+}
+
+async function openNativeFiles(files) {
+	let retained = [];
+	try {
+		if (document.body.hasAttribute("data-busy") || batchElements.Panel.open && batch.running) { setStatus("请等待当前操作完成"); return; }
+		if (batchElements.Panel.open) {
+			retained = files.filter(isDocumentFile);
+			addBatchFiles(files);
+		} else if (files.length === 1) {
+			if (await openOFD(files[0])) retained = files;
+		} else if (files.length) setStatus("请选择一个文档");
+	} finally {
+		await nativeHost.discardFiles(files.filter(file => !retained.includes(file)));
 	}
 }
 
@@ -4804,6 +4814,7 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 	state.wasmRecoveries = 0;
 	const openSeq = ++state.openSeq;
 	setBusy(true, "正在读取文档", 10, STATUS.opening);
+	let accepted = false;
 	try {
 		const downloaded = remote ? await downloadRemoteDocument(remote) : null;
 		if (openSeq !== state.openSeq) return;
@@ -4843,6 +4854,7 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 		if (openSeq !== state.openSeq) return;
 		state.ofdBytes = bytes;
 		state.saveHandle = format === "ofd" && !remote ? handle || null : null;
+		accepted = true;
 		state.saveStamp = state.saveHandle && !nativeHost ? {size: file.size, modified: file.lastModified} : null;
 		state.conversionWarnings = warnings;
 		state.fileName = (name || "ofdgo.ofd").replace(/\.pdf$/i, ".ofd");
@@ -4893,6 +4905,7 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 			setBusy(false);
 		}
 	}
+	return accepted;
 }
 
 function isDocumentFile(file) {
@@ -12186,10 +12199,11 @@ function fitPageScale(page, mode) {
 	}
 	const layoutWidth = state.pageLayout > 1 ? Math.max(width, contentWidth) : width;
 	const scrollbar = scrollbarWidth();
+	const viewport = el.viewerPanel.getBoundingClientRect();
 	let vertical = false, horizontal = false, scale = 1;
 	for (let pass = 0; pass < 3; pass++) {
-		const availableWidth = Math.max(1, el.viewerPanel.offsetWidth - (vertical ? scrollbar : 0));
-		const availableHeight = Math.max(1, el.viewerPanel.offsetHeight - (horizontal ? scrollbar : 0));
+		const availableWidth = Math.max(1, viewport.width - (vertical ? scrollbar : 0));
+		const availableHeight = Math.max(1, viewport.height - (horizontal ? scrollbar : 0));
 		scale = Math.min(4, Math.max(1, availableWidth - space * 2 - gap) / layoutWidth);
 		if (mode === "height") scale = Math.min(scale, Math.max(1, availableHeight - space * 2) / height);
 		const blockSpace = state.continuous ? 0 : Math.max(space, (availableHeight - height * scale) / 2);

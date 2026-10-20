@@ -28,6 +28,8 @@ github.com/benoitkugler/textlayout v0.3.2/go.mod h1:o+1hFV+JSHBC9qNLIuwVoLedERU7
 github.com/benoitkugler/textlayout-testdata v0.1.1/go.mod h1:i/qZl09BbUOtd7Bu/W1CAubRwTWrEXWq6JwMkw8wYxo=
 github.com/benoitkugler/textprocessing v0.0.6 h1:obkMyj62GEPg3xUVYqROlCN22z1OleuZm6ULqX9Om1g=
 github.com/benoitkugler/textprocessing v0.0.6/go.mod h1:Io0gN08/PXEzrSOWFa88xHx2Xv3VjvLMY7H76YoI23A=
+github.com/ebitengine/purego v0.11.2 h1:WWiTx8rD8zYdOwSj8O/NiNbsOvSAgJMTlyV1XlbUSeU=
+github.com/ebitengine/purego v0.11.2/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
 github.com/emmansun/gmsm v0.45.0 h1:PU/6ObyR3g05YN3jn1L5GZDowzyAi8Xhkq4svzYNyiA=
 github.com/emmansun/gmsm v0.45.0/go.mod h1:HgLSvmdePGLo+Fo2PNgdTQU6lqAepSyriSQJRpECY6w=
 github.com/go-fonts/latin-modern v0.3.3 h1:g2xNgI8yzdNzIVm+qvbMryB6yGPe0pSMss8QT3QwlJ0=
@@ -58,8 +60,8 @@ github.com/tdewolff/parse/v2 v2.8.16 h1:bLk5svUOQRkW/Y2SJ+DeENSIkZBcTIkq+Atyv5D8
 github.com/tdewolff/parse/v2 v2.8.16/go.mod h1:XdsoSFThlVIRIajAuqz1evNY7bagZS8LBOPA3aVopwQ=
 github.com/tdewolff/test v1.0.12 h1:7F21DqIajswxuche0geHdrUZRCWE4oko4b7bcmkkrxk=
 github.com/tdewolff/test v1.0.12/go.mod h1:XPuWBzvdUzhCuxWO1ojpXsyzsA5bFoS3tO/Q3kFuTG8=
-github.com/xiaoqidun/guigo v0.0.0-20261019033038-6971953317bb h1:MvkeDfZFJvEM5SG+3KM/gOak2sO7WE541ZoKghhcCEY=
-github.com/xiaoqidun/guigo v0.0.0-20261019033038-6971953317bb/go.mod h1:QAHK2Sa/KvY6dO+6dtvVUeOXVQO4Zh8R5oSSU+av7kE=
+github.com/xiaoqidun/guigo v0.0.0-20261020023410-769328036c38 h1:8DQijibcXKHB8EZvGlQ1AfscgH5hThCeIprmPjH6QKc=
+github.com/xiaoqidun/guigo v0.0.0-20261020023410-769328036c38/go.mod h1:xJF8xE6Bjw+NcOZNvWJEVX/XXIkngs3ltc9F6vNcLls=
 github.com/xiaoqidun/j2kgo v1.0.2 h1:OAjjEOfaBaQzBNcj9wx+eM68UI5pewR6SzNZa1R1DIw=
 github.com/xiaoqidun/j2kgo v1.0.2/go.mod h1:DCwAfuDzCDYqUiAlZ7BDwigTjaXw7o9L1FtEma/D1aA=
 github.com/xiaoqidun/jbig2 v1.1.8 h1:dERPW7F8gs18a/DOD9gXHR3fP1Vl6KhCNsLnq5l3BIo=

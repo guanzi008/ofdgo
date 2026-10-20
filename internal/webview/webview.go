@@ -92,7 +92,7 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 	h.conversionPool = h.resources.ConversionPool()
 	defer h.close()
 	bindings := make(map[string]guigo.HandlerFunc)
-	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title"} {
+	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "drop.release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title"} {
 		bindings["ofdgo.host."+name] = func(ctx context.Context, args any) (any, error) { return h.call(ctx, name, args) }
 	}
 	static := http.FileServerFS(webuiassets.NativeFS)
@@ -248,17 +248,22 @@ func (h *Host) emit(name string, value any) {
 func (h *Host) openPaths(names []string) {
 	files := make([]any, 0, len(names))
 	for _, name := range names {
-		handle, err := h.files.add(name, false)
+		file, err := h.files.addDrop(name)
 		if err != nil {
 			h.emit("ofdgo.error", err.Error())
 			continue
 		}
-		file, err := h.files.file(handle["nativeHandle"].(string))
-		if err == nil {
-			files = append(files, file)
-		}
+		files = append(files, file)
 	}
-	h.emit("ofdgo.files", files)
+	h.mu.Lock()
+	w := h.window
+	h.mu.Unlock()
+	if w != nil && w.Emit("ofdgo.files", files) == nil {
+		return
+	}
+	for _, file := range files {
+		h.files.discardDrop(file.(map[string]any)["nativeFile"].(string))
+	}
 }
 
 // call 执行宿主协议并保留业务结果结构
@@ -454,6 +459,9 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		return h.files.file(text("handle"))
 	case "release":
 		h.files.release(text("file"))
+		return nil, nil
+	case "drop.release":
+		h.files.discardDrop(text("file"))
 		return nil, nil
 	case "child":
 		value, err := h.files.child(text("handle"), text("name"), flag("directory"), flag("create"))
@@ -819,7 +827,11 @@ func windowOptions(dataDir string) (guigo.Options, error) {
 		if err != nil {
 			return guigo.Options{}, err
 		}
-		dataDir = filepath.Join(cache, "OFDGo")
+		name := "ofdgo"
+		if runtime.GOOS == "windows" {
+			name = "OFDGo"
+		}
+		dataDir = filepath.Join(cache, name)
 	}
 	dataDir, err := filepath.Abs(dataDir)
 	if err != nil {

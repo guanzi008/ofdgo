@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !windows || !amd64
+//go:build (!windows && !linux) || !amd64
 
 package main
 
