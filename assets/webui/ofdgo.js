@@ -43,6 +43,7 @@ let wasmRequestID = 0;
 let wasmRecoveryTimer = 0;
 let textMeasure = null;
 let credentialRequest = null;
+let documentRequest = null;
 let cancelPageTouch = null;
 
 const state = {
@@ -2375,8 +2376,23 @@ async function closeFile() {
 		}
 	}
 	if (openSeq !== state.openSeq || batch.unlocking) return;
-	clearSecurityForms();
 	const source = state.ofdBytes;
+	resetDocumentState();
+	markWASMExited();
+	renderPageList();
+	renderOutlines();
+	renderMeta();
+	renderFontList();
+	updateFontSummary();
+	updateControls();
+	el.zoomLabel.textContent = "100%";
+	setEmpty(STATUS.ready);
+	setStatus(STATUS.ready);
+	if (nativeHost) await nativeHost.release(source);
+}
+
+function resetDocumentState() {
+	clearSecurityForms();
 	state.openSeq++;
 	state.pageSeq++;
 	state.ofdBytes = null;
@@ -2395,7 +2411,18 @@ async function closeFile() {
 	state.annotationSummary = null;
 	state.openActionTask = null;
 	state.openActionEnabled = false;
+	state.openActionDocument = false;
+	state.openActionPage = null;
+	if (state.openActionFrame) cancelAnimationFrame(state.openActionFrame);
+	state.openActionFrame = 0;
 	state.insertObject = null;
+	state.importPageCount = 0;
+	state.importDocumentCount = 0;
+	state.importDocumentMode = false;
+	state.importEncrypted = false;
+	state.createInsert = false;
+	state.createPackage = false;
+	state.createDocumentAt = null;
 	state.objectClipboard = null;
 	state.styleClipboard = null;
 	state.styleOriginal = null;
@@ -2404,7 +2431,13 @@ async function closeFile() {
 	state.pageSelection.clear();
 	state.pageSelectionAnchor = null;
 	state.pageMultiSelect = false;
+	cancelPageTouch?.();
+	state.pageTouchPointer = null;
 	state.navigationScroll.clear();
+	state.outlineExpanded.clear();
+	state.outlineSelection = null;
+	state.outlineAction = "add";
+	state.outlineSeq++;
 	state.documentManagement = null;
 	state.versionManagement = null;
 	state.infoDocumentIndex = null;
@@ -2412,13 +2445,23 @@ async function closeFile() {
 	state.scale = 1;
 	state.rotation = 0;
 	state.fontRenderPending = false;
+	state.textFonts = [];
+	state.textFontID = null;
+	delete state.textDefaults.fontChoice;
+	state.exportPages = null;
 	canvasEditor.richClipboard = null;
 	canvasEditor.cancelNudge();
+	canvasEditor.setTool("");
 	canvasEditor.clear();
 	setDirty(false);
 	resetSearch();
 	resetPageFlow();
+	releasePageResources();
+	if (state.scrollFrame) cancelAnimationFrame(state.scrollFrame);
+	if (state.thumbnailFrame) cancelAnimationFrame(state.thumbnailFrame);
+	state.scrollFrame = state.thumbnailFrame = 0;
 	state.pageWindow = null;
+	state.pageDragIndex = null;
 	el.svgHost.replaceChildren();
 	el.viewerPanel.classList.remove("single-page-fits-height");
 	el.annotationsList.replaceChildren();
@@ -2426,6 +2469,8 @@ async function closeFile() {
 	el.ofdInput.value = "";
 	releaseResourcePreview();
 	resourceManager.sequence++;
+	resourceManager.kind = "Font";
+	resourceManager.busy = false;
 	resourceManager.items = [];
 	resourceManager.filteredItems = [];
 	resourceManager.start = resourceManager.end = -1;
@@ -2433,8 +2478,22 @@ async function closeFile() {
 	resourceManager.views.clear();
 	resourceManager.scope = "";
 	resourceManager.references = [];
+	resourceManager.referenceOffset = 0;
 	resourceManager.targets = [];
+	resourceManager.fileAction = null;
 	settings.sequence++;
+	settings.kind = "bookmarks";
+	settings.locked = false;
+	settings.busy = false;
+	settings.page = 0;
+	settings.scope = "document";
+	settings.object = "";
+	settings.path = [];
+	settings.selected = -1;
+	settings.resource = null;
+	settings.view = "";
+	settings.suspended = false;
+	settings.invoice = false;
 	settings.data = null;
 	settings.drafts.clear();
 	settings.views.clear();
@@ -2442,27 +2501,33 @@ async function closeFile() {
 	settings.baseline = {};
 	settingsElements.Content.replaceChildren();
 	settingsElements.Actions.replaceChildren();
+	settingsElements.Context.replaceChildren();
+	settingsElements.Form.inert = false;
+	settingsElements.Status.textContent = "";
 	resourceElements.List.replaceChildren();
 	resourceElements.List.style.height = "";
+	resourceElements.List.closest(".resource-list-container").scrollTop = 0;
+	resourceElements.List.inert = false;
+	resourceElements.Panel.removeAttribute("data-busy");
 	resourceElements.Reference.replaceChildren();
+	resourceElements.Page.replaceChildren();
+	resourceElements.Object.replaceChildren();
+	resourceElements.File.value = "";
+	resourceElements.Status.textContent = "";
+	invoicePanel.tab = "basic";
 	invoicePanel.entries = [];
 	invoicePanel.drafts.clear();
 	invoicePanel.views.clear();
+	invoicePanel.key = "";
 	invoicePanel.result = null;
+	fontBinding.sequence++;
 	fontBinding.font = null;
 	fontBinding.choices = [];
 	fontManager.localFonts = [];
-	markWASMExited();
-	renderPageList();
-	renderOutlines();
-	renderMeta();
-	renderFontList();
-	updateFontSummary();
-	updateControls();
-	el.zoomLabel.textContent = "100%";
-	setEmpty(STATUS.ready);
-	setStatus(STATUS.ready);
-	if (nativeHost) await nativeHost.release(source);
+	for (const panel of [resourceElements.Panel, settingsElements.Panel, el.createPanel, el.insertPanel,
+		fontBindingElements.Panel, el.pagePanel, el.paragraphPanel, el.infoPanel, el.documentPanel,
+		el.versionPanel, el.annotationNote, el.annotationCreate, el.objectPicker, el.importPanel,
+		el.batchPagesPanel, el.objectStylePanel, el.objectBoundsPanel, el.outlinePanel, el.structureDialog]) panel.close();
 }
 
 function setEditorInfo(doc) {
@@ -2927,8 +2992,7 @@ async function createDocument(event) {
 		return;
 	}
 	const title = el.createName.value.trim() || "未命名";
-	clearSecurityForms();
-	const openSeq = ++state.openSeq;
+	let openSeq = state.openSeq;
 	const images = el.createMode.value === "images";
 	state.imageImporting = images;
 	setBusy(true, "正在新建文档", null, "正在新建文档");
@@ -2943,28 +3007,13 @@ async function createDocument(event) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
+		resetDocumentState();
+		openSeq = state.openSeq;
 		state.editing = true;
-		state.composite = null;
-		state.objectClipboard = null;
-		state.editorViews.clear();
-		state.styleClipboard = null;
-		canvasEditor.richClipboard = null;
-		state.fontRenderPending = false;
-		state.annotationCreate = null;
-		canvasEditor.setTool("");
-		canvasEditor.clear();
-		delete state.textDefaults.fontChoice;
 		updateTextFonts(null, true);
 		state.selectObjects = true;
 		setPan(false);
-		state.ofdBytes = null;
 		state.fileName = `${title.replace(/[\\/:*?"<>|]+/g, "_").replace(/\.ofd$/i, "")}.ofd`;
-		state.saveHandle = null;
-		state.saveStamp = null;
-		state.conversionWarnings = [];
-		state.savedRevision = null;
-		state.packageDirty = false;
-		state.encryptionDirty = false;
 		setEditorInfo(doc);
 		el.createPanel.close();
 		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true });
@@ -4806,7 +4855,7 @@ async function downloadRemoteDocument(options) {
 }
 
 async function openOFD(file, remote = null, handle = file?.handle) {
-	if (state.saving) return;
+	if (state.saving || state.exporting || documentRequest?.committing || !documentRequest && document.body.hasAttribute("data-busy")) return;
 	if (!file) {
 		return;
 	}
@@ -4819,49 +4868,53 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 		return;
 	}
 	remoteDownload?.abort();
-	resourceElements.Panel.close();
-	clearSecurityForms();
 	state.wasmRecoveries = 0;
-	const openSeq = ++state.openSeq;
+	let openSeq = state.openSeq;
+	const request = {committing: false};
+	documentRequest = request;
+	const current = () => documentRequest === request && openSeq === state.openSeq;
 	setBusy(true, "正在读取文档", 10, STATUS.opening);
 	let accepted = false;
 	try {
 		const downloaded = remote ? await downloadRemoteDocument(remote) : null;
-		if (openSeq !== state.openSeq) return;
+		if (!current()) return;
 		await ensureWASM();
-		if (openSeq !== state.openSeq) return;
+		if (!current()) return;
 		const source = downloaded ? downloaded.file : file;
 		const format = await callWASM("ofdgoDetectFormat", source);
-		if (openSeq !== state.openSeq) return;
+		if (!current()) return;
 		let bytes = await documentBytes(source);
 		const name = (downloaded ? downloaded.name : file.name) || `ofdgo.${format}`;
 		let warnings = [];
 		let convertedDoc;
-		if (openSeq !== state.openSeq) {
+		if (!current()) {
 			return;
 		}
+		request.committing = true;
 		if (format === "pdf") {
 			setProgress("正在转换文档", 25);
 			await ensureWASM();
-			if (openSeq !== state.openSeq) return;
+			if (!current()) return;
 			let converted;
 			try {
 				converted = await openWithCredentials(await fontManager.files(fontManager.records()), openSeq, bytes, false, true);
 			} finally {
-				if (openSeq === state.openSeq) {
+				if (current()) {
 					state.exportRequestID = 0;
 					el.cancelExportButton.hidden = true;
 				}
 			}
-			if (openSeq !== state.openSeq) return;
+			if (!current()) return;
 			bytes = converted.bytes;
 			convertedDoc = converted.doc;
 			warnings = JSON.parse(converted.warnings || "null") || [];
 		}
 		await ensureWASM();
-		if (openSeq !== state.openSeq) return;
+		if (!current()) return;
 		const doc = convertedDoc || await openWithCredentials(await fontManager.files(fontManager.userFonts), openSeq, bytes);
-		if (openSeq !== state.openSeq) return;
+		if (!current()) return;
+		resetDocumentState();
+		openSeq = state.openSeq;
 		state.ofdBytes = bytes;
 		state.saveHandle = format === "ofd" && !remote ? handle || null : null;
 		accepted = true;
@@ -4869,51 +4922,16 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 		state.conversionWarnings = warnings;
 		state.fileName = (name || "ofdgo.ofd").replace(/\.pdf$/i, ".ofd");
 		if (remote && !/\.ofd$/i.test(state.fileName)) state.fileName += ".ofd";
-		state.editing = false;
-		state.composite = null;
-		state.annotationCreate = null;
-		state.pageSelection.clear();
-		state.pageSelectionAnchor = null;
-		state.pageMultiSelect = false;
-		state.objectClipboard = null;
-		state.styleClipboard = null;
-		canvasEditor.richClipboard = null;
-		state.editorInfo = null;
-		state.editorViews.clear();
-		state.fontRenderPending = false;
-		state.savedRevision = null;
-		state.packageDirty = false;
-		state.encryptionDirty = false;
-		canvasEditor.clear();
-		setDirty(false);
-		el.createPanel.close();
-		el.insertPanel.close();
-		fontBindingElements.Panel.close();
-		el.pagePanel.close();
-		el.paragraphPanel.close();
-		el.infoPanel.close();
-		el.documentPanel.close();
-		state.documentManagement = null;
-		el.versionPanel.close();
-		state.versionManagement = null;
-		state.infoDocumentIndex = null;
-		el.annotationNote.close();
-		el.annotationCreate.close();
-		el.objectPicker.close();
-		el.importPanel.close();
-		el.batchPagesPanel.close();
-		el.objectStylePanel.close();
-		el.objectBoundsPanel.close();
-		el.outlinePanel.close();
-		el.structureDialog.close();
 		updateControls();
 		await openDocument({ doc, pageIndex: remote?.pageIndex || 0, resetScroll: true, openSeq, activateActions: true });
 	} catch (err) {
-		if (openSeq === state.openSeq) {
+		if (current()) {
 			if (err.name === "AbortError") setStatus("打开已取消");
 			else showError(err, !state.doc);
 			setBusy(false);
 		}
+	} finally {
+		if (documentRequest === request) documentRequest = null;
 	}
 	return accepted;
 }
@@ -7464,6 +7482,7 @@ function renderResourceTabs() {
 }
 
 function rememberResourceView() {
+	if (!resourceManager.scope) return;
 	resourceManager.views.set(resourceManager.kind, {selected: resourceManager.selected?.id,
 		scroll: resourceElements.List.closest(".resource-list-container").scrollTop,
 		reference: Number(resourceElements.Reference.value), page: resourceElements.Page.value, object: resourceElements.Object.value});
