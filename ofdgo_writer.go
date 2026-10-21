@@ -109,7 +109,7 @@ type ofdXML struct {
 type ofdAttrs []xml.Attr
 
 // Snapshot 创建独立编辑快照，完成后可与原编辑器并行使用
-// 创建过程需与原实例串行，保留修订及保存目标，不复制撤销记录和进度回调
+// 创建过程需与原实例串行，保留修订、附件清理状态及保存目标，不复制撤销记录和进度回调
 // 保存目标与原实例共享，由输出实现协调并发事务及提交版本
 // 原包压缩数据独立复制并在快照间复用，超预算数据随最后一个快照释放
 // 自定义后端及字体文件系统仍由调用方提供，需支持并行读取
@@ -146,6 +146,10 @@ func (e *Editor) Snapshot(ctx context.Context) (*Editor, error) {
 	}
 	snapshot.revision, snapshot.serial, snapshot.saveTarget = e.revision, e.serial, e.saveTarget
 	snapshot.backends, snapshot.fontDirs, snapshot.fontFS = e.backends, slices.Clone(e.fontDirs), slices.Clone(e.fontFS)
+	if e.source != nil {
+		snapshot.source.retiredAttachments = maps.Clone(e.source.retiredAttachments)
+		snapshot.source.removedAttachments = maps.Clone(e.source.removedAttachments)
+	}
 	return snapshot, nil
 }
 
