@@ -196,9 +196,17 @@ func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (result Ge
 	if slices.Contains(options.Dashes, 0) {
 		return path.Stroke(options)
 	}
+	if options.Cap == "Round" {
+		if pointPath, found := canvasPointPath(path); found {
+			return pointPath.Stroke(options)
+		}
+	}
 	p, err := geometryToCanvasPath(&path)
 	if err != nil {
 		return nil, err
+	}
+	if p.Empty() && options.Cap == "Round" {
+		return path.Stroke(options)
 	}
 	tolerance := options.Tolerance
 	if tolerance == 0 {
@@ -220,6 +228,45 @@ func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (result Ge
 	p = flattenCanvasPath(p, tolerance)
 	p = strokeCanvasPath(p, options.Width, style.lineCap, style.lineJoin, tolerance)
 	return *geometryFromCanvasPath(p), nil
+}
+
+// canvasPointPath 保留普通闭合轮廓，将闭合单点改为同位置绘制段
+// 入参: path 原始几何路径
+// 返回: GeometryPath 只在需要时复制的路径, bool 是否含实际绘制的单点子路径
+func canvasPointPath(path GeometryPath) (GeometryPath, bool) {
+	result := path
+	var start Point
+	point, drawn, active, found, copied := false, false, false, false, false
+	for i, segment := range path {
+		switch segment.Verb {
+		case GeometryMove:
+			found = found || point && drawn
+			start = segment.End
+			point, drawn, active = true, false, true
+		case GeometryClose:
+			if point && active {
+				if !copied {
+					result = slices.Clone(path)
+					copied = true
+				}
+				result[i] = GeometrySegment{Verb: GeometryLine, End: start}
+				found = true
+			}
+			point, drawn, active = true, false, false
+		case GeometryLine:
+			point = point && segment.End == start
+			drawn, active = true, true
+		case GeometryQuad:
+			point = point && segment.End == start && segment.Control1 == start
+			drawn, active = true, true
+		case GeometryCubic:
+			point = point && segment.End == start && segment.Control1 == start && segment.Control2 == start
+			drawn, active = true, true
+		default:
+			point, drawn, active = false, true, true
+		}
+	}
+	return result, found || point && drawn
 }
 
 // Clip 解析对象裁剪并与父裁剪相交，保留未裁剪与完全裁去的区别
@@ -389,7 +436,11 @@ func geometryToCanvasPath(path *GeometryPath) (*canvas.Path, error) {
 		case GeometryArc:
 			p.ArcTo(s.RadiusX, s.RadiusY, -s.Rotation, s.Large, !s.Sweep, s.End.X, -s.End.Y)
 		case GeometryClose:
-			p.Close()
+			if data := p.Data(); len(data) != 0 && data[len(data)-1] == canvas.MoveToCmd {
+				p = canvas.NewPathFromData(append(data, canvas.CloseCmd, data[len(data)-3], data[len(data)-2], canvas.CloseCmd))
+			} else {
+				p.Close()
+			}
 		default:
 			return nil, fmt.Errorf("unsupported geometry command %d", s.Verb)
 		}
@@ -419,7 +470,11 @@ func canvasObjectPath(path GeometryPath) (*canvas.Path, error) {
 			data = p.Data()
 		case GeometryClose:
 			p := canvas.NewPathFromData(data)
-			p.Close()
+			if len(data) != 0 && data[len(data)-1] == canvas.MoveToCmd {
+				p = canvas.NewPathFromData(append(data, canvas.CloseCmd, data[len(data)-3], data[len(data)-2], canvas.CloseCmd))
+			} else {
+				p.Close()
+			}
 			data = p.Data()
 		default:
 			return nil, fmt.Errorf("unsupported geometry command %d", s.Verb)

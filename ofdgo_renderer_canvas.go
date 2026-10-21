@@ -16,7 +16,6 @@ package ofdgo
 
 import (
 	"fmt"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"image"
 	"image/color"
 	"image/draw"
@@ -24,6 +23,7 @@ import (
 
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/canvas/renderers/rasterizer"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
@@ -176,7 +176,26 @@ func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Ima
 					style.Dashes[i] = dash / options.Width
 				}
 			}
-			if slices.Contains(options.Dashes, 0) {
+			var pointPath GeometryPath
+			pointStroke := false
+			if options.Cap == "Round" {
+				pointPath, pointStroke = canvasPointPath(geometryFromRaster(cmd.Path))
+			}
+			if options.Cap == "Round" && (p.Empty() || pointStroke) {
+				path, err := pointPath.Transform(MatrixFromValues([6]float64(m)))
+				if err != nil {
+					return nil, err
+				}
+				path, err = path.Stroke(options)
+				if err != nil {
+					return nil, err
+				}
+				p, err = canvasObjectPath(path)
+				if err != nil {
+					return nil, err
+				}
+				style = canvas.Style{Fill: paint, FillRule: canvas.NonZero}
+			} else if slices.Contains(options.Dashes, 0) {
 				var err error
 				p, err = canvasStrokePath(b, p, options)
 				if err != nil {

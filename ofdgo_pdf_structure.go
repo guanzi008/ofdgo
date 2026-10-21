@@ -18,9 +18,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,12 +51,14 @@ const (
 	pdfMetadataTagType      = "OFDGo.PDFMetadata"
 	pdfInformationTagType   = "OFDGo.PDFInformation"
 	pdfInformationNamespace = "https://ofdgo.aite.me/ns/pdf/information/1"
+	pdfAuxiliaryTagType     = "OFDGo.PDFAuxiliary"
 )
 
 // pdfStructureBindings 保存来源区段与最终页面图元的关联，不记录临时渲染对象
 type pdfStructureBindings struct {
 	parents   map[*pdfgo.Reader]map[[2]int64]pdfgo.Reference
 	prepared  map[*pdfgo.Reader]bool
+	invalid   map[*pdfgo.Reader]bool
 	readers   []*pdfgo.Reader
 	marked    map[pdfStructureContent]bool
 	sequences map[*pdfgo.ContentSequence][]StructureReference
@@ -104,11 +108,12 @@ type pdfStructureBinding struct {
 
 // pdfStructureValues 保存属性值类型及间接对象共享关系
 type pdfStructureValues struct {
-	ctx      context.Context
-	reader   *pdfgo.Reader
-	seen     map[pdfgo.Reference]bool
-	elements map[pdfgo.Reference]bool
-	objects  []StructureNode
+	ctx       context.Context
+	reader    *pdfgo.Reader
+	seen      map[pdfgo.Reference]bool
+	elements  map[pdfgo.Reference]bool
+	objects   []StructureNode
+	auxiliary bool
 }
 
 // pdfMetadataValue 保留字段是否声明及其来源，空文本不作为缺省值
@@ -117,10 +122,39 @@ type pdfMetadataValue struct {
 	xmp  bool
 }
 
-// prepareStructure 校验结构内容关联并登记引用区段，不提前写入标引
+// prepareStructure 校验结构内容关联，无法映射时保留原始结构
 // 入参: ctx 取消上下文
-// 返回: error 结构或内容容器错误
+// 返回: error 读取、严格校验或取消错误
 func (p *pdfImporter) prepareStructure(ctx context.Context) error {
+	err := p.readStructureBindings(ctx)
+	if err == nil {
+		return nil
+	}
+	if p.warning == nil || !pdfAuxiliaryError(err) {
+		return err
+	}
+	object, readErr := p.pdfCatalogObject("StructTreeRoot")
+	if readErr != nil {
+		return readErr
+	}
+	if err := p.recoverPDFObject(ctx, "Structure", object, err); err != nil {
+		return err
+	}
+	b := p.structureBindings
+	if b.prepared == nil {
+		b.prepared = make(map[*pdfgo.Reader]bool)
+	}
+	if b.invalid == nil {
+		b.invalid = make(map[*pdfgo.Reader]bool)
+	}
+	b.prepared[p.reader], b.invalid[p.reader] = true, true
+	return ctx.Err()
+}
+
+// readStructureBindings 校验结构内容关联并准备有效图元绑定
+// 入参: ctx 取消上下文
+// 返回: error 结构、内容容器或取消错误
+func (p *pdfImporter) readStructureBindings(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -233,10 +267,34 @@ func (p *pdfImporter) documentStructures(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// documentStructure 写出逻辑结构层级、文本属性及已提交的内容引用
+// documentStructure 写出逻辑结构及已提交的图元引用，异常结构以类型化标引保留
 // 入参: ctx 取消上下文
 // 返回: error 解析、未支持的结构属性或提交错误
 func (p *pdfImporter) documentStructure(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.structureBindings.invalid[p.reader] {
+		return ctx.Err()
+	}
+	err := p.projectStructure(ctx)
+	if err == nil {
+		return nil
+	}
+	if p.warning == nil || !pdfAuxiliaryError(err) {
+		return err
+	}
+	object, readErr := p.pdfCatalogObject("StructTreeRoot")
+	if readErr != nil {
+		return readErr
+	}
+	return p.recoverPDFObject(ctx, "Structure", object, err)
+}
+
+// projectStructure 将有效逻辑结构投影为OFD层级及实际图元引用
+// 入参: ctx 取消上下文
+// 返回: error 结构、绑定或提交错误
+func (p *pdfImporter) projectStructure(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -484,7 +542,7 @@ func (v *pdfStructureValues) encode(object pdfgo.Object, depth int) (StructureNo
 	if err := v.ctx.Err(); err != nil {
 		return node, err
 	}
-	if depth > 128 {
+	if depth > 128 && !v.auxiliary {
 		return node, fmt.Errorf("PDF structure attribute limit exceeded")
 	}
 	switch value := object.(type) {
@@ -516,7 +574,16 @@ func (v *pdfStructureValues) encode(object pdfgo.Object, depth int) (StructureNo
 			v.seen[value] = true
 			resolved, err := v.reader.Resolve(value)
 			if err != nil {
+				if v.auxiliary && pdfAuxiliaryError(err) {
+					node.Attributes = append(node.Attributes, pdfStructureAttribute("Error", err.Error())...)
+					return node, nil
+				}
 				return node, err
+			}
+			if v.auxiliary {
+				if dict, ok := resolved.(pdfgo.Dictionary); ok && (dict["Type"] == pdfgo.Name("Page") || dict["Type"] == pdfgo.Name("Pages") || dict["Type"] == pdfgo.Name("Catalog")) {
+					return node, nil
+				}
 			}
 			child, err := v.encode(resolved, depth+1)
 			if err != nil {
@@ -548,15 +615,81 @@ func (v *pdfStructureValues) encode(object pdfgo.Object, depth int) (StructureNo
 		if err != nil {
 			return node, err
 		}
-		data, err := value.DecodeContext(v.ctx)
+		data := value.Data
+		dataName := "RawData"
+		if !v.auxiliary {
+			dataName = "DecodedData"
+			data, err = value.DecodeContext(v.ctx)
+		}
 		if err != nil {
 			return node, err
 		}
-		node.Children = []StructureNode{dictionary, {Name: "DecodedData", Namespace: pdfStructureNamespace, Attributes: []StructureAttribute{{Name: "Encoding", Value: "base64"}}, Text: base64.StdEncoding.EncodeToString(data)}}
+		node.Children = []StructureNode{dictionary, {Name: dataName, Namespace: pdfStructureNamespace, Attributes: []StructureAttribute{{Name: "Encoding", Value: "base64"}}, Text: base64.StdEncoding.EncodeToString(data)}}
 	default:
 		return node, fmt.Errorf("invalid PDF structure attribute value")
 	}
 	return node, v.ctx.Err()
+}
+
+// pdfCatalogObject 获取文档级原始字段，不预先解析字段值
+// 入参: name 目录字段名
+// 返回: pdfgo.Object 原始字段, error 目录读取错误
+func (p *pdfImporter) pdfCatalogObject(name pdfgo.Name) (pdfgo.Object, error) {
+	value, err := p.reader.Resolve(p.reader.Trailer["Root"])
+	if err != nil {
+		return nil, err
+	}
+	dict, ok := value.(pdfgo.Dictionary)
+	if !ok {
+		return nil, fmt.Errorf("invalid PDF catalog")
+	}
+	return dict[name], nil
+}
+
+// pdfAuxiliaryError 区分辅助格式错误与必须传递的输入、关闭和取消错误
+// 入参: err 待检查错误
+// 返回: bool 是否可以保留原文后继续
+func pdfAuxiliaryError(err error) bool {
+	var read *pdfgo.ReadError
+	return err != nil && !errors.As(err, &read) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, os.ErrClosed) && !errors.Is(err, errPDFMediaRead)
+}
+
+// preservePDFObject 保存辅助对象的原始类型、引用和流数据，不展开页面及目录
+// 入参: ctx 取消上下文, name 来源字段, object 原始对象
+// 返回: error 读取、编码或提交错误
+func (p *pdfImporter) preservePDFObject(ctx context.Context, name string, object pdfgo.Object) error {
+	values := pdfStructureValues{ctx: ctx, reader: p.reader, seen: make(map[pdfgo.Reference]bool), auxiliary: true}
+	node, err := values.encode(object, 0)
+	if err != nil {
+		return err
+	}
+	root := StructureNode{Name: "Auxiliary", Namespace: pdfStructureNamespace, Attributes: pdfStructureAttribute("Name", name), Children: []StructureNode{node}}
+	if len(values.objects) != 0 {
+		root.Children = append(root.Children, StructureNode{Name: "Objects", Namespace: pdfStructureNamespace, Children: values.objects})
+	}
+	data, err := encodeStructureNode(root)
+	if err != nil {
+		return err
+	}
+	_, err = p.editor.addStructureXML(ctx, CustomTag{TypeID: pdfAuxiliaryTagType, NameSpace: pdfStructureNamespace}, data)
+	return err
+}
+
+// recoverPDFObject 按导入策略诊断并保留辅助对象，读取和取消错误不恢复
+// 入参: ctx 取消上下文, name 来源字段, object 原始对象, cause 辅助错误
+// 返回: error 严格模式、读取、取消或提交错误
+func (p *pdfImporter) recoverPDFObject(ctx context.Context, name string, object pdfgo.Object, cause error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.warning == nil || !pdfAuxiliaryError(cause) {
+		return cause
+	}
+	if err := p.preservePDFObject(ctx, name, object); err != nil {
+		return err
+	}
+	p.warning(pdfgo.Diagnostic{Message: "PDF " + name + " retained as metadata: " + cause.Error()})
+	return nil
 }
 
 // pdfStructureAttribute 保留XML不可表达的源字段，不替换原始字符
@@ -924,7 +1057,12 @@ func (p *pdfImporter) documentMetadata(ctx context.Context, strict bool) error {
 	}{{"CreationDate", &info.CreationDate}, {"ModDate", &info.ModDate}} {
 		text, err := codecpdf.NormalizeDate(*field.text, strict)
 		if err != nil {
-			return fmt.Errorf("PDF metadata %s: %w", field.name, err)
+			if strict || !pdfAuxiliaryError(err) {
+				return fmt.Errorf("PDF metadata %s: %w", field.name, err)
+			}
+			p.warning(pdfgo.Diagnostic{Message: "PDF metadata " + field.name + " retained without date projection: " + err.Error()})
+			*field.text = ""
+			continue
 		}
 		if text != *field.text {
 			p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Message: "PDF metadata " + field.name + ": date normalized"})
@@ -937,22 +1075,51 @@ func (p *pdfImporter) documentMetadata(ctx context.Context, strict bool) error {
 	}
 	stream, err := p.reader.Metadata()
 	if err != nil {
-		return err
+		object, readErr := p.pdfCatalogObject("Metadata")
+		if readErr != nil {
+			return readErr
+		}
+		if err := p.recoverPDFObject(ctx, "Metadata", object, err); err != nil {
+			return err
+		}
+		stream = nil
 	}
 	var packet []byte
 	var root *StructureNode
 	if stream != nil {
 		packet, err = stream.DecodeContext(ctx)
 		if err != nil {
-			return err
+			if err := p.recoverPDFObject(ctx, "Metadata", stream, err); err != nil {
+				return err
+			}
+		} else {
+			root, err = parseStructure(ctx, packet, CustomTag{})
+			if err != nil {
+				if err := p.recoverPDFObject(ctx, "Metadata", stream, err); err != nil {
+					return err
+				}
+				root = nil
+			}
 		}
-		root, err = parseStructure(ctx, packet, CustomTag{})
-		if err != nil {
-			return err
-		}
+	}
+	if root != nil {
 		xmp, err := pdfMetadataFields(ctx, root)
 		if err != nil {
-			return err
+			if err := p.recoverPDFObject(ctx, "Metadata", stream, err); err != nil {
+				return err
+			}
+			xmp = nil
+		}
+		for _, key := range []string{"CreationDate", "ModDate", "MetadataDate"} {
+			if value, ok := xmp[key]; ok {
+				if _, _, _, err := codecpdf.MetadataDate(value.text, true); err != nil {
+					if strict || !pdfAuxiliaryError(err) {
+						return fmt.Errorf("PDF metadata %s: %w", key, err)
+					}
+					p.warning(pdfgo.Diagnostic{Message: "PDF metadata " + key + " retained without date projection: " + err.Error()})
+					delete(xmp, key)
+				}
+			}
 		}
 		newer := false
 		if stamp, ok := xmp["MetadataDate"]; ok && stamp.text != "" && info.ModDate != "" {
@@ -1013,25 +1180,38 @@ func (p *pdfImporter) documentMetadata(ctx context.Context, strict bool) error {
 		if err != nil {
 			return err
 		}
-		_, err = p.editor.addStructureXML(ctx, CustomTag{TypeID: pdfInformationTagType, NameSpace: pdfInformationNamespace}, data)
-		return err
+		if _, err = p.editor.addStructureXML(ctx, CustomTag{TypeID: pdfInformationTagType, NameSpace: pdfInformationNamespace}, data); err != nil {
+			return err
+		}
+	}
+	if !strict {
+		object, err := p.pdfCatalogObject("OutputIntents")
+		if err != nil {
+			return err
+		}
+		if object != nil {
+			return p.preservePDFObject(ctx, "OutputIntents", object)
+		}
 	}
 	return ctx.Err()
 }
 
-// informationMetadata 收集已声明字段并保存文本，日期使用校验结果，XML无法表示的字符使用Base64保留
+// informationMetadata 收集已声明字段，日期分别保留原文及投影值，XML无法表示的文本使用Base64保留
 // 入参: ctx 取消上下文, info 已解码的信息字典
 // 返回: map[string]pdfMetadataValue 可映射字段, StructureNode 原始字段, error 读取或取消错误
 func (p *pdfImporter) informationMetadata(ctx context.Context, info pdfgo.DocumentInfo) (map[string]pdfMetadataValue, StructureNode, error) {
 	root := StructureNode{Name: "Information", Namespace: pdfInformationNamespace}
 	values := make(map[string]pdfMetadataValue)
 	object, err := p.reader.Resolve(p.reader.Trailer["Info"])
-	if err != nil || object == nil {
-		return values, root, err
+	if err != nil {
+		return values, root, p.recoverPDFObject(ctx, "Information", p.reader.Trailer["Info"], err)
+	}
+	if object == nil {
+		return values, root, nil
 	}
 	dict, ok := object.(pdfgo.Dictionary)
 	if !ok {
-		return nil, root, fmt.Errorf("invalid PDF information dictionary")
+		return values, root, p.recoverPDFObject(ctx, "Information", object, fmt.Errorf("invalid PDF information dictionary"))
 	}
 	known := map[pdfgo.Name]string{
 		"Title": info.Title, "Author": info.Author, "Subject": info.Subject, "Keywords": info.Keywords,
@@ -1044,12 +1224,40 @@ func (p *pdfImporter) informationMetadata(ctx context.Context, info pdfgo.Docume
 		}
 		value, err := p.reader.Resolve(dict[key])
 		if err != nil {
-			return nil, root, err
+			if err := p.recoverPDFObject(ctx, "Information."+string(key), dict[key], err); err != nil {
+				return nil, root, err
+			}
+			continue
 		}
 		if value == nil {
 			continue
 		}
+		if text, ok := value.(pdfgo.String); ok {
+			if _, err := pdfgo.DecodeTextString(text); err != nil {
+				if err := p.recoverPDFObject(ctx, "Information."+string(key), dict[key], err); err != nil {
+					return nil, root, err
+				}
+				if key == "CreationDate" || key == "ModDate" {
+					values[string(key)] = pdfMetadataValue{}
+				}
+				continue
+			}
+		}
 		text, standard := known[key]
+		_, stringValue := value.(pdfgo.String)
+		valid := stringValue
+		if key == "Trapped" {
+			valid = value == pdfgo.Name("True") || value == pdfgo.Name("False") || value == pdfgo.Name("Unknown")
+		}
+		if !valid {
+			if err := p.preservePDFObject(ctx, "Information."+string(key), dict[key]); err != nil {
+				return nil, root, err
+			}
+			if key == "CreationDate" || key == "ModDate" {
+				values[string(key)] = pdfMetadataValue{}
+			}
+			continue
+		}
 		if !standard {
 			text = info.Custom[key]
 		} else {
@@ -1068,6 +1276,20 @@ func (p *pdfImporter) informationMetadata(ctx context.Context, info pdfgo.Docume
 		if !structureXMLText(text) {
 			text = base64.StdEncoding.EncodeToString([]byte(text))
 			field.Attributes = append(field.Attributes, StructureAttribute{Name: "Encoding", Value: "base64"})
+		}
+		if key == "CreationDate" || key == "ModDate" {
+			original, err := pdfgo.DecodeTextString(value.(pdfgo.String))
+			if err != nil {
+				if err := p.recoverPDFObject(ctx, "Information."+string(key), dict[key], err); err != nil {
+					return nil, root, err
+				}
+				continue
+			}
+			text = original
+			if !structureXMLText(text) {
+				text = base64.StdEncoding.EncodeToString([]byte(text))
+				field.Attributes = append(field.Attributes, StructureAttribute{Name: "Encoding", Value: "base64"})
+			}
 		}
 		field.Text = text
 		root.Children = append(root.Children, field)

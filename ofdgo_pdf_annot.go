@@ -27,6 +27,95 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// recoverAnnotationAuxiliary 仅在存在有效正常外观时保留辅助错误，外观仍由调用方实际绘制
+// 入参: ctx 取消上下文, annotation 原始注解, name 辅助字段名, object 原始对象, cause 辅助错误
+// 返回: error 严格模式、缺少有效外观或不可恢复错误
+func (p *pdfImporter) recoverAnnotationAuxiliary(ctx context.Context, annotation pdfgo.Annotation, name string, object pdfgo.Object, cause error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.warning == nil || !pdfAuxiliaryError(cause) {
+		return cause
+	}
+	appearance, err := p.reader.ReadAnnotationAppearance(annotation)
+	if err != nil {
+		return err
+	}
+	if appearance == nil {
+		return cause
+	}
+	return p.recoverPDFObject(ctx, name, object, cause)
+}
+
+// popupAnnotation 单独恢复弹窗的打开状态和父引用，不忽略外观或几何错误
+// 入参: ctx 取消上下文, object 原始弹窗对象
+// 返回: pdfgo.PopupAnnotation 弹窗信息, error 读取或不可恢复错误
+func (p *pdfImporter) popupAnnotation(ctx context.Context, object pdfgo.Object) (pdfgo.PopupAnnotation, error) {
+	value, err := p.reader.Resolve(object)
+	if err != nil {
+		return pdfgo.PopupAnnotation{}, p.recoverPDFObject(ctx, "Annotation.Popup", object, err)
+	}
+	if value == nil {
+		return pdfgo.PopupAnnotation{}, nil
+	}
+	dict, ok := value.(pdfgo.Dictionary)
+	if !ok {
+		return pdfgo.PopupAnnotation{}, p.recoverPDFObject(ctx, "Annotation.Popup", object, fmt.Errorf("invalid popup annotation"))
+	}
+	dict = maps.Clone(dict)
+	open, err := p.reader.Resolve(dict["Open"])
+	if err == nil && open != nil && open != pdfgo.Boolean(false) && open != pdfgo.Boolean(true) {
+		err = fmt.Errorf("invalid popup open state")
+	}
+	if err != nil {
+		if err := p.recoverPDFObject(ctx, "Annotation.Popup.Open", dict["Open"], err); err != nil {
+			return pdfgo.PopupAnnotation{}, err
+		}
+		delete(dict, "Open")
+	}
+	if object := dict["Parent"]; object != nil {
+		parent, reference := object.(pdfgo.Reference)
+		value, err := p.reader.Resolve(object)
+		if err == nil && value != nil {
+			parentDict, ok := value.(pdfgo.Dictionary)
+			if !reference || !ok {
+				err = fmt.Errorf("invalid popup parent annotation")
+			} else {
+				subtype, resolveErr := p.reader.Resolve(parentDict["Subtype"])
+				err = resolveErr
+				if kind, ok := subtype.(pdfgo.Name); err == nil && (!ok || kind == "Popup") {
+					err = fmt.Errorf("invalid popup parent subtype")
+				}
+			}
+		} else if err == nil && !reference {
+			err = fmt.Errorf("invalid popup parent reference")
+		}
+		if err != nil {
+			if err := p.recoverPDFObject(ctx, "Annotation.Popup.Parent", object, err); err != nil {
+				return pdfgo.PopupAnnotation{}, err
+			}
+			delete(dict, "Parent")
+		} else {
+			dict["Parent"] = parent
+		}
+	}
+	return p.reader.ReadPopupAnnotation(dict)
+}
+
+// annotationOpen 读取文本注解初始打开状态，单独保留无效辅助字段
+// 入参: ctx 取消上下文, dict 注解字典
+// 返回: pdfgo.Object 打开状态, error 不可恢复错误
+func (p *pdfImporter) annotationOpen(ctx context.Context, dict pdfgo.Dictionary) (pdfgo.Object, error) {
+	value, err := p.reader.Resolve(dict["Open"])
+	if err == nil && value != nil && value != pdfgo.Boolean(false) && value != pdfgo.Boolean(true) {
+		err = fmt.Errorf("invalid PDF text annotation open state")
+	}
+	if err != nil {
+		return nil, p.recoverPDFObject(ctx, "Annotation.Open", dict["Open"], err)
+	}
+	return value, nil
+}
+
 // appearanceAnnotation 将PDF静态外观转换为对应类型的OFD注解
 // 入参: ctx 取消上下文, page PDF页面, annotation PDF注解, actions 外观区域的动作
 // 返回: error 外观或转换错误
@@ -38,6 +127,21 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 // 入参: ctx 取消上下文, page PDF页面, annotation PDF注解, paint 绘制回调，空值使用原外观, actions 外观区域的动作
 // 返回: error 外观或转换错误
 func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation, paint func(*pdfImporter) error, actions ...Action) error {
+	if annotation.Subtype == "Projection" {
+		if _, err := p.reader.ReadProjectionAnnotation(annotation); err != nil {
+			if p.warning == nil || !pdfAuxiliaryError(err) {
+				return err
+			}
+			if _, err := p.reader.ReadAnnotationAppearance(annotation); err != nil {
+				return err
+			}
+			if err := p.recoverPDFObject(ctx, "Annotation.Projection.ExData", annotation.Dictionary["ExData"], err); err != nil {
+				return err
+			}
+			annotation.Dictionary = maps.Clone(annotation.Dictionary)
+			delete(annotation.Dictionary, "ExData")
+		}
+	}
 	clicks, err := p.annotationTriggerActions(ctx, annotation, "CLICK")
 	if err != nil {
 		return err
@@ -50,11 +154,13 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 			continue
 		}
 		value, err := p.reader.Resolve(annotation.Dictionary[key])
-		if err != nil {
-			return err
-		}
-		if value != nil {
-			return &pdfgo.UnsupportedError{Feature: fmt.Sprintf("annotation field %q", key)}
+		if value != nil || err != nil {
+			if err == nil {
+				err = &pdfgo.UnsupportedError{Feature: fmt.Sprintf("annotation field %q", key)}
+			}
+			if err := p.recoverPDFObject(ctx, "Annotation."+string(key), annotation.Dictionary[key], err); err != nil {
+				return err
+			}
 		}
 	}
 	remark, err := p.reader.ReadAnnotationTextContext(ctx, annotation, "Contents", p.warning)
@@ -74,7 +180,9 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 	}
 	invisible := flags&1 != 0 && !annotation.IsStandard()
 	if flags&256 != 0 {
-		return &pdfgo.UnsupportedError{Feature: "annotation ToggleNoView flag"}
+		if err := p.recoverPDFObject(ctx, "Annotation.F", annotation.Dictionary["F"], &pdfgo.UnsupportedError{Feature: "annotation ToggleNoView flag"}); err != nil {
+			return err
+		}
 	}
 	box := pdfBounds([]pdfgo.Point{
 		p.matrix.Apply(pdfgo.Point{X: annotation.Rect.XMin, Y: annotation.Rect.YMin}),
@@ -85,7 +193,9 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 	if len(clicks) != 0 && annotation.Subtype == "Link" {
 		region, err := p.linkRegion(annotation, box)
 		if err != nil {
-			return err
+			if err := p.recoverPDFObject(ctx, "Annotation.QuadPoints", annotation.Dictionary["QuadPoints"], err); err != nil {
+				return err
+			}
 		}
 		for i := range clicks {
 			clicks[i].Region = region
@@ -151,21 +261,18 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 		converted.Parameters = &AnnotationParameters{Parameter: []AnnotationParameter{{Name: "PDF.Redact.Pending", Value: "true"}}}
 	}
 	if annotation.Subtype == "Text" {
-		value, err := p.reader.Resolve(annotation.Dictionary["Open"])
+		value, err := p.annotationOpen(ctx, annotation.Dictionary)
 		if err != nil {
 			return err
 		}
 		converted.Parameters = &AnnotationParameters{Parameter: []AnnotationParameter{{Name: "PDF.Text.Open", Value: strconv.FormatBool(value == pdfgo.Boolean(true))}}}
 	}
-	popupObject, err := p.reader.Resolve(annotation.Dictionary["Popup"])
-	if err != nil {
-		return err
-	}
+	popupObject := annotation.Dictionary["Popup"]
 	if annotation.Subtype == "Popup" {
 		popupObject = annotation.Dictionary
 	}
 	if popupObject != nil {
-		popup, err := p.reader.ReadPopupAnnotation(popupObject)
+		popup, err := p.popupAnnotation(ctx, popupObject)
 		if err != nil {
 			return err
 		}

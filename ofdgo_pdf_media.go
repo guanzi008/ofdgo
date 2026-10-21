@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"path"
 	"reflect"
@@ -336,12 +337,39 @@ func (p *pdfImporter) movieAnnotation(ctx context.Context, page *pdfgo.Page, ann
 		return err
 	}
 	movie, err := p.reader.ReadMovie(annotation.Dictionary["Movie"])
+	if err != nil && p.warning != nil && pdfAuxiliaryError(err) {
+		value, resolveErr := p.reader.Resolve(annotation.Dictionary["Movie"])
+		if resolveErr != nil {
+			return resolveErr
+		}
+		if dict, ok := value.(pdfgo.Dictionary); ok && dict["Aspect"] != nil {
+			corrected := maps.Clone(dict)
+			delete(corrected, "Aspect")
+			retry, readErr := p.reader.ReadMovie(corrected)
+			if readErr == nil {
+				if err := p.recoverPDFObject(ctx, "Annotation.Movie", annotation.Dictionary["Movie"], err); err != nil {
+					return err
+				}
+				annotation.Dictionary = maps.Clone(annotation.Dictionary)
+				annotation.Dictionary["Movie"] = corrected
+				movie, err = retry, nil
+			} else if !pdfAuxiliaryError(readErr) {
+				return readErr
+			}
+		}
+	}
 	if err != nil {
-		return err
+		if err := p.recoverAnnotationAuxiliary(ctx, annotation, "Annotation.Movie", annotation.Dictionary["Movie"], err); err != nil {
+			return err
+		}
+		return p.appearanceAnnotation(ctx, page, annotation)
 	}
 	activation, err := p.reader.Resolve(annotation.Dictionary["A"])
 	if err != nil {
-		return err
+		if err := p.recoverAnnotationAuxiliary(ctx, annotation, "Annotation.Movie.A", annotation.Dictionary["A"], err); err != nil {
+			return err
+		}
+		return p.appearanceAnnotation(ctx, page, annotation)
 	}
 	if activation == pdfgo.Boolean(false) {
 		return p.appearanceAnnotation(ctx, page, annotation)
@@ -351,7 +379,10 @@ func (p *pdfImporter) movieAnnotation(ctx context.Context, page *pdfgo.Page, ann
 	}
 	parameters, err := p.reader.ReadMovieActivation(ctx, activation)
 	if err != nil {
-		return err
+		if err := p.recoverAnnotationAuxiliary(ctx, annotation, "Annotation.Movie.A", annotation.Dictionary["A"], err); err != nil {
+			return err
+		}
+		return p.appearanceAnnotation(ctx, page, annotation)
 	}
 	if !pdfMoviePlaybackSupported(movie, parameters) {
 		if err := p.moviePlaybackLoss(ctx, movie.File, strict); err != nil {
@@ -523,7 +554,28 @@ func (p *pdfImporter) movieActionLoss(feature string, strict, retained bool) err
 // 入参: ctx 取消上下文
 // 返回: error 名称树、附件读取或写入错误
 func (p *pdfImporter) documentAttachments(ctx context.Context) error {
-	return p.reader.WalkEmbeddedFiles(ctx, func(_ string, file pdfgo.FileSpecification) error {
+	var original pdfgo.Object
+	if p.warning != nil {
+		names, err := p.pdfCatalogObject("Names")
+		if err != nil {
+			return err
+		}
+		value, err := p.reader.Resolve(names)
+		if err != nil {
+			return p.recoverPDFObject(ctx, "Names", names, err)
+		}
+		if dictionary, ok := value.(pdfgo.Dictionary); ok {
+			original = dictionary["EmbeddedFiles"]
+			if original != nil {
+				if err := p.preservePDFObject(ctx, "EmbeddedFiles", original); err != nil {
+					return err
+				}
+			}
+		} else if value != nil {
+			return p.recoverPDFObject(ctx, "Names", names, fmt.Errorf("invalid names dictionary"))
+		}
+	}
+	err := p.reader.WalkEmbeddedFiles(ctx, func(_ string, file pdfgo.FileSpecification) error {
 		if file.Embedded == nil {
 			if p.warning == nil {
 				return fmt.Errorf("PDF embedded file has no embedded data")
@@ -533,16 +585,23 @@ func (p *pdfImporter) documentAttachments(ctx context.Context) error {
 		}
 		data, err := file.Embedded.DecodeContext(ctx)
 		if err != nil {
-			var unsupported *pdfgo.UnsupportedError
-			if p.warning != nil && errors.As(err, &unsupported) {
-				p.warning(pdfgo.Diagnostic{Message: "PDF document attachment not transferred to OFD: " + err.Error()})
+			if p.warning != nil && pdfAuxiliaryError(err) {
+				p.warning(pdfgo.Diagnostic{Message: "PDF document attachment retained as metadata: " + err.Error()})
 				return nil
 			}
 			return err
 		}
 		_, err = p.attachmentFile(file.Name, data)
+		if err != nil && p.warning != nil && pdfAuxiliaryError(err) {
+			p.warning(pdfgo.Diagnostic{Message: "PDF document attachment retained as metadata: " + err.Error()})
+			return nil
+		}
 		return err
 	})
+	if err != nil {
+		return p.recoverPDFObject(ctx, "EmbeddedFiles", original, err)
+	}
+	return ctx.Err()
 }
 
 // attachmentFile 按原名及数据复用附件，兼容末尾NUL，缺名使用固定名称

@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -36,12 +35,15 @@ type pdfDestinationFontBackend struct {
 // 入参: ctx 取消上下文
 // 返回: error 动作、编码或取消错误
 func (p *pdfImporter) documentOpenActions(ctx context.Context) error {
+	raw, err := p.pdfCatalogObject("OpenAction")
+	if err != nil {
+		return err
+	}
 	opened, err := p.reader.ReadOpenAction(ctx)
 	if err != nil {
-		if p.warning == nil || !errors.Is(err, pdfgo.ErrInvalidDestination) {
+		if err := p.recoverPDFObject(ctx, "OpenAction", raw, err); err != nil {
 			return err
 		}
-		p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("invalid PDF initial destination ignored: %v", err)})
 	}
 	var object pdfgo.Object
 	if opened.Action != nil {
@@ -52,7 +54,7 @@ func (p *pdfImporter) documentOpenActions(ctx context.Context) error {
 		object = pdfgo.Dictionary{"S": pdfgo.Name("GoTo"), "D": array}
 	}
 	currentPage := 0
-	actions, err := p.eventActions(ctx, object, "DO", pdfgo.Annotation{}, &currentPage)
+	actions, err := p.eventActions(ctx, object, "DO", pdfgo.Annotation{}, &currentPage, raw)
 	if err != nil {
 		return err
 	}
@@ -61,11 +63,18 @@ func (p *pdfImporter) documentOpenActions(ctx context.Context) error {
 	}
 	triggers, err := p.reader.ReadDocumentTriggers(ctx)
 	if err != nil {
-		return err
+		object, readErr := p.pdfCatalogObject("AA")
+		if readErr != nil {
+			return readErr
+		}
+		return p.recoverPDFObject(ctx, "Document.AA", object, err)
 	}
 	for _, trigger := range triggers {
 		if _, err := p.reader.ReadJavaScriptAction(ctx, trigger.Action); err != nil {
-			return err
+			if err := p.recoverPDFObject(ctx, "Document.AA."+string(trigger.Event), trigger.Action, err); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := p.unmappedTrigger(ctx, "document", trigger); err != nil {
 			return err
@@ -81,7 +90,7 @@ func (p *pdfImporter) pageOpenActions(ctx context.Context, page *pdfgo.Page) err
 	p.pageActionPage = p.page
 	triggers, err := p.reader.ReadPageTriggers(ctx, page)
 	if err != nil {
-		return err
+		return p.recoverPDFObject(ctx, "Page.AA", page.Dictionary["AA"], err)
 	}
 	for _, trigger := range triggers {
 		if trigger.Event != "O" {
@@ -102,32 +111,59 @@ func (p *pdfImporter) pageOpenActions(ctx context.Context, page *pdfgo.Page) err
 }
 
 // eventActions 按原顺序转换动作链，保留事件类型与链内跳转页状态
-// 入参: ctx 取消上下文, object 动作对象, event OFD事件, source 触发注解，零值表示非图元动作, currentPage 当前页面
+// 入参: ctx 取消上下文, object 动作对象, event OFD事件, source 触发注解，零值表示非图元动作, currentPage 当前页面, original 可选原始来源
 // 返回: []Action 转换动作, error 动作或取消错误
-func (p *pdfImporter) eventActions(ctx context.Context, object pdfgo.Object, event string, source pdfgo.Annotation, currentPage *int) ([]Action, error) {
+func (p *pdfImporter) eventActions(ctx context.Context, object pdfgo.Object, event string, source pdfgo.Annotation, currentPage *int, original ...pdfgo.Object) ([]Action, error) {
+	raw := object
+	if len(original) != 0 {
+		raw = original[0]
+	}
+	retained, warned := false, false
+	warning := p.warning
+	if warning != nil {
+		p.warning = func(diagnostic pdfgo.Diagnostic) {
+			warned = true
+			warning(diagnostic)
+		}
+		defer func() { p.warning = warning }()
+	}
+	retain := func(cause error) error {
+		if cause != nil && (p.warning == nil || !pdfAuxiliaryError(cause)) {
+			return cause
+		}
+		if retained {
+			if cause != nil {
+				p.warning(pdfgo.Diagnostic{Message: "PDF Action." + event + " retained as metadata: " + cause.Error()})
+			}
+			return ctx.Err()
+		}
+		var err error
+		if cause != nil {
+			err = p.recoverPDFObject(ctx, "Action."+event, raw, cause)
+		} else if p.warning != nil {
+			err = p.preservePDFObject(ctx, "Action."+event, raw)
+		}
+		retained = err == nil
+		return err
+	}
 	var actions []Action
+	var conversionErr error
 	err := p.reader.WalkActions(ctx, object, func(info pdfgo.ActionInfo) error {
 		annotation := source
 		annotation.Dictionary = pdfgo.Dictionary{"A": info.Dictionary}
-		converted, err := p.linkActions(annotation, p.warning == nil, currentPage)
+		warned = false
+		warnings := len(p.report.Warnings)
+		converted, err := p.convertLinkActions(annotation, p.warning == nil, currentPage)
 		if err != nil {
-			if errors.Is(err, errPDFMediaRead) {
+			conversionErr = retain(err)
+			*currentPage = -1
+			return conversionErr
+		}
+		if p.warning != nil && (converted == nil || warned || len(p.report.Warnings) != warnings) {
+			if err := retain(nil); err != nil {
+				conversionErr = err
 				return err
 			}
-			var unsupported *pdfgo.UnsupportedError
-			if event != "CLICK" && p.warning != nil && errors.Is(err, pdfgo.ErrInvalidAction) {
-				p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("invalid PDF %s action ignored: %v", event, err)})
-				return nil
-			}
-			if event != "CLICK" && p.warning != nil && errors.Is(err, pdfgo.ErrInvalidDestination) {
-				p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("invalid PDF %s destination ignored: %v", event, err)})
-				return nil
-			}
-			if event != "CLICK" && p.warning != nil && errors.As(err, &unsupported) {
-				p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("PDF %s action not transferred to OFD: %s", event, unsupported.Feature)})
-				return nil
-			}
-			return err
 		}
 		for _, action := range converted {
 			action.Event = event
@@ -135,8 +171,14 @@ func (p *pdfImporter) eventActions(ctx context.Context, object pdfgo.Object, eve
 		}
 		return nil
 	})
+	if conversionErr != nil {
+		return nil, conversionErr
+	}
 	if err != nil {
-		return nil, err
+		if err := retain(err); err != nil {
+			return nil, err
+		}
+		*currentPage = -1
 	}
 	return actions, ctx.Err()
 }
@@ -146,14 +188,10 @@ func (p *pdfImporter) eventActions(ctx context.Context, object pdfgo.Object, eve
 // 返回: error 动作链、取消或严格模式错误
 func (p *pdfImporter) unmappedTrigger(ctx context.Context, owner string, trigger pdfgo.ActionTrigger) error {
 	if err := p.reader.WalkActions(ctx, trigger.Action, func(pdfgo.ActionInfo) error { return nil }); err != nil {
-		return err
+		return p.recoverPDFObject(ctx, owner+".AA."+string(trigger.Event), trigger.Action, err)
 	}
 	feature := owner + " trigger " + string(trigger.Event)
-	if p.warning == nil {
-		return &pdfgo.UnsupportedError{Feature: feature}
-	}
-	p.warning(pdfgo.Diagnostic{Message: "PDF " + feature + " not transferred to OFD"})
-	return nil
+	return p.recoverPDFObject(ctx, owner+".AA."+string(trigger.Event), trigger.Action, &pdfgo.UnsupportedError{Feature: feature})
 }
 
 // annotationTriggerActions 按事件转换注解动作，页面打开动作独立于注解外观
@@ -165,7 +203,7 @@ func (p *pdfImporter) annotationTriggerActions(ctx context.Context, annotation p
 	}
 	triggers, err := p.reader.ReadAnnotationTriggers(ctx, annotation)
 	if err != nil {
-		return nil, err
+		return nil, p.recoverPDFObject(ctx, "Annotation.AA", annotation.Dictionary["AA"], err)
 	}
 	if len(triggers) == 0 {
 		return nil, ctx.Err()
@@ -193,7 +231,10 @@ func (p *pdfImporter) annotationTriggerActions(ctx context.Context, annotation p
 		switch trigger.Event {
 		case "U", "PO":
 		default:
-			return nil, &pdfgo.UnsupportedError{Feature: "annotation trigger " + string(trigger.Event)}
+			if err := p.unmappedTrigger(ctx, "annotation", trigger); err != nil {
+				return nil, err
+			}
+			continue
 		}
 		currentPage := p.page
 		if event == "PO" {
@@ -258,7 +299,8 @@ func (p *pdfImporter) destinationBounds(page *pdfgo.Page) (Box, error) {
 	local := pdfImporter{
 		resources: p.resources,
 		ctx:       p.ctx, reader: p.reader, editor: editor, renderer: p.renderer,
-		matrix: matrix, pageBox: page.CropBox, pageWidth: width, pageHeight: height,
+		warning: p.warning,
+		matrix:  matrix, pageBox: page.CropBox, pageWidth: width, pageHeight: height,
 		rasterDPI: p.rasterDPI, fontIDs: make(map[*pdfgo.Font]string),
 		resolveFile: p.resolveFile, resolveReference: p.resolveReference,
 		references: &codecpdf.ReferenceCache{},
@@ -320,17 +362,15 @@ func (p *pdfImporter) destinationBounds(page *pdfgo.Page) (Box, error) {
 // 返回: error 严格模式转换错误或取消错误
 func (p *pdfImporter) outlines(ctx context.Context) error {
 	count := 0
+	var conversionErr error
 	data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) {
 		x.root("Outlines", nil)
 		depth := 0
 		err := p.reader.WalkOutlines(ctx, func(level int, item pdfgo.OutlineItem) error {
 			actions, err := p.outlineActions(ctx, item)
 			if err != nil {
-				if p.warning == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errPDFMediaRead) {
-					return err
-				}
-				p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("PDF outline %q actions not transferred to OFD: %v", item.Title, err)})
-				actions = nil
+				conversionErr = err
+				return err
 			}
 			for depth > level {
 				x.end("OutlineElem")
@@ -354,15 +394,21 @@ func (p *pdfImporter) outlines(ctx context.Context) error {
 		}
 		x.end("Outlines")
 	})
+	if conversionErr != nil {
+		return conversionErr
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if p.warning == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errPDFMediaRead) {
+		if p.warning == nil || !pdfAuxiliaryError(err) {
 			return err
 		}
-		p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("PDF outlines not transferred to OFD: %v", err)})
-		return nil
+		object, readErr := p.pdfCatalogObject("Outlines")
+		if readErr != nil {
+			return readErr
+		}
+		return p.recoverPDFObject(ctx, "Outlines", object, err)
 	}
 	if count > 0 {
 		p.editor.outlines = bytes.TrimPrefix(data, []byte(xml.Header))
@@ -374,42 +420,22 @@ func (p *pdfImporter) outlines(ctx context.Context) error {
 // 入参: ctx 取消上下文, item PDF目录节点
 // 返回: []Action OFD动作序列, error 动作或取消错误
 func (p *pdfImporter) outlineActions(ctx context.Context, item pdfgo.OutlineItem) ([]Action, error) {
+	raw := item.Action
 	object, err := p.reader.Resolve(item.Action)
 	if err != nil {
-		return nil, err
+		return nil, p.recoverPDFObject(ctx, "Outline.A", item.Action, err)
 	}
 	dest, err := p.reader.Resolve(item.Destination)
 	if err != nil {
-		return nil, err
+		return nil, p.recoverPDFObject(ctx, "Outline.Dest", item.Destination, err)
 	}
 	if dest != nil {
 		if object != nil {
-			return nil, fmt.Errorf("PDF outline has both destination and action")
+			return nil, p.recoverPDFObject(ctx, "Outline", pdfgo.Dictionary{"A": item.Action, "Dest": item.Destination}, fmt.Errorf("PDF outline has both destination and action"))
 		}
 		object = pdfgo.Dictionary{"S": pdfgo.Name("GoTo"), "D": dest}
+		raw = item.Destination
 	}
 	currentPage := -1
-	var actions []Action
-	err = p.reader.WalkActions(ctx, object, func(info pdfgo.ActionInfo) error {
-		converted, err := p.linkActions(pdfgo.Annotation{Dictionary: pdfgo.Dictionary{"A": info.Dictionary}}, p.warning == nil, &currentPage)
-		if err != nil {
-			if errors.Is(err, errPDFMediaRead) {
-				return err
-			}
-			var unsupported *pdfgo.UnsupportedError
-			if p.warning != nil && (errors.As(err, &unsupported) || errors.Is(err, pdfgo.ErrInvalidDestination) || errors.Is(err, pdfgo.ErrInvalidAction)) {
-				p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("PDF outline action not transferred to OFD: %v", err)})
-				currentPage = -1
-				return nil
-			}
-			return err
-		}
-		if converted != nil {
-			actions = append(actions, converted...)
-		} else {
-			currentPage = -1
-		}
-		return nil
-	})
-	return actions, err
+	return p.eventActions(ctx, object, "CLICK", pdfgo.Annotation{}, &currentPage, raw)
 }

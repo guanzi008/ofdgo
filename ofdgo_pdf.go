@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"sort"
 
@@ -245,13 +246,14 @@ func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Ed
 	editor.SetRenderBackends(renderer.Backends())
 	editor.fontDirs, editor.fontFS = renderer.FontSources()
 	editor.fontSourcesCache = renderer.fontSourcesCache
-	importer := pdfImporter{resources: options.Resources, ctx: ctx, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, fontIDs: map[*pdfgo.Font]string{}, fonts: map[*pdfgo.Font]*pdfImportedFont{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}, structureBindings: &pdfStructureBindings{}}
+	importer := pdfImporter{resources: options.Resources, ctx: ctx, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, page: -1, fontIDs: map[*pdfgo.Font]string{}, fonts: map[*pdfgo.Font]*pdfImportedFont{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}, structureBindings: &pdfStructureBindings{}}
 	readOptions := pdfgo.ReaderOptions{Password: options.Password, PasswordUTF8: options.PasswordUTF8, ShapeText: importer.shapePDFText}
-	var diagnostics []pdfgo.Diagnostic
-	var readWarning func(pdfgo.Diagnostic)
 	if !options.Strict {
-		readWarning = func(diagnostic pdfgo.Diagnostic) { diagnostics = append(diagnostics, diagnostic) }
-		readOptions.Warning = func(diagnostic pdfgo.Diagnostic) { readWarning(diagnostic) }
+		importer.warning = func(warning pdfgo.Diagnostic) {
+			warning.Page = importer.page + 1
+			importer.report.Warnings = append(importer.report.Warnings, warning)
+		}
+		readOptions.Warning = importer.warning
 	}
 	reader, err := pdfgo.NewReaderWithOptions(convertReader{ctx: ctx, input: input}, input.Size(), readOptions)
 	if err != nil {
@@ -266,12 +268,11 @@ func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Ed
 	if err != nil {
 		return nil, PDFImportReport{}, fmt.Errorf("import PDF output intents: %w", err)
 	}
-	importer.report.Warnings = diagnostics
 	if len(outputIntents) != 0 {
 		if options.Strict {
 			return nil, PDFImportReport{}, &pdfgo.UnsupportedError{Feature: "PDF output intent conversion"}
 		}
-		importer.report.Warnings = append(importer.report.Warnings, pdfgo.Diagnostic{Message: "PDF output intents not transferred to OFD"})
+		importer.report.Warnings = append(importer.report.Warnings, pdfgo.Diagnostic{Message: "PDF output intents preserved as metadata; not applied to rendering"})
 	}
 	importer.pageIndexes = make(map[pdfgo.Reference]int)
 	importer.resolveFile = options.ResolveFile
@@ -281,13 +282,6 @@ func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Ed
 	importer.references = &codecpdf.ReferenceCache{}
 	defer importer.references.Close()
 	importer.halftoneWarnings = make(map[*pdfgo.Halftone]bool)
-	if !options.Strict {
-		importer.warning = func(warning pdfgo.Diagnostic) {
-			warning.Page = importer.page + 1
-			importer.report.Warnings = append(importer.report.Warnings, warning)
-		}
-		readWarning = importer.warning
-	}
 	if err := progress.report("pages", 0, 0); err != nil {
 		return nil, PDFImportReport{}, err
 	}
@@ -418,6 +412,67 @@ func (p *pdfImporter) referencePage(ctx context.Context, source *pdfgo.Reader, r
 		p.references = &codecpdf.ReferenceCache{}
 	}
 	return p.references.Resolve(ctx, source, reference, p.resolveFile, p.resolveReference, p.warning)
+}
+
+// pageAnnotations 保留不可显示的源注解声明，其他注解仍按原顺序读取
+// 入参: ctx 取消上下文, page PDF页面
+// 返回: []pdfgo.Annotation 可显示的注解, error 输入、取消或严格校验错误
+func (p *pdfImporter) pageAnnotations(ctx context.Context, page *pdfgo.Page) ([]pdfgo.Annotation, error) {
+	annotations, err := page.AnnotationsContext(ctx)
+	if err == nil || p.warning == nil || !pdfAuxiliaryError(err) {
+		return annotations, err
+	}
+	object := page.Dictionary["Annots"]
+	if err := p.recoverPDFObject(ctx, "Page.Annots", object, err); err != nil {
+		return nil, err
+	}
+	value, err := p.reader.Resolve(object)
+	if err != nil {
+		return nil, p.recoverPDFObject(ctx, "Page.Annots", object, err)
+	}
+	array, ok := value.(pdfgo.Array)
+	if !ok {
+		return nil, ctx.Err()
+	}
+	for index, object := range array {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		candidate := *page
+		candidate.Dictionary = maps.Clone(page.Dictionary)
+		candidate.Dictionary["Annots"] = pdfgo.Array{object}
+		items, err := candidate.AnnotationsContext(ctx)
+		if err != nil && pdfAuxiliaryError(err) {
+			value, resolveErr := p.reader.Resolve(object)
+			if resolveErr != nil && !pdfAuxiliaryError(resolveErr) {
+				return nil, resolveErr
+			}
+			if dict, ok := value.(pdfgo.Dictionary); ok && dict["AP"] != nil {
+				subtype, resolveErr := p.reader.Resolve(dict["Subtype"])
+				if resolveErr != nil && !pdfAuxiliaryError(resolveErr) {
+					return nil, resolveErr
+				}
+				if _, named := subtype.(pdfgo.Name); !named && resolveErr == nil {
+					dict = maps.Clone(dict)
+					dict["Subtype"] = pdfgo.Name("Stamp")
+					candidate.Dictionary["Annots"] = pdfgo.Array{dict}
+					items, err = candidate.AnnotationsContext(ctx)
+				}
+			}
+		}
+		if err != nil {
+			if !pdfAuxiliaryError(err) {
+				return nil, err
+			}
+			p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("PDF annotation %d retained without appearance: %v", index+1, err)})
+			continue
+		}
+		if len(items) == 1 && items[0].Reference == (pdfgo.Reference{}) {
+			items[0].Reference, _ = object.(pdfgo.Reference)
+		}
+		annotations = append(annotations, items...)
+	}
+	return annotations, ctx.Err()
 }
 
 // objectValidation 在单次导入中共享不可变资源的校验结果，隔离局部编辑器

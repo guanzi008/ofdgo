@@ -37,7 +37,7 @@ type pdfEmbeddedFile struct {
 // 返回: error 错误信息
 func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict bool) error {
 	p.movieBounds = nil
-	annotations, err := page.AnnotationsContext(ctx)
+	annotations, err := p.pageAnnotations(ctx, page)
 	if err != nil {
 		return err
 	}
@@ -70,7 +70,7 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		if annotation.Subtype != "Popup" {
 			continue
 		}
-		popup, err := p.reader.ReadPopupAnnotation(annotation.Dictionary)
+		popup, err := p.popupAnnotation(ctx, annotation.Dictionary)
 		if err != nil {
 			return err
 		}
@@ -78,11 +78,15 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			dict := maps.Clone(annotations[parent].Dictionary)
 			previous, err := p.reader.Resolve(dict["Popup"])
 			if err != nil {
-				return err
+				if err := p.recoverPDFObject(ctx, "Annotation.Popup", dict["Popup"], err); err != nil {
+					return err
+				}
 			}
 			if previous != nil {
 				if reference, ok := dict["Popup"].(pdfgo.Reference); !ok || reference != annotation.Reference {
-					return fmt.Errorf("inconsistent PDF popup parent")
+					if err := p.recoverPDFObject(ctx, "Annotation.Popup", dict["Popup"], fmt.Errorf("inconsistent PDF popup parent")); err != nil {
+						return err
+					}
 				}
 			}
 			dict["Popup"] = annotation.Dictionary
@@ -127,12 +131,9 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			annotation.Dictionary = dict
 		}
 		if annotation.Subtype == "Text" {
-			value, err := p.reader.Resolve(dict["Open"])
+			value, err := p.annotationOpen(ctx, dict)
 			if err != nil {
 				return err
-			}
-			if value != nil && value != pdfgo.Boolean(false) && value != pdfgo.Boolean(true) {
-				return fmt.Errorf("invalid PDF text annotation open state")
 			}
 			if value == pdfgo.Boolean(true) {
 				if strict {
@@ -141,20 +142,19 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 				p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF text annotation open state retained as annotation parameter"})
 			}
 		}
-		popupObject, err := p.reader.Resolve(dict["Popup"])
-		if err != nil {
-			return err
-		}
+		popupObject := dict["Popup"]
 		if annotation.Subtype == "Popup" {
 			popupObject = dict
 		}
 		if popupObject != nil {
-			popup, err := p.reader.ReadPopupAnnotation(popupObject)
+			popup, err := p.popupAnnotation(ctx, popupObject)
 			if err != nil {
 				return err
 			}
 			if annotation.Subtype != "Popup" && popup.Parent != (pdfgo.Reference{}) && popup.Parent != annotation.Reference {
-				return fmt.Errorf("inconsistent PDF popup parent")
+				if err := p.recoverPDFObject(ctx, "Annotation.Popup.Parent", popupObject, fmt.Errorf("inconsistent PDF popup parent")); err != nil {
+					return err
+				}
 			}
 			if popup.Open {
 				if strict {
@@ -166,11 +166,20 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		if annotation.Subtype == "Sound" {
 			sound, err := p.reader.ReadSound(dict["Sound"])
 			if err != nil {
-				return err
+				if err := p.recoverPDFObject(ctx, "Annotation.Sound", dict["Sound"], err); err != nil {
+					return err
+				}
+				if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
+					return err
+				}
+				continue
 			}
 			id, err := p.soundResource(ctx, sound)
 			if err != nil {
-				return err
+				if err := p.recoverPDFObject(ctx, "Annotation.Sound", dict["Sound"], err); err != nil {
+					return err
+				}
+				id = ""
 			}
 			if id == "" {
 				if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
@@ -228,7 +237,13 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		if annotation.Subtype == "Widget" {
 			field, err := p.reader.ReadField(annotation)
 			if err != nil {
-				return err
+				if err := p.recoverAnnotationAuxiliary(ctx, annotation, "Annotation.Field", annotation.Dictionary, err); err != nil {
+					return err
+				}
+				if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
+					return err
+				}
+				continue
 			}
 			annotation.Dictionary = field
 			if field["FT"] == pdfgo.Name("Sig") && field["V"] != nil {
@@ -273,10 +288,6 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			}
 			continue
 		}
-		primary, err := p.reader.Resolve(dict["A"])
-		if err != nil {
-			return err
-		}
 		var actions []Action
 		currentPage := p.page
 		appendAction := func(dict pdfgo.Dictionary) error {
@@ -289,23 +300,29 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			actions = append(actions, converted...)
 			return nil
 		}
-		if primary == nil {
+		primary, err := p.reader.Resolve(dict["A"])
+		if err != nil {
+			if err := p.recoverPDFObject(ctx, "Annotation.A", dict["A"], err); err != nil {
+				return err
+			}
+		} else if primary == nil {
 			if err := appendAction(dict); err != nil {
 				return err
 			}
-		} else if err := p.reader.WalkActions(ctx, primary, func(info pdfgo.ActionInfo) error {
-			current := maps.Clone(dict)
-			current["A"] = info.Dictionary
-			return appendAction(current)
-		}); err != nil {
-			return err
+		} else {
+			actions, err = p.eventActions(ctx, dict["A"], "CLICK", annotation, &currentPage)
+			if err != nil {
+				return err
+			}
 		}
 
 		b := annotation.Rect
 		box := pdfBounds([]pdfgo.Point{p.matrix.Apply(pdfgo.Point{X: b.XMin, Y: b.YMin}), p.matrix.Apply(pdfgo.Point{X: b.XMax, Y: b.YMax})})
 		region, err := p.linkRegion(annotation, box)
 		if err != nil {
-			return err
+			if err := p.recoverPDFObject(ctx, "Annotation.QuadPoints", dict["QuadPoints"], err); err != nil {
+				return err
+			}
 		}
 		for i := range actions {
 			actions[i].Region = region
@@ -366,7 +383,32 @@ func (p *pdfImporter) linkRegion(annotation pdfgo.Annotation, box Box) (*Region,
 // linkActions 将单个PDF动作转换为有序OFD动作，保留动态媒体控制的目标范围
 // 入参: annotation 触发注解, strict 严格检查开关, currentPage 动作链当前页
 // 返回: []Action 动作序列，空切片表示无操作，nil表示未转换, error 转换错误
-func (p *pdfImporter) linkActions(annotation pdfgo.Annotation, strict bool, currentPage *int) ([]Action, error) {
+func (p *pdfImporter) linkActions(annotation pdfgo.Annotation, strict bool, currentPage *int) (actions []Action, err error) {
+	object := pdfgo.Dictionary{}
+	for _, key := range []pdfgo.Name{"A", "Dest"} {
+		if value, ok := annotation.Dictionary[key]; ok {
+			object[key] = value
+		}
+	}
+	warnings := len(p.report.Warnings)
+	defer func() {
+		if err != nil && pdfAuxiliaryError(err) {
+			err = p.recoverPDFObject(p.ctx, "Link", object, err)
+			if err == nil {
+				actions = nil
+				*currentPage = -1
+			}
+		} else if err == nil && (actions == nil || len(p.report.Warnings) != warnings) && len(object) != 0 && p.warning != nil {
+			err = p.preservePDFObject(p.ctx, "Link", object)
+		}
+	}()
+	return p.convertLinkActions(annotation, strict, currentPage)
+}
+
+// convertLinkActions 转换单个动作，由调用方在辅助失败时保留原始来源
+// 入参: annotation 触发注解, strict 严格检查开关, currentPage 动作链当前页
+// 返回: []Action 转换动作, error 动作或读取错误
+func (p *pdfImporter) convertLinkActions(annotation pdfgo.Annotation, strict bool, currentPage *int) ([]Action, error) {
 	value, err := p.reader.Resolve(annotation.Dictionary["A"])
 	if err != nil {
 		return nil, err
@@ -521,6 +563,9 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 		if destination.Mode == "FitB" {
 			box, err := p.destinationBounds(targetPage)
 			if err != nil {
+				if !pdfAuxiliaryError(err) {
+					return nil, err
+				}
 				if canceled := p.ctx.Err(); canceled != nil {
 					return nil, canceled
 				}
@@ -641,7 +686,7 @@ func (p *pdfImporter) remoteLinkAction(object pdfgo.Object, strict bool) (*Actio
 	}
 	data, err := p.reader.ReadFileData(p.ctx, *action.File, p.resolveFile)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errPDFMediaRead, err)
 	}
 	id, err := p.attachmentFile(action.File.Name, data)
 	if err != nil {

@@ -54,6 +54,9 @@ func pdfGeometryPath(ctx context.Context, source pdfgo.Path, matrix pdfgo.Matrix
 // 入参: node 图元, stroke 是否描边
 // 返回: *RasterPage 覆盖场景, Box 页面区域, error 编译错误
 func (p *pdfImporter) compileCoverage(node pdfCompositeNode, stroke bool) (*RasterPage, Box, error) {
+	if node.path != nil && pdfPaintedPathEmpty(node.path.Path) {
+		return nil, Box{}, p.emptyPaintedPath()
+	}
 	fallback := func() (*RasterPage, Box, error) {
 		return p.compileGroup(func(local *pdfImporter) error { return node.coverage(local, stroke) })
 	}
@@ -95,7 +98,7 @@ func (p *pdfImporter) compileCoverage(node pdfCompositeNode, stroke bool) (*Rast
 		return nil, Box{}, err
 	}
 	if len(path) == 0 {
-		return nil, Box{}, fmt.Errorf("empty PDF painted path")
+		return nil, Box{}, p.emptyPaintedPath()
 	}
 	path = GeometryPath(basegeom.Close(basegeom.Path(path)))
 	clip, err := p.coverageClip(style.Clips, geometry)
@@ -298,6 +301,12 @@ func (b *pdfPointBounds) box() Box {
 // 入参: mark PDF路径绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) path(mark pdfgo.PathMark) error {
+	if err := p.ctx.Err(); err != nil {
+		return err
+	}
+	if pdfPaintedPathEmpty(mark.Path) {
+		return p.emptyPaintedPath()
+	}
 	if mark.Style.BlendMode != "" && mark.Style.BlendMode != "Normal" && mark.Style.BlendMode != "Compatible" {
 		return &pdfgo.UnsupportedError{Feature: "path blend mode " + string(mark.Style.BlendMode)}
 	}
@@ -308,6 +317,9 @@ func (p *pdfImporter) path(mark pdfgo.PathMark) error {
 // 入参: mark PDF路径绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
+	if pdfPaintedPathEmpty(mark.Path) {
+		return p.emptyPaintedPath()
+	}
 	var err error
 	mark.Style, err = p.maskStyle(mark.Style)
 	if err != nil {
@@ -330,9 +342,6 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 	box, err := codecpdf.PathBounds(p.ctx, mark.Path, p.matrix)
 	if err != nil {
 		return err
-	}
-	if box == (Box{}) {
-		return fmt.Errorf("empty PDF painted path")
 	}
 	scale := math.Hypot(p.matrix[0], p.matrix[1])
 	drawing, origin, ctm := *p, box, ""
@@ -408,6 +417,31 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 	p.appendSequenceObject(GraphicObject{Type: "PathObject", PathObject: object}, mark.Sequence)
 	p.report.PathObjects++
 	return nil
+}
+
+// pdfPaintedPathEmpty 判断无坐标路径，不排除具有坐标的退化描边
+// 入参: path PDF路径
+// 返回: bool 是否没有坐标
+func pdfPaintedPathEmpty(path pdfgo.Path) bool {
+	for _, segment := range path.Segments {
+		if segment.Operator != "C" || len(segment.Points) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// emptyPaintedPath 按诊断策略忽略不绘制内容的空路径，严格模式仍拒绝
+// 返回: error 严格模式或取消错误
+func (p *pdfImporter) emptyPaintedPath() error {
+	if err := p.ctx.Err(); err != nil {
+		return err
+	}
+	if p.warning == nil {
+		return fmt.Errorf("empty PDF painted path")
+	}
+	p.warning(pdfgo.Diagnostic{Message: "empty PDF painted path ignored"})
+	return p.ctx.Err()
 }
 
 // clipPath 复用页面内重复路径编码，按估算字节预算淘汰且不缓存错误
