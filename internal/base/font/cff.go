@@ -260,6 +260,21 @@ func SanitizeCFF(data []byte) ([]byte, error) {
 		if kind == 1 {
 			return normalizeCFFType1(data, topDict)
 		}
+		private, err := readType2Private(data, topDict[18], &type2Font{})
+		if err != nil {
+			return nil, err
+		}
+		count := len(private)
+		if err := normalizeCFFPrivate(private); err != nil {
+			return nil, err
+		}
+		if len(private) != count {
+			font, err := readType2Font(data)
+			if err != nil {
+				return nil, err
+			}
+			return rebuildNamedCFF(data, font, font.chars, nil)
+		}
 		return data, nil
 	}
 	fdArrOff, err := cffDictOffset(data, topDict, 1236)
@@ -342,17 +357,21 @@ func SanitizeCFF(data []byte) ([]byte, error) {
 	return encodeSanitizedCFF(data[:hdrSize], nameIndexData, topDict, stringIndexData, globalSubrIndexData, charStringsData, finalPrivData, localSubrData), nil
 }
 
-// normalizeCFFPrivate 移除旧版CFF中不生效的缺省字段，拒绝需要额外解释的取值
+// normalizeCFFPrivate 移除废弃的加粗阈值及未加密标记，拒绝加密字形程序
 // 入参: dict 私有字典
 // 返回: error 不支持的旧版行为
 func normalizeCFFPrivate(dict cffDict) error {
-	for op, value := range map[int]float64{1215: 0, 1216: -1} {
-		if values, ok := dict[op]; ok {
-			if len(values) != 1 || values[0] != value {
-				return fmt.Errorf("unsupported legacy CFF private operator %d", op)
-			}
-			delete(dict, op)
+	if values, ok := dict[1215]; ok {
+		if len(values) != 1 || !finite(values[0]) {
+			return fmt.Errorf("invalid legacy CFF bold threshold")
 		}
+		delete(dict, 1215)
+	}
+	if values, ok := dict[1216]; ok {
+		if len(values) != 1 || values[0] != -1 {
+			return fmt.Errorf("unsupported legacy CFF private operator 1216")
+		}
+		delete(dict, 1216)
 	}
 	return nil
 }

@@ -25,7 +25,7 @@ import (
 // errTTStackUnderflow 表示字形程序缺少必需的栈参数
 var errTTStackUnderflow = errors.New("TrueType instruction stack underflow")
 
-// errTTInvalidReference 表示字形指令引用不存在的点或函数
+// errTTInvalidReference 表示字形指令引用不存在的区、点、轮廓或函数
 var errTTInvalidReference = errors.New("invalid TrueType instruction reference")
 
 // errTTInvalidControlFlow 表示条件分支未闭合或跳转超出字节码范围
@@ -380,7 +380,8 @@ func (v *ttInterpreter) execute(code []byte, depth int) error {
 			case op >= 0x13 && op <= 0x16:
 				z := v.pop()
 				if z < 0 || z > 1 {
-					return fmt.Errorf("invalid TrueType zone")
+					v.err = fmt.Errorf("%w: zone %d", errTTInvalidReference, z)
+					break
 				}
 				if op == 0x16 {
 					g.zone = [3]int32{z, z, z}
@@ -854,7 +855,7 @@ func (v *ttInterpreter) shift(op byte) {
 	if op <= 0x35 {
 		contour := v.pop()
 		if contour < 0 || int64(contour) >= int64(len(v.ends)) {
-			v.err = fmt.Errorf("invalid TrueType contour reference")
+			v.err = fmt.Errorf("%w: contour %d", errTTInvalidReference, contour)
 			return
 		}
 		if contour > 0 {
@@ -864,7 +865,7 @@ func (v *ttInterpreter) shift(op byte) {
 	} else {
 		target = v.pop()
 		if target < 0 || target > 1 {
-			v.err = fmt.Errorf("invalid TrueType zone")
+			v.err = fmt.Errorf("%w: zone %d", errTTInvalidReference, target)
 			return
 		}
 		to = len(v.zones[target])

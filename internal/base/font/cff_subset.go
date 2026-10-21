@@ -231,6 +231,9 @@ func rebuildNamedCFF(data []byte, font *type2Font, chars [][]byte, ids []uint16)
 	if err != nil {
 		return nil, err
 	}
+	if err := normalizeCFFPrivate(private); err != nil {
+		return nil, err
+	}
 	privateData, err := encodeCFFSubsetPrivate(private)
 	if err != nil {
 		return nil, err

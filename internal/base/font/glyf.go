@@ -235,7 +235,7 @@ func (f *Outliner) phantomPoints(id uint16, data []byte) [4]ttPoint {
 	return [4]ttPoint{{x: left * 64, ox: left * 64}, {x: (left + int32(f.Font.GlyphAdvance(id))) * 64, ox: (left + int32(f.Font.GlyphAdvance(id))) * 64}, {y: top * 64, oy: top * 64}, {y: (top - int32(f.Font.GlyphVerticalAdvance(id))) * 64, oy: (top - int32(f.Font.GlyphVerticalAdvance(id))) * 64}}
 }
 
-// ttRecoverableHint 判断栈参数、指令引用或控制流错误是否允许保留执行前轮廓
+// ttRecoverableHint 判断栈参数、区点轮廓及函数引用或控制流错误是否允许保留执行前轮廓
 // 入参: err 指令错误
 // 返回: bool 是否可恢复
 func ttRecoverableHint(err error) bool {

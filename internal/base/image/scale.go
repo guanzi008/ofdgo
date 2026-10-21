@@ -56,7 +56,7 @@ func (s rasterImageSource) RGBA64At(x, y int) color.RGBA64 {
 	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
 }
 
-// drawRasterAxisImage 按像素中心进行轴向缩放，逐行复用横向采样并保留镜像与小数坐标
+// drawRasterAxisImage 轴向缩放复用逐行采样，细轴按面积覆盖并保留镜像与小数坐标
 // 入参: dst 目标图像, src 源图像, m 像素变换, op 合成操作
 // 返回: bool 是否使用轴向采样
 func drawRasterAxisImage(dst draw.Image, src image.Image, m [6]float64, op draw.Op) bool {
@@ -78,7 +78,13 @@ func drawRasterAxisImage(dst draw.Image, src image.Image, m [6]float64, op draw.
 		return true
 	}
 	if float64(r.Dx())*math.Min(float64(r.Dy()), math.Ceil(4*math.Max(1, sy))+2) > rasterScaleBufferLimit/32 {
+		if sx*float64(b.Dx()) < 1 || sy*float64(b.Dy()) < 1 {
+			return drawRasterFootprintImage(dst, src, m, op, r)
+		}
 		return false
+	}
+	if !rasterFootprintWeightsFit(b, r, m) {
+		return drawRasterFootprintImage(dst, src, m, op, r)
 	}
 	xs := rasterImageAxis(r.Min.X, r.Max.X, b.Min.X, b.Max.X, m[0], m[4])
 	ys := rasterImageAxis(r.Min.Y, r.Max.Y, b.Min.Y, b.Max.Y, m[3], m[5])
@@ -139,10 +145,13 @@ func drawRasterAxisImage(dst draw.Image, src image.Image, m [6]float64, op draw.
 	return true
 }
 
-// rasterImageAxis 按连续源坐标生成CatmullRom权重，不对图像几何边界取整
+// rasterImageAxis 按连续源坐标生成CatmullRom权重，亚像素细轴使用面积覆盖权重
 // 入参: first 目标起点, end 目标终点, source 源起点, limit 源终点, scale 缩放比例, offset 平移距离
 // 返回: []rasterAxisSample 轴向采样表
 func rasterImageAxis(first, end, source, limit int, scale, offset float64) []rasterAxisSample {
+	if math.Abs(scale)*float64(limit-source) < 1 {
+		return rasterImageFootprintAxis(first, end, source, limit, scale, offset)
+	}
 	result := make([]rasterAxisSample, 0, end-first)
 	argument := math.Min(1, math.Abs(scale))
 	support := draw.CatmullRom.Support / argument
@@ -179,6 +188,142 @@ func rasterImageAxis(first, end, source, limit int, scale, offset float64) []ras
 			weights[i] /= total
 		}
 		sample.weights = weights
+	}
+	return result
+}
+
+// rasterFootprintWeightsFit 检查细轴权重表的合计预算，乘法前排除溢出
+// 入参: source 源边界, target 目标范围, m 像素变换
+// 返回: bool 权重表是否符合预算
+func rasterFootprintWeightsFit(source, target image.Rectangle, m [6]float64) bool {
+	budget := rasterScaleBufferLimit / 8
+	for _, axis := range [...]struct {
+		source, target int
+		scale          float64
+	}{{source.Dx(), target.Dx(), m[0]}, {source.Dy(), target.Dy(), m[3]}} {
+		if math.Abs(axis.scale)*float64(axis.source) < 1 && axis.target > 0 {
+			n, samples := axis.source, min(2, axis.target)
+			if n > budget/samples {
+				return false
+			}
+			budget -= n * samples
+		}
+	}
+	return true
+}
+
+// rasterImageWeightSpan 提供单个目标像素的源范围和权重，不分配整轴权重表
+// 入参: pixel 目标像素, source 源起点, limit 源终点, scale 缩放比例, offset 平移距离
+// 返回: int 源起点, int 源终点, func(int)float64 源权重
+func rasterImageWeightSpan(pixel, source, limit int, scale, offset float64) (int, int, func(int) float64) {
+	if math.Abs(scale)*float64(limit-source) < 1 {
+		left, right := (float64(pixel)-offset)/scale, (float64(pixel+1)-offset)/scale
+		if right < left {
+			left, right = right, left
+		}
+		if right <= float64(source) || left >= float64(limit) {
+			return 0, 0, nil
+		}
+		return source, limit, func(x int) float64 {
+			return math.Max(0, math.Min(float64(x)+1, right)-math.Max(float64(x), left)) * math.Abs(scale)
+		}
+	}
+	center := (float64(pixel) + .5 - offset) / scale
+	if center < float64(source) || center >= float64(limit) {
+		return 0, 0, nil
+	}
+	center -= .5
+	argument := math.Min(1, math.Abs(scale))
+	support := draw.CatmullRom.Support / argument
+	start := int(max(float64(source), math.Floor(center-support)))
+	stop := int(min(float64(limit), math.Ceil(center+support)))
+	weight := func(x int) float64 {
+		distance := math.Abs((float64(x) - center) * argument)
+		if distance < draw.CatmullRom.Support {
+			return draw.CatmullRom.At(distance)
+		}
+		return 0
+	}
+	var total float64
+	for x := start; x < stop; x++ {
+		total += weight(x)
+	}
+	return start, stop, func(x int) float64 { return weight(x) / total }
+}
+
+// drawRasterFootprintImage 在细轴权重超预算时按原累加顺序逐点绘制
+// 入参: dst 目标图像, src 源图像, m 像素变换, op 合成操作, target 目标范围
+// 返回: bool 是否完成绘制
+func drawRasterFootprintImage(dst draw.Image, src image.Image, m [6]float64, op draw.Op, target image.Rectangle) bool {
+	pixels, ok := src.(image.RGBA64Image)
+	if !ok {
+		pixels = rasterImageSource{src}
+	}
+	b := src.Bounds()
+	output := image.NewRGBA64(image.Rect(0, 0, 1, 1))
+	var value [1]rasterImagePixel
+	for y := target.Min.Y; y < target.Max.Y; y++ {
+		firstY, endY, wy := rasterImageWeightSpan(y, b.Min.Y, b.Max.Y, m[3], m[5])
+		if firstY == endY {
+			continue
+		}
+		for x := target.Min.X; x < target.Max.X; x++ {
+			firstX, endX, wx := rasterImageWeightSpan(x, b.Min.X, b.Max.X, m[0], m[4])
+			if firstX == endX {
+				continue
+			}
+			value[0] = rasterImagePixel{}
+			for sy := firstY; sy < endY; sy++ {
+				var row rasterImagePixel
+				for sx := firstX; sx < endX; sx++ {
+					p, weight := pixels.RGBA64At(sx, sy), wx(sx)
+					if weight != 0 {
+						row.r += float64(p.R) * weight
+						row.g += float64(p.G) * weight
+						row.b += float64(p.B) * weight
+						row.a += float64(p.A) * weight
+					}
+				}
+				if weight := wy(sy); weight != 0 {
+					value[0].r += row.r * weight
+					value[0].g += row.g * weight
+					value[0].b += row.b * weight
+					value[0].a += row.a * weight
+				}
+			}
+			rasterImageWriteRow(dst, output, value[:], x, y, op)
+		}
+	}
+	return true
+}
+
+// rasterImageFootprintAxis 对不足一个目标像素的整轴保留真实交叠面积及预乘透明度
+// 入参: first 目标起点, end 目标终点, source 源起点, limit 源终点, scale 缩放比例, offset 平移距离
+// 返回: []rasterAxisSample 轴向覆盖权重
+func rasterImageFootprintAxis(first, end, source, limit int, scale, offset float64) []rasterAxisSample {
+	lo, hi := float64(source)*scale+offset, float64(limit)*scale+offset
+	if hi < lo {
+		lo, hi = hi, lo
+	}
+	result := make([]rasterAxisSample, 0, min(2, end-first))
+	for pixel := first; pixel < end; pixel++ {
+		if math.Min(float64(pixel+1), hi) > math.Max(float64(pixel), lo) {
+			result = append(result, rasterAxisSample{pixel: pixel, first: source})
+		}
+	}
+	buffer := make([]float64, len(result)*(limit-source))
+	for index := range result {
+		sample := &result[index]
+		left, right := (float64(sample.pixel)-offset)/scale, (float64(sample.pixel+1)-offset)/scale
+		if right < left {
+			left, right = right, left
+		}
+		n := limit - source
+		sample.weights, buffer = buffer[:n:n], buffer[n:]
+		for i := range sample.weights {
+			x := float64(source + i)
+			sample.weights[i] = math.Max(0, math.Min(x+1, right)-math.Max(x, left)) * math.Abs(scale)
+		}
 	}
 	return result
 }
