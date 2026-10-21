@@ -25,8 +25,9 @@ import (
 
 // clipRenderer 收集图形和文字的绘制轮廓
 type clipRenderer struct {
-	path *canvas.Path
-	clip *canvas.Path
+	path   *canvas.Path
+	clip   *canvas.Path
+	unions *renderCache[[32]byte, *canvas.Path]
 }
 
 // Size 返回不限定边界的裁剪画布尺寸
@@ -57,13 +58,23 @@ func (r *clipRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
 // 入参: img 图像, m 变换矩阵
 func (r *clipRenderer) RenderImage(img image.Image, m canvas.Matrix) {}
 
-// add 合并裁剪轮廓
+// add 合并裁剪轮廓，按完整输入复用已有并集
 // 入参: path 裁剪路径
 func (r *clipRenderer) add(path *canvas.Path) {
 	if r.path == nil {
 		r.path = path
-	} else {
+	} else if r.unions == nil || path == nil {
 		r.path = unionClipPath(r.path, path)
+	} else {
+		key := canvasGeometryDigest(r.path, path)
+		if merged, ok := r.unions.get(key); ok {
+			r.path = merged.Copy()
+		} else {
+			r.path = unionClipPath(r.path, path)
+			if cost := len(r.path.Data())*8 + 256; cost <= r.unions.limit {
+				r.unions.put(key, r.path.Copy(), cost)
+			}
+		}
 	}
 }
 
@@ -96,7 +107,7 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ma
 	}
 	var p *canvas.Path
 	for _, clip := range clips.Clip {
-		renderer := &clipRenderer{}
+		renderer := &clipRenderer{unions: r.canvasClipUnions()}
 		for _, area := range clip.Area {
 			areaCTM := matrix.Multiply(NewMatrix(area.CTM))
 			for _, pathObj := range area.Path {

@@ -291,6 +291,132 @@ func editorObjectFontScan(object GraphicObject) bool {
 // 入参: progress 保存进度回调
 // 返回: map[string][]byte 包内字体子集, error 错误信息
 func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error) {
+	result, err := e.subsetNewFonts(progress)
+	if err != nil {
+		return nil, err
+	}
+	ctx := context.Background()
+	if e.output != nil {
+		ctx = e.output.ctx
+	}
+	source, err := e.subsetSnapshotFonts(ctx, progress.withContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return source, nil
+	}
+	maps.Copy(result, source)
+	return result, nil
+}
+
+// subsetSnapshotFonts 在写出时扫描快照中新增字体的完整包引用，不改动既有字体
+// 入参: ctx 取消上下文, progress 写出进度
+// 返回: map[string][]byte 新增字体的安全子集, error 扫描或裁剪错误
+func (e *Editor) subsetSnapshotFonts(ctx context.Context, progress editorProgress) (map[string][]byte, error) {
+	if e.source == nil || e.backends.FontResources == nil {
+		return nil, ctx.Err()
+	}
+	candidates := make(map[string]bool)
+	for _, resource := range e.resources {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if resource.font != nil && resource.font.FontFile != "" && e.source.reader.fileNames[resource.name] {
+			candidates[resource.name] = true
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, ctx.Err()
+	}
+	view, err := e.readerContext(ctx, progress)
+	if err != nil {
+		return nil, err
+	}
+	defer view.Close()
+	refs, resources, references, safe, err := scanEditorResources(ctx, view, view.files, nil, maps.Clone(view.fileNames), progress, true)
+	if err != nil || !safe {
+		return nil, err
+	}
+	scoped, err := resourceReferenceScopes(ctx, refs.documents, resources, references, "")
+	if err != nil || scoped == nil {
+		return nil, err
+	}
+	read := func(name string) ([]byte, error) { return view.readFileViewContext(ctx, name) }
+	usage, err := resourceFontUsage(ctx, resources, scoped, read)
+	if err != nil {
+		return nil, err
+	}
+	for _, source := range references {
+		for name := range source.files {
+			if font := usage[name]; font != nil && !source.versions[name] {
+				font.unsafe = true
+			}
+		}
+		for _, definition := range source.definitions {
+			for name := range definition.files {
+				if font := usage[name]; font != nil {
+					font.unsafe = true
+				}
+			}
+		}
+	}
+	result := make(map[string][]byte)
+	for i, name := range slices.Sorted(maps.Keys(candidates)) {
+		if err := progress.report("fonts", i, len(candidates)); err != nil {
+			return nil, err
+		}
+		font := usage[name]
+		if font == nil || font.unsafe || len(font.chars)+len(font.glyphs) == 0 {
+			continue
+		}
+		data, err := read(name)
+		if err != nil {
+			return nil, err
+		}
+		parsed, err := e.backends.FontResources.OpenFontResource(FontFile{Data: data}, 0)
+		if err != nil {
+			return nil, err
+		}
+		if !parsed.CanSubset {
+			continue
+		}
+		preserve := len(font.glyphs) != 0
+		glyphs := maps.Clone(font.glyphs)
+		for char := range font.chars {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			glyphs[parsed.GlyphIndex(char)] = true
+		}
+		glyphs[0] = true
+		for id := range glyphs {
+			if id >= parsed.NumGlyphs() {
+				font.unsafe = true
+				break
+			}
+		}
+		if font.unsafe {
+			continue
+		}
+		subset, err := e.backends.FontResources.SubsetFont(data, slices.Sorted(maps.Keys(glyphs)), preserve)
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if len(subset) != 0 && len(subset) < len(data) {
+			result[name] = subset
+		}
+	}
+	return result, progress.report("fonts", len(candidates), len(candidates))
+}
+
+// subsetNewFonts 解析尚未物化为源资源的新增字体，保持编辑字体完整
+// 入参: progress 写出进度
+// 返回: map[string][]byte 包内字体子集, error 读取或裁剪错误
+func (e *Editor) subsetNewFonts(progress editorProgress) (map[string][]byte, error) {
 	ctx := context.Background()
 	if e.output != nil {
 		ctx = e.output.ctx
@@ -303,7 +429,7 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 		return nil, err
 	}
 	if !slices.ContainsFunc(e.resources, func(resource editorResource) bool {
-		return resource.font != nil && resource.font.FontFile != ""
+		return resource.font != nil && resource.font.FontFile != "" && (e.source == nil || !e.source.reader.fileNames[resource.name])
 	}) {
 		return nil, nil
 	}
@@ -318,7 +444,7 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 		if err := progress.report("fonts", i, total); err != nil {
 			return nil, err
 		}
-		if resource.font.FontFile == "" {
+		if resource.font.FontFile == "" || e.source != nil && e.source.reader.fileNames[resource.name] {
 			continue
 		}
 		resourceFont := e.fonts[resource.font.ID]

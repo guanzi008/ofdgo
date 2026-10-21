@@ -82,6 +82,7 @@ type pdfImporter struct {
 	pageActionPage     int
 	fontIDs            map[*pdfgo.Font]string
 	fonts              map[*pdfgo.Font]*pdfImportedFont
+	fontPrograms       map[pdfFontProgramKey]*pdfImportedFont
 	symbolFonts        map[*pdfgo.Font]*pdfImportedFont
 	fontWarnings       map[string]bool
 	clipTexts          map[*pdfgo.TextClip][]TextObject

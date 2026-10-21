@@ -556,6 +556,14 @@ func clipLinearFillGeometry(path, clip GeometryPath) (GeometryPath, bool, error)
 	return *geometryFromCanvasPath(result), true, nil
 }
 
+// invertCanvasMatrix 对有限可逆矩阵求逆，保留非零小尺度变换
+// 入参: matrix 画布仿射矩阵
+// 返回: canvas.Matrix 逆矩阵, bool 是否存在有限逆矩阵
+func invertCanvasMatrix(matrix canvas.Matrix) (canvas.Matrix, bool) {
+	inverse, ok := MatrixFromValues([6]float64{matrix[0][0], matrix[1][0], matrix[0][1], matrix[1][1], matrix[0][2], matrix[1][2]}).Invert()
+	return canvas.Matrix{{inverse.a, inverse.c, inverse.e}, {inverse.b, inverse.d, inverse.f}}, ok
+}
+
 // actionCanvasMatrix 转换页面坐标矩阵，不翻转Y轴
 // 入参: matrix 页面变换
 // 返回: canvas.Matrix 路径变换

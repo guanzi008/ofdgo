@@ -197,7 +197,7 @@ func subsetSourceSFNT(sfnt *SFNT, usage *Usage, size int) []byte {
 	for char := range usage.Characters {
 		id := sfnt.GlyphIndex(char)
 		for _, cmap := range unicodeTables {
-			if alternate, ok := cmap.mapping[char]; ok && alternate != id {
+			if alternate, ok := cmap.lookup(char); ok && alternate != id {
 				return nil
 			}
 		}

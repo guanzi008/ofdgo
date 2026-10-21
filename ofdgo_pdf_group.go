@@ -398,10 +398,13 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 	if p.symbolFonts == nil {
 		p.symbolFonts = make(map[*pdfgo.Font]*pdfImportedFont)
 	}
+	if p.fontPrograms == nil {
+		p.fontPrograms = make(map[pdfFontProgramKey]*pdfImportedFont)
+	}
 	if p.clipPaths == nil {
 		p.clipPaths = resourceCache[[32]byte, pdfClipPath](p.resources, 8<<20)
 	}
-	local := pdfImporter{resources: p.resources, ctx: p.ctx, reader: p.reader, editor: editor, renderer: p.renderer, matrix: p.matrix, pageBox: p.pageBox, pageWidth: p.pageWidth, pageHeight: p.pageHeight, rasterDPI: p.rasterDPI, warning: p.warning, rasterWarned: true, fontIDs: map[*pdfgo.Font]string{}, fonts: p.fonts, symbolFonts: p.symbolFonts, clipPaths: p.clipPaths, textOrigins: p.textOrigins}
+	local := pdfImporter{resources: p.resources, ctx: p.ctx, reader: p.reader, editor: editor, renderer: p.renderer, matrix: p.matrix, pageBox: p.pageBox, pageWidth: p.pageWidth, pageHeight: p.pageHeight, rasterDPI: p.rasterDPI, warning: p.warning, rasterWarned: true, fontIDs: map[*pdfgo.Font]string{}, fonts: p.fonts, fontPrograms: p.fontPrograms, symbolFonts: p.symbolFonts, clipPaths: p.clipPaths, textOrigins: p.textOrigins}
 	if err := build(&local); err != nil {
 		return nil, box, err
 	}

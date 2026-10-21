@@ -227,7 +227,11 @@ func (run *TextRun) addSpan(start, end int, bounds canvas.Rect, m canvas.Matrix,
 		if path.Empty() {
 			return
 		}
-		bounds = path.Transform(m.Inv()).Bounds()
+		inverse, ok := invertCanvasMatrix(m)
+		if !ok {
+			return
+		}
+		bounds = path.Transform(inverse).Bounds()
 	}
 	if bounds.W() < 0 || bounds.H() <= 0 {
 		return
@@ -238,8 +242,8 @@ func (run *TextRun) addSpan(start, end int, bounds canvas.Rect, m canvas.Matrix,
 		span = run.Spans[n-1]
 		v := span.Matrix
 		previous := canvas.Matrix{{v[0], v[2], v[4]}, {v[1], v[3], v[5]}}
-		if previous.Det() != 0 {
-			bounds = canvas.Rect{X1: 1, Y1: 1}.Add(canvas.Rect{X1: 1, Y1: 1}.Transform(previous.Inv().Mul(m)))
+		if inverse, ok := invertCanvasMatrix(previous); ok {
+			bounds = canvas.Rect{X1: 1, Y1: 1}.Add(canvas.Rect{X1: 1, Y1: 1}.Transform(inverse.Mul(m)))
 			m = previous.Translate(bounds.X0, bounds.Y0).Scale(bounds.W(), bounds.H())
 		}
 		run.Spans = run.Spans[:n-1]

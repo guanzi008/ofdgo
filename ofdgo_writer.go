@@ -146,6 +146,19 @@ func (e *Editor) Snapshot(ctx context.Context) (*Editor, error) {
 	}
 	snapshot.revision, snapshot.serial, snapshot.saveTarget = e.revision, e.serial, e.saveTarget
 	snapshot.backends, snapshot.fontDirs, snapshot.fontFS = e.backends, slices.Clone(e.fontDirs), slices.Clone(e.fontFS)
+	for _, resource := range e.resources {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if resource.font == nil || resource.font.FontFile == "" || !next.fileNames[resource.name] {
+			continue
+		}
+		data, err := next.readFileViewContext(ctx, resource.name)
+		if err != nil {
+			return nil, err
+		}
+		snapshot.resources = append(snapshot.resources, editorResource{name: resource.name, data: data, font: cloneEditorData(resource.font)})
+	}
 	if e.source != nil {
 		snapshot.source.retiredAttachments = maps.Clone(e.source.retiredAttachments)
 		snapshot.source.removedAttachments = maps.Clone(e.source.removedAttachments)

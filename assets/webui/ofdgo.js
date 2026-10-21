@@ -7687,13 +7687,18 @@ function chooseResourceFile(action) {
 async function changeManagedResource(action, item, file) {
 	if (!item || !state.editing) return;
 	releaseResourcePreview();
+	const page = Number(resourceElements.Page.value), object = resourceElements.Object.value;
 	const format = file?.name.includes(".") ? file.name.split(".").at(-1).toUpperCase() : "";
 	const changed = item.kind === "Attachment" && action !== "bind" && action !== "unbind"
 		? await changeDocument("ofdgoChangeAttachment", null, action, item.id, file ? [file.name] : [], file ? [file] : [])
-		: await changeDocument("ofdgoChangeResource", null, action, item.kind, item.id, format, file || null, Number(resourceElements.Page.value), resourceElements.Object.value);
+		: await changeDocument("ofdgoChangeResource", null, action, item.kind, item.id, format, file || null, page, object);
 	if (changed) {
 		await loadManagedResources();
-		if (action === "bind" || action === "unbind") resourceElements.Status.textContent = action === "bind" ? "已绑定" : "已解绑";
+		if (action === "bind" || action === "unbind") {
+			resourceElements.Page.value = String(page);
+			await loadResourceTargets(object);
+			resourceElements.Status.textContent = action === "bind" ? "已绑定" : "已解绑";
+		}
 	}
 }
 

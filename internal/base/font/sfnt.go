@@ -17,9 +17,11 @@ package font
 import (
 	"encoding/binary"
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/go-text/typesetting/font/opentype/tables"
 )
@@ -34,10 +36,12 @@ type SFNT struct {
 	reverse                            map[uint16][]rune
 }
 
-// sfntCmap 保存编码记录及对应字符映射，标记已解析的共享子表
+// sfntCmap 保存编码记录及字符映射，连续区间与共享子表不重复展开
 type sfntCmap struct {
 	platform, encoding, format uint16
 	mapping                    map[rune]uint16
+	groups                     []byte
+	entries                    uint64
 	duplicate                  bool
 }
 
@@ -90,7 +94,7 @@ func ParseSFNTTables(table map[string][]byte) (*SFNT, error) {
 		if cmap.duplicate {
 			continue
 		}
-		for _, glyph := range cmap.mapping {
+		for _, glyph := range cmap.pairs() {
 			if glyph >= f.count {
 				return nil, fmt.Errorf("cmap glyph index out of range")
 			}
@@ -119,7 +123,7 @@ func readSFNTCmaps(data []byte) ([]sfntCmap, error) {
 	}
 	count := int(binary.BigEndian.Uint16(data[2:]))
 	result := make([]sfntCmap, 0, count)
-	parsed := make(map[uint32]map[rune]uint16)
+	parsed := make(map[uint32]sfntCmap)
 	for i := range count {
 		record := data[4+8*i:]
 		offset := binary.BigEndian.Uint32(record[4:])
@@ -128,23 +132,44 @@ func readSFNTCmaps(data []byte) ([]sfntCmap, error) {
 		}
 		sub := data[offset:]
 		format := binary.BigEndian.Uint16(sub)
-		mapping, found := parsed[offset]
+		cmap, found := parsed[offset]
 		if !found {
-			mapping = make(map[rune]uint16)
+			cmap.mapping = make(map[rune]uint16)
 			var err error
 			switch format {
 			case 0:
-				parseCmapFormat0(sub, mapping)
+				parseCmapFormat0(sub, cmap.mapping)
 			case 4:
-				parseCmapFormat4(sub, mapping)
+				parseCmapFormat4(sub, cmap.mapping)
 			case 6:
-				parseCmapFormat6(sub, mapping)
+				parseCmapFormat6(sub, cmap.mapping)
 			case 12:
-				parseCmapFormat12(sub, mapping)
+				if len(sub) >= 16 {
+					length := uint64(binary.BigEndian.Uint32(sub[4:]))
+					count := uint64(binary.BigEndian.Uint32(sub[12:]))
+					if length >= 16 && length <= uint64(len(sub)) && count <= (length-16)/12 {
+						cmap.groups = sub[16 : 16+12*count]
+						for offset := 0; offset < len(cmap.groups); offset += 12 {
+							first := binary.BigEndian.Uint32(cmap.groups[offset:])
+							last := binary.BigEndian.Uint32(cmap.groups[offset+4:])
+							if first > last || offset != 0 && first <= binary.BigEndian.Uint32(cmap.groups[offset-8:]) {
+								cmap.groups = nil
+								parseCmapFormat12(sub, cmap.mapping)
+								break
+							}
+						}
+						if cmap.groups != nil {
+							cmap.mapping = nil
+							for range cmap.pairs() {
+								cmap.entries++
+							}
+						}
+					}
+				}
 			case 2:
-				mapping, err = parseCmapFormat2(sub)
+				cmap.mapping, err = parseCmapFormat2(sub)
 			case 8, 10, 13:
-				mapping, err = parseCmapExtended(sub)
+				cmap.mapping, err = parseCmapExtended(sub)
 			case 14:
 			default:
 				return nil, fmt.Errorf("unsupported cmap format %d", format)
@@ -152,11 +177,65 @@ func readSFNTCmaps(data []byte) ([]sfntCmap, error) {
 			if err != nil {
 				return nil, err
 			}
-			parsed[offset] = mapping
+			parsed[offset] = cmap
 		}
-		result = append(result, sfntCmap{platform: binary.BigEndian.Uint16(record), encoding: binary.BigEndian.Uint16(record[2:]), format: format, mapping: mapping, duplicate: found})
+		cmap.platform, cmap.encoding, cmap.format, cmap.duplicate = binary.BigEndian.Uint16(record), binary.BigEndian.Uint16(record[2:]), format, found
+		result = append(result, cmap)
 	}
 	return result, nil
+}
+
+// pairs 按原映射返回字符与字形，连续编码段不展开存储
+// 返回: iter.Seq2[rune, uint16] 非零有效字符映射
+func (c sfntCmap) pairs() iter.Seq2[rune, uint16] {
+	return func(yield func(rune, uint16) bool) {
+		for char, glyph := range c.mapping {
+			if !yield(char, glyph) {
+				return
+			}
+		}
+		for offset := 0; offset+12 <= len(c.groups); offset += 12 {
+			group := c.groups[offset:]
+			first, last, glyph := binary.BigEndian.Uint32(group), binary.BigEndian.Uint32(group[4:]), binary.BigEndian.Uint32(group[8:])
+			if first > last || first > utf8.MaxRune || glyph > 65535 {
+				continue
+			}
+			end := min(uint64(last), uint64(first)+65535-uint64(glyph), uint64(utf8.MaxRune))
+			for char := uint64(first); char <= end; char++ {
+				id := uint16(uint64(glyph) + char - uint64(first))
+				if id != 0 && utf8.ValidRune(rune(char)) && !yield(rune(char), id) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// lookup 查找原字符映射，连续编码段使用有序区间查询
+// 入参: char 字符
+// 返回: uint16 字形编号, bool 是否存在映射
+func (c sfntCmap) lookup(char rune) (uint16, bool) {
+	if glyph, ok := c.mapping[char]; ok {
+		return glyph, true
+	}
+	if !utf8.ValidRune(char) {
+		return 0, false
+	}
+	low, high := 0, len(c.groups)/12
+	for low < high {
+		middle := low + (high-low)/2
+		group := c.groups[middle*12:]
+		first, last := binary.BigEndian.Uint32(group), binary.BigEndian.Uint32(group[4:])
+		if uint32(char) < first {
+			high = middle
+		} else if uint32(char) > last {
+			low = middle + 1
+		} else {
+			glyph := uint64(binary.BigEndian.Uint32(group[8:])) + uint64(uint32(char)-first)
+			return uint16(glyph), glyph > 0 && glyph <= 65535
+		}
+	}
+	return 0, false
 }
 
 // UnitsPerEm 返回字体设计单位
@@ -172,7 +251,7 @@ func (f *SFNT) NumGlyphs() uint16 { return f.count }
 func (f *SFNT) CmapEntries() uint64 {
 	var count uint64
 	for _, cmap := range f.cmaps {
-		count += uint64(len(cmap.mapping))
+		count += uint64(len(cmap.mapping)) + cmap.entries
 	}
 	return count
 }
@@ -185,14 +264,14 @@ func (f *SFNT) GlyphIndex(char rune) uint16 {
 		if cmap.duplicate {
 			continue
 		}
-		if gid := cmap.mapping[char]; gid != 0 {
+		if gid, ok := cmap.lookup(char); ok && gid != 0 {
 			return gid
 		}
 	}
 	return 0
 }
 
-// glyphCharacters 返回指向指定字形的全部字符
+// glyphCharacters 返回指向指定字形的全部字符，连续区间按需反查
 // 入参: gid 字形编号
 // 返回: []rune 排序后的字符
 func (f *SFNT) glyphCharacters(gid uint16) []rune {
@@ -204,7 +283,7 @@ func (f *SFNT) glyphCharacters(gid uint16) []rune {
 				continue
 			}
 			for char, glyph := range cmap.mapping {
-				if glyph != 0 && !seen[char] {
+				if glyph != 0 && !seen[char] && f.GlyphIndex(char) == glyph {
 					f.reverse[glyph] = append(f.reverse[glyph], char)
 					seen[char] = true
 				}
@@ -214,7 +293,28 @@ func (f *SFNT) glyphCharacters(gid uint16) []rune {
 			slices.Sort(chars)
 		}
 	})
-	return f.reverse[gid]
+	if gid == 0 {
+		return nil
+	}
+	chars := slices.Clone(f.reverse[gid])
+	for _, cmap := range f.cmaps {
+		if cmap.duplicate {
+			continue
+		}
+		for offset := 0; offset+12 <= len(cmap.groups); offset += 12 {
+			group := cmap.groups[offset:]
+			first, last, glyph := binary.BigEndian.Uint32(group), binary.BigEndian.Uint32(group[4:]), binary.BigEndian.Uint32(group[8:])
+			if first > last || uint32(gid) < glyph {
+				continue
+			}
+			char := uint64(first) + uint64(uint32(gid)-glyph)
+			if char <= uint64(last) && char <= utf8.MaxRune && utf8.ValidRune(rune(char)) && f.GlyphIndex(rune(char)) == gid {
+				chars = append(chars, rune(char))
+			}
+		}
+	}
+	slices.Sort(chars)
+	return slices.Compact(chars)
 }
 
 // GlyphAdvance 返回水平字宽

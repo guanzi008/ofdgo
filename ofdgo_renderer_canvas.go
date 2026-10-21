@@ -19,6 +19,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"math"
 	"slices"
 
 	"github.com/tdewolff/canvas"
@@ -120,7 +121,7 @@ func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Ima
 			}
 			continue
 		}
-		p, err := rasterCanvasPath(cmd.Path, pathData)
+		p, err := rasterCanvasPath(visibleRasterPath(cmd, page), pathData)
 		if err != nil {
 			return nil, fmt.Errorf("canvas command %d: %w", i, err)
 		}
@@ -226,6 +227,54 @@ func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Ima
 	}
 	r.Close()
 	return img, nil
+}
+
+// visibleRasterPath 排除填充区域外的完整子路径，保留曲线控制范围与抗锯齿边缘
+// 入参: command 绘制指令, page 目标页面
+// 返回: []RasterSegment 可见子路径，描边和短路径沿用原数据
+func visibleRasterPath(command RasterCommand, page *RasterPage) []RasterSegment {
+	if command.Stroke != nil || len(command.Path) < 256 || command.Path[0].Verb != RasterMove {
+		return command.Path
+	}
+	padding := 25.4 / page.DPI
+	var visible []RasterSegment
+	filtered := false
+	start := 0
+	minX, minY, maxX, maxY := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+	flush := func(end int) {
+		if minX <= page.Width+padding && maxX >= -padding && minY <= page.Height+padding && maxY >= -padding {
+			if filtered {
+				visible = append(visible, command.Path[start:end]...)
+			}
+		} else if !filtered {
+			filtered = true
+			visible = append(visible, command.Path[:start]...)
+		}
+	}
+	include := func(point RasterPoint) bool {
+		point = command.Transform.Apply(point)
+		if !finite(point.X) || !finite(point.Y) {
+			return false
+		}
+		minX, minY = math.Min(minX, point.X), math.Min(minY, point.Y)
+		maxX, maxY = math.Max(maxX, point.X), math.Max(maxY, point.Y)
+		return true
+	}
+	for index, segment := range command.Path {
+		if segment.Verb == RasterMove && index != start {
+			flush(index)
+			start = index
+			minX, minY, maxX, maxY = math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+		}
+		if segment.Verb > RasterClose || segment.Verb != RasterClose && !include(segment.End) || (segment.Verb == RasterQuad || segment.Verb == RasterCubic) && !include(segment.Control1) || segment.Verb == RasterCubic && !include(segment.Control2) {
+			return command.Path
+		}
+	}
+	flush(len(command.Path))
+	if !filtered {
+		return command.Path
+	}
+	return visible
 }
 
 // rasterCanvasPath 预留路径容量，保留光栅指令的构建及闭合规则

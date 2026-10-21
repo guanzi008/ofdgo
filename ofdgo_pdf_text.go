@@ -38,6 +38,12 @@ type pdfImportedFont struct {
 	repairLimit uint16
 }
 
+// pdfFontProgramKey 区分字体封装内容及交给资源后端的来源名称
+type pdfFontProgramKey struct {
+	checksum [32]byte
+	name     string
+}
+
 // pdfTextReplacement 记录一个完整替换区段的文字数量与转换状态
 type pdfTextReplacement struct {
 	text     *pdfgo.ReplacementText
@@ -661,21 +667,27 @@ func (p *pdfImporter) importedFont(source *pdfgo.Font) (*pdfImportedFont, error)
 	if p.editor.backends.FontResources == nil {
 		return nil, fmt.Errorf("PDF font %s resource: font resources: %w", source.Name, ErrBackendUnavailable)
 	}
-	result.resource, err = p.editor.backends.FontResources.OpenFontResource(FontFile{Name: source.Name + ".ttf", Data: program}, 0)
-	if err != nil {
-		return nil, fmt.Errorf("PDF font %s resource: %w", source.Name, err)
-	}
 	if p.editor.backends.Fonts == nil {
 		return nil, fmt.Errorf("PDF font backend unavailable")
 	}
-	result.metrics, err = p.editor.backends.Fonts.OpenFont(result.resource.Data)
-	if err != nil {
-		return nil, fmt.Errorf("PDF font %s metrics: %w", source.Name, err)
+	key := pdfFontProgramKey{checksum: sha256.Sum256(program), name: source.Name}
+	if cached := p.fontPrograms[key]; cached != nil {
+		result.resource, result.metrics, result.checksum = cached.resource, cached.metrics, cached.checksum
+	} else {
+		result.resource, err = p.editor.backends.FontResources.OpenFontResource(FontFile{Name: source.Name + ".ttf", Data: program}, 0)
+		if err != nil {
+			return nil, fmt.Errorf("PDF font %s resource: %w", source.Name, err)
+		}
+		result.metrics, err = p.editor.backends.Fonts.OpenFont(result.resource.Data)
+		if err != nil {
+			return nil, fmt.Errorf("PDF font %s metrics: %w", source.Name, err)
+		}
+		if _, ok := result.metrics.(FontOutlines); !ok {
+			return nil, fmt.Errorf("PDF font backend does not provide glyph outlines")
+		}
+		result.checksum = sha256.Sum256(result.resource.Data)
 	}
-	if _, ok := result.metrics.(FontOutlines); !ok {
-		return nil, fmt.Errorf("PDF font backend does not provide glyph outlines")
-	}
-	result.checksum, result.repairLimit = sha256.Sum256(result.resource.Data), repair.MetricsLimit
+	result.repairLimit = repair.MetricsLimit
 	if source.Recovered || programRecovered {
 		if err := p.preservePDFObject(p.ctx, "Font", source.Dictionary); err != nil {
 			return nil, err
@@ -690,6 +702,13 @@ func (p *pdfImporter) importedFont(source *pdfgo.Font) (*pdfImportedFont, error)
 	if p.fonts == nil {
 		p.fonts = make(map[*pdfgo.Font]*pdfImportedFont)
 	}
+	if err := p.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p.fontPrograms == nil {
+		p.fontPrograms = make(map[pdfFontProgramKey]*pdfImportedFont)
+	}
+	p.fontPrograms[key] = result
 	p.fonts[source] = result
 	return result, nil
 }

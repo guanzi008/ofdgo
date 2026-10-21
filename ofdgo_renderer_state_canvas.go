@@ -34,6 +34,9 @@ type canvasFontKey struct {
 // canvasClipCacheKey 区分不依赖文档资源的共享裁剪缓存
 type canvasClipCacheKey struct{}
 
+// canvasClipUnionKey 区分文字和图形裁剪的共享并集缓存
+type canvasClipUnionKey struct{}
+
 // canvasPathCacheKey 区分不依赖文档资源的共享局部路径缓存
 type canvasPathCacheKey struct{}
 
@@ -72,6 +75,21 @@ type canvasBackendState struct {
 // 返回: *renderCache[[32]byte, *canvas.Path] 裁剪缓存
 func (r *Renderer) canvasClipIntersections() *renderCache[[32]byte, *canvas.Path] {
 	key := canvasClipCacheKey{}
+	if state, ok := r.sharedBackendStates[key]; ok {
+		return state.(*renderCache[[32]byte, *canvas.Path])
+	}
+	if r.sharedBackendStates == nil {
+		r.sharedBackendStates = make(map[any]any)
+	}
+	cache := resourceCache[[32]byte, *canvas.Path](r.Reader.resources, 8<<20)
+	r.sharedBackendStates[key] = cache
+	return cache
+}
+
+// canvasClipUnions 复用相同输入轮廓的裁剪并集，不改变布尔运算顺序
+// 返回: *renderCache[[32]byte, *canvas.Path] 只读裁剪并集缓存
+func (r *Renderer) canvasClipUnions() *renderCache[[32]byte, *canvas.Path] {
+	key := canvasClipUnionKey{}
 	if state, ok := r.sharedBackendStates[key]; ok {
 		return state.(*renderCache[[32]byte, *canvas.Path])
 	}
