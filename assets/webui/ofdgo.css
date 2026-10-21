@@ -1857,27 +1857,33 @@ body[data-hide-meta] .meta-panel {
 	max-width: calc(100vw - 26px);
 }
 
-.invoice-dialog .settings-body {
-	padding-top: 12px;
-}
-
-.invoice-tabs {
+.panel-tabs {
 	display: flex;
+	flex-shrink: 0;
+	min-width: 0;
 	gap: 16px;
-	margin-block: 12px;
+	margin-bottom: 12px;
 	border-bottom: 1px solid var(--line);
+	overflow-x: auto;
+	overscroll-behavior-x: contain;
+	scrollbar-width: thin;
 }
 
-.invoice-tabs > .button {
+.panel-tabs[hidden] {
+	display: none;
+}
+
+.panel-tabs > .button {
 	flex: none;
 	min-width: 2em;
 	padding: 8px 0;
 	border: 0;
 	border-bottom: 2px solid transparent;
 	background: transparent;
+	white-space: nowrap;
 }
 
-.invoice-tabs > .button[data-selected="true"] {
+.panel-tabs > .button[data-selected="true"] {
 	border-bottom-color: currentColor;
 	color: var(--accent);
 }
@@ -1999,6 +2005,10 @@ body[data-hide-meta] .meta-panel {
 	padding: 0;
 }
 
+.settings-dialog > form > .panel-tabs {
+	margin: 0 12px;
+}
+
 .settings-header {
 	display: flex;
 	flex: none;
@@ -2044,7 +2054,7 @@ body[data-hide-meta] .meta-panel {
 .settings-body {
 	min-width: 0;
 	min-height: 0;
-	padding: 0 12px 12px;
+	padding: 12px;
 	overflow: auto;
 	overscroll-behavior: contain;
 }

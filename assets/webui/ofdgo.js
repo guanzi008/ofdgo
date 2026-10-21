@@ -11,6 +11,8 @@ const svgFontBytes = new WeakMap();
 const PAGE_LAYOUT_GAP = 16;
 const SCROLL_SEGMENT_SIZE = 1000000;
 const OBJECT_CLIPBOARD_TYPE = "application/x-ofdgo-objects";
+const RESOURCE_KINDS = [["Font", "字体"], ["Image", "图片"], ["Audio", "音频"], ["Video", "视频"], ["Attachment", "附件"], ["ColorSpace", "色彩"], ["DrawParam", "样式"]];
+const SETTINGS_KINDS = [["bookmarks", "书签"], ["actions", "动作"], ["templates", "模板"], ["layers", "图层"], ["extensions", "扩展"]];
 const STATUS = {
 	ready: "选择 OFD、PDF 文件",
 	opening: "正在打开文档",
@@ -26,11 +28,11 @@ const batch = { items: [], formats: [], running: false, canceled: false, workers
 const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Compression", "FontRow", "FontMode", "Destination", "DPIRow", "DPI", "DPIValue", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
 const fontBinding = { font: null, choices: [], sequence: 0 };
 const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name", "SourceRow", "Source", "File", "Hint", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#fontBinding${name}`)]));
-const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Kind", "List", "Empty", "Reference", "ReferenceGroup", "Actions", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "BindingActions", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
-const resourceManager = { items: [], filteredItems: [], start: -1, end: -1, selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
-const settingsElements = Object.fromEntries(["Button", "Panel", "Form", "Title", "Kind", "Context", "Content", "Actions", "Status"].map(name => [name, document.querySelector(`#settings${name}`)]));
-const settings = { sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false, invoice: false };
-const invoicePanel = { tab: "basic", entries: [], formats: [], drafts: new Map(), key: "", result: null };
+const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Tabs", "List", "Empty", "Reference", "ReferenceGroup", "Actions", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "BindingActions", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
+const resourceManager = { kind: "Font", scope: "", views: new Map(), items: [], filteredItems: [], start: -1, end: -1, selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
+const settingsElements = Object.fromEntries(["Button", "Panel", "Form", "Title", "Tabs", "Context", "Content", "Actions", "Status"].map(name => [name, document.querySelector(`#settings${name}`)]));
+const settings = { kind: "bookmarks", locked: false, views: new Map(), sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false, invoice: false };
+const invoicePanel = { tab: "basic", views: new Map(), entries: [], formats: [], drafts: new Map(), key: "", result: null };
 const invoiceDocuments = new WeakMap();
 const invoiceReferenceStandard = "http://www.ofdspec.org/2016";
 
@@ -793,11 +795,11 @@ resourceElements.ManageButton.addEventListener("click", openResourceManagement);
 resourceElements.Close.addEventListener("click", () => resourceElements.Panel.close());
 resourceElements.Form.addEventListener("submit", event => event.preventDefault());
 resourceElements.Panel.addEventListener("close", () => {
+	rememberResourceView();
 	resourceManager.sequence++;
 	if (resourceManager.requestID) wasmWorker?.postMessage({type: "cancel", id: resourceManager.requestID});
 	releaseResourcePreview();
 });
-resourceElements.Kind.addEventListener("change", () => resourceTask(renderResourceList));
 resourceElements.List.closest(".resource-list-container").addEventListener("scroll", renderResourceWindow, {passive: true});
 new ResizeObserver(renderResourceWindow).observe(resourceElements.List.closest(".resource-list-container"));
 resourceElements.List.addEventListener("keydown", event => {
@@ -832,7 +834,7 @@ resourceElements.Export.addEventListener("click", () => {
 resourceElements.Locate.addEventListener("click", () => resourceTask(locateManagedResource));
 resourceElements.Add.addEventListener("click", () => {
 	if (!state.editing) return;
-	const kind = resourceElements.Kind.value;
+	const kind = resourceManager.kind;
 	if (kind === "Font") openFontFile(el.fontInput);
 	else if (kind === "Image") openInsertPanel();
 	else if (kind === "Attachment") openAttachmentDialog("add");
@@ -1575,10 +1577,9 @@ el.annotationsKind.addEventListener("change", renderAnnotationSummary);
 el.versionExport.addEventListener("click", exportManagedVersion);
 editorClick(settingsElements.Button, () => openDocumentSettings());
 editorClick(el.invoiceButton, () => openDocumentSettings(true));
-settingsElements.Kind.addEventListener("change", () => { rememberSettingsDraft(); settings.selected = -1; loadDocumentSettings(); });
 settingsElements.Form.addEventListener("submit", event => event.preventDefault());
 settingsElements.Panel.addEventListener("cancel", event => { event.preventDefault(); closeDocumentSettings(); });
-settingsElements.Panel.addEventListener("close", () => { if (!settings.suspended) { settings.sequence++; settings.drafts.clear(); settings.view = ""; invoicePanel.drafts.clear(); invoicePanel.key = ""; } });
+settingsElements.Panel.addEventListener("close", () => { if (!settings.suspended) { settings.sequence++; settings.drafts.clear(); settings.views.clear(); settings.view = ""; invoicePanel.drafts.clear(); invoicePanel.views.clear(); invoicePanel.key = ""; } });
 document.querySelector("#objectActionsButton").addEventListener("click", async () => {
 	const item = canvasEditor.selected;
 	if (!item || item.scoped || item.items) return;
@@ -1587,9 +1588,10 @@ document.querySelector("#objectActionsButton").addEventListener("click", async (
 		&& !window.confirm("链接尚未应用，放弃链接更改？")) return;
 	syncObjectLink(item);
 	settings.scope = "object";
-	settingsElements.Kind.value = "actions";
+	settings.kind = "actions";
 	await openDocumentSettings();
-	settingsElements.Kind.disabled = true;
+	settings.locked = true;
+	settingsElements.Tabs.hidden = true;
 });
 el.outlinesTab.addEventListener("click", () => showNavigation(el.outlinesTab));
 el.searchTab.addEventListener("click", focusSearch);
@@ -1693,6 +1695,9 @@ el.pageInput.addEventListener("change", () => {
 	}
 });
 window.addEventListener("resize", resizeViewer);
+window.addEventListener("resize", () => {
+	for (const tabs of document.querySelectorAll(".panel-tabs")) revealPanelTab(tabs);
+});
 window.addEventListener("blur", () => endPan());
 COMPACT_LAYOUT.addEventListener("change", syncLayoutMode);
 el.viewerPanel.addEventListener("scroll", () => {
@@ -2425,11 +2430,14 @@ async function closeFile() {
 	resourceManager.filteredItems = [];
 	resourceManager.start = resourceManager.end = -1;
 	resourceManager.selected = null;
+	resourceManager.views.clear();
+	resourceManager.scope = "";
 	resourceManager.references = [];
 	resourceManager.targets = [];
 	settings.sequence++;
 	settings.data = null;
 	settings.drafts.clear();
+	settings.views.clear();
 	settings.actions = [];
 	settings.baseline = {};
 	settingsElements.Content.replaceChildren();
@@ -2439,6 +2447,7 @@ async function closeFile() {
 	resourceElements.Reference.replaceChildren();
 	invoicePanel.entries = [];
 	invoicePanel.drafts.clear();
+	invoicePanel.views.clear();
 	invoicePanel.result = null;
 	fontBinding.font = null;
 	fontBinding.choices = [];
@@ -5700,6 +5709,78 @@ function settingsField(container, label, id, value = "", type = "text", unit = "
 	return field;
 }
 
+function revealPanelTab(container) {
+	const selected = container.querySelector('[data-selected="true"]');
+	if (!selected || !container.clientWidth) return;
+	const box = selected.getBoundingClientRect(), viewport = container.getBoundingClientRect();
+	if (box.left < viewport.left) container.scrollLeft -= viewport.left - box.left;
+	else if (box.right > viewport.right) container.scrollLeft += box.right - viewport.right;
+}
+
+function renderPanelTabs(container, choices, value, change) {
+	const focused = container.contains(document.activeElement) ? document.activeElement.dataset.value : null;
+	const left = container.scrollLeft;
+	const buttons = choices.map(([key, label, id]) => {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.className = "button";
+		button.textContent = label;
+		button.dataset.value = key;
+		button.setAttribute("data-selected", String(key === value));
+		button.tabIndex = key === value ? 0 : -1;
+		if (id) button.id = id;
+		button.addEventListener("click", async () => {
+			const focused = container.contains(document.activeElement);
+			await change(key);
+			if (focused && container.clientWidth && (document.activeElement === document.body || container.contains(document.activeElement))) container.querySelector(`[data-value="${key}"]`)?.focus({preventScroll: true});
+		});
+		button.addEventListener("keydown", event => {
+			if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+			const index = buttons.indexOf(button);
+			const next = event.key === "ArrowRight" ? (index + 1) % buttons.length : event.key === "ArrowLeft" ? (index + buttons.length - 1) % buttons.length : event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : -1;
+			if (next < 0 || buttons[next].disabled) return;
+			event.preventDefault();
+			buttons[next].click();
+			container.querySelector(`[data-value="${choices[next][0]}"]`)?.focus({preventScroll: true});
+		});
+		return button;
+	});
+	container.replaceChildren(...buttons);
+	container.scrollLeft = left;
+	if (focused != null) container.querySelector(`[data-value="${focused}"]`)?.focus({preventScroll: true});
+	revealPanelTab(container);
+}
+
+function renderSettingsTabs() {
+	const choices = settings.invoice ? [["basic", "基本", "Basic"], ["items", "明细", "Items"], ["fields", "字段", "Fields"], ["appearance", "票面", "Appearance"], ["xml", "原文", "XML"]].map(([key, label, id]) => [key, label, `settingsInvoiceTab${id}`])
+		: SETTINGS_KINDS.filter(([key]) => key !== "actions" || state.editing);
+	settingsElements.Tabs.hidden = Boolean(settings.resource) || settings.locked || settings.invoice && !invoiceCurrent();
+	if (settingsElements.Tabs.hidden) { settingsElements.Tabs.replaceChildren(); return; }
+	renderPanelTabs(settingsElements.Tabs, choices, settings.invoice ? invoicePanel.tab : settings.kind, kind => {
+		if (settings.busy) return;
+		const body = document.querySelector("#settingsBody");
+		if (settings.invoice) {
+			if (kind === invoicePanel.tab) return;
+			invoicePanel.views.set(JSON.stringify([invoicePanel.key, invoicePanel.tab]), {scroll: body.scrollTop,
+				tables: [...body.querySelectorAll(".invoice-table-scroll")].map(node => node.scrollLeft),
+				expanded: [...body.querySelectorAll("details")].map(node => node.open)});
+			invoicePanel.tab = kind;
+			renderDocumentSettings();
+			return;
+		}
+		if (kind === settings.kind) return;
+		rememberSettingsDraft();
+		settings.views.set(settings.kind, {selected: settings.selected, page: settings.page, scope: settings.scope, object: settings.object, path: [...settings.path], scroll: body.scrollTop,
+			expanded: [...settingsElements.Content.querySelectorAll("details")].map(node => node.open)});
+		settings.kind = kind;
+		const saved = settings.views.get(kind);
+		settings.selected = saved?.selected ?? -1;
+		if (saved) for (const key of ["page", "scope", "object", "path"]) settings[key] = saved[key];
+		settings.view = "";
+		return loadDocumentSettings();
+	});
+}
+
 function settingsSelect(container, label, id, choices, value, change) {
 	const row = document.createElement("label"), title = document.createElement("span"), field = document.createElement("select");
 	row.className = "form-row";
@@ -5768,7 +5849,7 @@ function rememberSettingsDraft() {
 }
 
 function restoreSettingsDraft() {
-	const kind = settingsElements.Kind.value;
+	const kind = settings.kind;
 	const entry = kind === "bookmarks" ? settings.data.bookmarks?.[settings.selected]?.Name
 		: kind === "templates" ? settings.data.page.templates?.[settings.selected]?.ID
 		: kind === "layers" ? settings.data.page.layers?.[settings.selected]?.ID : settings.selected;
@@ -5830,9 +5911,9 @@ async function openDocumentSettings(invoice = false) {
 	if (!state.doc || !state.ready || state.exporting || document.body.hasAttribute("data-busy")) return;
 	if (resourceManager.pick?.settings) { finishResourcePick(); return; }
 	invoicePanel.drafts.clear();
+	invoicePanel.views.clear();
 	invoicePanel.key = "";
 	settings.invoice = invoice;
-	settingsElements.Kind.closest("label").hidden = invoice;
 	settingsElements.Title.textContent = invoice ? "电子发票" : "文档配置";
 	settingsElements.Panel.classList.toggle("invoice-dialog", invoice);
 	settingsElements.Context.replaceChildren();
@@ -5843,11 +5924,11 @@ async function openDocumentSettings(invoice = false) {
 	settings.path = state.outlineSelection || [];
 	settings.selected = -1;
 	settings.drafts.clear();
+	settings.views.clear();
 	settings.view = "";
 	settings.resource = null;
-	settingsElements.Kind.disabled = false;
-	for (const option of settingsElements.Kind.options) option.hidden = option.value === "actions" && !state.editing || ["ColorSpace", "DrawParam"].includes(option.value);
-	if (settingsElements.Kind.selectedOptions[0]?.hidden) settingsElements.Kind.value = "bookmarks";
+	settings.locked = false;
+	if (!SETTINGS_KINDS.some(([key]) => key === settings.kind) || settings.kind === "actions" && !state.editing) settings.kind = "bookmarks";
 	settingsElements.Panel.showModal();
 	await loadDocumentSettings();
 }
@@ -5855,25 +5936,25 @@ async function openDocumentSettings(invoice = false) {
 async function openResourceSettings(kind, id) {
 	if (!state.doc || !state.ready || document.body.hasAttribute("data-busy")) return;
 	settings.invoice = false;
-	settingsElements.Kind.closest("label").hidden = false;
 	settings.resource = {kind, id};
 	settings.selected = -1;
 	settings.drafts.clear();
+	settings.views.clear();
 	settings.view = "";
 	const page = Number(resourceElements.Page.value);
 	settings.page = resourceElements.Page.value !== "" && Number.isInteger(page) && page >= 0 && page < state.doc.pages.length ? page : state.pageIndex;
 	settings.object = resourceElements.Object.value || "";
-	settingsElements.Kind.querySelector(`option[value="${kind}"]`).hidden = false;
-	settingsElements.Kind.value = kind;
-	settingsElements.Kind.disabled = true;
+	settings.kind = kind;
+	settings.locked = true;
 	settingsElements.Panel.showModal();
 	await loadDocumentSettings();
 }
 
 async function loadDocumentSettings() {
 	const sequence = ++settings.sequence, openSeq = state.openSeq;
-	const kind = settings.invoice ? "invoices" : settingsElements.Kind.value;
+	const kind = settings.invoice ? "invoices" : settings.kind;
 	settings.busy = true;
+	renderSettingsTabs();
 	settingsElements.Form.inert = true;
 	settingsElements.Status.textContent = "正在读取信息";
 	settingsElements.Status.title = "";
@@ -5928,7 +6009,7 @@ function renderDocumentSettings() {
 	settingsElements.Context.replaceChildren();
 	settingsElements.Content.replaceChildren();
 	settingsElements.Actions.replaceChildren();
-	const kind = settings.invoice ? "invoices" : settingsElements.Kind.value;
+	const kind = settings.invoice ? "invoices" : settings.kind;
 	settings.renderedKind = kind;
 	const location = document.querySelector("#settingsLocation"), doc = state.doc;
 	if (location) {
@@ -5938,9 +6019,15 @@ function renderDocumentSettings() {
 	}
 	settingsElements.Title.textContent = {ColorSpace: "色彩设置", DrawParam: "样式设置", invoices: "电子发票"}[kind] || "文档配置";
 	settingsElements.Panel.classList.toggle("invoice-dialog", kind === "invoices");
+	renderSettingsTabs();
 	if (kind === "invoices") {
 		renderInvoiceSettings();
 		settingsButton("关闭", closeDocumentSettings, false, "Close").classList.add("settings-close");
+		const view = invoicePanel.views.get(JSON.stringify([invoicePanel.key, invoicePanel.tab]));
+		const body = document.querySelector("#settingsBody");
+		if (view) for (const [index, node] of [...body.querySelectorAll("details")].entries()) node.open = view.expanded[index] || false;
+		body.scrollTop = view?.scroll || 0;
+		for (const [index, node] of [...body.querySelectorAll(".invoice-table-scroll")].entries()) node.scrollLeft = view?.tables[index] || 0;
 		return;
 	}
 	if (kind === "actions") renderActionSettings();
@@ -5958,6 +6045,10 @@ function renderDocumentSettings() {
 	const lastActions = settingsElements.Content.querySelector(".settings-section:last-child > .settings-section-actions");
 	if (lastActions) settingsElements.Actions.append(lastActions);
 	settingsButton("关闭", closeDocumentSettings, false, "Close").classList.add("settings-close");
+	const draft = settings.drafts.get(settings.view);
+	const view = settings.views.get(kind);
+	if (!draft && view) for (const [index, node] of [...settingsElements.Content.querySelectorAll("details")].entries()) node.open = view.expanded[index] || false;
+	document.querySelector("#settingsBody").scrollTop = draft?.scroll ?? settings.views.get(kind)?.scroll ?? 0;
 }
 
 function invoiceSourceKey(source = {}) {
@@ -6121,25 +6212,6 @@ function renderInvoiceSettings() {
 		settingsElements.Status.title = invoiceIssues(invoicePanel.issues, true);
 		return;
 	}
-	const tabs = document.createElement("div");
-	tabs.className = "invoice-tabs";
-	for (const [key, label, id] of [["basic", "基本", "Basic"], ["items", "明细", "Items"], ["fields", "字段", "Fields"], ["appearance", "票面", "Appearance"], ["xml", "原文", "XML"]]) {
-		const button = settingsButton(label, () => { invoicePanel.tab = key; renderDocumentSettings(); }, false, `InvoiceTab${id}`, tabs);
-		button.setAttribute("data-selected", String(invoicePanel.tab === key));
-		button.tabIndex = invoicePanel.tab === key ? 0 : -1;
-		button.addEventListener("keydown", event => {
-			const buttons = [...tabs.children];
-			const index = buttons.indexOf(button);
-			const next = event.key === "ArrowRight" ? (index + 1) % buttons.length : event.key === "ArrowLeft" ? (index + buttons.length - 1) % buttons.length : event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : -1;
-			if (next >= 0) {
-				event.preventDefault();
-				const target = buttons[next].id;
-				buttons[next].click();
-				document.getElementById(target)?.focus();
-			}
-		});
-	}
-	content.append(tabs);
 	const body = document.createElement("div");
 	body.id = "invoiceTabContent";
 	content.append(body);
@@ -7372,9 +7444,29 @@ async function openResourceManagement() {
 	if (resourceManager.busy || !state.doc || !state.ready || document.body.hasAttribute("data-busy")) return;
 	if (resourceManager.pick) { finishResourcePick(); return; }
 	resourceElements.Panel.showModal();
+	renderResourceTabs();
 	resourceElements.Page.replaceChildren(...state.doc.pages.map((page, index) => new Option(`第${index + 1}页`, String(index))));
 	resourceElements.Page.value = String(state.pageIndex);
 	await resourceTask(loadManagedResources);
+}
+
+function renderResourceTabs() {
+	renderPanelTabs(resourceElements.Tabs, RESOURCE_KINDS, resourceManager.kind, kind => {
+		if (resourceManager.busy || kind === resourceManager.kind) return;
+		return resourceTask(async () => {
+			rememberResourceView();
+			resourceManager.kind = kind;
+			renderResourceTabs();
+			updateResourceControls();
+			await renderResourceList();
+		});
+	});
+}
+
+function rememberResourceView() {
+	resourceManager.views.set(resourceManager.kind, {selected: resourceManager.selected?.id,
+		scroll: resourceElements.List.closest(".resource-list-container").scrollTop,
+		reference: Number(resourceElements.Reference.value), page: resourceElements.Page.value, object: resourceElements.Object.value});
 }
 
 async function resourceTask(action, delay = 0) {
@@ -7413,6 +7505,13 @@ function resourceError(message) {
 
 async function loadManagedResources() {
 	const sequence = state.openSeq;
+	const scope = JSON.stringify([sequence, state.doc.documentIndex || 0, state.doc.documentVersion || ""]);
+	if (resourceManager.scope === scope) rememberResourceView();
+	else {
+		resourceManager.views.clear();
+		resourceManager.selected = null;
+		resourceManager.scope = scope;
+	}
 	let items;
 	try { items = await callWASM("ofdgoResources"); }
 	finally { resourceManager.requestID = 0; }
@@ -7422,15 +7521,23 @@ async function loadManagedResources() {
 }
 
 async function renderResourceList() {
-	const items = resourceManager.items.filter(item => item.kind === resourceElements.Kind.value);
-	const selected = items.find(item => item.id === resourceManager.selected?.id && item.kind === resourceManager.selected?.kind) || items[0];
+	const items = resourceManager.items.filter(item => item.kind === resourceManager.kind);
+	const view = resourceManager.views.get(resourceManager.kind);
+	const selected = items.find(item => item.id === view?.selected) || items[0];
+	const saved = selected && selected.id === view?.selected ? view : null;
 	resourceManager.filteredItems = items;
 	resourceManager.start = resourceManager.end = -1;
 	resourceElements.Empty.hidden = items.length !== 0;
 	const height = parseFloat(getComputedStyle(resourceElements.List).getPropertyValue("--resource-row-height"));
 	resourceElements.List.style.height = `${items.length * height}px`;
-	resourceElements.List.closest(".resource-list-container").scrollTop = Math.max(0, items.indexOf(selected)) * height;
-	await selectManagedResource(selected);
+	resourceElements.List.closest(".resource-list-container").scrollTop = view?.scroll || 0;
+	await selectManagedResource(selected, saved?.reference);
+	if (!resourceElements.Panel.open || resourceManager.selected !== selected) return;
+	if (saved && (resourceElements.Page.value !== saved.page || resourceElements.Object.value !== saved.object) && [...resourceElements.Page.options].some(option => option.value === saved.page)) {
+		resourceElements.Page.value = saved.page;
+		await loadResourceTargets(saved.object);
+		updateResourceControls();
+	}
 }
 
 function renderResourceWindow() {
@@ -7476,9 +7583,9 @@ async function chooseManagedResource(item) {
 	}, 150);
 }
 
-async function selectManagedResource(item) {
+async function selectManagedResource(item, reference) {
 	const same = item?.id === resourceManager.selected?.id && item?.kind === resourceManager.selected?.kind;
-	const reference = same ? resourceElements.Reference.value : "0";
+	reference ??= same ? Number(resourceElements.Reference.value) : 0;
 	releaseResourcePreview();
 	resourceManager.selected = item || null;
 	renderResourceWindow();
@@ -7487,7 +7594,7 @@ async function selectManagedResource(item) {
 	const current = resourceElements.List.querySelector(`[data-index="${resourceManager.filteredItems.indexOf(item)}"]`);
 	if (current) { current.setAttribute("data-selected", "true"); current.tabIndex = 0; }
 	resourceElements.List.tabIndex = resourceManager.filteredItems.length && !current ? 0 : -1;
-	await loadManagedReferences(same ? Number(reference) : 0);
+	await loadManagedReferences(reference);
 }
 
 async function loadManagedReferences(index = 0) {
@@ -7518,7 +7625,8 @@ async function loadManagedReferences(index = 0) {
 function updateResourceControls() {
 	const item = resourceManager.selected, editing = state.editing;
 	const disabled = resourceManager.busy || !state.doc || document.body.hasAttribute("data-busy");
-	resourceElements.Kind.disabled = resourceElements.Page.disabled = resourceElements.Object.disabled = disabled;
+	for (const button of resourceElements.Tabs.querySelectorAll("button")) button.disabled = disabled;
+	resourceElements.Page.disabled = resourceElements.Object.disabled = disabled;
 	const referenceCount = item?.referenceCount || 0;
 	resourceElements.ReferenceGroup.hidden = referenceCount <= 100;
 	resourceElements.ReferenceGroup.disabled = disabled || referenceCount <= 100;
@@ -7676,7 +7784,7 @@ function pickResourceObject(event) {
 }
 
 function chooseResourceFile(action) {
-	const item = action === "add" ? {kind: resourceElements.Kind.value, id: ""} : resourceManager.selected;
+	const item = action === "add" ? {kind: resourceManager.kind, id: ""} : resourceManager.selected;
 	if (!item) return;
 	resourceManager.fileAction = {action, item, sequence: state.openSeq};
 	resourceElements.File.value = "";
