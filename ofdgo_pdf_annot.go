@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -120,6 +121,52 @@ func (p *pdfImporter) annotationOpen(ctx context.Context, dict pdfgo.Dictionary)
 // 入参: ctx 取消上下文, page PDF页面, annotation PDF注解, actions 外观区域的动作
 // 返回: error 外观或转换错误
 func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation, actions ...Action) error {
+	if annotation.Rect.XMin == annotation.Rect.XMax || annotation.Rect.YMin == annotation.Rect.YMax {
+		return p.paintedAnnotation(ctx, page, annotation, nil, actions...)
+	}
+	if !annotation.IsStandard() {
+		flags, err := p.reader.ReadAnnotationFlags(annotation)
+		if err != nil {
+			return err
+		}
+		if flags&1 != 0 {
+			return p.paintedAnnotation(ctx, page, annotation, nil, actions...)
+		}
+	}
+	if p.warning != nil && annotation.Dictionary["AP"] == nil && annotation.Dictionary["BS"] == nil && annotation.Dictionary["Border"] != nil {
+		border, err := p.reader.Resolve(annotation.Dictionary["Border"])
+		if err != nil {
+			return err
+		}
+		if array, ok := border.(pdfgo.Array); ok && len(array) == 0 {
+			if err := p.preservePDFObject(ctx, "Annotation.Border", annotation.Dictionary["Border"]); err != nil {
+				return err
+			}
+		}
+	}
+	if annotation.Dictionary["AP"] != nil {
+		if _, err := p.reader.ReadAnnotationAppearance(annotation); err != nil {
+			if !errors.Is(err, pdfgo.ErrInvalidAnnotationAppearance) {
+				return err
+			}
+			if p.warning == nil {
+				return err
+			}
+			if err := p.preservePDFObject(ctx, "Annotation.Appearance", annotation.Dictionary); err != nil {
+				return err
+			}
+		}
+	}
+	switch annotation.Subtype {
+	case "PrinterMark", "TrapNet", "3D", "RichMedia", "Watermark":
+		appearance, err := p.reader.Resolve(annotation.Dictionary["AP"])
+		if err != nil {
+			return err
+		}
+		if appearance == nil {
+			return p.recoverPDFObject(ctx, "Annotation.Appearance", annotation.Dictionary, &pdfgo.UnsupportedError{Feature: "annotation without static appearance"})
+		}
+	}
 	return p.paintedAnnotation(ctx, page, annotation, nil, actions...)
 }
 

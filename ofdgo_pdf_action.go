@@ -315,7 +315,7 @@ func (p *pdfImporter) destinationBounds(page *pdfgo.Page) (Box, error) {
 	if err := local.commitObjects(); err != nil {
 		return Box{}, err
 	}
-	reader, err := editor.resourceReader()
+	reader, err := local.temporaryReader()
 	if err != nil {
 		return Box{}, err
 	}

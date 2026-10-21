@@ -414,7 +414,7 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 	if err := local.commitObjects(); err != nil {
 		return nil, box, err
 	}
-	reader, err := editor.resourceReader()
+	reader, err := local.temporaryReader()
 	if err != nil {
 		return nil, box, err
 	}
@@ -433,6 +433,18 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 		return nil, box, fmt.Errorf("PDF local compositing: invalid compiled scene")
 	}
 	return p.groupSceneBounds(scene)
+}
+
+// temporaryReader 为局部编译准备资源，带有保留信息时使用完整快照
+// 返回: *Reader 独立阅读器, error 准备或取消错误
+func (p *pdfImporter) temporaryReader() (*Reader, error) {
+	if err := p.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p.editor.source != nil || len(p.editor.origins) != 0 {
+		return p.editor.readerContext(p.ctx, nil)
+	}
+	return p.editor.resourceReader()
 }
 
 // groupSceneBounds 计算已编译场景在页面内的像素对齐区域

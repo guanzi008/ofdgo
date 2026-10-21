@@ -166,6 +166,11 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 				p.editor.fontMetrics[id] = imported.metrics
 			}
 		} else {
+			if font.Recovered {
+				if err := p.preservePDFObject(p.ctx, "Font", font.Dictionary); err != nil {
+					return err
+				}
+			}
 			id, err = p.editor.AddExternalFont(font.Name)
 		}
 		if err != nil {
@@ -625,15 +630,28 @@ func (p *pdfImporter) importedFont(source *pdfgo.Font) (*pdfImportedFont, error)
 	}
 	var type1 *basefont.Type1Program
 	result := &pdfImportedFont{}
+	programSource := *source
+	programRecovered := false
+	if p.warning != nil {
+		var err error
+		if source.ProgramType == "FontFile" {
+			programSource.Program, programRecovered, err = basefont.NormalizePDFType1(source.Program)
+		} else {
+			programSource.Program, programRecovered, err = basefont.NormalizePDFProgram(source.Program)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("PDF font %s container: %w", source.Name, err)
+		}
+	}
 	if source.ProgramType == "FontFile" {
-		parsed, err := basefont.ParseType1Program(source.Program)
+		parsed, err := basefont.ParseType1Program(programSource.Program)
 		if err != nil {
 			return nil, fmt.Errorf("PDF font %s program: %w", source.Name, err)
 		}
 		type1 = &parsed
 		result.type1Glyphs = parsed.GlyphIDs()
 	}
-	program, repair, err := codecpdf.FontProgram(source, type1)
+	program, repair, err := codecpdf.FontProgram(&programSource, type1)
 	if err != nil {
 		return nil, fmt.Errorf("PDF font %s program: %w", source.Name, err)
 	}
@@ -658,6 +676,14 @@ func (p *pdfImporter) importedFont(source *pdfgo.Font) (*pdfImportedFont, error)
 		return nil, fmt.Errorf("PDF font backend does not provide glyph outlines")
 	}
 	result.checksum, result.repairLimit = sha256.Sum256(result.resource.Data), repair.MetricsLimit
+	if source.Recovered || programRecovered {
+		if err := p.preservePDFObject(p.ctx, "Font", source.Dictionary); err != nil {
+			return nil, err
+		}
+	}
+	if programRecovered {
+		p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("PDF font %s container and metrics normalized from embedded program; original glyph IDs retained", source.Name)})
+	}
 	if repair.Locations {
 		p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("PDF font %s has invalid glyph locations; index rebuilt with original glyph IDs", source.Name)})
 	}

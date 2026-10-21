@@ -87,6 +87,108 @@ func FileTables(data []byte, index int) (map[string][]byte, error) {
 	return tables, nil
 }
 
+// NormalizePDFProgram 修复可确定的PDF内嵌SFNT封装，不补造TrueType轮廓或字形编号
+// 入参: data 原始字体程序
+// 返回: []byte 原程序或独立修复程序, bool 是否修复, error 无法确认的目录或度量错误
+func NormalizePDFProgram(data []byte) ([]byte, bool, error) {
+	if len(data) < 12 || string(data[:4]) != "OTTO" && string(data[:4]) != "\x00\x01\x00\x00" && string(data[:4]) != "true" {
+		return data, false, nil
+	}
+	count := int(binary.BigEndian.Uint16(data[4:6]))
+	if count == 0 || count > (len(data)-12)/16 {
+		return nil, false, fmt.Errorf("unrecoverable PDF font directory size")
+	}
+	first := len(data)
+	for n := 0; n < count; n++ {
+		record := data[12+n*16:]
+		start, size := uint64(binary.BigEndian.Uint32(record[8:])), uint64(binary.BigEndian.Uint32(record[12:]))
+		if size != 0 && start >= 12 && start+size <= uint64(len(data)) {
+			first = min(first, int(start))
+		}
+	}
+	changed := false
+	if first < 12+count*16 {
+		if (first-12)%16 != 0 {
+			return nil, false, fmt.Errorf("ambiguous PDF font directory overlap")
+		}
+		actual := (first - 12) / 16
+		for n := 0; n < count; n++ {
+			record := data[12+n*16:]
+			printable := true
+			for _, b := range record[:4] {
+				printable = printable && b >= 32 && b <= 126
+			}
+			if printable != (n < actual) {
+				return nil, false, fmt.Errorf("ambiguous PDF font table count")
+			}
+			if n < actual {
+				start, size := uint64(binary.BigEndian.Uint32(record[8:])), uint64(binary.BigEndian.Uint32(record[12:]))
+				if size != 0 && (start < uint64(first) || start+size > uint64(len(data))) {
+					return nil, false, fmt.Errorf("incomplete PDF font table")
+				}
+			}
+		}
+		data = bytes.Clone(data)
+		binary.BigEndian.PutUint16(data[4:6], uint16(actual))
+		changed = true
+	}
+	tables, err := FileTables(data, 0)
+	if err != nil {
+		return nil, false, err
+	}
+	if head := tables["head"]; len(head) > 54 && len(head) <= 57 {
+		tables["head"] = head[:54]
+		changed = true
+	}
+	if hhea := tables["hhea"]; len(hhea) > 36 && len(hhea) <= 39 && binary.BigEndian.Uint32(hhea) == 0x00010000 {
+		tables["hhea"] = hhea[:36]
+		changed = true
+	}
+	if maxp := tables["maxp"]; tables["glyf"] != nil && len(maxp) > 32 && len(maxp) <= 35 && binary.BigEndian.Uint32(maxp) == 0x00010000 {
+		tables["maxp"] = maxp[:32]
+		changed = true
+	}
+	if post := tables["post"]; len(post) > 32 && binary.BigEndian.Uint32(post) == 0x00030000 {
+		tables["post"] = post[:32]
+		changed = true
+	}
+	if cvt := tables["cvt "]; len(cvt)%2 != 0 && cvt[len(cvt)-1] == 0 {
+		tables["cvt "] = cvt[:len(cvt)-1]
+		changed = true
+	}
+	if len(tables["CFF "]) != 0 && len(tables["head"]) == 0 && len(tables["maxp"]) == 0 && len(tables["hhea"]) == 0 && len(tables["hmtx"]) == 0 {
+		program, _, err := WrapCFFToOTF(tables["CFF "])
+		return program, true, err
+	}
+	if maxp := tables["maxp"]; len(tables["CFF "]) != 0 && tables["glyf"] == nil && len(maxp) >= 6 && (binary.BigEndian.Uint32(maxp) == 0x00010000 || binary.BigEndian.Uint32(maxp) == 0x00005000 && len(maxp) != 6) {
+		count, err := parseCFFAndCountGlyphs(tables["CFF "])
+		if err != nil {
+			return nil, false, err
+		}
+		if count != int(binary.BigEndian.Uint16(maxp[4:6])) {
+			program, _, err := WrapCFFToOTF(tables["CFF "])
+			if err != nil {
+				return nil, false, err
+			}
+			rebuilt, err := FileTables(program, 0)
+			if err != nil {
+				return nil, false, err
+			}
+			if len(tables["head"]) < 20 || !bytes.Equal(tables["head"][18:20], rebuilt["head"][18:20]) {
+				return nil, false, fmt.Errorf("CFF and SFNT design units differ")
+			}
+			return program, true, nil
+		}
+		tables["maxp"] = buildCFFMaxpTable(uint16(count))
+		changed = true
+	}
+	if !changed {
+		return data, false, nil
+	}
+	program, err := SerializeOTF(tables)
+	return program, true, err
+}
+
 // calcTableChecksum 计算字体表校验和
 // 入参: data 表数据
 // 返回: uint32 校验和

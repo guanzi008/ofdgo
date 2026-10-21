@@ -27,12 +27,13 @@ const pdfPatternCellLimit = 8 << 20
 
 // pdfPatternCellKey 隔离图案来源、基色、坐标、精度、混合空间与目标文档资源
 type pdfPatternCellKey struct {
-	source *pdfgo.TilingPattern
-	base   pdfgo.Paint
-	matrix pdfgo.Matrix
-	dpi    float64
-	editor *Editor
-	space  *pdfgo.ColorSpace
+	source                *pdfgo.TilingPattern
+	base                  pdfgo.Paint
+	matrix                pdfgo.Matrix
+	dpi                   float64
+	editor                *Editor
+	space                 *pdfgo.ColorSpace
+	pageWidth, pageHeight float64
 }
 
 // pdfPatternCell 保存图案快照及单元内部的来源区段
@@ -71,7 +72,7 @@ func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Pain
 	if p.patternCells == nil {
 		p.patternCells = resourceCache[pdfPatternCellKey, pdfPatternCell](p.resources, pdfPatternCellLimit)
 	}
-	key := pdfPatternCellKey{source: source, matrix: p.matrix, dpi: p.rasterDPI, editor: p.editor, space: p.compositeSpace}
+	key := pdfPatternCellKey{source: source, matrix: p.matrix, dpi: p.rasterDPI, editor: p.editor, space: p.compositeSpace, pageWidth: p.pageWidth, pageHeight: p.pageHeight}
 	if source.PaintType == 2 {
 		base.Tiling, base.Axial, base.Radial, base.Mesh, base.Function, base.Shading = nil, nil, nil, nil, nil, nil
 		base.Alpha = 1
@@ -140,6 +141,146 @@ func pdfPatternCellCost(value reflect.Value, budget, depth int) int {
 	return cost
 }
 
+// pdfPatternRectangleBounds 识别无文字裁剪的单个轴对齐矩形，不把边界框当作路径覆盖范围
+// 入参: path 矩形路径
+// 返回: pdfgo.Rectangle 精确覆盖范围, bool 是否单矩形
+func pdfPatternRectangleBounds(path pdfgo.Path) (pdfgo.Rectangle, bool) {
+	if len(path.Text) != 0 || len(path.Segments) != 5 || path.Segments[4].Operator != "C" || len(path.Segments[4].Points) != 0 {
+		return pdfgo.Rectangle{}, false
+	}
+	var points [4]pdfgo.Point
+	box := pdfgo.Rectangle{XMin: math.Inf(1), YMin: math.Inf(1), XMax: math.Inf(-1), YMax: math.Inf(-1)}
+	for i, segment := range path.Segments[:4] {
+		if len(segment.Points) != 1 || i == 0 && segment.Operator != "M" || i != 0 && segment.Operator != "L" {
+			return pdfgo.Rectangle{}, false
+		}
+		point := segment.Points[0]
+		if !finite(point.X) || !finite(point.Y) {
+			return pdfgo.Rectangle{}, false
+		}
+		points[i] = point
+		box.XMin, box.YMin = math.Min(box.XMin, point.X), math.Min(box.YMin, point.Y)
+		box.XMax, box.YMax = math.Max(box.XMax, point.X), math.Max(box.YMax, point.Y)
+	}
+	if box.XMin == box.XMax || box.YMin == box.YMax {
+		return pdfgo.Rectangle{}, false
+	}
+	corners := 0
+	for i, point := range points {
+		next := points[(i+1)%len(points)]
+		if (point.X == next.X) == (point.Y == next.Y) || point.X != box.XMin && point.X != box.XMax || point.Y != box.YMin && point.Y != box.YMax {
+			return pdfgo.Rectangle{}, false
+		}
+		corner := 0
+		if point.X == box.XMax {
+			corner++
+		}
+		if point.Y == box.YMax {
+			corner += 2
+		}
+		corners |= 1 << corner
+	}
+	return box, corners == 15
+}
+
+// pdfPatternRectanglePath 构造精确闭合矩形，用于连续覆盖的绘制及裁剪
+// 入参: box 矩形范围
+// 返回: pdfgo.Path 闭合矩形
+func pdfPatternRectanglePath(box pdfgo.Rectangle) pdfgo.Path {
+	return pdfgo.Path{Segments: []pdfgo.Segment{{Operator: "M", Points: []pdfgo.Point{{X: box.XMin, Y: box.YMin}}}, {Operator: "L", Points: []pdfgo.Point{{X: box.XMax, Y: box.YMin}}}, {Operator: "L", Points: []pdfgo.Point{{X: box.XMax, Y: box.YMax}}}, {Operator: "L", Points: []pdfgo.Point{{X: box.XMin, Y: box.YMax}}}, {Operator: "C"}}}
+}
+
+// densePatternRectangle 对单一不透明矩形的连续重叠轴求精确并集，不修改源步距或近似采样
+// 入参: source 原图案, base 基色, width 单元宽, height 单元高, xstep 横向步距, ystep 纵向步距
+// 返回: *pdfgo.PathMark 并集矩形, bool 横轴已连续覆盖, bool 纵轴已连续覆盖, error 解析或取消错误
+func (p *pdfImporter) densePatternRectangle(source *pdfgo.TilingPattern, base pdfgo.Paint, width, height, xstep, ystep float64) (*pdfgo.PathMark, bool, bool, error) {
+	limit := float64(int(^uint(0) >> 1))
+	continuousX, continuousY := width/xstep >= limit, height/ystep >= limit
+	if !continuousX && !continuousY {
+		return nil, false, false, nil
+	}
+	var mark pdfgo.PathMark
+	paths, other := 0, false
+	visitor := pdfgo.Visitor{
+		Warning: p.warning,
+		Path: func(value pdfgo.PathMark) error {
+			paths++
+			if paths == 1 {
+				mark = value
+			}
+			return nil
+		},
+		Text: func(pdfgo.TextMark) error { other = true; return nil }, Image: func(pdfgo.ImageMark) error { other = true; return nil },
+		Form:       func(pdfgo.FormMark, func(pdfgo.Visitor) error) error { other = true; return nil },
+		Group:      func(pdfgo.GroupMark, func(pdfgo.Visitor) error) error { other = true; return nil },
+		PostScript: func(pdfgo.PostScriptMark) error { other = true; return nil },
+	}
+	if err := source.Walk(p.ctx, base, visitor); err != nil {
+		return nil, false, false, err
+	}
+	if err := p.ctx.Err(); err != nil {
+		return nil, false, false, err
+	}
+	style, paint := mark.Style, mark.Style.Fill
+	if other || paths != 1 || !mark.Fill || mark.Stroke || paint.None || paint.Alpha != 1 || paint.Colorant != nil || paint.Process != nil || paint.Tiling != nil || paint.Shading != nil || paint.Axial != nil || paint.Radial != nil || paint.Mesh != nil || paint.Function != nil || style.SoftMask != nil || style.Transfer != nil || style.Halftone != nil || style.FillOverprint || style.AlphaIsShape || style.BlendMode != "" && style.BlendMode != "Normal" || len(style.Clips) != 1 {
+		return nil, false, false, nil
+	}
+	clip, ok := pdfPatternRectangleBounds(style.Clips[0])
+	if !ok || clip != source.BBox {
+		return nil, false, false, nil
+	}
+	box, ok := pdfPatternRectangleBounds(mark.Path)
+	if !ok {
+		return nil, false, false, nil
+	}
+	box.XMin, box.YMin = math.Max(box.XMin, clip.XMin), math.Max(box.YMin, clip.YMin)
+	box.XMax, box.YMax = math.Min(box.XMax, clip.XMax), math.Min(box.YMax, clip.YMax)
+	if box.XMax <= box.XMin || box.YMax <= box.YMin || continuousX && box.XMax-box.XMin < xstep || continuousY && box.YMax-box.YMin < ystep {
+		return nil, false, false, nil
+	}
+	if continuousX {
+		box.XMin, box.XMax = clip.XMin, clip.XMax
+	}
+	if continuousY {
+		box.YMin, box.YMax = clip.YMin, clip.YMax
+	}
+	mark.Path = pdfPatternRectanglePath(box)
+	return &mark, continuousX, continuousY, nil
+}
+
+// densePatternPageBounds 将连续覆盖轴的等价单元边界置于页面外，避免子像素单元接缝
+// 入参: source 原图案, box 原单元, x 横轴连续覆盖, y 纵轴连续覆盖
+// 返回: pdfgo.Rectangle 等价单元边界, error 非有限范围或退化变换错误
+func (p *pdfImporter) densePatternPageBounds(source *pdfgo.TilingPattern, box pdfgo.Rectangle, x, y bool) (pdfgo.Rectangle, error) {
+	inverse, ok := p.matrix.Mul(source.Matrix).Inverse()
+	if !ok {
+		return box, fmt.Errorf("invalid PDF dense pattern matrix")
+	}
+	if !finite(p.pageWidth) || !finite(p.pageHeight) || p.pageWidth <= 0 || p.pageHeight <= 0 {
+		return box, fmt.Errorf("invalid PDF dense pattern page bounds")
+	}
+	area := pdfgo.Rectangle{XMin: math.Inf(1), YMin: math.Inf(1), XMax: math.Inf(-1), YMax: math.Inf(-1)}
+	for _, point := range []pdfgo.Point{{}, {X: p.pageWidth}, {Y: p.pageHeight}, {X: p.pageWidth, Y: p.pageHeight}} {
+		point = inverse.Apply(point)
+		area.XMin, area.YMin = math.Min(area.XMin, point.X), math.Min(area.YMin, point.Y)
+		area.XMax, area.YMax = math.Max(area.XMax, point.X), math.Max(area.YMax, point.Y)
+	}
+	if x {
+		span := box.XMax - box.XMin
+		box.XMin, box.XMax = math.Min(box.XMin, area.XMin-span), math.Max(box.XMax, area.XMax+span)
+	}
+	if y {
+		span := box.YMax - box.YMin
+		box.YMin, box.YMax = math.Min(box.YMin, area.YMin-span), math.Max(box.YMax, area.YMax+span)
+	}
+	for _, value := range []float64{box.XMin, box.YMin, box.XMax, box.YMax, box.XMax - box.XMin, box.YMax - box.YMin} {
+		if !finite(value) {
+			return box, fmt.Errorf("nonfinite PDF dense pattern page bounds")
+		}
+	}
+	return box, nil
+}
+
 // buildTilingPattern 保留PDF图案单元与页面坐标之间的仿射关系
 // 入参: source 平铺图案, base 无色图案基色
 // 返回: *Pattern OFD图案, error 转换错误
@@ -148,12 +289,41 @@ func (p *pdfImporter) buildTilingPattern(source *pdfgo.TilingPattern, base pdfgo
 	box := source.BBox
 	width, height := box.XMax-box.XMin, box.YMax-box.YMin
 	xstep, ystep := math.Abs(source.XStep), math.Abs(source.YStep)
+	if (width == 0 || height == 0) && finite(width) && finite(height) && width >= 0 && height >= 0 && finite(xstep) && finite(ystep) && xstep > 0 && ystep > 0 {
+		return &Pattern{Width: unit, Height: unit, XStep: unit, YStep: unit, RelativeTo: "Page"}, nil
+	}
 	if width <= 0 || height <= 0 || !finite(xstep) || !finite(ystep) || xstep == 0 || ystep == 0 {
 		return nil, fmt.Errorf("invalid PDF tiling pattern dimensions")
+	}
+	dense, continuousX, continuousY, err := p.densePatternRectangle(source, base, width, height, xstep, ystep)
+	if err != nil {
+		return nil, err
+	}
+	if dense != nil {
+		box, err = p.densePatternPageBounds(source, box, continuousX, continuousY)
+		if err != nil {
+			return nil, err
+		}
+		bounds, _ := pdfPatternRectangleBounds(dense.Path)
+		if continuousX {
+			bounds.XMin, bounds.XMax = box.XMin, box.XMax
+		}
+		if continuousY {
+			bounds.YMin, bounds.YMax = box.YMin, box.YMax
+		}
+		dense.Path, dense.Style.Clips = pdfPatternRectanglePath(bounds), []pdfgo.Path{pdfPatternRectanglePath(box)}
+		width, height = box.XMax-box.XMin, box.YMax-box.YMin
 	}
 	localToPDF := pdfgo.Matrix{1 / unit, 0, 0, -1 / unit, box.XMin, box.YMax}
 	m := p.matrix.Mul(source.Matrix).Mul(localToPDF)
 	pattern := &Pattern{Width: math.Min(width, xstep) * unit, Height: math.Min(height, ystep) * unit, XStep: xstep * unit, YStep: ystep * unit, RelativeTo: "Page", CTM: pdfNumbers(m[:]...)}
+	repeatWidth, repeatHeight := width, height
+	if continuousX {
+		pattern.Width, repeatWidth = width*unit, xstep
+	}
+	if continuousY {
+		pattern.Height, repeatHeight = height*unit, ystep
+	}
 	if p.patternOrigins == nil {
 		p.patternOrigins = make(map[*Pattern]pdfObjectOrigin)
 	}
@@ -166,6 +336,9 @@ func (p *pdfImporter) buildTilingPattern(source *pdfgo.TilingPattern, base pdfgo
 	}
 	cell.objects = nil
 	nodes, err := cell.collectCompositeNodes(func(visitor pdfgo.Visitor) error {
+		if dense != nil {
+			return visitor.Path(*dense)
+		}
 		return source.Walk(p.ctx, base, visitor)
 	}, false)
 	if err != nil {
@@ -185,8 +358,8 @@ func (p *pdfImporter) buildTilingPattern(source *pdfgo.TilingPattern, base pdfgo
 		return nil, err
 	}
 	pattern.CellContent.Objects = objects
-	if len(objects) != 0 && (width > xstep || height > ystep) {
-		columns, rows := math.Ceil(width/xstep), math.Ceil(height/ystep)
+	if len(objects) != 0 && (repeatWidth > xstep || repeatHeight > ystep) {
+		columns, rows := math.Ceil(repeatWidth/xstep), math.Ceil(repeatHeight/ystep)
 		if !finite(columns*rows) || columns*rows >= float64(uint(^uint(0)>>1)+1) {
 			return nil, fmt.Errorf("PDF tiling pattern instance count overflow")
 		}

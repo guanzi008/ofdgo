@@ -198,6 +198,9 @@ func ParseType1Program(data []byte) (Type1Program, error) {
 		return Type1Program{}, fmt.Errorf("Type1 font has no glyphs")
 	}
 	for index := range program.subrs {
+		if program.subrs[index] == nil {
+			continue
+		}
 		program.subrs[index], err = type1CharString(program.subrs[index], program.lenIV)
 		if err != nil {
 			return Type1Program{}, err
@@ -210,6 +213,61 @@ func ParseType1Program(data []byte) (Type1Program, error) {
 		}
 	}
 	return program, nil
+}
+
+// NormalizePDFType1 修复完整加密分段之后的PFB明文尾部，不补齐加密或字形数据
+// 入参: data 原始PFB程序
+// 返回: []byte 原程序或独立修复容器, bool 是否修复, error 容器或程序错误
+func NormalizePDFType1(data []byte) ([]byte, bool, error) {
+	if len(data) < 6 || data[0] != 0x80 {
+		return data, false, nil
+	}
+	binarySeen := false
+	for offset := 0; offset+2 <= len(data) && data[offset] == 0x80; {
+		kind := data[offset+1]
+		if kind == 3 {
+			return data, false, nil
+		}
+		if offset+6 > len(data) || kind != 1 && kind != 2 {
+			return data, false, fmt.Errorf("incomplete PFB segment header")
+		}
+		length := uint64(binary.LittleEndian.Uint32(data[offset+2:]))
+		remaining := len(data) - offset - 6
+		if binarySeen && kind == 1 && remaining == 0 {
+			result := append(bytes.Clone(data[:offset]), 0x80, 3)
+			if _, err := ParseType1Program(result); err != nil {
+				return nil, false, err
+			}
+			return result, true, nil
+		}
+		if length > uint64(remaining) {
+			return nil, false, fmt.Errorf("incomplete PFB encrypted or text segment")
+		}
+		if binarySeen && kind == 1 && length == 0 {
+			tail := data[offset+6:]
+			if len(tail) < 2 || !bytes.Equal(tail[len(tail)-2:], []byte{0x80, 3}) {
+				return data, false, fmt.Errorf("unbounded PFB text trailer")
+			}
+			text := bytes.TrimSpace(tail[:len(tail)-2])
+			if !bytes.HasSuffix(text, []byte("cleartomark")) {
+				return data, false, fmt.Errorf("PFB trailer lacks cleartomark")
+			}
+			for _, b := range bytes.TrimSuffix(text, []byte("cleartomark")) {
+				if b != '0' && !type1Space(b) {
+					return data, false, fmt.Errorf("unexpected PFB text trailer")
+				}
+			}
+			result := bytes.Clone(data)
+			binary.LittleEndian.PutUint32(result[offset+2:], uint32(len(tail)-2))
+			if _, err := ParseType1Program(result); err != nil {
+				return nil, false, err
+			}
+			return result, true, nil
+		}
+		binarySeen = binarySeen || kind == 2
+		offset += 6 + int(length)
+	}
+	return data, false, nil
 }
 
 // readType1Header 读取明文字体矩阵及加密数据起点
