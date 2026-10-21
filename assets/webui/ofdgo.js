@@ -1887,7 +1887,7 @@ function handleKeyDown(event) {
 }
 
 function formDialogOpen() {
-	return Boolean(sealPreview || resourceManager.pick) || settingsElements.Panel.open || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
+	return Boolean(sealPreview || resourceManager.pick) || el.closePanel.open || el.attachmentDialog.open || settingsElements.Panel.open || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
 		|| resourceElements.Panel.open || el.structureDialog.open || el.versionPanel.open || el.batchPagesPanel.open || el.objectStylePanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
 
@@ -2375,7 +2375,7 @@ async function closeFile() {
 			openSeq = state.openSeq;
 		}
 	}
-	if (openSeq !== state.openSeq || batch.unlocking) return;
+	if (openSeq !== state.openSeq || batch.unlocking || state.saving || state.exporting || document.body.hasAttribute("data-busy")) return;
 	const source = state.ofdBytes;
 	resetDocumentState();
 	markWASMExited();
@@ -2524,7 +2524,7 @@ function resetDocumentState() {
 	fontBinding.font = null;
 	fontBinding.choices = [];
 	fontManager.localFonts = [];
-	for (const panel of [resourceElements.Panel, settingsElements.Panel, el.createPanel, el.insertPanel,
+	for (const panel of [resourceElements.Panel, settingsElements.Panel, el.closePanel, el.attachmentDialog, el.createPanel, el.insertPanel,
 		fontBindingElements.Panel, el.pagePanel, el.paragraphPanel, el.infoPanel, el.documentPanel,
 		el.versionPanel, el.annotationNote, el.annotationCreate, el.objectPicker, el.importPanel,
 		el.batchPagesPanel, el.objectStylePanel, el.objectBoundsPanel, el.outlinePanel, el.structureDialog]) panel.close();
@@ -2632,11 +2632,12 @@ async function switchReadingVersion(id) {
 	if (id === (state.doc.documentVersion || "")) return true;
 	const dirty = state.dirty;
 	const before = state.editorInfo ? editorLocation() : null, revision = state.editorInfo?.revision;
-	const openSeq = ++state.openSeq;
+	let openSeq = state.openSeq;
 	setBusy(true, "正在切换版本");
 	try {
 		const doc = await callWASM("ofdgoSelectVersion", id);
 		if (openSeq !== state.openSeq) return;
+		openSeq = ++state.openSeq;
 		state.objectClipboard = state.styleClipboard = null;
 		canvasEditor.richClipboard = null;
 		resetCompositeScope();
@@ -2809,11 +2810,14 @@ async function switchDocument(index) {
 		el.documentSelect.value = String(previous);
 		return;
 	}
-	const openSeq = ++state.openSeq;
+	if (document.body.hasAttribute("data-busy")) return;
+	let openSeq = state.openSeq;
 	setBusy(true, "正在切换文档");
 	try {
 		const doc = await callWASM("ofdgoSelectDocument", index);
 		if (openSeq !== state.openSeq) return;
+		openSeq = ++state.openSeq;
+		const source = state.ofdBytes;
 		state.packageDirty ||= state.dirty;
 		state.savedRevision = doc.revision;
 		state.editorViews.clear();
@@ -2827,6 +2831,7 @@ async function switchDocument(index) {
 		state.ofdBytes = null;
 		setEditorInfo(doc);
 		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true, clearSelection: true, fitMode: state.fitMode, scale: state.scale, activateActions: true });
+		if (nativeHost) await nativeHost.release(source);
 	} catch (error) {
 		if (openSeq === state.openSeq) {
 			el.documentSelect.value = String(previous);
@@ -2892,11 +2897,13 @@ async function toggleEditor() {
 	}
 	const { pageIndex, fitMode, scale } = state;
 	const anchor = scaleAnchor(0);
-	const openSeq = ++state.openSeq;
+	let openSeq = state.openSeq;
 	setBusy(true, "正在准备编辑", null, "正在准备编辑");
 	try {
 		const doc = await callWASM("ofdgoEditDocument", pageIndex);
 		if (openSeq !== state.openSeq) return;
+		openSeq = ++state.openSeq;
+		const source = state.ofdBytes;
 		state.savedRevision = doc.revision;
 		state.editorViews.clear();
 		setEditorInfo(doc);
@@ -2913,6 +2920,7 @@ async function toggleEditor() {
 		setPan(false);
 		await openDocument({ doc, openSeq, skipAutoFonts: true, pageIndex, fitMode, scale,
 			keepPreview: true, preserveThumbnails: true, previewAnchor: anchor });
+		if (nativeHost) await nativeHost.release(source);
 	} catch (err) {
 		if (openSeq === state.openSeq) showError(err, false);
 	} finally {
@@ -3007,6 +3015,7 @@ async function createDocument(event) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
+		const source = state.ofdBytes;
 		resetDocumentState();
 		openSeq = state.openSeq;
 		state.editing = true;
@@ -3017,6 +3026,7 @@ async function createDocument(event) {
 		setEditorInfo(doc);
 		el.createPanel.close();
 		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true });
+		if (nativeHost) await nativeHost.release(source);
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			el.createStatus.textContent = err.message;
@@ -4913,6 +4923,7 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 		if (!current()) return;
 		const doc = convertedDoc || await openWithCredentials(await fontManager.files(fontManager.userFonts), openSeq, bytes);
 		if (!current()) return;
+		const previousSource = state.ofdBytes;
 		resetDocumentState();
 		openSeq = state.openSeq;
 		state.ofdBytes = bytes;
@@ -4924,6 +4935,7 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 		if (remote && !/\.ofd$/i.test(state.fileName)) state.fileName += ".ofd";
 		updateControls();
 		await openDocument({ doc, pageIndex: remote?.pageIndex || 0, resetScroll: true, openSeq, activateActions: true });
+		if (nativeHost && previousSource !== bytes) await nativeHost.release(previousSource);
 	} catch (err) {
 		if (current()) {
 			if (err.name === "AbortError") setStatus("打开已取消");
@@ -5402,9 +5414,15 @@ async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, import
 			try {
 				if (pdf) {
 					const converted = await callWASM("ofdgoConvertPDF", data, fonts, credentials?.password || null);
-					if (openSeq !== state.openSeq) return converted;
-					converted.doc = await callWASM("ofdgoOpen", converted.bytes, fonts, state.renderAnnotations, credentials);
-					return converted;
+					let accepted = false;
+					try {
+						if (openSeq !== state.openSeq) return converted;
+						converted.doc = await callWASM("ofdgoOpen", converted.bytes, fonts, state.renderAnnotations, credentials);
+						accepted = openSeq === state.openSeq;
+						return converted;
+					} finally {
+						if (!accepted && nativeHost) await nativeHost.release(converted.bytes);
+					}
 				}
 				return importing ? await callWASM("ofdgoLoadImport", data?.nativeFile ? data : data.slice(), credentials)
 					: await callWASM("ofdgoOpen", data, fonts, state.renderAnnotations, credentials);
@@ -12784,6 +12802,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	renderSecurity();
 	updateDisplayControls();
 	el.editButton.disabled = busy || Boolean(sealPreview || resourceManager.pick) || !state.doc || !state.ready || state.exporting;
+	el.closePanel.inert = busy;
 	el.createForm.inert = busy && !state.imageImporting;
 	updateCreateOptions();
 	el.insertForm.inert = busy;
