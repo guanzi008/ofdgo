@@ -10925,6 +10925,9 @@ function renderPageList() {
 	state.pageListCurrent = null;
 	state.visibleThumbnails.clear();
 	if (!state.doc) {
+		el.pageList.style.height = "";
+		el.pageList.classList.remove("virtual-pages", "grouped-pages");
+		el.navigationContent.scrollTop = 0;
 		return;
 	}
 	if (state.thumbnailObserver) {
