@@ -49,9 +49,9 @@ const (
 // PDF来源元数据的标引定义
 const (
 	pdfMetadataTagType      = "OFDGo.PDFMetadata"
+	pdfAuxiliaryTagType     = "OFDGo.PDFAuxiliary"
 	pdfInformationTagType   = "OFDGo.PDFInformation"
 	pdfInformationNamespace = "https://ofdgo.aite.me/ns/pdf/information/1"
-	pdfAuxiliaryTagType     = "OFDGo.PDFAuxiliary"
 )
 
 // pdfStructureBindings 保存来源区段与最终页面图元的关联，不记录临时渲染对象
