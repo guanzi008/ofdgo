@@ -113,15 +113,7 @@
 }
 
 .document-new-tab {
-	flex-basis: var(--titlebar-height, 36px);
-	width: var(--titlebar-height, 36px);
-	min-width: var(--titlebar-height, 36px);
-	align-self: stretch;
-	height: auto;
-}
-
-.document-new-tab:focus-visible {
-	outline-offset: -2px;
+	margin-left: 8px;
 }
 
 .document-title-drag {
