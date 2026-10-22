@@ -3544,12 +3544,17 @@ async function createDocument(event) {
 	const request = {controller: new AbortController()};
 	tab.opening = request;
 	el.createPanel.close();
-	workspace.tabs.push(tab);
-	await activateDocumentTab(tab);
-	if (workspace.active === tab && !previous.state.doc && !previous.opening && !previous.state.dirty && !previous.error) {
-		workspace.tabs.splice(workspace.tabs.indexOf(previous), 1);
-		await releaseDocumentTab(previous);
+	const replace = !workspace.switching && !previous.state.doc && !previous.opening && !previous.state.dirty && !previous.error;
+	const index = workspace.tabs.indexOf(previous);
+	if (replace) workspace.tabs[index] = tab;
+	else workspace.tabs.push(tab);
+	if (!await activateDocumentTab(tab) && replace && workspace.active !== tab) {
+		workspace.tabs[index] = previous;
+		await releaseDocumentTab(tab);
+		renderDocumentTabs();
+		return;
 	}
+	if (replace) await releaseDocumentTab(previous);
 	let accepted = false;
 	setBusy(true, "正在新建文档", null, "正在新建文档", tab);
 	try {
