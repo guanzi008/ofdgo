@@ -6447,8 +6447,8 @@ function revealPanelTab(container) {
 	const selected = container.querySelector('[data-selected="true"]');
 	if (!selected || !container.clientWidth) return;
 	const box = selected.getBoundingClientRect(), viewport = container.getBoundingClientRect();
-	if (box.left < viewport.left) container.scrollLeft -= viewport.left - box.left;
-	else if (box.right > viewport.right) container.scrollLeft += box.right - viewport.right;
+	if (box.left < viewport.left) container.scrollLeft -= Math.ceil(viewport.left - box.left);
+	else if (box.right > viewport.right) container.scrollLeft += Math.ceil(box.right - viewport.right);
 }
 
 function renderPanelTabs(container, choices, value, change) {
