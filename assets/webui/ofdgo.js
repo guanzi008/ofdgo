@@ -13814,6 +13814,7 @@ function setProgress(text = "", percent = 0, status = "", tab = documentTab()) {
 }
 
 function setStatus(text) {
+	documentTab().status = text;
 	el.statusText.textContent = text;
 }
 
