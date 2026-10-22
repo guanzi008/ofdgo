@@ -1,12 +1,15 @@
 importScripts("./wasm_exec.js");
 
-let pending = Promise.resolve();
-const operations = new Map();
-const fontRequests = new Map();
+const engines = new Map();
+let resolveRuntime;
+let rejectRuntime;
+const runtimeReady = new Promise((resolve, reject) => { resolveRuntime = resolve; rejectRuntime = reject; });
+runtimeReady.catch(() => {});
 let fontSequence = 0;
 let engineMemory = null;
 
-function requestFont(id, signal, name, done) {
+function requestFont(engine, id, signal, name, done) {
+	const fontRequests = engine.fontRequests;
 	if (signal.aborted) { done(null, "", true); return; }
 	const request = ++fontSequence;
 	const cancel = () => {
@@ -18,7 +21,7 @@ function requestFont(id, signal, name, done) {
 		signal.removeEventListener("abort", cancel);
 		done(result.bytes, result.error || "", signal.aborted);
 	});
-	self.postMessage({ id, type: "font", request, name });
+	self.postMessage({ engineID: engine.id, id, type: "font", request, name });
 }
 self.onmessage = ({ data }) => {
 	if (data.type === "module") {
@@ -26,24 +29,71 @@ self.onmessage = ({ data }) => {
 		else loadWASM(data.module).catch(exitWASM);
 		return;
 	}
+	const engineID = data.engineID;
+	if (typeof engineID !== "string" || !engineID) {
+		self.postMessage({ engineID, id: data.id, ok: false, error: "missing engine ID" });
+		return;
+	}
+	if (data.type === "open") {
+		if (engines.has(engineID)) {
+			self.postMessage({ engineID, type: "exit", error: "engine already exists" });
+			return;
+		}
+		const engine = { id: engineID, operations: new Map(), fontRequests: new Map(), active: new Set(), closed: false };
+		engines.set(engineID, engine);
+		engine.pending = runtimeReady.then(async () => {
+			if (engine.closed) return;
+			const opened = JSON.parse(globalThis.ofdgoEngineOpen(engineID));
+			if (!opened.ok) throw new Error(opened.error);
+			const backends = JSON.parse(await globalThis.ofdgoEngineCall(engineID, "ofdgoRenderBackends"));
+			if (!backends.ok) throw new Error(backends.error);
+			if (!engine.closed) self.postMessage({ engineID, type: "ready", backends: backends.data, memory: engineMemory.buffer.byteLength });
+		}).catch(error => {
+			engine.closed = true;
+			self.postMessage({ engineID, type: "exit", error: error.message });
+		});
+		return;
+	}
+	const engine = engines.get(engineID);
+	if (!engine && data.type === "close") {
+		self.postMessage({ engineID, type: "closed" });
+		return;
+	}
+	if (!engine || engine.closed && data.type !== "close") {
+		self.postMessage({ engineID, id: data.id, ok: false, error: "unknown or closed engine" });
+		return;
+	}
+	if (data.type === "close") {
+		engine.closed = true;
+		for (const operation of engine.operations.values()) operation.abort();
+		engine.pending.then(async () => {
+			await Promise.all([...engine.active]);
+			await runtimeReady;
+			globalThis.ofdgoEngineClose(engineID);
+			engines.delete(engineID);
+			self.postMessage({ engineID, type: "closed" });
+		}).catch(() => engines.delete(engineID));
+		return;
+	}
 	if (data.type === "font") {
-		fontRequests.get(data.request)?.(data);
-		fontRequests.delete(data.request);
+		engine.fontRequests.get(data.request)?.(data);
+		engine.fontRequests.delete(data.request);
 		return;
 	}
 	if (data.type === "cancel") {
-		operations.get(data.id)?.abort();
+		engine.operations.get(data.id)?.abort();
 		return;
 	}
-	if (["ofdgoResources", "ofdgoPrepareSave", "ofdgoSaveSnapshot"].includes(data.name)) operations.set(data.id, new AbortController());
-	if (data.name === "ofdgoSaveSnapshot") {
-		pending = pending.then(() => { void handleMessage(data); });
-		return;
-	}
-	if (data.name === "ofdgoImportDocuments" || data.name === "ofdgoImportImages" || data.name === "ofdgoExportImages" || data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" || data.name === "ofdgoConvertPDF" || data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoExportResource" || data.name === "ofdgoExportMedia" || data.name === "ofdgoExportVersion" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoSaveSigned" || data.name === "ofdgoImportPages") {
-		operations.set(data.id, new AbortController());
-	}
-	pending = pending.then(() => data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" ? handleBatchMessage(data) : handleMessage(data));
+	engine.operations.set(data.id, new AbortController());
+	engine.pending = engine.pending.then(() => {
+		const operation = (data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" ? handleBatchMessage(engine, data) : handleMessage(engine, data)).catch(error => {
+			engine.operations.delete(data.id);
+			self.postMessage({ engineID, id: data.id, ok: false, error: error.message });
+		});
+		engine.active.add(operation);
+		operation.finally(() => engine.active.delete(operation));
+		if (data.name !== "ofdgoSaveSnapshot") return operation;
+	});
 };
 
 async function availableOutput(directory, base, format) {
@@ -59,7 +109,9 @@ async function availableOutput(directory, base, format) {
 	}
 }
 
-async function handleBatchMessage({ id, name, args }) {
+async function handleBatchMessage(engine, { id, name, args }) {
+	const operations = engine.operations;
+	const postMessage = (data, transfer) => self.postMessage({ ...data, engineID: engine.id }, transfer);
 	const signal = operations.get(id).signal;
 	const channel = new MessageChannel();
 	const finish = (done, err) => {
@@ -89,7 +141,7 @@ async function handleBatchMessage({ id, name, args }) {
 		if (name === "ofdgoConvertFile") {
 			const [file, options, fonts, destination] = args;
 			credentials = options.credentials;
-			const formats = JSON.parse(globalThis.ofdgoOutputFormats()).data;
+			const formats = JSON.parse(await globalThis.ofdgoEngineCall(engine.id, "ofdgoOutputFormats")).data;
 			const format = formats.find(item => item.value === options.format);
 			if (!format) throw new Error("不支持此格式");
 			root = destination;
@@ -100,7 +152,7 @@ async function handleBatchMessage({ id, name, args }) {
 				if (format.paged) directory = await root.getDirectoryHandle(target.name, { create: true });
 				else { await root.getFileHandle(target.name, { create: true }); directory = root; }
 				created = target.name;
-				self.postMessage({ id, type: "output", name: created });
+				postMessage({ id, type: "output", name: created });
 				return target;
 			}) : { stem: base, name: format.paged ? base : `${base}.${format.extension}` };
 			const boundary = async (action, pageName) => {
@@ -113,7 +165,7 @@ async function handleBatchMessage({ id, name, args }) {
 						const handle = await directory.getFileHandle(fileName, { create: true });
 						if (!format.paged) {
 							created = fileName;
-							self.postMessage({ id, type: "output", name: created });
+							postMessage({ id, type: "output", name: created });
 						}
 						current.handle = handle;
 						output = await handle.createWritable();
@@ -126,19 +178,19 @@ async function handleBatchMessage({ id, name, args }) {
 					chunks = [];
 				}
 			};
-			payload = await globalThis.ofdgoConvertFile(read(file), file.size, options, write,
+			payload = await globalThis.ofdgoEngineCall(engine.id, "ofdgoConvertFile", read(file), file.size, options, write,
 				(phase, completed, total, done) => {
-					self.postMessage({ id, type: "conversion", phase, completed, total, memory: engineMemory.buffer.byteLength });
+					postMessage({ id, type: "conversion", phase, completed, total, memory: engineMemory.buffer.byteLength });
 					finish(done);
 				},
 				(action, pageName, done) => boundary(action, pageName).then(() => finish(done), err => finish(done, err)),
-				done => finish(done), fonts, (name, done) => requestFont(id, signal, name, done));
+				done => finish(done), fonts, (name, done) => requestFont(engine, id, signal, name, done));
 		} else {
 			const [entries, handle, compression] = args;
 			if (handle) output = await handle.createWritable();
-			payload = await globalThis.ofdgoPackFiles(entries.map(entry => ({ name: entry.name, size: entry.file.size })),
+			payload = await globalThis.ofdgoEngineCall(engine.id, "ofdgoPackFiles", entries.map(entry => ({ name: entry.name, size: entry.file.size })),
 				index => read(entries[index].file), write,
-				(completed, total, done) => { self.postMessage({ id, type: "conversion", phase: "pack", completed, total, memory: engineMemory.buffer.byteLength }); finish(done); },
+				(completed, total, done) => { postMessage({ id, type: "conversion", phase: "pack", completed, total, memory: engineMemory.buffer.byteLength }); finish(done); },
 				done => finish(done), compression);
 		}
 		signal.throwIfAborted();
@@ -157,7 +209,7 @@ async function handleBatchMessage({ id, name, args }) {
 		}
 		result.data.size = size;
 		operations.delete(id);
-		self.postMessage({ id, ...result, memory: engineMemory.buffer.byteLength });
+		postMessage({ id, ...result, memory: engineMemory.buffer.byteLength });
 	} catch (err) {
 		await output?.abort().catch(() => {});
 		let message = signal.aborted ? "转换已取消" : err.message;
@@ -165,7 +217,7 @@ async function handleBatchMessage({ id, name, args }) {
 			try { await root.removeEntry(created, { recursive: true }); }
 			catch (cleanupError) { message += `；清理失败：${cleanupError.message}`; }
 		}
-		self.postMessage({ id, ok: false, error: message, code: err.code, canceled: signal.aborted, memory: engineMemory.buffer.byteLength });
+		postMessage({ id, ok: false, error: message, code: err.code, canceled: signal.aborted, memory: engineMemory.buffer.byteLength });
 	} finally {
 		credentials?.password?.fill(0);
 		credentials?.key?.fill(0);
@@ -175,12 +227,15 @@ async function handleBatchMessage({ id, name, args }) {
 		operations.delete(id);
 	}
 }
-async function handleMessage({ id, name, args }) {
+async function handleMessage(engine, { id, name, args }) {
+	const operations = engine.operations;
+	const postMessage = (data, transfer) => self.postMessage({ ...data, engineID: engine.id }, transfer);
 	let output;
 	let saveFile;
 	let saveStamp;
 	let channel;
 	const signal = operations.get(id)?.signal;
+	const cancellable = ["ofdgoResources", "ofdgoPrepareSave", "ofdgoSaveSnapshot", "ofdgoImportDocuments", "ofdgoImportImages", "ofdgoExportImages", "ofdgoConvertPDF", "ofdgoExportPage", "ofdgoExportDocument", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion", "ofdgoSaveDocument", "ofdgoSaveSigned", "ofdgoImportPages"].includes(name);
 	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages" || name === "ofdgoImportDocuments";
 	const converting = name === "ofdgoConvertPDF";
 	const saving = name === "ofdgoSaveDocument" || name === "ofdgoSaveSnapshot" || name === "ofdgoSaveSigned";
@@ -222,7 +277,7 @@ async function handleMessage({ id, name, args }) {
 		}
 		const chunks = [];
 		let size = 0;
-		if (signal) {
+		if (cancellable) {
 			channel = new MessageChannel();
 			const finish = (done, err, commit = false) => {
 				channel.port1.onmessage = () => {
@@ -235,10 +290,10 @@ async function handleMessage({ id, name, args }) {
 				args.push(done => finish(done));
 			} else if (importing || converting) {
 				args.push((phase, completed, total, done) => {
-					self.postMessage({ id, type: importing ? "import" : "conversion", phase, completed, total });
+					postMessage({ id, type: importing ? "import" : "conversion", phase, completed, total });
 					finish(done, null, importing && phase === "commit");
 				});
-				if (converting) args.push((name, done) => requestFont(id, signal, name, done));
+				if (converting) args.push((name, done) => requestFont(engine, id, signal, name, done));
 			} else {
 				const destination = args.pop();
 				const file = destination?.fileHandle || destination;
@@ -263,17 +318,17 @@ async function handleMessage({ id, name, args }) {
 				});
 				if (name === "ofdgoExportDocument") {
 					args.push((completed, total, done) => {
-						self.postMessage({ id, type: "export", stage: "pages", completed, total });
+						postMessage({ id, type: "export", stage: "pages", completed, total });
 						finish(done);
 					});
 				} else if (name === "ofdgoExportVersion") {
 					args.push((phase, completed, total, done) => {
-						self.postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
+						postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
 						finish(done);
 					}, done => finish(done));
 				} else if (saving) {
 					args.push((phase, completed, total, done) => {
-						self.postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
+						postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
 						finish(done);
 					});
 					if (compression || name === "ofdgoSaveSnapshot") args.push(indices, compression || {mode: 0}, done => finish(done));
@@ -282,12 +337,12 @@ async function handleMessage({ id, name, args }) {
 				if (!saving && args.some(value => value?.mode !== undefined)) args.push(done => finish(done));
 			}
 		}
-		const payload = await globalThis[name](...args);
+		const payload = await globalThis.ofdgoEngineCall(engine.id, name, ...args);
 		signal?.throwIfAborted();
 		const result = typeof payload === "string" ? JSON.parse(payload) : payload;
-		if (signal && !importing && !converting && !resources && result.ok) {
+		if (cancellable && !importing && !converting && !resources && result.ok) {
 			result.data.size = size;
-			if (name !== "ofdgoExportMedia") self.postMessage({ id, type: "export", stage: "save" });
+			if (name !== "ofdgoExportMedia") postMessage({ id, type: "export", stage: "save" });
 			if (output) {
 				if (saveStamp) {
 					const current = await saveFile.getFile();
@@ -304,15 +359,15 @@ async function handleMessage({ id, name, args }) {
 		}
 		output = null;
 		const transfer = [...new Set([result.data?.bytes, ...(result.data?.images || []).map(image => image.bytes), ...(result.data?.fonts || []).map(font => font.data)].filter(bytes => bytes?.byteLength).map(bytes => bytes.buffer))];
-		self.postMessage({ id, ...result, memory: engineMemory.buffer.byteLength }, transfer);
+		postMessage({ id, ...result, memory: engineMemory.buffer.byteLength }, transfer);
 	} catch (err) {
 		await output?.abort().catch(() => {});
 		const result = { id, ok: false, error: err.message, errorName: err.name };
 		if (signal?.aborted) {
-			result.error = resources ? "查询已取消" : importing ? "导入已取消" : converting ? "转换已取消" : "导出已取消";
+			result.error = resources ? "查询已取消" : importing ? "导入已取消" : converting ? "转换已取消" : cancellable ? "导出已取消" : "操作已取消";
 			result.canceled = true;
 		}
-		self.postMessage(result);
+		postMessage(result);
 	} finally {
 		password?.fill(0);
 		key?.fill(0);
@@ -324,6 +379,7 @@ async function handleMessage({ id, name, args }) {
 }
 
 function exitWASM(err) {
+	rejectRuntime(err || new Error("引擎运行中断"));
 	self.postMessage({ type: "exit", error: err?.message || "引擎运行中断" });
 	self.close();
 }
@@ -335,9 +391,7 @@ async function loadWASM(module) {
 	self.postMessage({ type: "progress", phase: "start", text: "正在启动引擎", percent: 58 });
 	go.run(instance).then(exitWASM, exitWASM);
 	if (!go.exited) {
-		const backends = JSON.parse(globalThis.ofdgoRenderBackends());
-		if (!backends.ok) throw new Error(backends.error);
-		self.postMessage({ type: "ready", backends: backends.data, memory: engineMemory.buffer.byteLength });
+		resolveRuntime();
 	}
 }
 

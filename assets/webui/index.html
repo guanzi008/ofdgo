@@ -12,9 +12,14 @@
 </head>
 <body>
 	<div class="app">
+		<div id="documentTitleBar" class="document-titlebar">
+			<div id="documentTabs" class="document-tabs" role="tablist" aria-label="文件"></div>
+			<button id="documentNewTab" class="document-new-tab" type="button" title="新建标签"><span class="new-icon"></span></button>
+			<div class="document-title-drag"></div>
+		</div>
 		<header class="toolbar-frame">
 			<div class="toolbar app-bar">
-				<input id="ofdInput" class="file-input" type="file" accept=".ofd,.pdf">
+				<input id="ofdInput" class="file-input" type="file" accept=".ofd,.pdf" multiple>
 				<input id="fontInput" class="file-input" type="file" accept=".ttf,.otf,.ttc,font/*" multiple>
 				<input id="fontDirectoryInput" class="file-input" type="file" webkitdirectory multiple>
 				<div class="tool-group">

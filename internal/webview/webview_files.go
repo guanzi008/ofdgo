@@ -333,17 +333,18 @@ func (s *fileStore) resource(id string) (io.ReaderAt, int64, func() error, error
 	return file, info.Size(), file.Close, nil
 }
 
-// release 释放内存结果或临时文件并取消页面清理回调
+// release 释放读取快照、内存结果或临时文件，保留在途读取及源文件
 // 入参: id 资源标识
 func (s *fileStore) release(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if entry := s.entries[id]; entry != nil && (entry.data != nil || entry.temporary) {
+	if entry := s.entries[id]; entry != nil && (entry.data != nil || entry.temporary || entry.file != nil) {
 		delete(s.entries, id)
+		entry.retired = true
 		if entry.stop != nil {
 			entry.stop()
 		}
-		if entry.file != nil {
+		if entry.file != nil && entry.readers == 0 {
 			entry.file.Close()
 		}
 		if entry.temporary {

@@ -1,5 +1,11 @@
 let engineModule = null;
 let engineScheduler = null;
+let engineSequence = 0;
+const engineRuntimes = new Map();
+
+function requestKey(worker, data) {
+	return worker.shared ? JSON.stringify([data.engineID, data.id]) : data.id;
+}
 
 export function engineLimits() {
 	engineScheduler ||= new BrowserScheduler();
@@ -31,19 +37,20 @@ class BrowserScheduler {
 
 	send(task) {
 		const {worker, data, transfer} = task;
-		worker.requests.set(data.id, performance.now());
+		worker.requests.set(requestKey(worker, data), performance.now());
 		try { worker.worker.postMessage(data, transfer); }
 		catch (error) {
-			worker.requests.delete(data.id);
-			worker.onmessage?.({data:{id:data.id, ok:false, error:error.message}});
+			worker.requests.delete(requestKey(worker, data));
+			worker.receive({data:{engineID:data.engineID, id:data.id, ok:false, error:error.message}});
 		}
 	}
 
 	complete(worker, data) {
 		if (data.memory) worker.memory = data.memory;
 		if (data.id == null || data.type) return;
-		const started = worker.requests.get(data.id);
-		worker.requests.delete(data.id);
+		const key = requestKey(worker, data);
+		const started = worker.requests.get(key);
+		worker.requests.delete(key);
 		if (this.memory > this.budget) this.limit = Math.max(1, this.limit - 1);
 		else if (started !== undefined && data.ok && performance.now() - started > 100 && this.memory + Math.max(128 << 20, worker.memory) < this.budget) this.limit = Math.min(this.capacity, this.limit + 1);
 	}
@@ -72,7 +79,7 @@ class BrowserScheduler {
 		const index = this.queue.findIndex(task => task.worker === worker && task.data.id === id);
 		if (index < 0) return false;
 		this.queue.splice(index, 1);
-		worker.onmessage?.({data:{id, ok:false, canceled:true, error:"操作已取消"}});
+		worker.receive({data:{engineID:worker.engineID, id, ok:false, canceled:true, error:"操作已取消"}});
 		this.drain();
 		return true;
 	}
@@ -89,32 +96,63 @@ class BrowserWorker {
 	constructor(options) {
 		engineScheduler ||= new BrowserScheduler();
 		this.primary = !!options.primary;
+		this.shared = !!options.shared;
+		this.engineID = this.shared ? null : `engine-${++engineSequence}`;
+		this.sessions = new Map();
+		this.closingSessions = new Set();
 		this.batch = !options.primary && !options.page;
 		this.requests = new Map();
 		this.memory = 64 << 20;
 		this.reservation = 0;
 		this.closed = false;
-		this.worker = new Worker("./ofdgo_wasm.js");
+		this.url = String(options.url || "./ofdgo_wasm.js");
+		this.worker = new Worker(this.url);
 		engineScheduler.workers.add(this);
 		this.worker.onmessage = event => {
 			if (this.closed || event.data.type === "module") return;
 			engineScheduler.complete(this, event.data);
-			if (event.data.type === "exit") this.terminate();
-			try { this.onmessage?.(event); }
+			if (event.data.type === "exit" && (!this.shared || !event.data.engineID)) this.terminate();
+			try { this.receive(event); }
 			finally { engineScheduler.drain(); }
 		};
-		this.worker.onerror = event => { this.terminate(); this.onerror?.(event); };
-		this.worker.onmessageerror = event => { this.terminate(); this.onmessageerror?.(event); };
+		this.worker.onerror = event => { this.terminate(); this.fail("onerror", event); };
+		this.worker.onmessageerror = event => { this.terminate(); this.fail("onmessageerror", event); };
 		this.worker.addEventListener("message", event => {
 			if (event.data.type !== "module") return;
 			event.stopImmediatePropagation();
 			engineModule ||= WebAssembly.compileStreaming(fetch("./ofdgo.wasm")).catch(error => { engineModule = null; throw error; });
 			engineModule.then(module => { if (!this.closed) this.worker.postMessage({ type:"module", module }); }, error => { if (!this.closed) this.worker.postMessage({ type:"module", error:error.message }); });
 		});
+		if (!this.shared) this.worker.postMessage({type:"open", engineID:this.engineID});
+	}
+
+	receive(event) {
+		if (!event.data.engineID && !["progress", "exit"].includes(event.data.type)) return;
+		if (!this.shared) {
+			if (event.data.engineID && event.data.engineID !== this.engineID) return;
+			this.onmessage?.(event);
+			return;
+		}
+		if (event.data.type === "closed") {
+			if (!this.closingSessions.delete(event.data.engineID)) return;
+			if (!this.sessions.size && !this.closingSessions.size) this.terminate();
+			return;
+		}
+		const targets = event.data.engineID ? [this.sessions.get(event.data.engineID)] : [...this.sessions.values()];
+		for (const session of targets) session?.receive(event);
+	}
+
+	fail(name, event) {
+		if (!this.shared) { this[name]?.(event); return; }
+		for (const session of [...this.sessions.values()]) {
+			session.terminate();
+			session[name]?.(event);
+		}
 	}
 
 	postMessage(data, transfer) {
 		if (this.closed) throw new DOMException("引擎已关闭", "AbortError");
+		if (!this.shared) data = {...data, engineID:this.engineID};
 		if (data.type) {
 			if (data.type === "cancel" && engineScheduler.cancel(this, data.id)) return;
 			this.worker.postMessage(data, transfer);
@@ -124,15 +162,61 @@ class BrowserWorker {
 	terminate() {
 		if (this.closed) return;
 		this.closed = true;
+		if (engineRuntimes.get(this.url) === this) engineRuntimes.delete(this.url);
+		this.closingSessions.clear();
 		this.worker.terminate();
 		engineScheduler.remove(this);
 	}
 }
 
+class BrowserSession {
+	constructor(options) {
+		const url = String(options.url || "./ofdgo_wasm.js");
+		let runtime = engineRuntimes.get(url);
+		if (!runtime || runtime.closed) {
+			runtime = new BrowserWorker({primary:true, shared:true, url});
+			engineRuntimes.set(url, runtime);
+		}
+		this.runtime = runtime;
+		this.engineID = `engine-${++engineSequence}`;
+		this.requests = new Set();
+		this.closed = false;
+		runtime.sessions.set(this.engineID, this);
+		runtime.postMessage({type:"open", engineID:this.engineID});
+	}
+
+	receive(event) {
+		if (this.closed) return;
+		if (event.data.id != null && !event.data.type) this.requests.delete(event.data.id);
+		if (event.data.type === "exit") this.terminate();
+		this.onmessage?.(event);
+	}
+
+	postMessage(data, transfer) {
+		if (this.closed) throw new DOMException("引擎已关闭", "AbortError");
+		if (!data.type) this.requests.add(data.id);
+		this.runtime.postMessage({...data, engineID:this.engineID}, transfer);
+	}
+
+	terminate() {
+		if (this.closed) return;
+		this.closed = true;
+		this.runtime.sessions.delete(this.engineID);
+		for (const id of this.requests) this.runtime.requests.delete(requestKey(this.runtime, {engineID:this.engineID, id}));
+		this.requests.clear();
+		if (!this.runtime.closed) {
+			this.runtime.closingSessions.add(this.engineID);
+			this.runtime.postMessage({type:"close", engineID:this.engineID});
+		}
+		engineScheduler.drain();
+	}
+}
+
 export function createEngineWorker(options = {}) {
 	if (nativeHost) return nativeHost.worker();
-	if (options.pages) return new BrowserEngine();
-	return new BrowserWorker(options);
+	if (options.page || options.batch) return new BrowserWorker(options);
+	if (options.primary) return new BrowserSession(options);
+	return new BrowserEngine(options);
 }
 
 export async function documentBytes(file) {
@@ -142,8 +226,10 @@ export async function documentBytes(file) {
 }
 
 class BrowserEngine {
-	constructor() {
-		this.primary = createEngineWorker({primary:true});
+	constructor(options) {
+		this.primary = createEngineWorker({primary:true, url:options.url});
+		this.engineID = this.primary.engineID;
+		this.workerURL = options.url;
 		this.primary.onmessage = event => {
 			const data = event.data;
 			if (data.memory) this.memory = data.memory;
@@ -187,7 +273,7 @@ class BrowserEngine {
 	}
 
 	createSlot(source) {
-		const worker = createEngineWorker({page:true});
+		const worker = createEngineWorker({page:true, url:this.workerURL});
 		const slot = {worker, pending: new Map(), busy: false, memory: Math.max(128 << 20, this.memory), pages:new Set(), lastPage:0};
 		worker.reservation = slot.memory;
 		worker.reclaim = () => { if (!slot.busy) this.closeSlot(slot); };
@@ -269,7 +355,7 @@ class BrowserEngine {
 			slot.pages.delete(slot.lastPage);
 			slot.pages.add(slot.lastPage);
 			if (slot.pages.size > 16) slot.pages.delete(slot.pages.values().next().value);
-			if (!this.closed) this.onmessage?.({data: {...result, id: data.id}});
+			if (!this.closed) this.onmessage?.({data: {...result, engineID:this.engineID, id: data.id}});
 		}).catch(error => {
 			if (!this.closed && revision === this.revision && error.name !== "AbortError") {
 				this.closeSlot(slot, error);
@@ -279,7 +365,7 @@ class BrowserEngine {
 				this.primary.postMessage(data, transfer);
 				return;
 			}
-			if (!this.closed) this.onmessage?.({data: {id: data.id, ok: false, error: error.message, canceled: error.name === "AbortError"}});
+			if (!this.closed) this.onmessage?.({data: {engineID:this.engineID, id: data.id, ok: false, error: error.message, canceled: error.name === "AbortError"}});
 		}).finally(() => {
 			if (!fallback) this.requests.delete(data.id);
 			slot.busy = false;
@@ -436,14 +522,17 @@ class NativeHost {
 		let closed = false;
 		let unsubscribe;
 		let pending = Promise.resolve();
+		let termination = null;
 		const readers = new Set();
+		const inputs = new Set();
 		const requests = new Map();
 		const completions = new Map();
 		const emit = data => {
 			if (data.type === "result") { completions.get(data.id)?.(data.result); return; }
-			if (!closed) worker.onmessage?.({data});
+			if (!closed) worker.onmessage?.({data:{...data, engineID:worker.engineID}});
 		};
 		const ready = host.call("engine.open", {}).then(({engine, parallelism, cacheBytes}) => {
+			worker.engineID = engine;
 			if (closed) return engine;
 			host.parallelism = Math.max(1, parallelism || 1);
 			host.cacheBytes = cacheBytes || host.cacheBytes;
@@ -452,8 +541,10 @@ class NativeHost {
 			return engine;
 		}).catch(error => { if (!closed) worker.onerror?.({message:error.message}); throw error; });
 		const worker = {
+			engineID:null,
 			onmessage:null,
 			onerror:null,
+			configurePages() {},
 			postMessage(data) {
 				if (closed) return;
 				if (data.type === "cancel") {
@@ -461,6 +552,10 @@ class NativeHost {
 					return;
 				}
 				if (data.type === "font") return;
+				if (["ofdgoDetectFormat", "ofdgoOpen", "ofdgoConvertPDF"].includes(data.name)) {
+					const input = data.args?.[0];
+					if (input?.nativeFile && !input.temporary) inputs.add(input.nativeFile);
+				}
 				const controller = new AbortController();
 				requests.set(data.id, controller);
 				const parallel = data.name === "ofdgoRenderPage";
@@ -502,14 +597,17 @@ class NativeHost {
 				} else if (data.name !== "ofdgoSaveSnapshot") pending = operation;
 			},
 			terminate() {
-				if (closed) return;
+				if (closed) return termination;
 				closed = true;
 				for (const controller of requests.values()) controller.abort();
-				ready.then(engine => host.call("engine.close", {engine})).catch(() => {}).finally(() => {
+				termination = ready.then(engine => host.call("engine.close", {engine})).catch(() => {}).finally(async () => {
 					unsubscribe?.();
 					for (const resolve of completions.values()) resolve({ok:false, canceled:true, error:"会话已关闭"});
 					completions.clear();
+					await Promise.all([...inputs].map(file => host.call("release", {file}).catch(() => {})));
+					inputs.clear();
 				});
+				return termination;
 			},
 		};
 		ready.catch(() => {});

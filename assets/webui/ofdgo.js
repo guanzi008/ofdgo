@@ -29,14 +29,13 @@ const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "A
 const fontBinding = { font: null, choices: [], sequence: 0 };
 const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name", "SourceRow", "Source", "File", "Hint", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#fontBinding${name}`)]));
 const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Tabs", "List", "Empty", "Reference", "ReferenceGroup", "Actions", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "BindingActions", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
-const resourceManager = { kind: "Font", scope: "", views: new Map(), items: [], filteredItems: [], start: -1, end: -1, selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
+let resourceManager = createResourceManager();
 const settingsElements = Object.fromEntries(["Button", "Panel", "Form", "Title", "Tabs", "Context", "Content", "Actions", "Status"].map(name => [name, document.querySelector(`#settings${name}`)]));
-const settings = { kind: "bookmarks", locked: false, views: new Map(), sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false, invoice: false };
-const invoicePanel = { tab: "basic", views: new Map(), entries: [], formats: [], drafts: new Map(), key: "", result: null };
+let settings = createSettings();
+let invoicePanel = createInvoicePanel();
 const invoiceDocuments = new WeakMap();
 const invoiceReferenceStandard = "http://www.ofdspec.org/2016";
 
-let wasmPromise = null;
 let remoteDownload = null;
 let wasmWorker = null;
 let wasmRequestID = 0;
@@ -46,128 +45,150 @@ let credentialRequest = null;
 let documentRequest = null;
 let cancelPageTouch = null;
 
-const state = {
-	conversionWarnings: [],
-	composite: null,
-	annotationEdit: null,
-	annotationCreate: null,
-	ready: false,
-	wasmExited: false,
-	wasmSeq: 0,
-	wasmRecovering: false,
-	wasmRecoveries: 0,
-	exporting: false,
-	saving: false,
-	saveRequestID: 0,
-	signing: false,
-	signCanceled: false,
-	exportRequestID: 0,
-	editing: false,
-	selectObjects: true,
-	dirty: false,
-	editorInfo: null,
-	editorViews: new Map(),
-	savedRevision: null,
-	saveHandle: null,
-	saveStamp: null,
-	packageDirty: false,
-	encryptionDirty: false,
-	insertObject: null,
-	importPageCount: 0,
-	importDocumentCount: 0,
-	importDocumentMode: false,
-	importEncrypted: false,
-	importing: false,
-	imageImporting: false,
-	createInsert: false,
-	createPackage: false,
-	createDocumentAt: null,
-	documentManagement: null,
-	versionManagement: null,
-	infoDocumentIndex: null,
-	pageSelection: new Set(),
-	pageSelectionAnchor: null,
-	pageMultiSelect: false,
-	pageTouchPointer: null,
-	outlineSelection: null,
-	outlineSeq: 0,
-	openActionEnabled: false,
-	openActionDocument: false,
-	openActionPage: null,
-	openActionTask: null,
-	openActionFrame: 0,
-	outlineAction: "add",
-	styleOriginal: null,
-	objectClipboard: null,
-	styleClipboard: null,
-	outlineExpanded: new Map(),
-	textFonts: [],
-	textFontID: null,
-	textDefaults: { type: "TextObject", size: 16 * 25.4 / 72, color: "#000000", wrap: true, align: "left", paragraphHeight: 0, letterSpacing: 0 },
-	ofdBytes: null,
-	fileName: "ofdgo.ofd",
-	openSeq: 0,
-	pageSeq: 0,
-	searchSeq: 0,
-	searchQuery: "",
-	searchMatches: [],
-	searchIndex: -1,
-	navigationScroll: new Map(),
-	fontSyncPending: false,
-	fontCatalogLoading: false,
-	fontFacesLoading: false,
-	fontRenderPending: false,
-	fontSyncing: false,
-	doc: null,
-	pageIndex: 0,
-	pageNavigation: null,
-	scale: 1,
-	rotation: 0,
-	panMode: false,
-	pan: null,
-	fitMode: "width",
-	continuous: false,
-	pageLayoutPreference: 1,
-	get pageLayout() {
-		return this.doc?.pageCount > 1 ? this.pageLayoutPreference : 1;
-	},
-	renderAnnotations: true,
-	renderBackend: "canvas",
-	renderMode: "svg",
-	renderDPI: DEFAULT_IMAGE_DPI,
-	pageCache: new Map(),
-	mediaPlayers: new Map(),
-	svgFonts: new Map(),
-	svgFontLoads: new Map(),
-	svgImages: new Map(),
-	selectedPages: new Set(),
-	documentSelection: null,
-	pageInFlight: new Map(),
-	pageRenderQueue: [],
-	pagePrefetchIndex: null,
-	pagePrefetchDirection: 1,
-	pageRenderRunning: false,
-	pageRenderWorkers: 0,
-	pageObserver: null,
-	visiblePages: new Set(),
-	scrollFrame: 0,
-	pageWindow: null,
-	thumbnailWindow: null,
-	thumbnailFrame: 0,
-	pageDragIndex: null,
-	pageListCurrent: null,
-	thumbnailInFlight: new Set(),
-	thumbnailObserver: null,
-	visibleThumbnails: new Set(),
-	exportFormats: [],
-	exportPages: null,
-	exportBackdrop: false,
-	encryptionChanged: false,
-	showPages: !COMPACT_LAYOUT.matches,
-	showMeta: !COMPACT_LAYOUT.matches,
-};
+const workspace = { tabs: [], active: null, sequence: 0, nextID: 0, pending: null, switching: false, closing: false };
+
+function createResourceManager() {
+	return { kind: "Font", scope: "", views: new Map(), items: [], filteredItems: [], start: -1, end: -1, selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
+}
+
+function createSettings() {
+	return { kind: "bookmarks", locked: false, views: new Map(), sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false, invoice: false };
+}
+
+function createInvoicePanel() {
+	return { tab: "basic", views: new Map(), entries: [], formats: [], drafts: new Map(), key: "", result: null };
+}
+
+function createDocumentState() {
+	return {
+		conversionWarnings: [],
+		composite: null,
+		annotationEdit: null,
+		annotationCreate: null,
+		ready: false,
+		wasmExited: false,
+		wasmSeq: 0,
+		wasmRecovering: false,
+		wasmRecoveries: 0,
+		exporting: false,
+		saving: false,
+		saveRequestID: 0,
+		signing: false,
+		signCanceled: false,
+		exportRequestID: 0,
+		editing: false,
+		selectObjects: true,
+		dirty: false,
+		editorInfo: null,
+		editorViews: new Map(),
+		savedRevision: null,
+		saveHandle: null,
+		saveStamp: null,
+		packageDirty: false,
+		encryptionDirty: false,
+		insertObject: null,
+		importPageCount: 0,
+		importDocumentCount: 0,
+		importDocumentMode: false,
+		importEncrypted: false,
+		importing: false,
+		imageImporting: false,
+		createInsert: false,
+		createPackage: false,
+		createDocumentAt: null,
+		documentManagement: null,
+		versionManagement: null,
+		infoDocumentIndex: null,
+		pageSelection: new Set(),
+		pageSelectionAnchor: null,
+		pageMultiSelect: false,
+		pageTouchPointer: null,
+		outlineSelection: null,
+		outlineSeq: 0,
+		openActionEnabled: false,
+		openActionDocument: false,
+		openActionPage: null,
+		openActionTask: null,
+		openActionFrame: 0,
+		outlineAction: "add",
+		styleOriginal: null,
+		objectClipboard: null,
+		styleClipboard: null,
+		outlineExpanded: new Map(),
+		textFonts: [],
+		textFontID: null,
+		textDefaults: { type: "TextObject", size: 16 * 25.4 / 72, color: "#000000", wrap: true, align: "left", paragraphHeight: 0, letterSpacing: 0 },
+		ofdBytes: null,
+		fileName: "ofdgo.ofd",
+		openSeq: 0,
+		pageSeq: 0,
+		searchSeq: 0,
+		searchQuery: "",
+		searchMatches: [],
+		searchIndex: -1,
+		searchRunning: false,
+		navigationScroll: new Map(),
+		fontSyncPending: false,
+		fontCatalogLoading: false,
+		fontFacesLoading: false,
+		fontRenderPending: false,
+		fontSyncing: false,
+		doc: null,
+		pageIndex: 0,
+		pageNavigation: null,
+		scale: 1,
+		rotation: 0,
+		panMode: false,
+		pan: null,
+		fitMode: "width",
+		continuous: false,
+		pageLayoutPreference: 1,
+		get pageLayout() {
+			return this.doc?.pageCount > 1 ? this.pageLayoutPreference : 1;
+		},
+		renderAnnotations: true,
+		renderBackend: "canvas",
+		renderMode: "svg",
+		renderDPI: DEFAULT_IMAGE_DPI,
+		pageCache: new Map(),
+		mediaPlayers: new Map(),
+		svgFonts: new Map(),
+		svgFontLoads: new Map(),
+		svgImages: new Map(),
+		selectedPages: new Set(),
+		documentSelection: null,
+		pageInFlight: new Map(),
+		pageRenderQueue: [],
+		pagePrefetchIndex: null,
+		pagePrefetchDirection: 1,
+		pageRenderRunning: false,
+		pageRenderWorkers: 0,
+		pageObserver: null,
+		visiblePages: new Set(),
+		scrollFrame: 0,
+		pageWindow: null,
+		thumbnailWindow: null,
+		thumbnailFrame: 0,
+		pageDragIndex: null,
+		pageListCurrent: null,
+		thumbnailInFlight: new Set(),
+		thumbnailObserver: null,
+		visibleThumbnails: new Set(),
+		exportFormats: [],
+		exportPages: null,
+		exportBackdrop: false,
+		encryptionChanged: false,
+		showPages: !COMPACT_LAYOUT.matches,
+		showMeta: !COMPACT_LAYOUT.matches,
+	};
+}
+
+let state = createDocumentState();
 
 const el = {
+	documentTitleBar: document.querySelector("#documentTitleBar"),
+	documentTabs: document.querySelector("#documentTabs"),
+	documentNewTab: document.querySelector("#documentNewTab"),
 	signButton: document.querySelector("#signButton"),
 	signPanel: document.querySelector("#signPanel"),
 	signForm: document.querySelector("#signForm"),
@@ -246,6 +267,8 @@ const el = {
 	ofdButton: document.querySelector("#ofdButton"),
 	closeButton: document.querySelector("#closeButton"),
 	closePanel: document.querySelector("#closePanel"),
+	closeTitle: document.querySelector("#closePanel .form-title"),
+	closeMessage: document.querySelector("#closePanel .confirm-message"),
 	newButton: document.querySelector("#newButton"),
 	editButton: document.querySelector("#editButton"),
 	editNotice: document.querySelector("#editNotice"),
@@ -1625,7 +1648,7 @@ document.addEventListener("pointerdown", () => el.viewerPanel.classList.remove("
 el.fontAddButton.addEventListener("click", () => openFontFile(el.fontInput));
 el.fontDirectoryButton.addEventListener("click", () => openFontFile(el.fontDirectoryInput));
 el.localFontButton.addEventListener("click", loadLocalFonts);
-el.ofdInput.addEventListener("change", () => openOFD(el.ofdInput.files[0]));
+el.ofdInput.addEventListener("change", async () => { for (const file of Array.from(el.ofdInput.files)) await openOFD(file); });
 el.fontInput.addEventListener("change", openSelectedFonts);
 el.fontDirectoryInput.addEventListener("change", openSelectedFonts);
 el.prevButton.addEventListener("click", () => renderPage(pageGroupStart() - state.pageLayout));
@@ -1765,6 +1788,9 @@ document.addEventListener("visibilitychange", () => {
 el.fontDirectoryButton.disabled = !("webkitdirectory" in el.fontDirectoryInput);
 nativeHost?.installFileInputs(error => showError(error, false));
 if (nativeHost) document.title = "OFDGo - OFD编辑器";
+documentTab();
+renderDocumentTabs();
+el.documentNewTab.addEventListener("click", openEmptyDocumentTab);
 updateSidebarState();
 boot();
 
@@ -1778,6 +1804,16 @@ function handleKeyDown(event) {
 	}
 	const key = event.key;
 	const target = event.target;
+	if (nativeHost && (event.ctrlKey || event.metaKey) && (key === "Tab" || key.toLowerCase() === "w")) {
+		event.preventDefault();
+		if (document.body.hasAttribute("data-busy") || formDialogOpen()) return;
+		if (key.toLowerCase() === "w") closeFile();
+		else {
+			const count = workspace.tabs.length, index = workspace.tabs.indexOf(documentTab());
+			activateDocumentTab(workspace.tabs[(index + (event.shiftKey ? -1 : 1) + count) % count]);
+		}
+		return;
+	}
 	if ((event.ctrlKey || event.metaKey) && key.toLowerCase() === "s" && state.doc
 		&& (state.editorInfo || state.ofdBytes)) {
 		event.preventDefault();
@@ -2336,6 +2372,386 @@ function updatePageDirection() {
 	el.pagePortrait.checked = complete && !landscape;
 }
 
+function documentTab() {
+	if (!workspace.active) {
+		const tab = createDocumentTab(state);
+		tab.resources = resourceManager;
+		tab.settings = settings;
+		tab.invoice = invoicePanel;
+		workspace.tabs.push(tab);
+		workspace.active = tab;
+	}
+	return workspace.active;
+}
+
+function isForegroundDocument(tab) {
+	return !tab.closed && (workspace.pending || workspace.active) === tab;
+}
+
+function applyTitleBarInfo(info) {
+	if (!info || !info.height) return;
+	workspace.titleBarReady = true;
+	document.body.style.setProperty("--titlebar-height", `${info.height}px`);
+	el.documentTitleBar.style.setProperty("--titlebar-left", `${info.left}px`);
+	el.documentTitleBar.style.setProperty("--titlebar-right", `${info.right}px`);
+	for (const [name, value] of Object.entries(info.colors || {})) {
+		if (value) el.documentTitleBar.style.setProperty(`--titlebar-${name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`, value);
+	}
+	el.documentTitleBar.dataset.active = String(info.active);
+	el.documentTitleBar.dataset.maximized = String(info.maximized);
+	updateTitleBarRegions();
+}
+
+function updateTitleBarRegions() {
+	if (!nativeHost || !workspace.titleBarReady) return;
+	const bounds = el.documentTitleBar.querySelector(".document-title-drag").getBoundingClientRect();
+	const regions = bounds.width > 0 && bounds.height > 0 ? [{x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height}] : [];
+	workspace.dragRegions = regions;
+	if (workspace.dragUpdating) return;
+	workspace.dragUpdating = true;
+	Promise.resolve().then(async () => {
+		while (workspace.dragRegions) {
+			const regions = workspace.dragRegions;
+			workspace.dragRegions = null;
+			await nativeHost.call("window.drag", {regions});
+		}
+	}).catch(error => showError(error, false)).finally(() => {
+		workspace.dragUpdating = false;
+		if (workspace.dragRegions) updateTitleBarRegions();
+	});
+}
+
+async function closeWorkspace() {
+	if (workspace.closing) return;
+	workspace.closing = true;
+	try {
+		if (workspace.tabs.some(tab => tab.state.saving)) { setStatus("文档正在保存，请稍后关闭"); return; }
+		if (batch.running && !window.confirm("批量转换尚未完成，是否退出？")) return;
+		const dirty = workspace.tabs.some(tab => tab.state.dirty) || canvasEditor.textChanged() || canvasEditor.cropChanged() || canvasEditor.nudgeChanged();
+		if (dirty && (workspace.switching || documentRequest || document.body.hasAttribute("data-busy") || formDialogOpen())) {
+			setStatus("操作正在进行，请完成或取消后关闭");
+			return;
+		}
+		if (!dirty) {
+			await closeApplicationWindow();
+			return;
+		}
+		const count = workspace.tabs.filter(tab => tab.state.dirty || tab === workspace.active && (canvasEditor.textChanged() || canvasEditor.cropChanged() || canvasEditor.nudgeChanged())).length;
+		const action = await requestCloseAction("退出程序", `有${count}个文档尚未保存`, "保存");
+		if (action === "cancel") return;
+		if (action === "save") {
+			if (!await commitDocumentView()) return;
+			for (const tab of workspace.tabs) {
+				if (!tab.state.dirty) continue;
+				if (!await activateDocumentTab(tab, true)) return;
+				if (!await exportFile(true, null, "ofd", false) || tab.state.dirty) return;
+			}
+		}
+		await closeApplicationWindow();
+	} finally {
+		workspace.closing = false;
+	}
+}
+
+async function closeApplicationWindow() {
+	window.removeEventListener("beforeunload", warnUnsaved);
+	window.removeEventListener("beforeunload", warnBatch);
+	await nativeHost.call("window.close", {});
+}
+
+function createDocumentTab(value = createDocumentState()) {
+	return { id: ++workspace.nextID, state: value, resources: createResourceManager(), settings: createSettings(),
+		invoice: createInvoicePanel(), worker: null, promise: null, closed: false, localFonts: [], view: null, status: STATUS.ready };
+}
+
+function advanceDocumentSequence() {
+	state.openSeq = workspace.sequence = Math.max(workspace.sequence, state.openSeq) + 1;
+	return state.openSeq;
+}
+
+function copyApplicationPreferences(target) {
+	for (const key of ["pageLayoutPreference", "renderAnnotations", "renderBackend", "renderMode", "renderDPI", "showPages", "showMeta", "exportFormats"]) target[key] = state[key];
+	const { fontChoice, ...defaults } = state.textDefaults;
+	target.textDefaults = { ...defaults, ...(target.textDefaults.fontChoice ? {fontChoice: target.textDefaults.fontChoice} : {}) };
+}
+
+function renderDocumentTabs() {
+	documentTab();
+	el.documentTabs.replaceChildren();
+	for (const tab of workspace.tabs) {
+		const item = document.createElement("div");
+		item.className = "document-tab";
+		item.dataset.id = String(tab.id);
+		item.dataset.selected = String(tab === workspace.active);
+		item.setAttribute("role", "tab");
+		item.setAttribute("aria-selected", String(tab === workspace.active));
+		item.tabIndex = tab === workspace.active ? 0 : -1;
+		item.draggable = true;
+		const name = document.createElement("span");
+		name.className = "document-tab-name";
+		const title = tab.state.doc ? tab.state.fileName : "OFDGo";
+		name.textContent = `${tab.state.dirty ? "● " : ""}${title}`;
+		item.title = `${title}${tab.state.saving ? " · 正在保存" : ""}`;
+		const close = document.createElement("button");
+		close.type = "button";
+		close.className = "document-tab-close";
+		close.title = "关闭";
+		close.setAttribute("aria-label", `关闭 ${title}`);
+		const icon = document.createElement("span");
+		icon.className = "close-icon";
+		close.append(icon);
+		close.disabled = tab.state.saving || !tab.state.doc && workspace.tabs.length === 1;
+		close.addEventListener("click", async event => {
+			event.stopPropagation();
+			if (await activateDocumentTab(tab)) await closeFile();
+		});
+		item.append(name, close);
+		item.addEventListener("click", () => activateDocumentTab(tab));
+		item.addEventListener("auxclick", async event => {
+			if (event.button !== 1) return;
+			event.preventDefault();
+			if (await activateDocumentTab(tab)) await closeFile();
+		});
+		item.addEventListener("dragstart", event => {
+			if (event.target.closest("button")) { event.preventDefault(); return; }
+			event.dataTransfer.setData("application/x-ofdgo-tab", String(tab.id));
+			event.dataTransfer.effectAllowed = "move";
+		});
+		item.addEventListener("dragover", event => {
+			if (Array.from(event.dataTransfer.types).includes("application/x-ofdgo-tab")) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }
+		});
+		item.addEventListener("drop", event => {
+			const index = workspace.tabs.findIndex(value => String(value.id) === event.dataTransfer.getData("application/x-ofdgo-tab"));
+			if (index < 0) return;
+			event.preventDefault();
+			event.stopPropagation();
+			const bounds = item.getBoundingClientRect();
+			const after = event.clientX > bounds.left + bounds.width / 2;
+			const [moved] = workspace.tabs.splice(index, 1);
+			if (moved === tab) workspace.tabs.splice(index, 0, moved);
+			else workspace.tabs.splice(workspace.tabs.indexOf(tab) + Number(after), 0, moved);
+			renderDocumentTabs();
+		});
+		item.addEventListener("keydown", async event => {
+			if (!["ArrowLeft", "ArrowRight", "Home", "End", "Delete"].includes(event.key) || event.target !== item) return;
+			event.preventDefault();
+			if (event.key === "Delete") { if (await activateDocumentTab(tab)) await closeFile(); return; }
+			const index = workspace.tabs.indexOf(tab), count = workspace.tabs.length;
+			const next = event.key === "Home" ? 0 : event.key === "End" ? count - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + count) % count;
+			if (await activateDocumentTab(workspace.tabs[next])) el.documentTabs.querySelector('[data-selected="true"]')?.focus();
+		});
+		el.documentTabs.append(item);
+	}
+	el.documentTabs.querySelector('[data-selected="true"]')?.scrollIntoView({block: "nearest", inline: "nearest"});
+	updateTitleBarRegions();
+}
+
+async function commitDocumentView() {
+	return await canvasEditor.commitNudge() && await canvasEditor.commitText() && await canvasEditor.commitCrop();
+}
+
+function detachDocumentView() {
+	const tab = documentTab();
+	window.clearTimeout(wasmRecoveryTimer);
+	wasmRecoveryTimer = 0;
+	const selection = canvasEditor.selected;
+	tab.view = { anchor: state.doc ? scaleAnchor() : null, navigation: el.navigationTabs.querySelector('[data-selected="true"]'),
+		navigationTop: el.navigationContent.scrollTop, metaTop: el.metaPanel.scrollTop, tool: canvasEditor.tool,
+		selection: selection ? {index: selection.index, ids: (selection.items || [selection]).map(item => item.id)} : canvasEditor.pendingSelection,
+		richClipboard: canvasEditor.richClipboard, search: el.searchInput.value };
+	tab.view.searchStatus = state.searchRunning ? "搜索已暂停" : el.searchStatus.textContent;
+	if (state.searchRunning) {
+		state.searchQuery = "";
+		state.searchSeq++;
+		state.searchRunning = false;
+	}
+	tab.localFonts = fontManager.localFonts;
+	tab.status = documentRequest?.previousStatus || el.statusText.textContent;
+	advanceDocumentSequence();
+	state.pageSeq++;
+	if (state.scrollFrame) cancelAnimationFrame(state.scrollFrame);
+	if (state.thumbnailFrame) cancelAnimationFrame(state.thumbnailFrame);
+	if (state.openActionFrame) cancelAnimationFrame(state.openActionFrame);
+	state.scrollFrame = state.thumbnailFrame = state.openActionFrame = 0;
+	state.openActionTask = null;
+	resetPageLoading();
+	wasmWorker?.configurePages?.(null);
+	state.pageRenderRunning = state.pageRenderWorkers > 0;
+	state.pageCache.clear();
+	state.svgFontLoads.clear();
+	releasePageResources();
+	state.pageWindow = null;
+	state.thumbnailWindow = null;
+	state.visiblePages.clear();
+	state.selectedPages.clear();
+	state.documentSelection = null;
+	cancelPageTouch?.();
+	endPan();
+	clearSecurityForms();
+	if (resourceElements.Panel.open) rememberResourceView();
+	workspace.resourceView = null;
+	releaseResourcePreview();
+	resourceManager.sequence++;
+	settings.sequence++;
+	fontBinding.sequence++;
+	fontPicker.close();
+	canvasEditor.cancelNudge();
+	canvasEditor.clear();
+	canvasEditor.setTool("");
+	for (const panel of [resourceElements.Panel, settingsElements.Panel, el.closePanel, el.attachmentDialog, el.createPanel,
+		el.insertPanel, fontBindingElements.Panel, el.pagePanel, el.paragraphPanel, el.infoPanel, el.documentPanel,
+		el.versionPanel, el.annotationNote, el.annotationCreate, el.objectPicker, el.importPanel, el.batchPagesPanel,
+		el.objectStylePanel, el.objectBoundsPanel, el.outlinePanel, el.structureDialog]) panel.close();
+}
+
+function attachDocumentTab(tab) {
+	tab.configurePending ||= tab.state.renderAnnotations !== state.renderAnnotations;
+	copyApplicationPreferences(tab.state);
+	workspace.active = tab;
+	state = tab.state;
+	state.textFontID = undefined;
+	resourceManager = tab.resources;
+	settings = tab.settings;
+	invoicePanel = tab.invoice;
+	wasmWorker = tab.worker;
+	fontManager.localFonts = tab.localFonts;
+	advanceDocumentSequence();
+	el.svgHost.replaceChildren();
+	el.pageList.replaceChildren();
+	el.outlineList.replaceChildren();
+	el.annotationsList.replaceChildren();
+	el.annotationsStatus.textContent = "";
+	el.searchInput.value = tab.view?.search || "";
+	el.searchStatus.textContent = tab.view?.searchStatus || "";
+	el.searchResults.replaceChildren();
+	renderSearchResults();
+	el.ofdInput.value = "";
+	canvasEditor.richClipboard = tab.view?.richClipboard || null;
+	canvasEditor.pendingSelection = tab.view?.selection || null;
+	renderDocumentTabs();
+}
+
+async function openEmptyDocumentTab() {
+	if (workspace.closing || workspace.switching || documentRequest || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
+	const tab = createDocumentTab();
+	workspace.tabs.push(tab);
+	if (!await activateDocumentTab(tab) && workspace.active !== tab) {
+		workspace.tabs.splice(workspace.tabs.indexOf(tab), 1);
+		await releaseDocumentTab(tab);
+		renderDocumentTabs();
+	}
+}
+
+async function activateDocumentTab(tab, closing = false) {
+	if (!tab || tab.closed) return false;
+	if (workspace.closing && !closing) return false;
+	if (tab === documentTab()) return true;
+	if (workspace.switching || documentRequest || document.body.hasAttribute("data-busy") || formDialogOpen()) return false;
+	const focused = el.documentTitleBar.contains(document.activeElement);
+	workspace.switching = true;
+	try {
+		if (!await commitDocumentView()) return false;
+		detachDocumentView();
+		attachDocumentTab(tab);
+		await mountDocumentTab(tab);
+		if (focused) el.documentTabs.querySelector('[data-selected="true"]')?.focus({preventScroll: true});
+		return true;
+	} catch (error) {
+		showError(error, !state.doc);
+		return false;
+	} finally {
+		workspace.switching = false;
+	}
+}
+
+async function mountDocumentTab(tab) {
+	if (state.doc) {
+		const view = tab.view;
+		if (state.wasmExited && state.editorInfo) {
+			setEmpty("引擎中断，未保存内容无法恢复");
+			updateControls();
+			setStatus(tab.status);
+			setBusy(false);
+			return;
+		}
+		if (tab.configurePending && !state.wasmExited) {
+			setBusy(true, "正在同步文档", null);
+			state.doc = await callWASM("ofdgoConfigure", await fontManager.files(fontManager.records()), state.renderAnnotations);
+			tab.configurePending = false;
+		}
+		await openDocument({ doc: state.wasmExited ? undefined : state.doc, pageIndex: state.pageIndex, fitMode: state.fitMode || "free", scale: state.scale,
+			skipAutoFonts: true, keepSearch: true, keepCache: true, restoreTab: true, openSeq: state.openSeq });
+		tab.configurePending = false;
+		if (workspace.active !== tab) return;
+		if (view?.anchor) restoreScaleAnchor(view.anchor);
+		showNavigation(view?.navigation || el.pagesTab);
+		el.navigationContent.scrollTop = view?.navigationTop || 0;
+		el.metaPanel.scrollTop = view?.metaTop || 0;
+		canvasEditor.setTool(view?.tool || "");
+	} else {
+		renderPageList();
+		renderOutlines();
+		renderMeta();
+		el.zoomLabel.textContent = "100%";
+		setEmpty(STATUS.ready);
+	}
+	renderFontList();
+	updateFontSummary();
+	updateControls();
+	tab.controlsPending = false;
+	setStatus(tab.status);
+	setBusy(false);
+}
+
+async function adoptDocumentTab(tab, doc, options = {}) {
+	setBusy(false);
+	if (!await commitDocumentView()) return false;
+	setBusy(true);
+	const previous = documentTab();
+	const empty = !previous.state.doc && !previous.state.dirty;
+	detachDocumentView();
+	if (empty) workspace.tabs.splice(workspace.tabs.indexOf(previous), 1, tab);
+	else workspace.tabs.push(tab);
+	tab.attached = true;
+	tab.state.doc = doc;
+	attachDocumentTab(tab);
+	if (empty) await releaseDocumentTab(previous);
+	await openDocument({ ...options, doc, resetScroll: true, openSeq: state.openSeq });
+	renderDocumentTabs();
+	updateWorkspaceDirty();
+	return true;
+}
+
+async function releaseDocumentTab(tab) {
+	if (tab.closed) return;
+	tab.closed = true;
+	await markWASMExited(tab.state.wasmSeq, null, tab);
+	for (const image of tab.state.svgImages.values()) URL.revokeObjectURL(image.url);
+	for (const font of tab.state.svgFonts.values()) document.fonts.delete(font);
+	tab.state.svgImages.clear();
+	tab.state.svgFonts.clear();
+	tab.state.svgFontLoads.clear();
+	tab.state.pageCache.clear();
+	tab.state.pageInFlight.clear();
+	tab.state.editorViews.clear();
+	tab.resources.views.clear();
+	tab.settings.views.clear();
+	tab.settings.drafts.clear();
+	tab.invoice.views.clear();
+	tab.invoice.drafts.clear();
+	if (nativeHost) await nativeHost.release(tab.state.ofdBytes);
+	tab.state.ofdBytes = null;
+	tab.state.doc = null;
+	tab.localFonts = [];
+	tab.view = null;
+}
+
+function updateWorkspaceDirty() {
+	if (state.dirty || workspace.tabs.some(tab => tab.state.dirty)) window.addEventListener("beforeunload", warnUnsaved);
+	else window.removeEventListener("beforeunload", warnUnsaved);
+	renderDocumentTabs();
+}
+
 function warnUnsaved(event) {
 	event.preventDefault();
 	event.returnValue = "";
@@ -2346,188 +2762,61 @@ function setDirty(dirty) {
 		return;
 	}
 	state.dirty = dirty;
-	if (dirty) {
-		window.addEventListener("beforeunload", warnUnsaved);
-	} else {
-		window.removeEventListener("beforeunload", warnUnsaved);
+	updateWorkspaceDirty();
+}
+
+async function requestCloseAction(title, message, save) {
+	el.closeTitle.textContent = title;
+	el.closeMessage.textContent = message;
+	el.closePanel.querySelector('[value="save"]').textContent = save;
+	el.closePanel.returnValue = "cancel";
+	const choice = new Promise(resolve => el.closePanel.addEventListener("close", () => resolve(el.closePanel.returnValue), { once: true }));
+	el.closePanel.showModal();
+	try {
+		return await choice;
+	} finally {
+		el.closeTitle.textContent = "关闭文档";
+		el.closeMessage.textContent = "文档尚未保存";
 	}
 }
 
-function discardChanges() {
-	if (state.saving) return false;
-	return !state.dirty || window.confirm("文档尚未保存，放弃更改？");
-}
-
-async function closeFile() {
-	if (state.saving) return;
-	if (!state.doc || state.exporting || batch.unlocking || document.body.hasAttribute("data-busy")) return;
+async function confirmDocumentClose() {
 	let openSeq = state.openSeq;
 	if (state.dirty || canvasEditor.input || canvasEditor.nudge || canvasEditor.nudgeCommit || canvasEditor.crop) {
-		el.closePanel.querySelector('[value="save"]').textContent = state.saveHandle ? "保存" : "另存";
-		el.closePanel.returnValue = "cancel";
-		const choice = new Promise(resolve => el.closePanel.addEventListener("close", () => resolve(el.closePanel.returnValue), { once: true }));
-		el.closePanel.showModal();
-		const action = await choice;
-		if (openSeq !== state.openSeq || action === "cancel") return;
+		const action = await requestCloseAction("关闭文档", "文档尚未保存", state.saveHandle ? "保存" : "另存");
+		if (openSeq !== state.openSeq || action === "cancel") return false;
 		if (action === "save") {
-			if (!await exportFile(true, null, "ofd", false)) return;
-			if (state.dirty) return;
+			if (!await exportFile(true, null, "ofd", false)) return false;
+			if (state.dirty) return false;
 			openSeq = state.openSeq;
 		}
 	}
-	if (openSeq !== state.openSeq || batch.unlocking || state.saving || state.exporting || document.body.hasAttribute("data-busy")) return;
-	const source = state.ofdBytes;
-	resetDocumentState();
-	markWASMExited();
-	renderPageList();
-	renderOutlines();
-	renderMeta();
-	renderFontList();
-	updateFontSummary();
-	updateControls();
-	el.zoomLabel.textContent = "100%";
-	setEmpty(STATUS.ready);
-	setStatus(STATUS.ready);
-	if (nativeHost) await nativeHost.release(source);
+	return openSeq === state.openSeq && !batch.unlocking && !state.saving && !state.exporting && !document.body.hasAttribute("data-busy");
 }
 
-function resetDocumentState() {
-	clearSecurityForms();
-	state.openSeq++;
-	state.pageSeq++;
-	state.ofdBytes = null;
-	state.doc = null;
-	state.fileName = "ofdgo.ofd";
-	state.saveHandle = null;
-	state.saveStamp = null;
-	state.editing = false;
-	state.editorInfo = null;
-	state.savedRevision = null;
-	state.packageDirty = false;
-	state.encryptionDirty = false;
-	state.composite = null;
-	state.annotationEdit = null;
-	state.annotationCreate = null;
-	state.annotationSummary = null;
-	state.openActionTask = null;
-	state.openActionEnabled = false;
-	state.openActionDocument = false;
-	state.openActionPage = null;
-	if (state.openActionFrame) cancelAnimationFrame(state.openActionFrame);
-	state.openActionFrame = 0;
-	state.insertObject = null;
-	state.importPageCount = 0;
-	state.importDocumentCount = 0;
-	state.importDocumentMode = false;
-	state.importEncrypted = false;
-	state.createInsert = false;
-	state.createPackage = false;
-	state.createDocumentAt = null;
-	state.objectClipboard = null;
-	state.styleClipboard = null;
-	state.styleOriginal = null;
-	state.conversionWarnings = [];
-	state.editorViews.clear();
-	state.pageSelection.clear();
-	state.pageSelectionAnchor = null;
-	state.pageMultiSelect = false;
-	cancelPageTouch?.();
-	state.pageTouchPointer = null;
-	state.navigationScroll.clear();
-	state.outlineExpanded.clear();
-	state.outlineSelection = null;
-	state.outlineAction = "add";
-	state.outlineSeq++;
-	state.documentManagement = null;
-	state.versionManagement = null;
-	state.infoDocumentIndex = null;
-	state.pageIndex = 0;
-	state.scale = 1;
-	state.rotation = 0;
-	state.fontRenderPending = false;
-	state.textFonts = [];
-	state.textFontID = null;
-	delete state.textDefaults.fontChoice;
-	state.exportPages = null;
-	canvasEditor.richClipboard = null;
-	canvasEditor.cancelNudge();
-	canvasEditor.setTool("");
-	canvasEditor.clear();
-	setDirty(false);
-	resetSearch();
-	resetPageFlow();
-	releasePageResources();
-	if (state.scrollFrame) cancelAnimationFrame(state.scrollFrame);
-	if (state.thumbnailFrame) cancelAnimationFrame(state.thumbnailFrame);
-	state.scrollFrame = state.thumbnailFrame = 0;
-	state.pageWindow = null;
-	state.pageDragIndex = null;
-	el.svgHost.replaceChildren();
-	el.viewerPanel.classList.remove("single-page-fits-height");
-	el.annotationsList.replaceChildren();
-	el.annotationsStatus.textContent = "";
-	el.ofdInput.value = "";
-	releaseResourcePreview();
-	resourceManager.sequence++;
-	resourceManager.kind = "Font";
-	resourceManager.busy = false;
-	resourceManager.items = [];
-	resourceManager.filteredItems = [];
-	resourceManager.start = resourceManager.end = -1;
-	resourceManager.selected = null;
-	resourceManager.views.clear();
-	resourceManager.scope = "";
-	resourceManager.references = [];
-	resourceManager.referenceOffset = 0;
-	resourceManager.targets = [];
-	resourceManager.fileAction = null;
-	settings.sequence++;
-	settings.kind = "bookmarks";
-	settings.locked = false;
-	settings.busy = false;
-	settings.page = 0;
-	settings.scope = "document";
-	settings.object = "";
-	settings.path = [];
-	settings.selected = -1;
-	settings.resource = null;
-	settings.view = "";
-	settings.suspended = false;
-	settings.invoice = false;
-	settings.data = null;
-	settings.drafts.clear();
-	settings.views.clear();
-	settings.actions = [];
-	settings.baseline = {};
-	settingsElements.Content.replaceChildren();
-	settingsElements.Actions.replaceChildren();
-	settingsElements.Context.replaceChildren();
-	settingsElements.Form.inert = false;
-	settingsElements.Status.textContent = "";
-	resourceElements.List.replaceChildren();
-	resourceElements.List.style.height = "";
-	resourceElements.List.closest(".resource-list-container").scrollTop = 0;
-	resourceElements.List.inert = false;
-	resourceElements.Panel.removeAttribute("data-busy");
-	resourceElements.Reference.replaceChildren();
-	resourceElements.Page.replaceChildren();
-	resourceElements.Object.replaceChildren();
-	resourceElements.File.value = "";
-	resourceElements.Status.textContent = "";
-	invoicePanel.tab = "basic";
-	invoicePanel.entries = [];
-	invoicePanel.drafts.clear();
-	invoicePanel.views.clear();
-	invoicePanel.key = "";
-	invoicePanel.result = null;
-	fontBinding.sequence++;
-	fontBinding.font = null;
-	fontBinding.choices = [];
-	fontManager.localFonts = [];
-	for (const panel of [resourceElements.Panel, settingsElements.Panel, el.closePanel, el.attachmentDialog, el.createPanel, el.insertPanel,
-		fontBindingElements.Panel, el.pagePanel, el.paragraphPanel, el.infoPanel, el.documentPanel,
-		el.versionPanel, el.annotationNote, el.annotationCreate, el.objectPicker, el.importPanel,
-		el.batchPagesPanel, el.objectStylePanel, el.objectBoundsPanel, el.outlinePanel, el.structureDialog]) panel.close();
+async function closeFile() {
+	if (workspace.closing || workspace.switching || documentRequest || state.saving) return;
+	if (!state.doc && workspace.tabs.length === 1 || state.exporting || batch.unlocking || document.body.hasAttribute("data-busy")) return;
+	const tab = documentTab();
+	if (!await confirmDocumentClose() || tab !== workspace.active || workspace.closing || workspace.switching) return;
+	workspace.switching = true;
+	const focused = el.documentTitleBar.contains(document.activeElement);
+	setBusy(true);
+	try {
+		const index = workspace.tabs.indexOf(tab);
+		detachDocumentView();
+		workspace.tabs.splice(index, 1);
+		if (!workspace.tabs.length) workspace.tabs.push(createDocumentTab());
+		attachDocumentTab(workspace.tabs[Math.min(index, workspace.tabs.length - 1)]);
+		await releaseDocumentTab(tab);
+		await mountDocumentTab(documentTab());
+		updateWorkspaceDirty();
+		if (focused) el.documentTabs.querySelector('[data-selected="true"]')?.focus({preventScroll: true});
+		return true;
+	} finally {
+		workspace.switching = false;
+		setBusy(false);
+	}
 }
 
 function setEditorInfo(doc) {
@@ -2637,7 +2926,7 @@ async function switchReadingVersion(id) {
 	try {
 		const doc = await callWASM("ofdgoSelectVersion", id);
 		if (openSeq !== state.openSeq) return;
-		openSeq = ++state.openSeq;
+		openSeq = advanceDocumentSequence();
 		state.objectClipboard = state.styleClipboard = null;
 		canvasEditor.richClipboard = null;
 		resetCompositeScope();
@@ -2816,7 +3105,7 @@ async function switchDocument(index) {
 	try {
 		const doc = await callWASM("ofdgoSelectDocument", index);
 		if (openSeq !== state.openSeq) return;
-		openSeq = ++state.openSeq;
+		openSeq = advanceDocumentSequence();
 		const source = state.ofdBytes;
 		state.packageDirty ||= state.dirty;
 		state.savedRevision = doc.revision;
@@ -2902,7 +3191,7 @@ async function toggleEditor() {
 	try {
 		const doc = await callWASM("ofdgoEditDocument", pageIndex);
 		if (openSeq !== state.openSeq) return;
-		openSeq = ++state.openSeq;
+		openSeq = advanceDocumentSequence();
 		const source = state.ofdBytes;
 		state.savedRevision = doc.revision;
 		state.editorViews.clear();
@@ -2938,7 +3227,7 @@ function confirmTextReflow(item) {
 }
 
 function openCreatePanel(insert = false, packageDocument = false) {
-	if (state.saving && insert !== true) return;
+	if (workspace.closing || state.saving && packageDocument) return;
 	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
@@ -2996,49 +3285,63 @@ async function createDocument(event) {
 		if (await changeDocument("ofdgoImportImages", null, ...imagePageRequest(), at, "", state.renderAnnotations)) el.createPanel.close();
 		return;
 	}
-	if (document.body.hasAttribute("data-busy") || !discardChanges()) {
+	if (document.body.hasAttribute("data-busy") || documentRequest || workspace.switching || workspace.closing) {
 		return;
 	}
 	const title = el.createName.value.trim() || "未命名";
-	let openSeq = state.openSeq;
+	const openSeq = state.openSeq;
 	const images = el.createMode.value === "images";
+	const previousState = state;
+	const tab = createDocumentTab();
+	copyApplicationPreferences(tab.state);
+	tab.state.openSeq = openSeq;
+	tab.state.imageImporting = images;
+	workspace.pending = tab;
+	const request = {committing: true, previousStatus: el.statusText.textContent};
+	documentRequest = request;
+	let accepted = false;
 	state.imageImporting = images;
 	setBusy(true, "正在新建文档", null, "正在新建文档");
 	try {
-		await ensureWASM();
+		await ensureTabEngine(tab);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
 		const doc = images
-			? await callWASM("ofdgoImportImages", ...imagePageRequest(), -1, title, state.renderAnnotations)
-			: await callWASM("ofdgoCreateDocument", title, Number(el.createWidth.value), Number(el.createHeight.value), state.renderAnnotations);
+			? await callTabWASM(tab, "ofdgoImportImages", ...imagePageRequest(), -1, title, state.renderAnnotations)
+			: await callTabWASM(tab, "ofdgoCreateDocument", title, Number(el.createWidth.value), Number(el.createHeight.value), state.renderAnnotations);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const source = state.ofdBytes;
-		resetDocumentState();
-		openSeq = state.openSeq;
-		state.editing = true;
-		updateTextFonts(null, true);
-		state.selectObjects = true;
-		setPan(false);
-		state.fileName = `${title.replace(/[\\/:*?"<>|]+/g, "_").replace(/\.ofd$/i, "")}.ofd`;
-		setEditorInfo(doc);
-		el.createPanel.close();
-		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true });
-		if (nativeHost) await nativeHost.release(source);
+		tab.state.editing = true;
+		tab.state.fileName = `${title.replace(/[\\/:*?"<>|]+/g, "_").replace(/\.ofd$/i, "")}.ofd`;
+		tab.state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
+			pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
+		tab.state.dirty = true;
+		accepted = await adoptDocumentTab(tab, doc, {skipAutoFonts: true});
+		if (accepted) { updateTextFonts(null, true); updateControls(); }
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			el.createStatus.textContent = err.message;
 		}
 	} finally {
-		if (images) {
-			state.imageImporting = false;
-			state.exportRequestID = 0;
-			el.cancelExportButton.hidden = true;
-			el.createCancel.disabled = false;
+		const current = documentRequest === request;
+		if (current) {
+			documentRequest = null;
+			workspace.pending = null;
 		}
-		if (openSeq === state.openSeq) {
+		if (!accepted && !tab.attached) await releaseDocumentTab(tab);
+		if (images) {
+			previousState.imageImporting = false;
+			tab.state.imageImporting = false;
+			if (accepted || current && openSeq === state.openSeq) {
+				state.imageImporting = false;
+				state.exportRequestID = 0;
+				el.cancelExportButton.hidden = true;
+				el.createCancel.disabled = false;
+			}
+		}
+		if (accepted || current && openSeq === state.openSeq) {
 			setBusy(false);
 			updateControls();
 		}
@@ -3516,28 +3819,29 @@ function editorFonts(item) {
 }
 
 async function loadEditorFonts() {
+	const tab = documentTab(), target = tab.state;
 	const tasks = [];
 	if (!state.fontCatalogLoading && fontManager.canReadLocal() && !fontManager.catalogLoaded && fontManager.permission !== "denied") {
-		state.fontCatalogLoading = true;
+		target.fontCatalogLoading = true;
 		tasks.push((async () => {
 			try {
 				await fontManager.queryLocal();
-				refreshEditorFonts();
+				if (isForegroundDocument(tab)) refreshEditorFonts();
 			} catch (err) {
-				setStatus(err?.name === "NotAllowedError" ? "系统字体未授权" : String(err.message || err));
+				if (isForegroundDocument(tab)) setStatus(err?.name === "NotAllowedError" ? "系统字体未授权" : String(err.message || err));
 			} finally {
-				state.fontCatalogLoading = false;
+				target.fontCatalogLoading = false;
 			}
 		})());
 	}
 	if (!state.fontFacesLoading && fontManager.userFonts.some(font => font.enabled && !font.faces)) {
-		state.fontFacesLoading = true;
+		target.fontFacesLoading = true;
 		tasks.push((async () => {
 			try {
-				await fontManager.loadFaces(data => callWASM("ofdgoFontFaces", data));
-				refreshEditorFonts();
+				await fontManager.loadFaces(data => callTabWASM(tab, "ofdgoFontFaces", data));
+				if (isForegroundDocument(tab)) refreshEditorFonts();
 			} finally {
-				state.fontFacesLoading = false;
+				target.fontFacesLoading = false;
 			}
 		})());
 	}
@@ -3677,7 +3981,7 @@ async function insertObject(event) {
 		canvasEditor.pendingSelection = item ? null : { index, ids: doc.selectedIDs };
 		state.selectObjects = true;
 		setPan(false);
-		openSeq = ++state.openSeq;
+		openSeq = advanceDocumentSequence();
 		await refreshEditorPage(doc, index, openSeq);
 		if (openSeq === state.openSeq) {
 			rememberEditorView(before, revision, !item && !!state.composite);
@@ -3969,7 +4273,7 @@ async function changeDocument(name, item, ...args) {
 			}
 			state.ofdBytes = null;
 			setEditorInfo(doc);
-			openSeq = ++state.openSeq;
+			openSeq = advanceDocumentSequence();
 			await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: documentChanged, clearSelection: true,
 				pageIndex: documentChanged ? 0 : state.pageIndex, fitMode: state.fitMode, scale: state.scale });
 			if (openSeq === state.openSeq) {
@@ -4024,7 +4328,7 @@ async function changeDocument(name, item, ...args) {
 		}
 		if (scoped && name === "ofdgoOrderObjects") canvasEditor.pendingSelection = { index: item.index, ids: doc.selectedIDs };
 		if (textSelection) canvasEditor.pendingSelection = { index: item.index, ids: doc.selectedIDs || [] };
-		openSeq = ++state.openSeq;
+		openSeq = advanceDocumentSequence();
 		if (changingFont) {
 			await refreshFontBinding(doc, openSeq);
 		} else if (item || name === "ofdgoPasteObjects" || inserting || editingAnnotation) {
@@ -4221,16 +4525,14 @@ function releasePageResources() {
 }
 
 async function openOFDFile() {
-	if (state.saving) return;
 	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	if (!nativeHost && window.showOpenFilePicker) {
 		try {
-			const [handle] = await window.showOpenFilePicker({types: [{description: "OFD、PDF", accept: {"application/ofd": [".ofd"], "application/pdf": [".pdf"]}}]});
-			const file = await handle.getFile();
+			const handles = await window.showOpenFilePicker({multiple: true, types: [{description: "OFD、PDF", accept: {"application/ofd": [".ofd"], "application/pdf": [".pdf"]}}]});
 			await requestLocalFontsBeforeOpen();
-			await openOFD(file, null, handle);
+			for (const handle of handles) await openOFD(await handle.getFile(), null, handle);
 		} catch (error) { if (error.name !== "AbortError") showError(error, !state.doc); }
 		return;
 	}
@@ -4254,16 +4556,12 @@ async function openOFDFromDrop(event) {
 	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
-	if (event.dataTransfer.files.length > 1) {
-		setStatus("一次拖入一个文件");
-		return;
-	}
-	const handlePromise = event.dataTransfer.items[0]?.getAsFileSystemHandle?.();
-	const file = event.dataTransfer.files[0];
-	if (file && isDocumentFile(file)) {
+	const files = Array.from(event.dataTransfer.files);
+	const handles = Array.from(event.dataTransfer.items).map(item => item.getAsFileSystemHandle?.().catch(() => null));
+	if (files.some(isDocumentFile)) {
 		await requestLocalFontsBeforeOpen();
 	}
-	await openOFD(file, null, await handlePromise?.catch(() => null));
+	for (let index = 0; index < files.length; index++) await openOFD(files[index], null, await handles[index]);
 }
 
 function openFontFile(input) {
@@ -4369,11 +4667,17 @@ async function boot() {
 					return;
 				}
 				opening = opening.then(async () => {
-					await openOFD(await files[0].getFile(), null, files[0]);
+					for (const file of files) await openOFD(await file.getFile(), null, file);
 				}).catch((err) => showError(err, !state.doc));
 			});
 		}
-		if (nativeHost) await nativeHost.start(openNativeFiles, error => showError(error, !state.doc));
+		if (nativeHost) {
+			nativeHost.bridge.on("ofdgo.window", applyTitleBarInfo);
+			nativeHost.bridge.on("ofdgo.closing", closeWorkspace);
+			applyTitleBarInfo(await nativeHost.call("window.info", {}));
+			new ResizeObserver(updateTitleBarRegions).observe(el.documentTitleBar);
+			await nativeHost.start(openNativeFiles, error => showError(error, !state.doc));
+		}
 		try {
 			const remote = remoteDocumentOptions(window.location.hash);
 			if (remote && openSeq === state.openSeq) await openOFD({ name: remote.name }, remote);
@@ -4397,9 +4701,9 @@ async function openNativeFiles(files) {
 		if (batchElements.Panel.open) {
 			retained = files.filter(isDocumentFile);
 			addBatchFiles(files);
-		} else if (files.length === 1) {
-			if (await openOFD(files[0])) retained = files;
-		} else if (files.length) setStatus("请选择一个文档");
+		} else {
+			for (const file of files) if (await openOFD(file)) retained.push(file);
+		}
 	} finally {
 		await nativeHost.discardFiles(files.filter(file => !retained.includes(file)));
 	}
@@ -4563,19 +4867,24 @@ async function refreshApplication() {
 	if (nativeHost || state.exporting || document.body.hasAttribute("data-busy")) {
 		return;
 	}
+	if (workspace.tabs.some(tab => tab.state.saving)) {
+		setStatus("文档正在保存，请稍后更新");
+		return;
+	}
 	if (!navigator.onLine) {
 		setStatus("离线，联网后重试");
 		return;
 	}
 	const temporaryFonts = fontManager.userFonts.some((font) => font.source === "upload");
-	const message = [state.dirty ? "文档尚未保存，刷新将丢失更改" : "刷新后需重新打开文件", temporaryFonts ? "未保存字体需重新添加" : ""].filter(Boolean).join("\n");
-	if ((state.ofdBytes || state.doc || temporaryFonts) && !window.confirm(message)) {
+	const dirty = state.dirty || workspace.tabs.some(tab => tab.state.dirty);
+	const message = [dirty ? "文档尚未保存，刷新将丢失更改" : "刷新后需重新打开文件", temporaryFonts ? "未保存字体需重新添加" : ""].filter(Boolean).join("\n");
+	if ((workspace.tabs.some(tab => tab.state.doc || tab.state.ofdBytes) || temporaryFonts) && !window.confirm(message)) {
 		return;
 	}
 	setBusy(true, "正在更新应用", null, "正在更新应用");
 	el.refreshAppButton.disabled = true;
 	el.refreshAppButton.textContent = "更新";
-	const panels = document.querySelectorAll(".toolbar-frame, .workspace");
+	const panels = document.querySelectorAll(".document-titlebar, .toolbar-frame, .workspace");
 	panels.forEach((panel) => { panel.inert = true; });
 	try {
 		if (navigator.storage?.persist) {
@@ -4634,52 +4943,61 @@ async function loadExportFormats() {
 }
 
 async function ensureWASM() {
-	if (state.ready && !state.wasmExited) {
-		return;
-	}
-	if (!wasmPromise) {
-		wasmPromise = loadWASM().finally(() => {
-			wasmPromise = null;
-		});
-	}
-	await wasmPromise;
+	return ensureTabEngine(documentTab());
 }
 
-async function loadWASM() {
+async function ensureTabEngine(tab) {
+	if (tab.closed) throw new Error("文档已关闭");
+	if (tab.state.ready && !tab.state.wasmExited) {
+		return;
+	}
+	if (!tab.promise) {
+		tab.promise = loadWASM(tab).finally(() => {
+			tab.promise = null;
+		});
+	}
+	await tab.promise;
+}
+
+async function loadWASM(tab = documentTab()) {
+	const state = tab.state;
 	const wasmSeq = state.wasmSeq + 1;
 	state.wasmSeq = wasmSeq;
 	state.ready = false;
 	state.wasmExited = false;
 	await new Promise((resolve, reject) => {
+		tab.rejectLoad = reject;
 		const worker = createEngineWorker({pages: true});
-		wasmWorker = worker;
+		tab.worker = worker;
+		if (workspace.active === tab) wasmWorker = worker;
 		const fail = (err) => {
-			markWASMExited(wasmSeq, err);
+			markWASMExited(wasmSeq, err, tab);
 			reject(err);
 		};
 		worker.onerror = (event) => fail(new Error(event.message || "引擎加载失败"));
 		worker.onmessageerror = () => fail(new Error("引擎通信失败"));
 		worker.onmessage = async ({ data }) => {
-			if (worker !== wasmWorker) {
+			if (worker !== tab.worker || tab.closed) {
 				return;
 			}
+			const visible = isForegroundDocument(tab);
 			if (data.type === "font") {
 				try {
 					const request = wasmRequests.get(data.id);
 					const font = request?.localFonts?.get(data.name);
-					if (!font || request.openSeq !== state.openSeq) throw new Error("系统字体不可用");
+					if (!font || request.tab !== tab) throw new Error("系统字体不可用");
 					if (!request.fontData.has(font)) request.fontData.set(font, fontManager.read(font));
 					const bytes = await request.fontData.get(font);
-					if (worker === wasmWorker) worker.postMessage({ type: "font", request: data.request, bytes });
+					if (worker === tab.worker) worker.postMessage({ type: "font", request: data.request, bytes });
 				} catch (err) {
-					if (worker === wasmWorker) worker.postMessage({ type: "font", request: data.request, error: err.message });
+					if (worker === tab.worker) worker.postMessage({ type: "font", request: data.request, error: err.message });
 				}
 				return;
 			}
 			if (data.type === "progress") {
-				setProgress(data.text, data.percent);
+				if (visible) setProgress(data.text, data.percent);
 			} else if (data.type === "conversion") {
-				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && !el.cancelExportButton.disabled) {
+				if (visible && wasmRequests.get(data.id)?.openSeq === state.openSeq && !el.cancelExportButton.disabled) {
 					if (data.phase === "open") setProgress("正在读取文档", null);
 					else if (data.phase === "pages") setProgress(data.completed ? `正在整理页面 · ${data.completed} 页` : "正在整理页面", null);
 					else if (data.phase === "convert") setProgress(`正在转换页面 · ${data.completed} / ${data.total} 页`, data.total ? 28 + data.completed / data.total * 22 : null);
@@ -4688,10 +5006,10 @@ async function loadWASM() {
 				}
 			} else if (data.type === "export") {
 				if (data.id === state.saveRequestID && state.saving && !state.exporting) {
-					if (data.stage === "save") el.cancelExportButton.disabled = true;
+					if (visible && data.stage === "save") el.cancelExportButton.disabled = true;
 					return;
 				}
-				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.exporting) {
+				if (visible && wasmRequests.get(data.id)?.openSeq === state.openSeq && state.exporting) {
 					if (data.stage === "save") {
 						el.cancelExportButton.disabled = true;
 						if (state.signing) el.signCancel.disabled = true;
@@ -4708,14 +5026,14 @@ async function loadWASM() {
 					}
 				}
 			} else if (data.type === "import") {
-				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.imageImporting) {
+				if (visible && wasmRequests.get(data.id)?.openSeq === state.openSeq && state.imageImporting) {
 					const text = data.phase === "commit" ? "正在完成导入" : `正在导入图片 · ${data.completed} / ${data.total} 张`;
 					el.createStatus.textContent = text;
 					setProgress(text, data.total ? data.completed / data.total * 100 : null);
 					if (data.phase === "commit") el.createCancel.disabled = el.cancelExportButton.disabled = true;
 					return;
 				}
-				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.importing && !el.importCancel.disabled) {
+				if (visible && wasmRequests.get(data.id)?.openSeq === state.openSeq && state.importing && !el.importCancel.disabled) {
 					const label = { ids: "正在检查标识", documents: "正在导入文档", pages: "正在导入页面", resources: "正在读取资源", commit: "正在完成导入" }[data.phase] || "正在导入文档";
 					el.importStatus.textContent = data.total ? `${label} · ${data.completed} / ${data.total}${state.importDocumentMode ? "" : " 页"}` : label;
 					setProgress(label, data.total ? data.completed / data.total * 100 : null);
@@ -4723,11 +5041,13 @@ async function loadWASM() {
 				}
 			} else if (data.type === "ready") {
 				state.ready = true;
+				tab.rejectLoad = null;
 				resolve();
 			} else if (data.type === "exit") {
 				fail(new Error(data.error));
 			} else {
 				const request = wasmRequests.get(data.id);
+				if (!request || request.tab !== tab) return;
 				wasmRequests.delete(data.id);
 				if (data.ok) {
 					request.resolve(data.data);
@@ -4746,41 +5066,52 @@ async function loadWASM() {
 	});
 }
 
-function markWASMExited(wasmSeq = state.wasmSeq, err) {
+function markWASMExited(wasmSeq = state.wasmSeq, err, tab = documentTab()) {
+	const state = tab.state;
 	if (wasmSeq !== state.wasmSeq) {
 		return;
 	}
 	state.ready = false;
-	clearSecurityForms();
+	tab.rejectLoad?.(err || new Error("引擎运行中断"));
+	tab.rejectLoad = null;
+	if (isForegroundDocument(tab)) clearSecurityForms();
 	state.wasmExited = true;
-	wasmWorker?.terminate();
-	wasmWorker = null;
-	for (const request of wasmRequests.values()) {
+	if (err) tab.status = state.editorInfo ? "引擎中断，未保存内容无法恢复" : "引擎运行中断";
+	const stopped = tab.worker?.terminate();
+	tab.worker = null;
+	if (workspace.active === tab) wasmWorker = null;
+	for (const [id, request] of wasmRequests) {
+		if (request.tab !== tab) continue;
+		wasmRequests.delete(id);
 		request.reject(err || new Error("引擎运行中断"));
 	}
-	wasmRequests.clear();
+	if (!isForegroundDocument(tab) || workspace.active !== tab) return stopped;
 	if (err) {
-		setStatus(state.editorInfo ? "引擎中断，未保存内容无法恢复" : "引擎运行中断");
+		setStatus(tab.status);
 	}
 	updateControls();
 	scheduleWASMRecovery();
+	return stopped;
 }
 
 function scheduleWASMRecovery() {
-	if (!state.ofdBytes || state.wasmRecovering || state.wasmRecoveries >= 2) {
+	if (!state.ofdBytes || state.editorInfo || state.wasmRecovering || state.wasmRecoveries >= 2) {
 		return;
 	}
+	const tab = documentTab();
 	window.clearTimeout(wasmRecoveryTimer);
-	wasmRecoveryTimer = window.setTimeout(recoverWASM, 0);
+	wasmRecoveryTimer = window.setTimeout(() => {
+		if (workspace.active === tab && !workspace.pending && !workspace.switching) recoverWASM();
+	}, 0);
 }
 
 async function recoverWASM() {
-	if (state.wasmRecovering || !state.ofdBytes) {
+	if (!state.wasmExited || state.editorInfo || state.wasmRecovering || !state.ofdBytes) {
 		return;
 	}
 	state.wasmRecovering = true;
 	state.wasmRecoveries += 1;
-	const openSeq = ++state.openSeq;
+	const openSeq = advanceDocumentSequence();
 	setBusy(true, "正在恢复引擎", 18, STATUS.recovering);
 	try {
 		await openDocument({
@@ -4865,7 +5196,7 @@ async function downloadRemoteDocument(options) {
 }
 
 async function openOFD(file, remote = null, handle = file?.handle) {
-	if (state.saving || state.exporting || documentRequest?.committing || !documentRequest && document.body.hasAttribute("data-busy")) return;
+	if (workspace.closing || state.exporting || workspace.switching || documentRequest?.committing || !documentRequest && document.body.hasAttribute("data-busy")) return;
 	if (!file) {
 		return;
 	}
@@ -4874,26 +5205,29 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 		showError(new Error("选择 OFD、PDF 文件"), !state.doc);
 		return;
 	}
-	if (!discardChanges()) {
-		return;
-	}
 	remoteDownload?.abort();
-	state.wasmRecoveries = 0;
-	let openSeq = state.openSeq;
-	const request = {committing: false};
+	const openSeq = state.openSeq;
+	const tab = createDocumentTab();
+	copyApplicationPreferences(tab.state);
+	tab.state.openSeq = openSeq;
+	const request = {committing: false, previousStatus: documentRequest?.previousStatus || el.statusText.textContent};
 	documentRequest = request;
+	workspace.pending = tab;
 	const current = () => documentRequest === request && openSeq === state.openSeq;
 	setBusy(true, "正在读取文档", 10, STATUS.opening);
 	let accepted = false;
+	let originalSource = null;
 	try {
 		const downloaded = remote ? await downloadRemoteDocument(remote) : null;
 		if (!current()) return;
-		await ensureWASM();
+		await ensureTabEngine(tab);
 		if (!current()) return;
 		const source = downloaded ? downloaded.file : file;
-		const format = await callWASM("ofdgoDetectFormat", source);
+		const format = await callTabWASM(tab, "ofdgoDetectFormat", source);
 		if (!current()) return;
 		let bytes = await documentBytes(source);
+		originalSource = bytes;
+		tab.state.ofdBytes = bytes;
 		const name = (downloaded ? downloaded.name : file.name) || `ofdgo.${format}`;
 		let warnings = [];
 		let convertedDoc;
@@ -4903,39 +5237,33 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 		request.committing = true;
 		if (format === "pdf") {
 			setProgress("正在转换文档", 25);
-			await ensureWASM();
+			await ensureTabEngine(tab);
 			if (!current()) return;
 			let converted;
 			try {
-				converted = await openWithCredentials(await fontManager.files(fontManager.records()), openSeq, bytes, false, true);
+				converted = await openWithCredentials(await fontManager.files(fontManager.records()), openSeq, bytes, false, true, tab);
 			} finally {
 				if (current()) {
-					state.exportRequestID = 0;
+					tab.state.exportRequestID = 0;
 					el.cancelExportButton.hidden = true;
 				}
 			}
 			if (!current()) return;
 			bytes = converted.bytes;
+			tab.state.ofdBytes = bytes;
 			convertedDoc = converted.doc;
 			warnings = JSON.parse(converted.warnings || "null") || [];
 		}
-		await ensureWASM();
+		await ensureTabEngine(tab);
 		if (!current()) return;
-		const doc = convertedDoc || await openWithCredentials(await fontManager.files(fontManager.userFonts), openSeq, bytes);
+		const doc = convertedDoc || await openWithCredentials(await fontManager.files(fontManager.userFonts), openSeq, bytes, false, false, tab);
 		if (!current()) return;
-		const previousSource = state.ofdBytes;
-		resetDocumentState();
-		openSeq = state.openSeq;
-		state.ofdBytes = bytes;
-		state.saveHandle = format === "ofd" && !remote ? handle || null : null;
-		accepted = true;
-		state.saveStamp = state.saveHandle && !nativeHost ? {size: file.size, modified: file.lastModified} : null;
-		state.conversionWarnings = warnings;
-		state.fileName = (name || "ofdgo.ofd").replace(/\.pdf$/i, ".ofd");
-		if (remote && !/\.ofd$/i.test(state.fileName)) state.fileName += ".ofd";
-		updateControls();
-		await openDocument({ doc, pageIndex: remote?.pageIndex || 0, resetScroll: true, openSeq, activateActions: true });
-		if (nativeHost && previousSource !== bytes) await nativeHost.release(previousSource);
+		tab.state.saveHandle = format === "ofd" && !remote ? handle || null : null;
+		tab.state.saveStamp = tab.state.saveHandle && !nativeHost ? {size: file.size, modified: file.lastModified} : null;
+		tab.state.conversionWarnings = warnings;
+		tab.state.fileName = (name || "ofdgo.ofd").replace(/\.pdf$/i, ".ofd");
+		if (remote && !/\.ofd$/i.test(tab.state.fileName)) tab.state.fileName += ".ofd";
+		accepted = await adoptDocumentTab(tab, doc, {pageIndex: remote?.pageIndex || 0, activateActions: true});
 	} catch (err) {
 		if (current()) {
 			if (err.name === "AbortError") setStatus("打开已取消");
@@ -4943,7 +5271,20 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 			setBusy(false);
 		}
 	} finally {
-		if (documentRequest === request) documentRequest = null;
+		if (documentRequest === request) {
+			documentRequest = null;
+			workspace.pending = null;
+			setBusy(false);
+			if (documentTab().controlsPending) {
+				updateControls();
+				documentTab().controlsPending = false;
+			}
+			if (state.wasmExited) scheduleWASMRecovery();
+		}
+		accepted ||= Boolean(tab.attached);
+		const source = tab.state.ofdBytes;
+		if (!accepted) await releaseDocumentTab(tab);
+		if (nativeHost && originalSource !== source) await nativeHost.release(originalSource);
 	}
 	return accepted;
 }
@@ -5136,6 +5477,7 @@ function updateFontSummary() {
 }
 
 async function applyFontChange() {
+	for (const tab of workspace.tabs) if (tab !== documentTab()) tab.configurePending = true;
 	updateFontSummary();
 	renderFontList();
 	if (!state.doc) {
@@ -5407,7 +5749,8 @@ function requestCredentials(code, openSeq, pdf = false) {
 	});
 }
 
-async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, importing = false, pdf = false) {
+async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, importing = false, pdf = false, tab = documentTab()) {
+	const callWASM = (name, ...args) => callTabWASM(tab, name, ...args);
 	let credentials = null;
 	try {
 		while (openSeq === state.openSeq) {
@@ -5456,7 +5799,7 @@ async function openDocument(options = {}) {
 	if (!state.ofdBytes && !state.editorInfo) {
 		return;
 	}
-	const openSeq = options.openSeq || (state.openSeq += 1);
+	const openSeq = options.openSeq || advanceDocumentSequence();
 	const previewPosition = options.previewScroll && state.pageWindow ? pageWindowAnchor(state.pageWindow) : null;
 	const viewport = options.keepPreview ? el.viewerPanel.getBoundingClientRect() : null;
 	const previewIDs = viewport ? [...state.visiblePages].filter((index) => {
@@ -5558,10 +5901,10 @@ async function openDocument(options = {}) {
 		}
 		if (options.clearSelection) canvasEditor.clear();
 		if (options.selection) canvasEditor.pendingSelection = options.selection;
-		resetPageFlow(options.keepPreview);
+		resetPageFlow(options.keepPreview || options.keepCache);
 		renderPageList();
 		if (options.keepPreview || options.resetScroll || el.outlineList.childElementCount === 0) {
-			renderOutlines(!options.keepPreview);
+			renderOutlines(!options.keepPreview && !options.restoreTab);
 		}
 		renderMeta(options.keepPreview);
 		renderPageFlow();
@@ -7500,7 +7843,7 @@ function renderResourceTabs() {
 }
 
 function rememberResourceView() {
-	if (!resourceManager.scope) return;
+	if (!resourceManager.scope || workspace.resourceView !== resourceManager) return;
 	resourceManager.views.set(resourceManager.kind, {selected: resourceManager.selected?.id,
 		scroll: resourceElements.List.closest(".resource-list-container").scrollTop,
 		reference: Number(resourceElements.Reference.value), page: resourceElements.Page.value, object: resourceElements.Object.value});
@@ -7508,26 +7851,30 @@ function rememberResourceView() {
 
 async function resourceTask(action, delay = 0) {
 	if (resourceManager.busy) return;
-	resourceManager.busy = true;
+	const manager = resourceManager;
+	const current = () => manager === resourceManager;
+	manager.busy = true;
 	resourceElements.List.inert = !delay;
 	updateResourceControls();
 	const showBusy = () => {
-		resourceElements.Status.textContent = "处理中";
+		if (current()) resourceElements.Status.textContent = "处理中";
 	};
 	const timer = delay ? setTimeout(showBusy, delay) : null;
 	if (!delay) showBusy();
 	resourceElements.Panel.setAttribute("data-busy", "true");
 	try {
 		await action();
-		if (resourceElements.Status.textContent === "处理中") resourceElements.Status.textContent = "";
+		if (current() && resourceElements.Status.textContent === "处理中") resourceElements.Status.textContent = "";
 	} catch (err) {
-		resourceElements.Status.textContent = resourceError(err.message);
+		if (current()) resourceElements.Status.textContent = resourceError(err.message);
 	} finally {
 		if (timer !== null) clearTimeout(timer);
-		resourceManager.busy = false;
-		resourceElements.List.inert = false;
-		resourceElements.Panel.removeAttribute("data-busy");
-		updateResourceControls();
+		manager.busy = false;
+		if (current()) {
+			resourceElements.List.inert = false;
+			resourceElements.Panel.removeAttribute("data-busy");
+			updateResourceControls();
+		}
 	}
 }
 
@@ -7542,7 +7889,8 @@ function resourceError(message) {
 
 async function loadManagedResources() {
 	const sequence = state.openSeq;
-	const scope = JSON.stringify([sequence, state.doc.documentIndex || 0, state.doc.documentVersion || ""]);
+	const manager = resourceManager;
+	const scope = JSON.stringify([documentTab().id, state.doc.documentIndex || 0, state.doc.documentVersion || "", state.editing]);
 	if (resourceManager.scope === scope) rememberResourceView();
 	else {
 		resourceManager.views.clear();
@@ -7551,8 +7899,9 @@ async function loadManagedResources() {
 	}
 	let items;
 	try { items = await callWASM("ofdgoResources"); }
-	finally { resourceManager.requestID = 0; }
+	finally { manager.requestID = 0; }
 	if (sequence !== state.openSeq || !resourceElements.Panel.open) return;
+	workspace.resourceView = manager;
 	resourceManager.items = items || [];
 	await renderResourceList();
 }
@@ -8575,7 +8924,7 @@ function batchCall(slot, name, args, onProgress) {
 
 function startBatchWorker() {
 	return new Promise((resolve, reject) => {
-		const worker = createEngineWorker();
+		const worker = createEngineWorker({batch: true});
 		const slot = { worker, error: null };
 		batch.workers.add(slot);
 		const fail = async error => {
@@ -8821,6 +9170,11 @@ function compressionOptions(value) {
 }
 
 async function exportFile(whole, indices = null, value = el.exportFormat.value, saveAs = true) {
+	const tab = documentTab();
+	const state = tab.state;
+	const callWASM = (name, ...args) => callTabWASM(tab, name, ...args);
+	const active = () => isForegroundDocument(tab);
+	if (!active()) return;
 	if (!state.doc || state.saving || state.exporting || document.body.hasAttribute("data-busy")) {
 		return;
 	}
@@ -8849,6 +9203,8 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 	let retrySaveAs = false;
 	let background = false;
 	let savedRevision = null;
+	let packageDirty = false;
+	let encryptionDirty = false;
 	let snapshotPrepared = false;
 	state.exporting = true;
 	state.saving = saving && indices === null;
@@ -8874,14 +9230,17 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			suggestedName: fileName,
 			types: [{ description: label, accept: { [mime]: [`.${extension}`] } }],
 		}) : null;
-		if (openSeq !== state.openSeq) {
+		if (!active() || openSeq !== state.openSeq) {
 			return;
 		}
 		if (canvasEditor.input || canvasEditor.crop || canvasEditor.nudge || canvasEditor.nudgeCommit) {
 			setBusy(false);
 			if (!await canvasEditor.commitNudge()) return;
+			if (!active()) return;
 			if (!await canvasEditor.commitText()) return;
+			if (!active()) return;
 			if (!await canvasEditor.commitCrop()) return;
+			if (!active()) return;
 			openSeq = state.openSeq;
 			setBusy(true, "正在生成文件", null, status);
 		}
@@ -8889,19 +9248,24 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 		const destination = !nativeHost && file && file === state.saveHandle && state.saveStamp ? {fileHandle: file, saveStamp: state.saveStamp} : file;
 		if (saving && indices === null && !readingSave) {
 			snapshotPrepared = true;
-			await callWASM("ofdgoPrepareSave");
 			savedRevision = state.editorInfo?.revision;
+			packageDirty = state.packageDirty;
+			encryptionDirty = state.encryptionDirty;
+			await callWASM("ofdgoPrepareSave");
+			if (!active() || openSeq !== state.openSeq || wasmSeq !== state.wasmSeq) return;
 			background = true;
-			state.exporting = false;
-			setBusy(false);
-			updateControls();
+			if (background) {
+				state.exporting = false;
+				setBusy(false);
+				updateControls();
+			}
 		}
 		const result = readingSave
 			? { label: "OFD", size: state.ofdBytes.size ?? state.ofdBytes.byteLength, mime, blob: state.ofdBytes }
-			: saving ? await callWASM(background ? "ofdgoSaveSnapshot" : "ofdgoSaveDocument", indices, ...outputOptions, destination) : whole
+			: saving ? await callWASM(snapshotPrepared ? "ofdgoSaveSnapshot" : "ofdgoSaveDocument", indices, ...outputOptions, destination) : whole
 			? await callWASM("ofdgoExportDocument", format.value, dpi, indices, state.renderBackend, ...outputOptions, file)
 			: await callWASM("ofdgoExportPage", pageIndex, format.value, dpi, state.renderBackend, ...outputOptions, file);
-		if ((!background && openSeq !== state.openSeq) || wasmSeq !== state.wasmSeq) {
+		if (tab.closed || (!background && (!active() || openSeq !== state.openSeq)) || wasmSeq !== state.wasmSeq) {
 			return;
 		}
 		if (readingSave && file) {
@@ -8923,10 +9287,14 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			downloadBytes(result.blob, result.mime, fileName);
 		}
 		if (saving && indices === null && state.editorInfo && file) {
-			state.savedRevision = background ? savedRevision : state.editorInfo.revision;
-			state.packageDirty = false;
-			state.encryptionDirty = false;
-			updatePendingChanges();
+			state.savedRevision = snapshotPrepared ? savedRevision : state.editorInfo.revision;
+			if (!snapshotPrepared || state.editorInfo.revision === savedRevision) {
+				if (!snapshotPrepared || state.packageDirty === packageDirty) state.packageDirty = false;
+				if (!snapshotPrepared || state.encryptionDirty === encryptionDirty) state.encryptionDirty = false;
+			}
+			state.dirty = state.packageDirty || state.encryptionDirty || state.editorInfo.revision !== state.savedRevision;
+			if (workspace.active === tab) updatePendingChanges();
+			updateWorkspaceDirty();
 		}
 		if (saving && indices === null && file) {
 			state.saveHandle = file;
@@ -8938,20 +9306,24 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 					state.saveStamp = {size: current.size, modified: current.lastModified};
 				} catch { state.saveHandle = null; }
 			}
-			document.title = `${nativeHost ? "OFDGo" : "OFDGo WebUI"} - ${state.fileName}`;
-			el.metaFile.textContent = state.fileName;
+			if (active()) {
+				document.title = `${nativeHost ? "OFDGo" : "OFDGo WebUI"} - ${state.fileName}`;
+				el.metaFile.textContent = state.fileName;
+			}
 		}
-		setStatus(`${result.label}已${action}（${formatBytes(result.size)}）`);
+		tab.status = `${result.label}已${action}（${formatBytes(result.size)}）`;
+		if (active()) setStatus(tab.status);
 		return true;
 	} catch (err) {
-		retrySaveAs = saving && !saveAs && !nativeHost && !!state.saveHandle && ["NotAllowedError", "SecurityError"].includes(err.name);
-		if ((background || openSeq === state.openSeq) && wasmSeq === state.wasmSeq && !retrySaveAs) {
+		const permissionDenied = saving && !saveAs && !nativeHost && !!state.saveHandle && ["NotAllowedError", "SecurityError"].includes(err.name);
+		retrySaveAs = active() && permissionDenied;
+		if (!tab.closed && (background || openSeq === state.openSeq) && wasmSeq === state.wasmSeq) {
 			const canceled = `${action}已取消`;
-			if (el.batchPagesPanel.open) el.batchPagesStatus.textContent = err.name === "AbortError" ? canceled : err.message;
-			if (err.name === "AbortError") {
-				setStatus(canceled);
-			} else {
-				showError(err, false);
+			tab.status = permissionDenied ? "保存权限不足，请切回文档后另存" : err.name === "AbortError" ? canceled : err.message;
+			if (active() && !retrySaveAs) {
+				if (el.batchPagesPanel.open) el.batchPagesStatus.textContent = tab.status;
+				if (err.name === "AbortError") setStatus(tab.status);
+				else showError(err, false);
 			}
 		}
 	} finally {
@@ -8962,14 +9334,18 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			state.exporting = false;
 			state.exportRequestID = 0;
 		}
-		el.cancelExportButton.hidden = !state.exportRequestID;
-		if (!document.body.hasAttribute("data-busy")) el.progressPanel.hidden = true;
-		if ((background || openSeq === state.openSeq) && wasmSeq === state.wasmSeq) {
-			if (!background) setBusy(false);
-			updateControls();
-		}
+		if (active()) {
+			el.cancelExportButton.hidden = !state.exportRequestID;
+			if (!document.body.hasAttribute("data-busy")) el.progressPanel.hidden = true;
+			if ((background || openSeq === state.openSeq) && wasmSeq === state.wasmSeq) {
+				if (!background) setBusy(false);
+				updateControls();
+			}
+		} else if (workspace.active === tab) tab.controlsPending = true;
+		updateWorkspaceDirty();
+		renderDocumentTabs();
 	}
-	if (retrySaveAs && (background || openSeq === state.openSeq) && wasmSeq === state.wasmSeq) return exportFile(whole, indices, value, true);
+	if (retrySaveAs && active() && (background || openSeq === state.openSeq) && wasmSeq === state.wasmSeq) return exportFile(whole, indices, value, true);
 }
 
 function cancelExport() {
@@ -8977,7 +9353,9 @@ function cancelExport() {
 		remoteDownload.abort();
 		return;
 	}
-	const requestID = state.exportRequestID || state.saveRequestID;
+	const tab = workspace.pending || documentTab();
+	const target = tab.state;
+	const requestID = target.exportRequestID || target.saveRequestID;
 	if (!requestID || el.cancelExportButton.disabled) {
 		return;
 	}
@@ -8990,7 +9368,7 @@ function cancelExport() {
 		el.importStatus.textContent = "正在取消操作";
 	}
 	setProgress("正在取消操作", null);
-	wasmWorker.postMessage({ type: "cancel", id: requestID });
+	tab.worker.postMessage({ type: "cancel", id: requestID });
 }
 
 function virtualIndex(offsets, top) {
@@ -9146,7 +9524,7 @@ function resetPageFlow(keepCache = false) {
 function resetPageLoading() {
 	releaseMediaPlayers();
 	for (const [id, request] of wasmRequests) {
-		if (request.name === "ofdgoRenderPage") wasmWorker?.postMessage({ type: "cancel", id });
+		if (request.tab === documentTab() && request.name === "ofdgoRenderPage") wasmWorker?.postMessage({ type: "cancel", id });
 	}
 	for (const task of state.pageInFlight.values()) {
 		task.resolve(null);
@@ -9296,14 +9674,17 @@ function schedulePageRender() {
 }
 
 async function processPageRenderQueue() {
+	const tab = documentTab();
 	await nextFrame();
+	if (workspace.active !== tab) return;
 	await Promise.all(Array.from({ length: nativeHost?.parallelism || wasmWorker?.parallelism || 1 }, () => processPageRenderTasks()));
 }
 
 async function processPageRenderTasks() {
+	const tab = documentTab(), state = tab.state;
 	state.pageRenderWorkers++;
 	try {
-		while (state.pageRenderQueue.length) {
+		while (workspace.active === tab && state.pageRenderQueue.length) {
 			let next = 0;
 			for (let index = 1; index < state.pageRenderQueue.length; index++) {
 				if (comparePageRenderTask(state.pageRenderQueue[index], state.pageRenderQueue[next]) < 0) next = index;
@@ -9321,7 +9702,7 @@ async function processPageRenderTasks() {
 				const args = [task.index, state.renderBackend, state.renderDPI, displayMode() === "raster"];
 				args.push([...state.svgFonts.keys()], [...state.svgImages.keys()], task.preview);
 				const page = await callWASM("ofdgoRenderPage", ...args);
-				if (state.pageInFlight.get(task.key) !== task) {
+				if (workspace.active !== tab || state.pageInFlight.get(task.key) !== task || task.openSeq !== state.openSeq) {
 					task.resolve(null);
 					continue;
 				}
@@ -9367,8 +9748,8 @@ async function processPageRenderTasks() {
 	} finally {
 		if (--state.pageRenderWorkers === 0) {
 			state.pageRenderRunning = false;
-			if (!state.pageInFlight.size) releasePageResources();
-			if (state.pageRenderQueue.length) schedulePageRender();
+			if (workspace.active === tab && !state.pageInFlight.size) releasePageResources();
+			if (workspace.active === tab && state.pageRenderQueue.length) schedulePageRender();
 		}
 	}
 }
@@ -10586,6 +10967,7 @@ function renderOutlines(reset = true) {
 }
 
 function resetSearch(clearInput = true) {
+	state.searchRunning = false;
 	state.searchSeq += 1;
 	state.searchQuery = "";
 	state.searchMatches = [];
@@ -10616,6 +10998,8 @@ async function searchDocument() {
 	const seq = state.searchSeq;
 	const openSeq = state.openSeq;
 	const pageCount = state.doc.pageCount;
+	const target = state;
+	target.searchRunning = true;
 	try {
 		for (let page = 0; page < pageCount; page += 1) {
 			const matches = await callWASM("ofdgoSearchPage", page, query);
@@ -10641,6 +11025,8 @@ async function searchDocument() {
 			el.searchStatus.textContent = "搜索失败";
 			showError(err, false);
 		}
+	} finally {
+		if (target.searchSeq === seq) target.searchRunning = false;
 	}
 }
 
@@ -12565,7 +12951,7 @@ function updateControls() {
 	renderSecurity();
 	updateStructureControls();
 	const hasDoc = Boolean(state.doc);
-	el.newButton.disabled = state.saving;
+	el.newButton.disabled = document.body.hasAttribute("data-busy");
 	el.closeButton.disabled = !hasDoc || state.exporting || state.saving || document.body.hasAttribute("data-busy");
 	updateDocumentControls();
 	updateDisplayControls();
@@ -12741,8 +13127,15 @@ function updateAnnotationButton() {
 }
 
 async function callWASM(name, ...args) {
+	return callTabWASM(documentTab(), name, ...args);
+}
+
+async function callTabWASM(tab, name, ...args) {
+	const state = tab.state;
+	const visible = isForegroundDocument(tab);
+	if (tab.closed) throw new Error("文档已关闭");
 	if (state.wasmExited) {
-		scheduleWASMRecovery();
+		if (workspace.active === tab) scheduleWASMRecovery();
 		throw new Error(state.wasmRecovering ? STATUS.recovering : "引擎运行中断");
 	}
 	if (!state.ready) {
@@ -12752,11 +13145,13 @@ async function callWASM(name, ...args) {
 		const id = ++wasmRequestID;
 		if (name === "ofdgoPrepareSave" || name === "ofdgoSaveSnapshot") {
 			state.saveRequestID = id;
-			el.cancelExportButton.hidden = false;
-			el.cancelExportButton.disabled = false;
+			if (visible) {
+				el.cancelExportButton.hidden = false;
+				el.cancelExportButton.disabled = false;
+			}
 		}
-		if (name === "ofdgoResources" && resourceElements.Panel.open) resourceManager.requestID = id;
-		wasmRequests.set(id, { name, resolve, reject, openSeq: state.openSeq });
+		if (name === "ofdgoResources" && workspace.active === tab && resourceElements.Panel.open) resourceManager.requestID = id;
+		wasmRequests.set(id, { name, resolve, reject, openSeq: state.openSeq, tab });
 		if (name === "ofdgoExportMedia") wasmRequests.get(id).mediaID = args[0];
 		if (name === "ofdgoConvertPDF") {
 			const request = wasmRequests.get(id);
@@ -12766,8 +13161,10 @@ async function callWASM(name, ...args) {
 		}
 		if (name === "ofdgoImportDocuments" || name === "ofdgoImportImages" || name === "ofdgoExportImages" || name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoExportResource" || name === "ofdgoExportVersion" || name === "ofdgoSaveDocument" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
 			state.exportRequestID = id;
-			el.cancelExportButton.hidden = false;
-			el.cancelExportButton.disabled = false;
+			if (visible) {
+				el.cancelExportButton.hidden = false;
+				el.cancelExportButton.disabled = false;
+			}
 		}
 		try {
 			const transfer = [];
@@ -12776,7 +13173,7 @@ async function callWASM(name, ...args) {
 				transfer.push(args[0].buffer);
 			}
 			if (name === "ofdgoLoadImport" && ArrayBuffer.isView(args[0]) && !nativeHost) transfer.push(args[0].buffer);
-			wasmWorker.postMessage({ id, name, args }, transfer);
+			tab.worker.postMessage({ id, name, args }, transfer);
 		} catch (err) {
 			wasmRequests.delete(id);
 			reject(err);
@@ -12794,6 +13191,7 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("data-busy", busy);
+	el.newButton.disabled = el.documentNewTab.disabled = busy;
 	el.pageLayoutButton.disabled = busy || !(state.doc?.pageCount > 1);
 	el.closeButton.disabled = busy || !state.doc || state.exporting || state.saving;
 	el.refreshAppButton.disabled = busy;

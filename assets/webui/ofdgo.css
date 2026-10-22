@@ -14,6 +14,10 @@
 	--focus: #0f7b68;
 	--sidebar-width: clamp(220px, 20vw, 292px);
 	--bar-bg: #fbfcfd;
+	--titlebar-background: #e8edf0;
+	--titlebar-foreground: #1f2428;
+	--titlebar-inactive-background: #eef1f4;
+	--titlebar-inactive-foreground: #66737f;
 	--bar-height: 40px;
 	--bar-pad: 5px 10px;
 	--control-height: 28px;
@@ -24,6 +28,91 @@
 
 * {
 	box-sizing: border-box;
+}
+
+.document-titlebar {
+	display: flex;
+	min-width: 0;
+	align-items: stretch;
+	height: var(--titlebar-height, 36px);
+	min-height: 0;
+	flex: 0 0 auto;
+	padding-left: var(--titlebar-left, 8px);
+	padding-right: var(--titlebar-right, 8px);
+	background: var(--titlebar-background);
+	color: var(--titlebar-foreground);
+	user-select: none;
+}
+
+.document-tabs {
+	display: flex;
+	min-width: 0;
+	overflow-x: auto;
+	scrollbar-width: none;
+	align-items: stretch;
+}
+
+.document-tab {
+	display: flex;
+	align-items: center;
+	flex: 0 0 210px;
+	width: 210px;
+	min-width: 100px;
+	max-width: 240px;
+	gap: 8px;
+	padding: 0 8px 0 12px;
+	border: 0;
+	border-right: 1px solid var(--line);
+	background: transparent;
+	color: var(--text-muted);
+	font-size: 13px;
+}
+
+.document-tab[data-selected="true"] {
+	background: var(--bar-bg);
+	color: var(--titlebar-foreground);
+	box-shadow: inset 0 2px var(--accent);
+}
+
+.document-tab-name {
+	min-width: 0;
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.document-titlebar[data-active="false"] {
+	background: var(--titlebar-inactive-background);
+	color: var(--titlebar-inactive-foreground);
+}
+
+.document-titlebar[data-active="false"] .document-tab {
+	color: var(--titlebar-inactive-foreground);
+}
+
+.document-tab-close,
+.document-new-tab {
+	display: grid;
+	place-items: center;
+	flex: 0 0 28px;
+	width: 28px;
+	min-width: 28px;
+	align-self: center;
+	height: min(26px, calc(var(--titlebar-height, 36px) - 6px));
+	border: 0;
+	padding: 0;
+	background: transparent;
+}
+
+.document-tab-close:hover,
+.document-new-tab:hover {
+	background: var(--accent-soft);
+}
+
+.document-title-drag {
+	flex: 1;
+	min-width: 32px;
 }
 
 html {
@@ -81,14 +170,15 @@ a:focus-visible {
 
 .app {
 	display: grid;
-	grid-template-rows: auto minmax(0, 1fr) auto;
+	grid-template-columns: minmax(0, 1fr);
+	grid-template-rows: auto auto minmax(0, 1fr) auto;
 	width: 100%;
 	height: 100dvh;
 	overflow: hidden;
 }
 
 .app:has(.editor-toolbar:not([hidden])) {
-	grid-template-rows: auto auto minmax(0, 1fr) auto;
+	grid-template-rows: auto auto auto minmax(0, 1fr) auto;
 }
 
 .editor-toolbar {
@@ -455,12 +545,14 @@ a:focus-visible {
 	display: flex;
 	min-width: 0;
 	background: var(--bar-bg);
+	border-top: 1px solid var(--line);
 	border-bottom: 1px solid var(--line);
 }
 
 .toolbar-frame > .toolbar {
 	flex: 1 1 auto;
 	border-bottom: 0;
+	box-shadow: none;
 }
 
 .app-update {
@@ -754,6 +846,7 @@ button:not(:disabled):hover {
 }
 
 .form-dialog::backdrop {
+	top: var(--titlebar-height, 36px);
 	background: rgb(31 36 40 / 18%);
 }
 

@@ -50,6 +50,7 @@ type Host struct {
 	files          *fileStore
 	engines        map[string]*webui.NativeEngine
 	engineStops    map[string]func() bool
+	closingEngines map[string]*engineClose
 	conversionPool *ofdgo.ConversionPool
 	resources      *ofdgo.Resources
 	cancels        map[string]context.CancelFunc
@@ -59,6 +60,14 @@ type Host struct {
 	fontFiles      map[string]string
 	fontError      error
 	pendingPaths   []string
+	frontendReady  bool
+	closeAllowed   bool
+}
+
+// engineClose 保存并发关闭共享的完成通知及结果
+type engineClose struct {
+	done chan struct{}
+	err  error
 }
 
 // resourceReader 保存资源读取位置及关闭操作
@@ -92,7 +101,7 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 	h.conversionPool = h.resources.ConversionPool()
 	defer h.close()
 	bindings := make(map[string]guigo.HandlerFunc)
-	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "drop.release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title"} {
+	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "drop.release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title", "window.info", "window.drag", "window.close"} {
 		bindings["ofdgo.host."+name] = func(ctx context.Context, args any) (any, error) { return h.call(ctx, name, args) }
 	}
 	static := http.FileServerFS(webuiassets.NativeFS)
@@ -124,6 +133,18 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 		h.mu.Unlock()
 	}
 	options.OnDrop = h.openPaths
+	options.OnTitleBarChanged = func(info guigo.TitleBarInfo) {
+		h.emit("ofdgo.window", info)
+	}
+	options.OnClosing = func(ctx context.Context) bool {
+		h.mu.Lock()
+		allowed := h.closeAllowed || !h.frontendReady
+		h.mu.Unlock()
+		if !allowed {
+			h.emit("ofdgo.closing", nil)
+		}
+		return allowed
+	}
 	options.OnError = func(err error) {
 		h.emit("ofdgo.error", err.Error())
 	}
@@ -514,10 +535,47 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 			return nil, nil
 		}
 		return nil, window.SetTitle(text("title"))
+	case "window.info", "window.drag", "window.close":
+		h.mu.Lock()
+		window := h.window
+		h.mu.Unlock()
+		if window == nil {
+			return nil, fmt.Errorf("窗口尚未就绪")
+		}
+		if name == "window.info" {
+			return window.TitleBarInfo()
+		}
+		if name == "window.close" {
+			h.mu.Lock()
+			h.closeAllowed = true
+			h.mu.Unlock()
+			return nil, window.Close()
+		}
+		values, ok := args["regions"].([]any)
+		if !ok {
+			return nil, fmt.Errorf("拖动区域无效")
+		}
+		regions := make([]guigo.Rect, 0, len(values))
+		for _, value := range values {
+			item, ok := value.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("拖动区域无效")
+			}
+			x, xOK := item["x"].(float64)
+			y, yOK := item["y"].(float64)
+			width, widthOK := item["width"].(float64)
+			height, heightOK := item["height"].(float64)
+			if !xOK || !yOK || !widthOK || !heightOK {
+				return nil, fmt.Errorf("拖动区域无效")
+			}
+			regions = append(regions, guigo.Rect{X: x, Y: y, Width: width, Height: height})
+		}
+		return nil, window.SetDragRegions(regions)
 	case "ready":
 		h.mu.Lock()
 		paths := h.pendingPaths
 		h.pendingPaths = nil
+		h.frontendReady = true
 		h.mu.Unlock()
 		if len(paths) != 0 {
 			h.openPaths(paths)
@@ -764,7 +822,21 @@ func (h *Host) loadFont(ctx context.Context, name string) ([]byte, error) {
 func (h *Host) closeEngine(id string) error {
 	var results []any
 	h.mu.Lock()
+	if closing := h.closingEngines[id]; closing != nil {
+		h.mu.Unlock()
+		<-closing.done
+		return closing.err
+	}
 	engine := h.engines[id]
+	if engine == nil {
+		h.mu.Unlock()
+		return nil
+	}
+	closing := &engineClose{done: make(chan struct{})}
+	if h.closingEngines == nil {
+		h.closingEngines = make(map[string]*engineClose)
+	}
+	h.closingEngines[id] = closing
 	delete(h.engines, id)
 	if stop := h.engineStops[id]; stop != nil {
 		stop()
@@ -785,10 +857,13 @@ func (h *Host) closeEngine(id string) error {
 	for _, result := range results {
 		h.discard(result)
 	}
-	if engine != nil {
-		return engine.Close()
-	}
-	return nil
+	err := engine.Close()
+	h.mu.Lock()
+	closing.err = err
+	delete(h.closingEngines, id)
+	close(closing.done)
+	h.mu.Unlock()
+	return err
 }
 
 // close 取消任务并释放当前窗口持有的会话
@@ -797,17 +872,18 @@ func (h *Host) close() {
 	for _, cancel := range h.cancels {
 		cancel()
 	}
-	engines := h.engines
+	engines := make([]string, 0, len(h.engines)+len(h.closingEngines))
+	for id := range h.engines {
+		engines = append(engines, id)
+	}
+	for id := range h.closingEngines {
+		engines = append(engines, id)
+	}
 	results := h.batchResults
 	h.batchResults = nil
-	for _, stop := range h.engineStops {
-		stop()
-	}
-	h.engineStops = nil
-	h.engines = make(map[string]*webui.NativeEngine)
 	h.mu.Unlock()
-	for _, engine := range engines {
-		_ = engine.Close()
+	for _, id := range engines {
+		_ = h.closeEngine(id)
 	}
 	for _, result := range results {
 		h.discard(result)
@@ -842,8 +918,15 @@ func windowOptions(dataDir string) (guigo.Options, error) {
 		return guigo.Options{}, err
 	}
 	return guigo.Options{
-		AppID:       applicationID,
-		Title:       "OFDGo - OFD编辑器",
+		AppID:    applicationID,
+		Title:    "OFDGo - OFD编辑器",
+		TitleBar: guigo.TitleBarContent,
+		TitleBarColors: guigo.TitleBarColors{
+			Background:         "#e8edf0",
+			Foreground:         "#1f2428",
+			InactiveBackground: "#eef1f4",
+			InactiveForeground: "#66737f",
+		},
 		Icon:        icon,
 		Width:       1440,
 		Height:      900,

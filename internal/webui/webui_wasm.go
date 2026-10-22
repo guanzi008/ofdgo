@@ -37,40 +37,72 @@ const (
 // platformValue 浏览器参数值
 type platformValue = js.Value
 
+// wasmEngines 管理共享资源的独立浏览器业务会话
+type wasmEngines struct {
+	resources *ofdgo.Resources
+	engines   map[string]*businessEngine
+}
+
 // RunWASM 注册浏览器WASM接口并阻塞运行
 func RunWASM() {
 	resources, _ := ofdgo.NewResources(ofdgo.ResourceOptions{Parallelism: 1, MemoryLimit: 64 << 20, CacheBytes: 48 << 20, SnapshotBytes: 32 << 20})
-	e := &businessEngine{resources: resources}
-	asynchronous := map[string]bool{
-		"ofdgoDetectFormat":     true,
-		"ofdgoExportVersion":    true,
-		"ofdgoConvertPDF":       true,
-		"ofdgoConvertFile":      true,
-		"ofdgoPackFiles":        true,
-		"ofdgoExportPage":       true,
-		"ofdgoExportDocument":   true,
-		"ofdgoExportAttachment": true,
-		"ofdgoExportMedia":      true,
-		"ofdgoResources":        true,
-		"ofdgoExportResource":   true,
-		"ofdgoExportImages":     true,
-		"ofdgoImportImages":     true,
-		"ofdgoImportPages":      true,
-		"ofdgoImportDocuments":  true,
-		"ofdgoSaveDocument":     true,
-		"ofdgoPrepareSave":      true,
-		"ofdgoSaveSnapshot":     true,
-		"ofdgoSetEncryption":    true,
-		"ofdgoSaveSigned":       true,
-	}
-	for name, callback := range e.businessCommands() {
-		if asynchronous[name] {
-			registerAsyncCallback(name, callback)
-		} else {
-			registerCallback(name, callback)
-		}
-	}
+	engines := &wasmEngines{resources: resources, engines: make(map[string]*businessEngine)}
+	registerCallback("ofdgoEngineOpen", engines.open)
+	registerAsyncCallback("ofdgoEngineCall", engines.call)
+	registerCallback("ofdgoEngineClose", engines.close)
 	select {}
+}
+
+// open 创建具有稳定标识的独立业务会话
+// 入参: args 会话标识
+// 返回: any 空结果, error 参数或会话错误
+func (w *wasmEngines) open(args []js.Value) (any, error) {
+	if len(args) != 1 || args[0].Type() != js.TypeString || args[0].String() == "" {
+		return nil, fmt.Errorf("missing engine ID")
+	}
+	id := args[0].String()
+	if w.engines[id] != nil {
+		return nil, fmt.Errorf("engine already exists: %s", id)
+	}
+	w.engines[id] = &businessEngine{resources: w.resources}
+	return nil, nil
+}
+
+// call 按会话标识分派业务命令，不提供默认会话
+// 入参: args 会话标识、命令及业务参数
+// 返回: any 业务结果, error 调用错误
+func (w *wasmEngines) call(args []js.Value) (any, error) {
+	if len(args) < 2 || args[0].Type() != js.TypeString || args[1].Type() != js.TypeString {
+		return nil, fmt.Errorf("missing engine ID or operation")
+	}
+	e := w.engines[args[0].String()]
+	if e == nil {
+		return nil, fmt.Errorf("unknown engine: %s", args[0].String())
+	}
+	fn := e.businessCommands()[args[1].String()]
+	if fn == nil {
+		return nil, fmt.Errorf("unknown operation: %s", args[1].String())
+	}
+	return fn(args[2:])
+}
+
+// close 释放会话的文档、编辑器、导入及剪贴板，不关闭共享资源
+// 入参: args 会话标识
+// 返回: any 空结果, error 参数或关闭错误
+func (w *wasmEngines) close(args []js.Value) (any, error) {
+	if len(args) != 1 || args[0].Type() != js.TypeString || args[0].String() == "" {
+		return nil, fmt.Errorf("missing engine ID")
+	}
+	id := args[0].String()
+	e := w.engines[id]
+	if e == nil {
+		return nil, nil
+	}
+	delete(w.engines, id)
+	e.clearImport()
+	err := e.currentSession.Close()
+	*e = businessEngine{}
+	return nil, err
 }
 
 // awaitExport 等待浏览器处理导出检查点
