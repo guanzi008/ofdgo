@@ -48,7 +48,7 @@
 	display: flex;
 	min-width: 0;
 	min-height: 0;
-	padding-right: 1px;
+	border-right: 1px solid transparent;
 	overflow-x: auto;
 	scrollbar-width: none;
 	align-items: stretch;
