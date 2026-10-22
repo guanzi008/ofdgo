@@ -37,7 +37,7 @@
 	height: var(--titlebar-height, 36px);
 	min-height: 0;
 	flex: 0 0 auto;
-	padding-left: var(--titlebar-left, 8px);
+	padding-left: var(--titlebar-left, 0px);
 	padding-right: var(--titlebar-right, 8px);
 	background: var(--titlebar-background);
 	color: var(--titlebar-foreground);
