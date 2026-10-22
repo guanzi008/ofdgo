@@ -1468,7 +1468,7 @@ el.pageForm.addEventListener("submit", async (event) => {
 });
 el.ofdButton.addEventListener("click", openOFDFile);
 el.closeButton.addEventListener("pointerdown", event => event.preventDefault());
-el.closeButton.addEventListener("click", () => closeFile().catch(error => showError(error, false)));
+el.closeButton.addEventListener("click", () => closeDocument().catch(error => showError(error, false)));
 batchElements.Button.addEventListener("click", () => { updateBatchControls(); batchElements.Panel.showModal(); });
 batchElements.Add.addEventListener("click", () => batchElements.Input.click());
 batchElements.Input.addEventListener("change", () => { addBatchFiles(batchElements.Input.files); batchElements.Input.value = ""; });
@@ -1850,7 +1850,7 @@ function handleKeyDown(event) {
 	if (nativeHost && (event.ctrlKey || event.metaKey) && (key === "Tab" || key.toLowerCase() === "w")) {
 		event.preventDefault();
 		if (document.body.hasAttribute("data-busy") || formDialogOpen()) return;
-		if (key.toLowerCase() === "w") closeFile();
+		if (key.toLowerCase() === "w") closeTab(documentTab());
 		else {
 			const count = workspace.tabs.length, index = workspace.tabs.indexOf(documentTab());
 			activateDocumentTab(workspace.tabs[(index + (event.shiftKey ? -1 : 1) + count) % count]);
@@ -2559,14 +2559,14 @@ function renderDocumentTabs() {
 		close.disabled = !nativeHost && !tab.state.doc && !tab.opening && !tab.error && workspace.tabs.length === 1;
 		close.addEventListener("click", async event => {
 			event.stopPropagation();
-			await closeFile(tab);
+			await closeTab(tab);
 		});
 		item.append(name, close);
 		item.addEventListener("click", () => activateDocumentTab(tab));
 		item.addEventListener("auxclick", async event => {
 			if (event.button !== 1) return;
 			event.preventDefault();
-			await closeFile(tab);
+			await closeTab(tab);
 		});
 		item.addEventListener("dragstart", event => {
 			if (event.target.closest("button")) { event.preventDefault(); return; }
@@ -2591,7 +2591,7 @@ function renderDocumentTabs() {
 		item.addEventListener("keydown", async event => {
 			if (!["ArrowLeft", "ArrowRight", "Home", "End", "Delete"].includes(event.key) || event.target !== item) return;
 			event.preventDefault();
-			if (event.key === "Delete") { await closeFile(tab); return; }
+			if (event.key === "Delete") { await closeTab(tab); return; }
 			const index = workspace.tabs.indexOf(tab), count = workspace.tabs.length;
 			const next = event.key === "Home" ? 0 : event.key === "End" ? count - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + count) % count;
 			if (await activateDocumentTab(workspace.tabs[next])) el.documentTabs.querySelector('[data-selected="true"]')?.focus();
@@ -2890,17 +2890,21 @@ async function confirmDocumentClose(tab = documentTab()) {
 	return !tab.closed && !state.saving;
 }
 
-async function closeFile(tab = null) {
-	const implicit = !tab?.state;
-	if (implicit) {
-		if (workspace.closeDefault) return;
-		tab = documentTab();
-	}
+function closeDocument() {
+	return closeFile(documentTab(), true);
+}
+
+function closeTab(tab) {
+	return closeFile(tab, false);
+}
+
+async function closeFile(tab = documentTab(), keepTab = false) {
+	if (keepTab && workspace.closeDefault) return;
 	if (tab.closed || tab.closing || workspace.closing) return;
-	if (nativeHost && workspace.tabs.length === 1) return closeWorkspace();
-	if (!tab.state.doc && !tab.opening && !tab.error && workspace.tabs.length === 1) return;
+	if (!keepTab && nativeHost && workspace.tabs.length === 1) return closeWorkspace();
+	if (!tab.state.doc && !tab.opening && !tab.error && (keepTab || workspace.tabs.length === 1)) return;
 	tab.closing = true;
-	if (implicit) {
+	if (keepTab) {
 		workspace.closeDefault = tab;
 		queueMicrotask(() => { if (workspace.closeDefault === tab) workspace.closeDefault = null; });
 	}
@@ -2922,7 +2926,11 @@ async function closeFile(tab = null) {
 		try {
 			const index = workspace.tabs.indexOf(tab);
 			if (selected) detachDocumentView();
-			workspace.tabs.splice(index, 1);
+			if (keepTab) {
+				const empty = createDocumentTab();
+				empty.id = tab.id;
+				workspace.tabs[index] = empty;
+			} else workspace.tabs.splice(index, 1);
 			if (!workspace.tabs.length) workspace.tabs.push(createDocumentTab());
 			if (selected) attachDocumentTab(workspace.tabs[Math.min(index, workspace.tabs.length - 1)]);
 			workspace.switching = false;
@@ -13511,7 +13519,7 @@ function updateControls() {
 	updateStructureControls();
 	const hasDoc = Boolean(state.doc);
 	el.newButton.disabled = workspace.closing;
-	el.closeButton.disabled = !nativeHost && !(hasDoc || documentTab().opening || documentTab().error) || workspace.closing;
+	el.closeButton.disabled = !(hasDoc || documentTab().opening || documentTab().error) || workspace.closing;
 	updateDocumentControls();
 	updateDisplayControls();
 	updateEditorTools();
@@ -13760,7 +13768,7 @@ function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab())
 	el.newButton.disabled = false;
 	el.documentNewTab.disabled = workspace.closing;
 	el.pageLayoutButton.disabled = busy || !(state.doc?.pageCount > 1);
-	el.closeButton.disabled = !nativeHost && !(state.doc || tab.opening || tab.error) || workspace.closing;
+	el.closeButton.disabled = !(state.doc || tab.opening || tab.error) || workspace.closing;
 	el.refreshAppButton.disabled = busy;
 	updateStructureControls();
 	updateDocumentControls();
