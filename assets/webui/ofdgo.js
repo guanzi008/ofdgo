@@ -2473,8 +2473,10 @@ async function closeWorkspace() {
 	if (workspace.closing) return;
 	workspace.closing = true;
 	try {
+		await Promise.all(workspace.tabs.filter(tab => tab.state.saving && tab.saveCompletion).map(tab => tab.saveCompletion));
 		if (workspace.tabs.some(tab => tab.state.saving)) { setStatus("文档正在保存，请稍后关闭"); return; }
 		if (batch.running && !window.confirm("批量转换尚未完成，是否退出？")) return;
+		if (workspace.tabs.some(tab => tab.opening || tab.state.exporting) && !window.confirm("文档正在处理，是否取消并退出？")) return;
 		const dirty = workspace.tabs.some(tab => tab.state.dirty) || canvasEditor.textChanged() || canvasEditor.cropChanged() || canvasEditor.nudgeChanged();
 		if (dirty && (workspace.switching || workspace.tabs.some(tab => tab.closing) || document.body.hasAttribute("data-busy") || formDialogOpen())) {
 			setStatus("操作正在进行，请完成或取消后关闭");
@@ -2551,7 +2553,7 @@ function renderDocumentTabs() {
 		const icon = document.createElement("span");
 		icon.className = "close-icon";
 		close.append(icon);
-		close.disabled = !tab.state.doc && !tab.opening && !tab.error && workspace.tabs.length === 1;
+		close.disabled = !nativeHost && !tab.state.doc && !tab.opening && !tab.error && workspace.tabs.length === 1;
 		close.addEventListener("click", async event => {
 			event.stopPropagation();
 			await closeFile(tab);
@@ -2887,6 +2889,7 @@ async function closeFile(tab = null) {
 		tab = documentTab();
 	}
 	if (tab.closed || tab.closing || workspace.closing) return;
+	if (nativeHost && workspace.tabs.length === 1) return closeWorkspace();
 	if (!tab.state.doc && !tab.opening && !tab.error && workspace.tabs.length === 1) return;
 	tab.closing = true;
 	if (implicit) {
@@ -2896,6 +2899,7 @@ async function closeFile(tab = null) {
 	try {
 		if (tab.state.saving && tab.saveCompletion) await tab.saveCompletion;
 		if (tab.closed) return;
+		if ((tab.opening || tab.state.exporting) && !window.confirm("文档正在处理，是否取消并关闭？")) return;
 		if (tab.state.dirty || tab === workspace.active && (canvasEditor.input || canvasEditor.crop || canvasEditor.nudge)) {
 			if (tab !== workspace.active && !await activateDocumentTab(tab)) return;
 			if (!await confirmDocumentClose(tab) || tab.closed || workspace.closing) return;
@@ -13496,7 +13500,7 @@ function updateControls() {
 	updateStructureControls();
 	const hasDoc = Boolean(state.doc);
 	el.newButton.disabled = workspace.closing;
-	el.closeButton.disabled = !(hasDoc || documentTab().opening || documentTab().error) || workspace.closing;
+	el.closeButton.disabled = !nativeHost && !(hasDoc || documentTab().opening || documentTab().error) || workspace.closing;
 	updateDocumentControls();
 	updateDisplayControls();
 	updateEditorTools();
@@ -13745,7 +13749,7 @@ function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab())
 	el.newButton.disabled = false;
 	el.documentNewTab.disabled = workspace.closing;
 	el.pageLayoutButton.disabled = busy || !(state.doc?.pageCount > 1);
-	el.closeButton.disabled = !(state.doc || tab.opening || tab.error) || workspace.closing;
+	el.closeButton.disabled = !nativeHost && !(state.doc || tab.opening || tab.error) || workspace.closing;
 	el.refreshAppButton.disabled = busy;
 	updateStructureControls();
 	updateDocumentControls();
