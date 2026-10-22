@@ -31,7 +31,7 @@
 }
 
 .document-titlebar {
-	--tab-action-gap: max(0px, calc((var(--titlebar-height, 36px) - 30px) / 2));
+	--tab-action-gap: max(2px, calc((var(--titlebar-height, 36px) - 28px) / 2));
 	display: flex;
 	min-width: 0;
 	align-items: stretch;
