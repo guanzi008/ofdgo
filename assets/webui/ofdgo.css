@@ -850,6 +850,7 @@ button:not(:disabled):hover {
 	width: 320px;
 	max-width: calc(100% - 24px);
 	max-height: calc(100dvh - 24px);
+	overflow: auto;
 	margin: auto;
 	padding: 0;
 	border: 1px solid var(--line);

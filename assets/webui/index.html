@@ -193,14 +193,14 @@
 				<button id="batchPagesButton" class="editor-group-action" type="button">页面</button>
 			</div>
 		</div>
-		<dialog id="closePanel" class="form-dialog confirm-dialog">
+		<dialog id="closePanel" class="form-dialog confirm-dialog" aria-labelledby="closeTitle">
 			<form method="dialog">
-				<h2 class="form-title">关闭文档</h2>
+				<h2 id="closeTitle" class="form-title">关闭文档</h2>
 				<p class="confirm-message">文档尚未保存</p>
 				<div class="form-actions"><button class="button" value="cancel" autofocus>取消</button><button class="button" value="discard">放弃</button><button class="button" value="save">保存</button></div>
 			</form>
 		</dialog>
-		<dialog id="convertPanel" class="form-dialog convert-dialog">
+		<dialog id="convertPanel" class="form-dialog convert-dialog" aria-labelledby="convertTitle">
 			<form id="convertForm">
 				<h2 id="convertTitle" class="form-title">批量转换<span id="convertCount"></span></h2>
 				<input id="convertInput" class="file-input" type="file" accept=".pdf,.ofd" multiple>
@@ -219,16 +219,18 @@
 				</div>
 			</form>
 		</dialog>
-		<dialog id="batchPagesPanel" class="form-dialog">
+		<dialog id="batchPagesPanel" class="form-dialog" aria-labelledby="batchPagesTitle">
 			<form id="batchPagesForm">
+				<h2 id="batchPagesTitle" class="form-title">复制页面</h2>
 				<div class="form-row"><label for="batchPageAction">操作</label><select id="batchPageAction"><option value="copy">复制</option><option value="move">移动</option><option value="delete">删除</option><option value="save">另存</option></select></div>
 				<div class="form-row"><label for="batchPageRange">页码</label><input id="batchPageRange" type="text" required autocomplete="off" spellcheck="false" autofocus></div>
 				<div id="batchPagePositionRow" class="form-row" hidden><label for="batchPagePosition">位置</label><select id="batchPagePosition"><option value="before">页前</option><option value="after">页后</option><option value="first">开头</option><option value="last">末尾</option></select></div>
 				<div class="form-actions"><div id="batchPagesStatus" class="form-status"></div><button id="batchPagesCancel" class="button" type="button">取消</button><button id="batchPagesSubmit" class="button" type="submit">复制</button></div>
 			</form>
 		</dialog>
-		<dialog id="objectStylePanel" class="form-dialog">
+		<dialog id="objectStylePanel" class="form-dialog" aria-labelledby="objectStyleTitle">
 			<form id="objectStyleForm">
+				<h2 id="objectStyleTitle" class="form-title">对象样式</h2>
 				<div class="form-row"><span>组合</span><div class="form-format"><button id="groupObjectsButton" class="button" type="button">组合</button><button id="ungroupObjectButton" class="button" type="button">解组</button></div></div>
 				<div class="form-row"><span>格式</span><div class="form-format"><button id="copyStyleButton" class="button" type="button">复制</button><button id="pasteStyleButton" class="button" type="button">粘贴</button></div></div>
 				<details id="objectLinkFields" hidden>
@@ -288,8 +290,9 @@
 				<div class="form-actions"><div id="objectStyleStatus" class="form-status"></div><button id="objectStyleCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="structureDialog" class="form-dialog structure-dialog">
+		<dialog id="structureDialog" class="form-dialog structure-dialog" aria-labelledby="structureTitle">
 			<form id="structureForm">
+				<h2 id="structureTitle" class="form-title">结构标引</h2>
 				<div class="form-row"><label for="structureEntry">标引</label><select id="structureEntry"></select></div>
 				<div id="structureNodeRow" class="form-row"><label for="structureNodeSelect">节点</label><select id="structureNodeSelect"></select></div>
 				<div id="structureActionRow" class="form-row"><label for="structureAction">操作</label><select id="structureAction"><option value="update">修改</option><option value="add">新增</option><option value="bind">绑定</option><option value="delete">删除</option></select></div>
@@ -308,8 +311,9 @@
 				<div class="form-actions"><div id="structureStatus" class="form-status"></div><button id="structureCancel" class="button" type="button">取消</button><button id="structureSubmit" class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="outlinePanel" class="form-dialog">
+		<dialog id="outlinePanel" class="form-dialog" aria-labelledby="outlinePanelTitle">
 			<form id="outlineForm">
+				<h2 id="outlinePanelTitle" class="form-title">新增目录</h2>
 				<div class="form-row"><label for="outlineTitle">标题</label><input id="outlineTitle" type="text" required autofocus></div>
 				<div class="form-row"><label for="outlineParent">上级</label><select id="outlineParent"></select></div>
 				<div class="form-row"><label for="outlinePage">页码</label><input id="outlinePage" type="number" min="1" step="1" placeholder="无"></div>
@@ -317,8 +321,9 @@
 				<div class="form-actions"><div id="outlineStatus" class="form-status"></div><button id="outlineCancel" class="button" type="button">取消</button><button id="outlineSubmit" class="button" type="submit">新增</button></div>
 			</form>
 		</dialog>
-		<dialog id="objectBoundsPanel" class="form-dialog">
+		<dialog id="objectBoundsPanel" class="form-dialog" aria-labelledby="objectBoundsTitle">
 			<form id="objectBoundsForm">
+				<h2 id="objectBoundsTitle" class="form-title">位置尺寸</h2>
 				<div class="form-pair">
 					<div class="form-row"><label for="objectX">横向</label><div class="form-unit"><input id="objectX" type="number" step="any" required autofocus><span>mm</span></div></div>
 					<div class="form-row"><label for="objectY">纵向</label><div class="form-unit"><input id="objectY" type="number" step="any" required><span>mm</span></div></div>
@@ -331,8 +336,9 @@
 				<div class="form-actions"><div id="objectBoundsStatus" class="form-status"></div><button id="objectBoundsCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="createPanel" class="form-dialog">
+		<dialog id="createPanel" class="form-dialog" aria-labelledby="createTitle">
 			<form id="createForm">
+				<h2 id="createTitle" class="form-title">新建文档</h2>
 				<div id="createModeRow" class="form-row"><label for="createMode">来源</label><select id="createMode"><option value="blank">空白</option><option value="images">图片</option></select></div>
 				<div class="form-row">
 					<label for="createName">名称</label>
@@ -359,8 +365,9 @@
 				</div>
 			</form>
 		</dialog>
-		<dialog id="importPanel" class="form-dialog">
+		<dialog id="importPanel" class="form-dialog" aria-labelledby="importTitle">
 			<form id="importForm">
+				<h2 id="importTitle" class="form-title">插入页面</h2>
 				<div class="form-row"><label for="importFile">文档</label><input id="importFile" type="file" accept=".ofd" required autofocus></div>
 				<div class="form-row"><label for="importRange">范围</label><select id="importRange"><option value="all">全部</option><option value="custom">指定</option></select></div>
 				<div id="importDocuments" class="document-list" hidden></div>
@@ -370,8 +377,9 @@
 				<div class="form-actions"><div id="importStatus" class="form-status"></div><button id="importCancel" class="button" type="button">取消</button><button id="importSubmit" class="button" type="submit" disabled>插入</button></div>
 			</form>
 		</dialog>
-		<dialog id="paragraphPanel" class="form-dialog">
+		<dialog id="paragraphPanel" class="form-dialog" aria-labelledby="paragraphTitle">
 			<form id="paragraphForm">
+				<h2 id="paragraphTitle" class="form-title">段落设置</h2>
 				<div class="form-row"><label for="firstLineIndent">首行</label><div class="form-unit"><input id="firstLineIndent" type="number" step="any" required autofocus><span>mm</span></div></div>
 				<div class="form-pair">
 					<div class="form-row"><label for="leftIndent">左侧</label><div class="form-unit"><input id="leftIndent" type="number" step="any" required><span>mm</span></div></div>
@@ -380,7 +388,7 @@
 				<div class="form-actions"><div id="paragraphStatus" class="form-status"></div><button id="paragraphCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="resourcePanel" class="form-dialog resource-dialog">
+		<dialog id="resourcePanel" class="form-dialog resource-dialog" aria-labelledby="resourceTitle">
 			<form id="resourceForm">
 				<h2 id="resourceTitle" class="form-title">资源管理</h2>
 				<div id="resourceTabs" class="panel-tabs"></div>
@@ -411,7 +419,7 @@
 				<input id="resourceFile" type="file" hidden>
 			</form>
 		</dialog>
-		<dialog id="documentPanel" class="form-dialog document-dialog">
+		<dialog id="documentPanel" class="form-dialog document-dialog" aria-labelledby="documentTitle">
 			<form id="documentForm">
 				<h2 id="documentTitle" class="form-title">文档管理</h2>
 				<div id="documentList" class="document-list"></div>
@@ -427,7 +435,7 @@
 				</div>
 			</form>
 		</dialog>
-		<dialog id="settingsPanel" class="form-dialog settings-dialog">
+		<dialog id="settingsPanel" class="form-dialog settings-dialog" aria-labelledby="settingsTitle">
 			<form id="settingsForm">
 				<header class="settings-header">
 					<h2 id="settingsTitle" class="form-title">文档配置</h2>
@@ -444,7 +452,7 @@
 				</div>
 			</form>
 		</dialog>
-		<dialog id="versionPanel" class="form-dialog document-dialog">
+		<dialog id="versionPanel" class="form-dialog document-dialog" aria-labelledby="versionTitle">
 			<form id="versionForm">
 				<h2 id="versionTitle" class="form-title">版本管理</h2>
 				<div id="versionNotice" class="font-permission-hint" hidden></div>
@@ -462,8 +470,9 @@
 				</div>
 			</form>
 		</dialog>
-		<dialog id="infoPanel" class="form-dialog">
+		<dialog id="infoPanel" class="form-dialog" aria-labelledby="infoPanelTitle">
 			<form id="infoForm">
+				<h2 id="infoPanelTitle" class="form-title">文档信息</h2>
 				<label class="form-row"><span>标题</span><input id="infoTitle" type="text" autofocus></label>
 				<label class="form-row"><span>主题</span><input id="infoSubject" type="text"></label>
 				<label class="form-row"><span>作者</span><input id="infoAuthor" type="text"></label>
@@ -471,8 +480,9 @@
 				<div class="form-actions"><div id="infoStatus" class="form-status"></div><button id="infoCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="annotationCreate" class="form-dialog">
+		<dialog id="annotationCreate" class="form-dialog" aria-labelledby="annotationCreateTitle">
 			<form id="annotationCreateForm">
+				<h2 id="annotationCreateTitle" class="form-title">添加批注</h2>
 				<label class="form-row" data-annotation="watermark"><span>类型</span><select id="annotationContent"><option value="text">文字</option><option value="image">图片</option></select></label>
 				<label class="form-row" data-annotation="replace"><span>原文</span><select id="annotationOld"></select></label>
 				<label class="form-row" data-annotation="replace"><span>字体</span><select id="annotationFont"><option value="keep">原有</option><option value="current">当前</option></select></label>
@@ -501,11 +511,16 @@
 				<div class="form-actions"><div id="annotationCreateStatus" class="form-status"></div><button id="annotationCreateCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="objectPicker" class="form-dialog">
-			<form method="dialog"><div id="objectPickerList" class="object-picker-list"></div><div class="form-actions"><button class="button" type="submit">关闭</button></div></form>
+		<dialog id="objectPicker" class="form-dialog" aria-labelledby="objectPickerTitle">
+			<form method="dialog">
+				<h2 id="objectPickerTitle" class="form-title">选择对象</h2>
+				<div id="objectPickerList" class="object-picker-list"></div>
+				<div class="form-actions"><button class="button" type="submit">关闭</button></div>
+			</form>
 		</dialog>
-		<dialog id="annotationNote" class="form-dialog">
+		<dialog id="annotationNote" class="form-dialog" aria-labelledby="annotationNoteTitle">
 			<form id="annotationForm" method="dialog">
+				<h2 id="annotationNoteTitle" class="form-title">注解详情</h2>
 				<div id="annotationDetail" class="annotation-detail"></div>
 				<div id="annotationFields" hidden>
 					<div class="form-row"><label for="annotationRemark">说明</label><textarea id="annotationRemark" rows="4"></textarea></div>
@@ -514,8 +529,9 @@
 				<div class="form-actions"><div id="annotationStatus" class="form-status"></div><button id="annotationClose" class="button" type="button" autofocus>关闭</button><button id="annotationSubmit" class="button" type="submit" hidden>确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="pagePanel" class="form-dialog">
+		<dialog id="pagePanel" class="form-dialog" aria-labelledby="pageTitle">
 			<form id="pageForm">
+				<h2 id="pageTitle" class="form-title">页面设置</h2>
 				<div id="pageRangeRow" class="form-row" hidden><span>范围</span><output id="pageRange"></output></div>
 				<div class="form-row">
 					<span id="pageDirectionLabel">方向</span>
@@ -541,7 +557,7 @@
 				</div>
 			</form>
 		</dialog>
-		<dialog id="fontBindingPanel" class="form-dialog">
+		<dialog id="fontBindingPanel" class="form-dialog" aria-labelledby="fontBindingTitle">
 			<form id="fontBindingForm">
 				<h2 id="fontBindingTitle" class="form-title">嵌入字体</h2>
 				<div class="form-row"><span>字体</span><output id="fontBindingName"></output></div>
@@ -551,8 +567,9 @@
 				<div class="form-actions"><div id="fontBindingStatus" class="form-status"></div><button id="fontBindingCancel" class="button" type="button">取消</button><button id="fontBindingSubmit" class="button" type="submit">嵌入</button></div>
 			</form>
 		</dialog>
-		<dialog id="insertPanel" class="form-dialog">
+		<dialog id="insertPanel" class="form-dialog" aria-labelledby="insertTitle">
 			<form id="insertForm">
+				<h2 id="insertTitle" class="form-title">添加图片</h2>
 				<div class="form-row">
 					<label for="insertImage">图片</label>
 					<input id="insertImage" type="file" accept=".png,.jpg,.jpeg,.bmp,.tif,.tiff,image/png,image/jpeg,image/bmp,image/tiff" required autofocus>
@@ -568,7 +585,7 @@
 				</div>
 			</form>
 		</dialog>
-		<dialog id="signPanel" class="form-dialog security-dialog">
+		<dialog id="signPanel" class="form-dialog security-dialog" aria-labelledby="signTitle">
 			<form id="signForm" autocomplete="off">
 				<h2 id="signTitle" class="form-title">签署文档</h2>
 				<div class="form-row"><label for="signCertificate">证书</label><input id="signCertificate" type="file" accept=".pem,.cer,.crt,.der" required></div>
@@ -596,7 +613,7 @@
 				<div id="signPositionStamp" class="seal-position-stamp" hidden><img id="signPositionImage" alt="" draggable="false"></div>
 			</div>
 		</div>
-		<dialog id="verifyPanel" class="form-dialog security-dialog">
+		<dialog id="verifyPanel" class="form-dialog security-dialog" aria-labelledby="verifyTitle">
 			<form id="verifyForm">
 				<h2 id="verifyTitle" class="form-title">验证签名</h2>
 				<div class="form-row"><label for="verifyRoots">信任根</label><input id="verifyRoots" type="file" accept=".pem,.cer,.crt,.der" multiple></div>
@@ -609,7 +626,7 @@
 				<div class="form-actions"><div id="verifyStatus" class="form-status"></div><button id="verifyCancel" class="button" type="button">取消</button><button class="button" type="submit">验签</button></div>
 			</form>
 		</dialog>
-		<dialog id="credentialsPanel" class="form-dialog security-dialog">
+		<dialog id="credentialsPanel" class="form-dialog security-dialog" aria-labelledby="credentialsTitle">
 			<form id="credentialsForm" autocomplete="off">
 				<h2 id="credentialsTitle" class="form-title">解锁文档</h2>
 				<div id="credentialsTypeRow" class="form-row"><label for="credentialsType">方式</label><select id="credentialsType"><option value="password">口令</option><option value="certificate">证书</option></select></div>
@@ -621,7 +638,7 @@
 				<div class="form-actions"><div id="credentialsStatus" class="form-status"></div><button id="credentialsCancel" class="button" type="button">取消</button><button class="button" type="submit">解锁</button></div>
 			</form>
 		</dialog>
-		<dialog id="attachmentDialog" class="form-dialog">
+		<dialog id="attachmentDialog" class="form-dialog" aria-labelledby="attachmentTitle">
 			<form id="attachmentForm">
 				<h2 id="attachmentTitle" class="form-title">添加附件</h2>
 				<div id="attachmentFileRow" class="form-row"><label for="attachmentFile">文件</label><input id="attachmentFile" type="file" multiple required></div>
@@ -633,7 +650,7 @@
 				</div>
 			</form>
 		</dialog>
-		<dialog id="encryptionPanel" class="form-dialog">
+		<dialog id="encryptionPanel" class="form-dialog" aria-labelledby="encryptionTitle">
 			<form id="encryptionForm">
 				<h2 id="encryptionTitle" class="form-title">加密文档</h2>
 				<div class="form-row"><label for="encryptionType">方式</label><select id="encryptionType" autofocus><option value="none">明文</option><option value="password">口令</option><option value="certificate">证书</option><option id="encryptionKeep" value="keep" hidden>保留</option></select></div>
@@ -645,7 +662,7 @@
 				<div class="form-actions"><div id="encryptionStatus" class="form-status"></div><button id="encryptionCancel" class="button" type="button">取消</button><button id="encryptionSubmit" class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
-		<dialog id="exportPanel" class="form-dialog">
+		<dialog id="exportPanel" class="form-dialog" aria-labelledby="exportTitle">
 			<form id="exportForm">
 				<h2 id="exportTitle" class="form-title">导出文档</h2>
 				<div class="form-row">

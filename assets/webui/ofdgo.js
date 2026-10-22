@@ -348,6 +348,7 @@ const el = {
 	rightIndent: document.querySelector("#rightIndent"),
 	firstLineIndent: document.querySelector("#firstLineIndent"),
 	importPanel: document.querySelector("#importPanel"),
+	importTitle: document.querySelector("#importTitle"),
 	importForm: document.querySelector("#importForm"),
 	importFile: document.querySelector("#importFile"),
 	importRange: document.querySelector("#importRange"),
@@ -389,6 +390,7 @@ const el = {
 	batchPagesPanel: document.querySelector("#batchPagesPanel"),
 	batchPagesForm: document.querySelector("#batchPagesForm"),
 	batchPageAction: document.querySelector("#batchPageAction"),
+	batchPagesTitle: document.querySelector("#batchPagesTitle"),
 	batchPageRange: document.querySelector("#batchPageRange"),
 	batchPagePositionRow: document.querySelector("#batchPagePositionRow"),
 	batchPagePosition: document.querySelector("#batchPagePosition"),
@@ -450,6 +452,7 @@ const el = {
 	objectStyleStatus: document.querySelector("#objectStyleStatus"),
 	objectStyleCancel: document.querySelector("#objectStyleCancel"),
 	outlinePanel: document.querySelector("#outlinePanel"),
+	outlinePanelTitle: document.querySelector("#outlinePanelTitle"),
 	outlineForm: document.querySelector("#outlineForm"),
 	outlineTitle: document.querySelector("#outlineTitle"),
 	outlineParent: document.querySelector("#outlineParent"),
@@ -472,6 +475,7 @@ const el = {
 	saveButton: document.querySelector("#saveButton"),
 	saveAsButton: document.querySelector("#saveAsButton"),
 	createPanel: document.querySelector("#createPanel"),
+	createTitle: document.querySelector("#createTitle"),
 	createMode: document.querySelector("#createMode"),
 	createImages: document.querySelector("#createImages"),
 	createSize: document.querySelector("#createSize"),
@@ -485,6 +489,7 @@ const el = {
 	createStatus: document.querySelector("#createStatus"),
 	createCancel: document.querySelector("#createCancel"),
 	insertPanel: document.querySelector("#insertPanel"),
+	insertTitle: document.querySelector("#insertTitle"),
 	insertForm: document.querySelector("#insertForm"),
 	insertImage: document.querySelector("#insertImage"),
 	insertFitRow: document.querySelector("#insertFitRow"),
@@ -617,11 +622,14 @@ const el = {
 	signatureSummary: document.querySelector("#signatureSummary"),
 	signatureList: document.querySelector("#signatureList"),
 	annotationNote: document.querySelector("#annotationNote"),
+	annotationNoteTitle: document.querySelector("#annotationNoteTitle"),
 	annotationTool: document.querySelector("#annotationTool"),
 	penTool: document.querySelector("#penTool"),
 	annotationCreate: document.querySelector("#annotationCreate"),
+	annotationCreateTitle: document.querySelector("#annotationCreateTitle"),
 	annotationCreateStatus: document.querySelector("#annotationCreateStatus"),
 	objectPicker: document.querySelector("#objectPicker"),
+	objectPickerTitle: document.querySelector("#objectPickerTitle"),
 	objectPickerList: document.querySelector("#objectPickerList"),
 	annotationForm: document.querySelector("#annotationForm"),
 	annotationFields: document.querySelector("#annotationFields"),
@@ -1270,6 +1278,7 @@ editorClick(el.pageSettingsButton, openPagePanel);
 editorClick(el.batchPagesButton, openBatchPages);
 function openBatchPages() {
 	el.batchPageAction.value = "copy";
+	el.batchPagesTitle.textContent = "复制页面";
 	el.batchPagesSubmit.textContent = "复制";
 	el.batchPagePositionRow.hidden = true;
 	el.batchPagePosition.value = "after";
@@ -1281,6 +1290,7 @@ function openBatchPages() {
 el.batchPagesCancel.addEventListener("click", () => el.batchPagesPanel.close());
 el.batchPageAction.addEventListener("change", () => {
 	el.batchPagesSubmit.textContent = { copy: "复制", move: "移动", delete: "删除", save: "另存" }[el.batchPageAction.value];
+	el.batchPagesTitle.textContent = `${el.batchPagesSubmit.textContent}页面`;
 	el.batchPagePositionRow.hidden = el.batchPageAction.value !== "move";
 });
 el.batchPagesForm.addEventListener("submit", async event => {
@@ -2223,6 +2233,7 @@ function addGradientStop(position, color, transparency, source) {
 
 function openOutlinePanel(action) {
 	state.outlineAction = action;
+	el.outlinePanelTitle.textContent = { add: "新增目录", update: "编辑目录", delete: "删除目录", move: "移动目录" }[action];
 	let outline = null, items = state.doc.outlines || [];
 	for (const index of state.outlineSelection || []) { outline = items[index]; items = outline.children || []; }
 	el.outlineTitle.value = action === "add" ? "" : outline.title;
@@ -2297,6 +2308,7 @@ function openImportPanel(documents = false) {
 	state.importPageCount = 0;
 	state.importDocumentCount = 0;
 	state.importDocumentMode = documents;
+	el.importTitle.textContent = documents ? "导入文档" : "插入页面";
 	state.importEncrypted = false;
 	el.importForm.reset();
 	el.importStatus.textContent = "";
@@ -3442,6 +3454,7 @@ function openCreatePanel(insert = false, packageDocument = false) {
 	el.createForm.reset();
 	state.createInsert = insert === true;
 	state.createPackage = packageDocument === true;
+	el.createTitle.textContent = state.createInsert ? "插入页面" : state.createPackage ? "新增文档" : "新建文档";
 	state.createDocumentAt = state.createPackage ? managedDocumentIndex() + 1 : null;
 	el.createMode.value = state.createInsert ? "images" : "blank";
 	el.createSubmit.textContent = state.createInsert ? "插入" : state.createPackage ? "新增" : "新建";
@@ -3557,6 +3570,7 @@ async function createDocument(event) {
 
 function editAnnotationDetails(item) {
 	state.annotationEdit = item;
+	el.annotationNoteTitle.textContent = "编辑注解";
 	el.annotationRemark.value = item.remark || "";
 	el.annotationCreator.value = item.creator || "";
 	el.annotationFields.hidden = el.annotationSubmit.hidden = false;
@@ -3568,6 +3582,7 @@ function editAnnotationDetails(item) {
 }
 
 function openObjectPicker(items = canvasEditor.pageItems(state.pageIndex)) {
+	el.objectPickerTitle.textContent = "选择对象";
 	el.objectPickerList.replaceChildren();
 	const labels = { TextObject: "文字", PathObject: "图形", ImageObject: "图片", CompositeObject: "组合", CompositeGraphicUnit: "组合", Annotation: "注解" };
 	const kinds = { Path: "批注", Stamp: "印章", Watermark: "水印", Link: "链接", Highlight: "高亮" };
@@ -3651,6 +3666,8 @@ function placeAnnotation(index, kind, box) {
 
 function updateAnnotationFields() {
 	const { kind, item } = state.annotationCreate;
+	el.annotationCreateTitle.textContent = kind === "replace" ? "替换文字"
+		: `${item ? "编辑" : "添加"}${{ note: "批注", watermark: "水印", stamp: "印章", link: "链接" }[kind]}`;
 	for (const key of ["X", "Y", "Width", "Height", "Pages", "Author"]) annotationFields[key].closest(".form-row").hidden = false;
 	for (const row of el.annotationCreate.querySelectorAll("[data-annotation]")) row.hidden = !row.dataset.annotation.split(" ").includes(kind);
 	const image = kind === "stamp" || kind === "watermark" && annotationFields.Content.value === "image";
@@ -3851,6 +3868,7 @@ function openInsertPanel(item = null) {
 	}
 	el.insertForm.reset();
 	state.insertObject = item;
+	el.insertTitle.textContent = item ? "替换图片" : "添加图片";
 	el.insertFitRow.hidden = !item || Boolean(item.scoped);
 	el.insertSubmit.textContent = item ? "替换" : "添加";
 	el.insertStatus.textContent = "";
@@ -8552,10 +8570,11 @@ async function locateManagedResource() {
 		if (target) canvasEditor.select(target);
 	};
 	if (locations.length === 1) await focus(locations[0]);
-	else resourceChoices(locations, location => `第${location.page}页 · ${location.object}`, location => resourceTask(() => focus(location)));
+	else resourceChoices(locations, location => `第${location.page}页 · ${location.object}`, location => resourceTask(() => focus(location)), "选择位置");
 }
 
-function resourceChoices(items, label, choose) {
+function resourceChoices(items, label, choose, title = "选择对象") {
+	el.objectPickerTitle.textContent = title;
 	el.objectPickerList.replaceChildren();
 	for (const item of items) {
 		const button = document.createElement("button");
@@ -10451,6 +10470,7 @@ function placeMediaPlayer(id, entry) {
 			header.className = "form-title";
 			const title = document.createElement("span");
 			title.textContent = `${label}播放`;
+			dialog.setAttribute("aria-label", title.textContent);
 			const close = document.createElement("button");
 			close.type = "button";
 			close.className = "small-button";
@@ -12967,6 +12987,7 @@ function mountAnnotationNotes(index, surface, annotations) {
 			el.annotationDetail.hidden = false;
 			el.annotationStatus.textContent = "";
 			el.annotationClose.textContent = "关闭";
+			el.annotationNoteTitle.textContent = "注解详情";
 			const content = document.createElement("div");
 			content.textContent = annotation.remark;
 			el.annotationDetail.append(content);
