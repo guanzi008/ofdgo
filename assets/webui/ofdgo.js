@@ -5903,17 +5903,22 @@ async function toggleAnnotations() {
 	if (document.body.hasAttribute("data-busy")) {
 		return;
 	}
+	const tab = documentTab(), state = tab.state;
+	const previous = state.renderAnnotations;
 	state.renderAnnotations = !state.renderAnnotations;
 	updateAnnotationButton();
 	if (!state.doc) {
 		return;
 	}
-	await openDocument({
-		pageIndex: state.pageIndex,
-		fitMode: state.fitMode,
-		skipAutoFonts: true,
-		reuseSession: true,
-	});
+	try {
+		await refreshPageDisplay();
+	} catch (err) {
+		state.renderAnnotations = previous;
+		if (isForegroundDocument(tab)) {
+			updateAnnotationButton();
+			showError(err, false);
+		}
+	}
 }
 
 function displayMode() {
