@@ -31,6 +31,7 @@
 }
 
 .document-titlebar {
+	--tab-action-gap: max(0px, calc((var(--titlebar-height, 36px) - 30px) / 2));
 	display: flex;
 	min-width: 0;
 	align-items: stretch;
@@ -62,7 +63,7 @@
 	min-width: 100px;
 	max-width: min(240px, 100%);
 	gap: 8px;
-	padding: 0 8px 0 12px;
+	padding: 0 var(--tab-action-gap) 0 12px;
 	border: 0;
 	border-right: 1px solid var(--line);
 	background: transparent;
@@ -117,7 +118,7 @@
 }
 
 .document-new-tab {
-	margin-left: 8px;
+	margin-left: var(--tab-action-gap);
 }
 
 .document-title-drag {
