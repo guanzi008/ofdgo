@@ -2095,7 +2095,7 @@ body[data-hide-meta] .meta-panel {
 .settings-dialog > form {
 	display: flex;
 	flex-direction: column;
-	max-height: calc(100dvh - 26px);
+	max-height: calc(100dvh - var(--dialog-inset, 0px) - 26px);
 	padding: 0;
 }
 

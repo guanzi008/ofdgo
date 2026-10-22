@@ -19,6 +19,7 @@ class BrowserScheduler {
 		this.limit = Math.min(this.capacity, Math.max(1, Math.floor(this.budget / (512 << 20))));
 		this.workers = new Set();
 		this.queue = [];
+		this.sequence = 0;
 	}
 
 	get memory() {
@@ -26,21 +27,34 @@ class BrowserScheduler {
 	}
 
 	active() {
-		return [...this.workers].filter(worker => worker.requests.size).length;
+		return [...this.workers].reduce((total, worker) => total + new Set([...worker.operations.values()].map(data => data.engineID)).size, 0);
+	}
+
+	owner(worker, data) {
+		return worker.shared ? worker.sessions.get(data.engineID) : worker;
+	}
+
+	priority(task) {
+		return Number(task.worker.batch || this.owner(task.worker, task.data)?.foreground === false) + Number(!!task.data.preload);
 	}
 
 	submit(worker, data, transfer) {
-		if (worker.primary) { this.send({worker, data, transfer}); return; }
-		this.queue.push({worker, data, transfer, queued:performance.now()});
+		if (data.preload && this.owner(worker, data)?.pagesPaused) {
+			worker.receive({data:{engineID:data.engineID, id:data.id, ok:false, canceled:true, error:"预加载已暂停"}});
+			return;
+		}
+		this.queue.push({worker, data, transfer, queued:performance.now(), order:++this.sequence});
 		this.drain();
 	}
 
 	send(task) {
 		const {worker, data, transfer} = task;
 		worker.requests.set(requestKey(worker, data), performance.now());
+		worker.operations.set(requestKey(worker, data), data);
 		try { worker.worker.postMessage(data, transfer); }
 		catch (error) {
 			worker.requests.delete(requestKey(worker, data));
+			worker.operations.delete(requestKey(worker, data));
 			worker.receive({data:{engineID:data.engineID, id:data.id, ok:false, error:error.message}});
 		}
 	}
@@ -51,6 +65,7 @@ class BrowserScheduler {
 		const key = requestKey(worker, data);
 		const started = worker.requests.get(key);
 		worker.requests.delete(key);
+		worker.operations.delete(key);
 		if (this.memory > this.budget) this.limit = Math.max(1, this.limit - 1);
 		else if (started !== undefined && data.ok && performance.now() - started > 100 && this.memory + Math.max(128 << 20, worker.memory) < this.budget) this.limit = Math.min(this.capacity, this.limit + 1);
 	}
@@ -63,31 +78,45 @@ class BrowserScheduler {
 				if (this.memory + (64 << 20) <= this.budget) break;
 				if (!worker.requests.size) worker.reclaim?.();
 			}
-			this.queue.sort((a, b) => Number(a.worker.batch) - Number(b.worker.batch) + (a.queued - b.queued) / 2000);
+			this.queue.sort((a, b) => this.priority(a) - this.priority(b) + (a.queued - b.queued) / 2000);
 			for (let i = 0; i < this.queue.length;) {
 				const task = this.queue[i];
 				if (task.worker.closed) { this.queue.splice(i, 1); continue; }
+				if (this.queue.some(previous => previous.worker === task.worker && previous.data.engineID === task.data.engineID && previous.order < task.order)) { i++; continue; }
+				const busy = [...task.worker.operations.values()].some(data => data.engineID === task.data.engineID && data.name !== "ofdgoSaveSnapshot");
+				const snapshot = task.data.name === "ofdgoSaveSnapshot" && [...task.worker.operations.values()].some(data => data.engineID === task.data.engineID && data.name === "ofdgoSaveSnapshot");
 				const active = this.active();
-				if (task.worker.requests.size || active >= this.limit || active && this.memory + (64 << 20) > this.budget) { i++; continue; }
+				const interactive = task.worker.primary && this.owner(task.worker, task.data)?.foreground === true && !task.data.preload;
+				const foregroundActive = [...this.workers].some(worker => [...worker.operations.values()].some(data => data.name !== "ofdgoSaveSnapshot" && worker.primary && this.owner(worker, data)?.foreground === true && !data.preload));
+				const continuing = task.worker.primary && [...task.worker.operations.values()].some(data => data.engineID === task.data.engineID);
+				const available = continuing || active < this.limit || interactive && !foregroundActive && active < this.limit + 1;
+				if (busy || snapshot || !available || !task.worker.primary && active && this.memory + (64 << 20) > this.budget) { i++; continue; }
 				this.queue.splice(i, 1);
 				this.send(task);
 			}
 		} finally { this.draining = false; }
 	}
 
-	cancel(worker, id) {
-		const index = this.queue.findIndex(task => task.worker === worker && task.data.id === id);
+	cancel(worker, data) {
+		const index = this.queue.findIndex(task => task.worker === worker && requestKey(worker, task.data) === requestKey(worker, data));
 		if (index < 0) return false;
-		this.queue.splice(index, 1);
-		worker.receive({data:{engineID:worker.engineID, id, ok:false, canceled:true, error:"操作已取消"}});
+		const task = this.queue.splice(index, 1)[0];
+		worker.receive({data:{engineID:task.data.engineID, id:data.id, ok:false, canceled:true, error:"操作已取消"}});
 		this.drain();
 		return true;
+	}
+
+	pause(worker, engineID) {
+		const paused = this.queue.filter(task => task.worker === worker && task.data.engineID === engineID && task.data.preload);
+		this.queue = this.queue.filter(task => !paused.includes(task));
+		for (const task of paused) worker.receive({data:{engineID, id:task.data.id, ok:false, canceled:true, error:"预加载已暂停"}});
 	}
 
 	remove(worker) {
 		this.workers.delete(worker);
 		this.queue = this.queue.filter(task => task.worker !== worker);
 		worker.requests.clear();
+		worker.operations.clear();
 		this.drain();
 	}
 }
@@ -102,6 +131,9 @@ class BrowserWorker {
 		this.closingSessions = new Set();
 		this.batch = !options.primary && !options.page;
 		this.requests = new Map();
+		this.operations = new Map();
+		this.foreground = !this.batch;
+		this.pagesPaused = false;
 		this.memory = 64 << 20;
 		this.reservation = 0;
 		this.closed = false;
@@ -135,6 +167,10 @@ class BrowserWorker {
 		}
 		if (event.data.type === "closed") {
 			if (!this.closingSessions.delete(event.data.engineID)) return;
+			for (const [key, data] of this.operations) if (data.engineID === event.data.engineID) {
+				this.requests.delete(key);
+				this.operations.delete(key);
+			}
 			if (!this.sessions.size && !this.closingSessions.size) this.terminate();
 			return;
 		}
@@ -154,9 +190,20 @@ class BrowserWorker {
 		if (this.closed) throw new DOMException("引擎已关闭", "AbortError");
 		if (!this.shared) data = {...data, engineID:this.engineID};
 		if (data.type) {
-			if (data.type === "cancel" && engineScheduler.cancel(this, data.id)) return;
+			if (data.type === "cancel" && engineScheduler.cancel(this, data)) return;
 			this.worker.postMessage(data, transfer);
 		} else engineScheduler.submit(this, data, transfer);
+	}
+
+	setForeground(foreground) {
+		this.foreground = !!foreground;
+		this.pausePages(!this.foreground);
+	}
+
+	pausePages(paused = true) {
+		this.pagesPaused = !!paused;
+		if (this.pagesPaused) engineScheduler.pause(this, this.engineID);
+		engineScheduler.drain();
 	}
 
 	terminate() {
@@ -180,6 +227,8 @@ class BrowserSession {
 		this.runtime = runtime;
 		this.engineID = `engine-${++engineSequence}`;
 		this.requests = new Set();
+		this.foreground = true;
+		this.pagesPaused = false;
 		this.closed = false;
 		runtime.sessions.set(this.engineID, this);
 		runtime.postMessage({type:"open", engineID:this.engineID});
@@ -198,11 +247,22 @@ class BrowserSession {
 		this.runtime.postMessage({...data, engineID:this.engineID}, transfer);
 	}
 
+	setForeground(foreground) {
+		this.foreground = !!foreground;
+		this.pausePages(!this.foreground);
+	}
+
+	pausePages(paused = true) {
+		this.pagesPaused = !!paused;
+		if (this.pagesPaused) engineScheduler.pause(this.runtime, this.engineID);
+		engineScheduler.drain();
+	}
+
 	terminate() {
 		if (this.closed) return;
 		this.closed = true;
 		this.runtime.sessions.delete(this.engineID);
-		for (const id of this.requests) this.runtime.requests.delete(requestKey(this.runtime, {engineID:this.engineID, id}));
+		engineScheduler.queue = engineScheduler.queue.filter(task => task.worker !== this.runtime || task.data.engineID !== this.engineID);
 		this.requests.clear();
 		if (!this.runtime.closed) {
 			this.runtime.closingSessions.add(this.engineID);
@@ -248,18 +308,40 @@ class BrowserEngine {
 		this.budget = engineScheduler.budget;
 		this.closed = false;
 		this.source = null;
+		this.pageSource = null;
+		this.foreground = true;
+		this.pagesPaused = false;
 	}
 
 	configurePages(source) {
+		const current = this.pageSource;
+		const fonts = (source?.fonts || []).map(font => font?.data !== undefined ? {name:font.name, data:font.data} : font);
+		const sameFonts = current && fonts.length === current.fonts.length && fonts.every((font, index) => font === current.fonts[index] || font?.data !== undefined && font.name === current.fonts[index]?.name && font.data === current.fonts[index]?.data);
+		if (source && current && source.file === current.file && (source.document || 0) === current.document && (source.version || "") === current.version && source.annotations === current.annotations && source.revision === current.revision && sameFonts) return;
 		this.invalidatePages();
 		if (!source || this.closed) return;
+		this.pageSource = {...source, fonts, document:source.document || 0, version:source.version || ""};
 		this.source = {...source, file: source.file instanceof Blob ? source.file : new Blob([source.file])};
 		this.parallelism = engineScheduler.limit;
+	}
+
+	setForeground(foreground) {
+		this.foreground = !!foreground;
+		this.primary.setForeground(this.foreground);
+		for (const slot of this.slots) slot.worker.setForeground(this.foreground);
+		this.pausePages(!this.foreground);
+	}
+
+	pausePages(paused = true) {
+		this.pagesPaused = !!paused;
+		this.primary.pausePages(this.pagesPaused);
+		for (const slot of this.slots) slot.worker.pausePages(this.pagesPaused);
 	}
 
 	invalidatePages() {
 		this.revision++;
 		this.source = null;
+		this.pageSource = null;
 		this.parallelism = 1;
 		for (const slot of this.slots) this.closeSlot(slot);
 	}
@@ -274,6 +356,8 @@ class BrowserEngine {
 
 	createSlot(source) {
 		const worker = createEngineWorker({page:true, url:this.workerURL});
+		worker.setForeground(this.foreground);
+		worker.pausePages(this.pagesPaused);
 		const slot = {worker, pending: new Map(), busy: false, memory: Math.max(128 << 20, this.memory), pages:new Set(), lastPage:0};
 		worker.reservation = slot.memory;
 		worker.reclaim = () => { if (!slot.busy) this.closeSlot(slot); };
@@ -289,7 +373,7 @@ class BrowserEngine {
 				if (!request) return;
 				slot.pending.delete(data.id);
 				if (data.ok) request.resolve(data);
-				else request.reject(Object.assign(new Error(data.error), {code: data.code}));
+				else request.reject(Object.assign(new Error(data.error), {code:data.code, name:data.canceled ? "AbortError" : "Error"}));
 			};
 			worker.onerror = worker.onmessageerror = () => this.closeSlot(slot, new Error("页面加载失败"));
 		});
@@ -303,18 +387,22 @@ class BrowserEngine {
 		return slot;
 	}
 
-	callSlot(slot, name, args) {
+	callSlot(slot, name, args, preload = false) {
 		return new Promise((resolve, reject) => {
 			if (!this.slots.has(slot)) { reject(new DOMException("页面加载已取消", "AbortError")); return; }
 			const id = --this.sequence;
 			slot.pending.set(id, {resolve, reject});
-			try { slot.worker.postMessage({id, name, args}); }
+			try { slot.worker.postMessage({id, name, args, preload}); }
 			catch (error) { slot.pending.delete(id); reject(error); }
 		});
 	}
 
 	postMessage(data, transfer) {
 		if (this.closed) return;
+		if (!data.type && data.preload && this.pagesPaused) {
+			this.onmessage?.({data:{engineID:this.engineID, id:data.id, ok:false, canceled:true, error:"预加载已暂停"}});
+			return;
+		}
 		if (data.type === "cancel") {
 			const slot = this.requests.get(data.id);
 			if (slot) this.closeSlot(slot);
@@ -339,7 +427,7 @@ class BrowserEngine {
 		}
 		let slot = preferred || [...this.slots].filter(slot => !slot.busy).sort((a,b) => Math.abs(a.lastPage-data.args[0])-Math.abs(b.lastPage-data.args[0]))[0];
 		const memory = engineScheduler.memory;
-		if (!slot && this.slots.size < this.parallelism - 1 && memory + Math.max(128 << 20, this.memory) <= this.budget) slot = this.createSlot(this.source);
+		if (!slot && this.foreground && !this.pagesPaused && this.slots.size < this.parallelism - 1 && memory + Math.max(128 << 20, this.memory) <= this.budget) slot = this.createSlot(this.source);
 		if (!slot) {
 			this.requests.set(data.id, null);
 			this.primary.postMessage(data, transfer);
@@ -349,7 +437,7 @@ class BrowserEngine {
 		this.requests.set(data.id, slot);
 		const revision = this.revision;
 		let fallback = false;
-		slot.ready.then(() => this.callSlot(slot, data.name, data.args)).then(result => {
+		slot.ready.then(() => this.callSlot(slot, data.name, data.args, !!data.preload)).then(result => {
 			if (revision !== this.revision) throw new DOMException("页面加载已取消", "AbortError");
 			slot.lastPage = data.args[0];
 			slot.pages.delete(slot.lastPage);
@@ -542,9 +630,18 @@ class NativeHost {
 		}).catch(error => { if (!closed) worker.onerror?.({message:error.message}); throw error; });
 		const worker = {
 			engineID:null,
+			foreground:true,
+			pagesPaused:false,
 			onmessage:null,
 			onerror:null,
 			configurePages() {},
+			setForeground(foreground) {
+				worker.foreground = !!foreground;
+				worker.pausePages(!worker.foreground);
+			},
+			pausePages(paused = true) {
+				worker.pagesPaused = !!paused;
+			},
 			postMessage(data) {
 				if (closed) return;
 				if (data.type === "cancel") {
@@ -563,6 +660,7 @@ class NativeHost {
 				const operation = barrier.then(async () => {
 					const engine = await ready;
 					if (closed) return;
+					if (data.preload && worker.pagesPaused) throw new DOMException("预加载已暂停", "AbortError");
 					controller.signal.throwIfAborted();
 					const args = {engine, id:data.id, name:data.name, args:data.args};
 					let result;

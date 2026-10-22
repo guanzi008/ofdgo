@@ -1,6 +1,6 @@
 const CACHE_PREFIX = `ofdgo:${self.registration.scope}:app:`;
 const META_CACHE = `${CACHE_PREFIX}meta`;
-const ASSETS = ["./", "ofdgo.css", "ofdgo.ico", "ofdgo.js", "ofdgo.json", "ofdgo.png", "ofdgo.svg", "ofdgo.wasm", "ofdgo_edit.js", "ofdgo_font.js", "ofdgo_host.js", "ofdgo_wasm.js", "ofdgo_work.js", "wasm_exec.js"]
+const ASSETS = ["./", "ofdgo.css", "ofdgo.ico", "ofdgo.js", "ofdgo.json", "ofdgo.png", "ofdgo.svg", "ofdgo.wasm", "ofdgo_edit.js", "ofdgo_font.js", "ofdgo_host.js", "ofdgo_util.js", "ofdgo_wasm.js", "ofdgo_work.js", "wasm_exec.js"]
 	.map((path) => new URL(path, self.registration.scope).href);
 const CLIENT_PREFIX = new URL("__client/", self.registration.scope).href;
 
