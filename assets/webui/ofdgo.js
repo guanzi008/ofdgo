@@ -2477,8 +2477,9 @@ async function closeWorkspace() {
 		if (workspace.tabs.some(tab => tab.state.saving)) { setStatus("文档正在保存，请稍后关闭"); return; }
 		if (batch.running && !window.confirm("批量转换尚未完成，是否退出？")) return;
 		if (workspace.tabs.some(tab => tab.opening || tab.state.exporting) && !window.confirm("文档正在处理，是否取消并退出？")) return;
-		const dirty = workspace.tabs.some(tab => tab.state.dirty) || canvasEditor.textChanged() || canvasEditor.cropChanged() || canvasEditor.nudgeChanged();
-		if (dirty && (workspace.switching || workspace.tabs.some(tab => tab.closing) || document.body.hasAttribute("data-busy") || formDialogOpen())) {
+		const activeDirty = state.dirty || canvasEditor.textChanged() || canvasEditor.cropChanged() || canvasEditor.nudgeChanged();
+		const dirty = activeDirty || workspace.tabs.some(tab => tab.state.dirty);
+		if (dirty && (workspace.switching || workspace.tabs.some(tab => tab.closing) || formDialogOpen() || (activeDirty && document.body.hasAttribute("data-busy")))) {
 			setStatus("操作正在进行，请完成或取消后关闭");
 			return;
 		}
@@ -2545,6 +2546,8 @@ function renderDocumentTabs() {
 		name.textContent = `${tab.state.dirty ? "● " : ""}${title}`;
 		item.title = `${title}${tab.opening ? ` · ${STATUS.opening}` : tab.state.saving ? " · 正在保存" : tab.error ? ` · ${tab.error}` : ""}`;
 		item.dataset.loading = String(Boolean(tab.opening));
+		item.dataset.error = String(Boolean(tab.error));
+		if (tab.error) name.textContent = `! ${name.textContent}`;
 		const close = document.createElement("button");
 		close.type = "button";
 		close.className = "document-tab-close";
@@ -2846,17 +2849,19 @@ function setDirty(dirty) {
 	updateWorkspaceDirty();
 }
 
-async function requestCloseAction(title, message, save) {
-	if (documentDialogs && !workspace.closing) return documentDialogs.request(el.closePanel, documentTab(), () => {
+async function requestCloseAction(title, message, save, tab = documentTab()) {
+	const setup = () => {
 		el.closeTitle.textContent = title;
 		el.closeMessage.textContent = message;
-		el.closePanel.querySelector('[value="save"]').textContent = save;
+		const saveButton = el.closePanel.querySelector('[value="save"]');
+		saveButton.hidden = !save;
+		if (save) saveButton.textContent = save;
+		el.closePanel.querySelector('[value="discard"]').textContent = save ? "放弃" : "停止并关闭";
 		el.closePanel.returnValue = "cancel";
-	});
-	el.closeTitle.textContent = title;
-	el.closeMessage.textContent = message;
-	el.closePanel.querySelector('[value="save"]').textContent = save;
-	el.closePanel.returnValue = "cancel";
+		el.closePanel.inert = false;
+	};
+	if (documentDialogs && !workspace.closing) return documentDialogs.request(el.closePanel, tab, setup);
+	setup();
 	const choice = new Promise(resolve => el.closePanel.addEventListener("close", () => resolve(el.closePanel.returnValue), { once: true }));
 	if (documentDialogs) documentDialogs.showApplication(el.closePanel);
 	else el.closePanel.showModal();
@@ -2865,6 +2870,9 @@ async function requestCloseAction(title, message, save) {
 	} finally {
 		el.closeTitle.textContent = "关闭文档";
 		el.closeMessage.textContent = "文档尚未保存";
+		el.closePanel.querySelector('[value="save"]').hidden = false;
+		el.closePanel.querySelector('[value="discard"]').textContent = "放弃";
+		el.closePanel.inert = document.body.hasAttribute("data-busy");
 	}
 }
 
@@ -2899,7 +2907,10 @@ async function closeFile(tab = null) {
 	try {
 		if (tab.state.saving && tab.saveCompletion) await tab.saveCompletion;
 		if (tab.closed) return;
-		if ((tab.opening || tab.state.exporting) && !window.confirm("文档正在处理，是否取消并关闭？")) return;
+		if (tab.opening || tab.state.exporting) {
+			const action = await requestCloseAction("关闭文档", "文档正在处理，是否取消并关闭？", null, tab);
+			if (action !== "discard" || tab.closed) return;
+		}
 		if (tab.state.dirty || tab === workspace.active && (canvasEditor.input || canvasEditor.crop || canvasEditor.nudge)) {
 			if (tab !== workspace.active && !await activateDocumentTab(tab)) return;
 			if (!await confirmDocumentClose(tab) || tab.closed || workspace.closing) return;
@@ -13756,7 +13767,7 @@ function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab())
 	renderSecurity();
 	updateDisplayControls();
 	el.editButton.disabled = busy || Boolean(sealPreview || resourceManager.pick) || !state.doc || !state.ready || state.exporting;
-	el.closePanel.inert = busy;
+	el.closePanel.inert = busy && !el.closePanel.open;
 	el.createForm.inert = busy && !state.imageImporting;
 	updateCreateOptions();
 	el.insertForm.inert = busy;

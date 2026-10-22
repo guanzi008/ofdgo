@@ -84,6 +84,10 @@
 	white-space: nowrap;
 }
 
+.document-tab[data-error="true"] .document-tab-name {
+	color: #b42318;
+}
+
 .document-titlebar[data-active="false"] {
 	background: var(--titlebar-inactive-background);
 	color: var(--titlebar-inactive-foreground);
@@ -879,6 +883,10 @@ button:not(:disabled):hover {
 .confirm-dialog .form-actions {
 	grid-template-columns: repeat(3, max-content);
 	justify-content: end;
+}
+
+.confirm-dialog .form-actions button[hidden] {
+	display: none;
 }
 
 .convert-dialog {
