@@ -1720,7 +1720,7 @@ el.pageInput.addEventListener("change", () => {
 });
 window.addEventListener("resize", resizeViewer);
 window.addEventListener("resize", () => {
-	for (const tabs of document.querySelectorAll(".panel-tabs")) revealPanelTab(tabs);
+	for (const tabs of document.querySelectorAll(".panel-tabs, .document-tabs")) revealPanelTab(tabs);
 });
 window.addEventListener("blur", () => endPan());
 COMPACT_LAYOUT.addEventListener("change", syncLayoutMode);
@@ -2399,6 +2399,7 @@ function applyTitleBarInfo(info) {
 	}
 	el.documentTitleBar.dataset.active = String(info.active);
 	el.documentTitleBar.dataset.maximized = String(info.maximized);
+	revealPanelTab(el.documentTabs);
 	updateTitleBarRegions();
 }
 
@@ -2542,7 +2543,7 @@ function renderDocumentTabs() {
 		});
 		el.documentTabs.append(item);
 	}
-	el.documentTabs.querySelector('[data-selected="true"]')?.scrollIntoView({block: "nearest", inline: "nearest"});
+	revealPanelTab(el.documentTabs);
 	updateTitleBarRegions();
 }
 
