@@ -193,6 +193,14 @@
 				<button id="batchPagesButton" class="editor-group-action" type="button">页面</button>
 			</div>
 		</div>
+		<dialog id="aboutPanel" class="form-dialog about-dialog" aria-labelledby="aboutTitle">
+			<form method="dialog">
+				<h2 id="aboutTitle" class="form-title">OFDGo</h2>
+				<div class="about-row"><span>构建版本</span><span id="aboutVersion">develop</span></div>
+				<div class="about-row"><span>项目官网</span><a href="https://ofdgo.aite.me/" target="_blank" rel="noreferrer">https://ofdgo.aite.me/</a></div>
+				<div class="about-row"><span>项目仓库</span><a href="https://github.com/xiaoqidun/ofdgo" target="_blank" rel="noreferrer">https://github.com/xiaoqidun/ofdgo</a></div>
+			</form>
+		</dialog>
 		<dialog id="closePanel" class="form-dialog confirm-dialog" aria-labelledby="closeTitle">
 			<form method="dialog">
 				<h2 id="closeTitle" class="form-title">关闭文档</h2>
@@ -841,7 +849,7 @@
 		</main>
 
 		<footer class="app-footer app-bar">
-			<a class="footer-brand" href="https://github.com/xiaoqidun/ofdgo" target="_blank" rel="noreferrer">OFDGo</a>
+			<button id="aboutButton" class="footer-brand" type="button">OFDGo</button>
 			<div id="statusText" class="status-text">正在准备引擎</div>
 			<nav class="footer-links">
 				<a href="https://aite.me/" target="_blank" rel="noreferrer">官方网站</a>

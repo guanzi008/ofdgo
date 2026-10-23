@@ -29,6 +29,7 @@ import (
 
 	"github.com/xiaoqidun/ofdgo/assets/webui"
 	"github.com/xiaoqidun/ofdgo/assets/webui/wasm"
+	"github.com/xiaoqidun/ofdgo/internal/build"
 )
 
 func main() {
@@ -50,6 +51,7 @@ func serveWebUI() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-OFDGo-Checksum", checksum)
+		w.Header().Set("X-OFDGo-Build-Version", build.Version)
 		if r.URL.Path == "/ofdgo.wasm" {
 			wasm.ServeHTTP(w, r)
 			return
@@ -73,5 +75,6 @@ func resourceChecksum() string {
 			hash.Write(data)
 		}
 	}
+	hash.Write([]byte(build.Version))
 	return hex.EncodeToString(hash.Sum(nil))
 }

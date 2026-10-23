@@ -866,6 +866,30 @@ button:not(:disabled):hover {
 	padding: 12px;
 }
 
+.about-dialog {
+	width: 460px;
+}
+
+.about-row {
+	display: grid;
+	grid-template-columns: 4em minmax(0, 1fr);
+	align-items: start;
+	gap: 12px;
+	margin-bottom: 12px;
+}
+
+.about-row > span:first-child {
+	text-align-last: justify;
+}
+
+.about-row:last-child {
+	margin-bottom: 0;
+}
+
+.about-row a {
+	overflow-wrap: anywhere;
+}
+
 .form-title {
 	margin: -12px -12px 12px;
 	padding: 10px 12px;
@@ -4135,8 +4159,19 @@ audio.page-media {
 	flex: 0 0 var(--sidebar-width);
 	min-width: 0;
 	overflow: hidden;
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--accent-strong);
+	font: inherit;
+	text-align: left;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+	cursor: pointer;
+}
+
+.footer-brand:hover {
+	text-decoration: underline;
 }
 
 .status-text {

@@ -190,6 +190,9 @@ const el = {
 	documentTitleBar: document.querySelector("#documentTitleBar"),
 	documentTabs: document.querySelector("#documentTabs"),
 	documentNewTab: document.querySelector("#documentNewTab"),
+	aboutButton: document.querySelector("#aboutButton"),
+	aboutPanel: document.querySelector("#aboutPanel"),
+	aboutVersion: document.querySelector("#aboutVersion"),
 	signButton: document.querySelector("#signButton"),
 	signPanel: document.querySelector("#signPanel"),
 	signForm: document.querySelector("#signForm"),
@@ -1466,6 +1469,13 @@ el.pageForm.addEventListener("submit", async (event) => {
 		el.pagePanel.close();
 	}
 });
+el.aboutButton.addEventListener("click", openAboutPanel);
+let aboutBackdrop = false;
+el.aboutPanel.addEventListener("pointerdown", event => { aboutBackdrop = event.target === el.aboutPanel; });
+el.aboutPanel.addEventListener("click", event => {
+	if (aboutBackdrop && event.target === el.aboutPanel) el.aboutPanel.close();
+	aboutBackdrop = false;
+});
 el.ofdButton.addEventListener("click", openOFDFile);
 el.closeButton.addEventListener("pointerdown", event => event.preventDefault());
 el.closeButton.addEventListener("click", () => closeDocument().catch(error => showError(error, false)));
@@ -1966,8 +1976,34 @@ function handleKeyDown(event) {
 }
 
 function formDialogOpen() {
-	return Boolean(sealPreview || resourceManager.pick) || el.closePanel.open || el.attachmentDialog.open || settingsElements.Panel.open || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
+	return Boolean(sealPreview || resourceManager.pick) || el.aboutPanel.open || el.closePanel.open || el.attachmentDialog.open || settingsElements.Panel.open || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
 		|| resourceElements.Panel.open || el.structureDialog.open || el.versionPanel.open || el.batchPagesPanel.open || el.objectStylePanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
+}
+
+async function openAboutPanel() {
+	el.aboutVersion.textContent = "读取中";
+	documentDialogs.showApplication(el.aboutPanel);
+	let raw = "";
+	try {
+		const response = await fetch("./", { cache: "no-store" });
+		if (response.ok) raw = response.headers.get("X-OFDGo-Build-Version") || "";
+	} catch {
+		if (el.aboutPanel.open) el.aboutVersion.textContent = "版本信息不可用";
+		return;
+	}
+	if (!el.aboutPanel.open) return;
+	if (!raw) {
+		el.aboutVersion.textContent = "develop";
+		return;
+	}
+	const match = /^(\d+)-([0-9a-f]{40}|[0-9a-f]{64})$/i.exec(raw);
+	const seconds = Number(match?.[1]);
+	const date = new Date(seconds * 1000);
+	if (!match || !Number.isSafeInteger(seconds) || Number.isNaN(date.getTime())) {
+		el.aboutVersion.textContent = "版本信息异常";
+		return;
+	}
+	el.aboutVersion.textContent = `${date.toISOString().slice(0, 10).replaceAll("-", "")}-${match[2].slice(0, 7)}`;
 }
 
 function setObjectDimension(input, value) {

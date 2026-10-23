@@ -37,6 +37,7 @@ import (
 	"github.com/xiaoqidun/guigo"
 	"github.com/xiaoqidun/ofdgo"
 	webuiassets "github.com/xiaoqidun/ofdgo/assets/webui"
+	"github.com/xiaoqidun/ofdgo/internal/build"
 	"github.com/xiaoqidun/ofdgo/internal/webui"
 )
 
@@ -115,6 +116,7 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-OFDGo-Build-Version", build.Version)
 		static.ServeHTTP(w, r)
 	})
 	options.Handler = handler
