@@ -2565,15 +2565,13 @@ function copyApplicationPreferences(target) {
 
 function renderDocumentTabs() {
 	documentTab();
-	const focused = el.documentTabs.contains(document.activeElement) ? document.activeElement.closest('[role="tab"]')?.dataset.id : null;
+	const focused = el.documentTabs.contains(document.activeElement) ? document.activeElement.closest(".document-tab")?.dataset.id : null;
 	el.documentTabs.replaceChildren();
 	for (const tab of workspace.tabs) {
 		const item = document.createElement("div");
 		item.className = "document-tab";
 		item.dataset.id = String(tab.id);
 		item.dataset.selected = String(tab === workspace.active);
-		item.setAttribute("role", "tab");
-		item.setAttribute("aria-selected", String(tab === workspace.active));
 		item.tabIndex = tab === workspace.active ? 0 : -1;
 		item.draggable = true;
 		const name = document.createElement("span");
@@ -2588,7 +2586,6 @@ function renderDocumentTabs() {
 		close.type = "button";
 		close.className = "document-tab-close";
 		close.title = "关闭";
-		close.setAttribute("aria-label", `关闭 ${title}`);
 		const icon = document.createElement("span");
 		icon.className = "close-icon";
 		close.append(icon);
@@ -5262,7 +5259,6 @@ async function refreshApplication() {
 	}
 	setBusy(true, "正在更新应用", null, "正在更新应用");
 	el.refreshAppButton.disabled = true;
-	el.refreshAppButton.textContent = "更新";
 	const panels = document.querySelectorAll(".document-titlebar, .toolbar-frame, .workspace");
 	panels.forEach((panel) => { panel.inert = true; });
 	try {
@@ -5297,7 +5293,6 @@ async function refreshApplication() {
 	} finally {
 		panels.forEach((panel) => { panel.inert = false; });
 		el.refreshAppButton.disabled = false;
-		el.refreshAppButton.textContent = "更新";
 		setBusy(false);
 	}
 }
@@ -10539,7 +10534,6 @@ function placeMediaPlayer(id, entry) {
 			header.className = "form-title";
 			const title = document.createElement("span");
 			title.textContent = `${label}播放`;
-			dialog.setAttribute("aria-label", title.textContent);
 			const close = document.createElement("button");
 			close.type = "button";
 			close.className = "small-button";

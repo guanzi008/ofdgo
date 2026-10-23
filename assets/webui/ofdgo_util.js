@@ -4,7 +4,6 @@ export class DocumentDialogs {
 		this.backdrop = root.createElement("div");
 		this.backdrop.className = "document-dialog-backdrop";
 		this.backdrop.hidden = true;
-		this.backdrop.setAttribute("aria-hidden", "true");
 		Object.assign(this.backdrop.style, { position: "fixed", inset: "0", background: "rgb(31 36 40 / 18%)", zIndex: "1000" });
 		root.body.append(this.backdrop);
 		root.addEventListener("keydown", event => {

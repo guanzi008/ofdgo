@@ -99,7 +99,8 @@
 }
 
 .document-tab-close,
-.document-new-tab {
+.document-new-tab,
+.app-update {
 	display: grid;
 	place-items: center;
 	flex: 0 0 28px;
@@ -113,7 +114,8 @@
 }
 
 .document-tab-close:hover,
-.document-new-tab:hover {
+.document-new-tab:hover,
+.app-update:not(:disabled):hover {
 	background: var(--accent-soft);
 }
 
@@ -567,19 +569,9 @@ a:focus-visible {
 }
 
 .app-update {
-	flex: 0 0 auto;
-	align-self: center;
-	margin-left: 8px;
-	border-color: var(--accent);
-	background: #e4f3ef;
+	margin-left: var(--tab-action-gap);
+	margin-right: -6px;
 	color: var(--accent-strong);
-	font-size: 13px;
-	line-height: 1;
-}
-
-.app-update:not(:disabled):hover {
-	border-color: var(--accent);
-	background: #f2faf7;
 }
 
 .app-update[hidden] {
@@ -659,6 +651,7 @@ button:not(:disabled):hover {
 .open-icon,
 .close-icon,
 .new-icon,
+.update-icon,
 .save-icon,
 .save-as-icon,
 .edit-icon,
@@ -681,6 +674,10 @@ button:not(:disabled):hover {
 
 .new-icon {
 	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3v18M3 12h18'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+.update-icon {
+	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 11a8 8 0 0 0-14.9-3M4 4v4h4M4 13a8 8 0 0 0 14.9 3M20 20v-4h-4'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
 .save-icon {
@@ -4349,6 +4346,10 @@ audio.page-media {
 		--bar-height: 42px;
 		--control-height: 28px;
 		--bar-pad: 5px 8px;
+	}
+
+	.app-update {
+		margin-right: -8px;
 	}
 
 	.workspace {
