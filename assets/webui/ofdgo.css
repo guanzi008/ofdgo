@@ -4155,7 +4155,7 @@ audio.page-media {
 	font-size: 12px;
 }
 
-.footer-brand {
+.footer-side {
 	flex: 0 0 var(--sidebar-width);
 	min-width: 0;
 	overflow: hidden;
@@ -4165,12 +4165,17 @@ audio.page-media {
 	color: var(--accent-strong);
 	font: inherit;
 	text-align: left;
+	text-decoration: none;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 	cursor: pointer;
 }
 
-.footer-brand:hover {
+.footer-about {
+	text-align: right;
+}
+
+.footer-side:hover {
 	text-decoration: underline;
 }
 
@@ -4183,26 +4188,6 @@ audio.page-media {
 	text-align: center;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-}
-
-.footer-links {
-	display: inline-flex;
-	align-items: center;
-	gap: 12px;
-	flex: 0 0 var(--sidebar-width);
-	justify-content: flex-end;
-	min-width: 0;
-	overflow: hidden;
-}
-
-.app-footer a {
-	color: var(--accent-strong);
-	font-weight: 400;
-	text-decoration: none;
-}
-
-.app-footer a:hover {
-	text-decoration: underline;
 }
 
 @media (display-mode: standalone) {
@@ -4298,8 +4283,7 @@ audio.page-media {
 		display: none;
 	}
 
-	.footer-brand,
-	.footer-links {
+	.footer-side {
 		flex: 0 1 auto;
 	}
 
