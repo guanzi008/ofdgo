@@ -5053,6 +5053,7 @@ async function boot() {
 			applyTitleBarInfo(await nativeHost.call("window.info", {}));
 			new ResizeObserver(updateTitleBarRegions).observe(el.documentTitleBar);
 			await nativeHost.start(openNativeFiles, error => showError(error, !state.doc));
+			watchApplicationUpdates();
 		}
 		try {
 			const remote = remoteDocumentOptions(window.location.hash);
@@ -5140,18 +5141,20 @@ function watchApplicationUpdates(checksum) {
 			if (force === true) retry = true;
 			return;
 		}
-		if (document.hidden || !navigator.onLine) {
+		if (document.hidden || !nativeHost && !navigator.onLine) {
 			return;
 		}
 		checking = true;
 		try {
-			if (!checksum) {
+			if (!nativeHost && !checksum) {
 				if (!navigator.serviceWorker.controller) return;
 				checksum = await applicationChecksum("./ofdgo.js");
 				if (!checksum) return;
 			}
-			const latest = await applicationChecksum("./", { method: "HEAD", cache: "no-store" });
-			if (latest) {
+			const latest = nativeHost ? await nativeHost.call("update.check", {}) : await applicationChecksum("./", { method: "HEAD", cache: "no-store" });
+			if (nativeHost) {
+				el.refreshAppButton.hidden = !latest;
+			} else if (latest) {
 				el.refreshAppButton.hidden = latest === checksum;
 			}
 		} catch {
@@ -5240,7 +5243,12 @@ function requestOffline(worker, type) {
 }
 
 async function refreshApplication() {
-	if (nativeHost || state.exporting || document.body.hasAttribute("data-busy")) {
+	if (nativeHost) {
+		try { await nativeHost.call("update.open", {}); }
+		catch (err) { showError(err, false); }
+		return;
+	}
+	if (state.exporting || document.body.hasAttribute("data-busy")) {
 		return;
 	}
 	if (workspace.tabs.some(tab => tab.state.saving)) {

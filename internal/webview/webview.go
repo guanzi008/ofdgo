@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xiaoqidun/guigo"
 	"github.com/xiaoqidun/ofdgo"
@@ -43,6 +44,9 @@ import (
 
 // applicationID 标识原生应用，与版本及可执行文件路径无关
 const applicationID = "me.aite.ofdgo"
+
+const applicationVersionURL = "https://ofdgo.aite.me/"
+const applicationDownloadURL = "https://ofdgo.aite.me/releases/"
 
 // Host 连接桌面系统能力和共用文档业务
 type Host struct {
@@ -102,7 +106,7 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 	h.conversionPool = h.resources.ConversionPool()
 	defer h.close()
 	bindings := make(map[string]guigo.HandlerFunc)
-	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "drop.release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title", "window.info", "window.drag", "window.close"} {
+	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "drop.release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title", "window.info", "window.drag", "window.close", "update.check", "update.open"} {
 		bindings["ofdgo.host."+name] = func(ctx context.Context, args any) (any, error) { return h.call(ctx, name, args) }
 	}
 	static := http.FileServerFS(webuiassets.NativeFS)
@@ -326,6 +330,10 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		return guigo.Result{Value: map[string]any{"engine": id, "parallelism": parallelism, "cacheBytes": cacheBytes}, Discard: func() { _ = h.closeEngine(id) }}, nil
 	case "batch":
 		return map[string]any{"parallelism": h.conversionPool.Parallelism()}, nil
+	case "update.check":
+		return applicationUpdate(ctx, build.Version, applicationVersionURL)
+	case "update.open":
+		return nil, guigo.OpenURL(applicationDownloadURL)
 	case "engine.close":
 		return nil, h.closeEngine(text("engine"))
 	case "engine.finish":
@@ -586,6 +594,35 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		return nil, nil
 	}
 	return nil, fmt.Errorf("未知宿主操作")
+}
+
+// applicationUpdate 比较官网和当前程序的完整构建版本
+// 入参: ctx 请求上下文, version 当前版本, endpoint 官网地址
+// 返回: bool 是否有更新, error 检查错误
+func applicationUpdate(ctx context.Context, version, endpoint string) (bool, error) {
+	if version == "" {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodHead, endpoint, nil)
+	if err != nil {
+		return false, err
+	}
+	request.Header.Set("Cache-Control", "no-store")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("检查更新失败: %s", response.Status)
+	}
+	latest := response.Header.Get("X-OFDGo-Build-Version")
+	if latest == "" {
+		return false, errors.New("未提供构建版")
+	}
+	return latest != version, nil
 }
 
 // dialogFilters 将共用界面的文件类型映射到系统对话框
