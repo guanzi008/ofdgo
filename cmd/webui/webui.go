@@ -75,6 +75,5 @@ func resourceChecksum() string {
 			hash.Write(data)
 		}
 	}
-	hash.Write([]byte(build.Version))
 	return hex.EncodeToString(hash.Sum(nil))
 }
