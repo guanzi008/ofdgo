@@ -39,7 +39,7 @@
 	min-height: 0;
 	flex: 0 0 auto;
 	padding-left: var(--titlebar-left, 0px);
-	padding-right: var(--titlebar-right, 8px);
+	padding-right: var(--titlebar-right, 10px);
 	background: var(--titlebar-background);
 	color: var(--titlebar-foreground);
 	user-select: none;
@@ -4343,6 +4343,10 @@ audio.page-media {
 		--bar-height: 42px;
 		--control-height: 28px;
 		--bar-pad: 5px 8px;
+	}
+
+	.document-titlebar {
+		padding-right: var(--titlebar-right, 8px);
 	}
 
 	.workspace {
