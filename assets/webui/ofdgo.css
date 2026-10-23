@@ -4169,7 +4169,7 @@ audio.page-media {
 .footer-action {
 	display: inline-flex;
 	align-items: center;
-	justify-content: center;
+	justify-content: flex-start;
 	flex: 0 0 40px;
 	width: 40px;
 	height: 24px;
@@ -4182,6 +4182,10 @@ audio.page-media {
 	white-space: nowrap;
 	cursor: pointer;
 	transition: none;
+}
+
+.footer-side-right .footer-action {
+	justify-content: flex-end;
 }
 
 .app-footer .footer-action:hover {
