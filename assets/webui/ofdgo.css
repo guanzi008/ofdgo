@@ -3081,6 +3081,20 @@ button.outline-link:hover {
 	-webkit-text-fill-color: transparent;
 }
 
+.edit-text span[data-glyph]::selection {
+	background: transparent;
+	color: transparent;
+	-webkit-text-fill-color: transparent;
+}
+
+.edit-text span[data-glyph][data-selected] {
+	background: Highlight;
+}
+
+.edit-text span[data-glyph][data-selected]::after {
+	color: HighlightText;
+}
+
 .edit-text span[data-glyph]::after {
 	content: attr(data-glyph);
 	position: absolute;

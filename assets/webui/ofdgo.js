@@ -3407,10 +3407,10 @@ async function toggleEditor() {
 	const callWASM = (name, ...args) => callTabWASM(tab, name, ...args);
 	if (!state.doc || !state.ready || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
 	if (state.editorInfo) {
-		const openSeq = state.openSeq;
-		if (!await canvasEditor.commitText() || !isForegroundDocument(tab) || openSeq !== state.openSeq) return;
-		if (!await canvasEditor.commitCrop()) return;
-		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
+		const wasmSeq = state.wasmSeq;
+		const current = () => !tab.closed && tab.state === state && isForegroundDocument(tab) && wasmSeq === state.wasmSeq;
+		if (!await canvasEditor.commitText() || !current()) return;
+		if (!await canvasEditor.commitCrop() || !current()) return;
 		const anchor = scaleAnchor(0);
 		state.editing = !state.editing;
 		renderDocumentFonts();
