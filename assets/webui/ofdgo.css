@@ -567,31 +567,19 @@ a:focus-visible {
 }
 
 .app-update {
-	order: 2;
 	flex: 0 0 auto;
 	align-self: center;
-	margin: 0 10px 0 0;
+	margin-left: 8px;
 	border-color: var(--accent);
 	background: #e4f3ef;
 	color: var(--accent-strong);
-	font-size: 14px;
+	font-size: 13px;
 	line-height: 1;
 }
 
 .app-update:not(:disabled):hover {
 	border-color: var(--accent);
 	background: #f2faf7;
-}
-
-.toolbar-frame:has(.app-update:not([hidden]))::before {
-	order: 1;
-	flex: 0 0 1px;
-	align-self: center;
-	width: 1px;
-	height: 22px;
-	margin: 0 12px 0 2px;
-	background: var(--line);
-	content: "";
 }
 
 .app-update[hidden] {
@@ -4357,10 +4345,6 @@ audio.page-media {
 }
 
 @media (max-width: 640px) {
-	.app-update {
-		margin-right: 8px;
-	}
-
 	:root {
 		--bar-height: 42px;
 		--control-height: 28px;
@@ -4375,8 +4359,7 @@ audio.page-media {
 		grid-template-columns: repeat(3, minmax(0, 1fr));
 	}
 
-	.tool-group + .tool-group::before,
-	.toolbar-frame:has(.app-update:not([hidden]))::before {
+	.tool-group + .tool-group::before {
 		display: none;
 	}
 
