@@ -570,8 +570,6 @@ a:focus-visible {
 
 .app-update {
 	margin-left: var(--tab-action-gap);
-	margin-right: -6px;
-	color: var(--accent-strong);
 }
 
 .app-update[hidden] {
@@ -4346,10 +4344,6 @@ audio.page-media {
 		--bar-height: 42px;
 		--control-height: 28px;
 		--bar-pad: 5px 8px;
-	}
-
-	.app-update {
-		margin-right: -8px;
 	}
 
 	.workspace {
