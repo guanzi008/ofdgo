@@ -30,8 +30,8 @@ github.com/benoitkugler/textprocessing v0.0.6 h1:obkMyj62GEPg3xUVYqROlCN22z1Oleu
 github.com/benoitkugler/textprocessing v0.0.6/go.mod h1:Io0gN08/PXEzrSOWFa88xHx2Xv3VjvLMY7H76YoI23A=
 github.com/ebitengine/purego v0.11.2 h1:WWiTx8rD8zYdOwSj8O/NiNbsOvSAgJMTlyV1XlbUSeU=
 github.com/ebitengine/purego v0.11.2/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
-github.com/emmansun/gmsm v0.45.0 h1:PU/6ObyR3g05YN3jn1L5GZDowzyAi8Xhkq4svzYNyiA=
-github.com/emmansun/gmsm v0.45.0/go.mod h1:HgLSvmdePGLo+Fo2PNgdTQU6lqAepSyriSQJRpECY6w=
+github.com/emmansun/gmsm v0.45.1 h1:S77WOluBZ9JH2wh701H2QR03eQYNGLeN8IUkdhgGpRA=
+github.com/emmansun/gmsm v0.45.1/go.mod h1:RfnfrzyB9XbDi73nF1NHbJeqJj+a6pg/pXr5lrZKMok=
 github.com/go-fonts/latin-modern v0.3.3 h1:g2xNgI8yzdNzIVm+qvbMryB6yGPe0pSMss8QT3QwlJ0=
 github.com/go-fonts/latin-modern v0.3.3/go.mod h1:tHaiWDGze4EPB0Go4cLT5M3QzRY3peya09Z/8KSCrpY=
 github.com/go-text/typesetting v0.3.5 h1:XZPUooClHY0Vf/rFyUyuPRNEkawARaFzLMQcXLSEyPk=
@@ -66,8 +66,8 @@ github.com/xiaoqidun/j2kgo v1.0.2 h1:OAjjEOfaBaQzBNcj9wx+eM68UI5pewR6SzNZa1R1DIw
 github.com/xiaoqidun/j2kgo v1.0.2/go.mod h1:DCwAfuDzCDYqUiAlZ7BDwigTjaXw7o9L1FtEma/D1aA=
 github.com/xiaoqidun/jbig2 v1.1.8 h1:dERPW7F8gs18a/DOD9gXHR3fP1Vl6KhCNsLnq5l3BIo=
 github.com/xiaoqidun/jbig2 v1.1.8/go.mod h1:9jromqVwMqlptUDEt6Yip8vqYA5I1YjhG7FgMl/Z2dA=
-github.com/xiaoqidun/pdfgo v0.0.0-20261021071541-3fdb0cab9d95 h1:Fcr2BVlFYc+BZ62OhrN55QIdkcH47ryxKWnFqCRcoE4=
-github.com/xiaoqidun/pdfgo v0.0.0-20261021071541-3fdb0cab9d95/go.mod h1:AaabzsObZ8Z76AcaWbo6swRROrJsblyIGB7HbieeJA4=
+github.com/xiaoqidun/pdfgo v0.0.0-20261023171626-3473b442eed5 h1:TudqqH4zfCt7jrBTN/yhMQqa7BvkozYJoF9q+T6FE6s=
+github.com/xiaoqidun/pdfgo v0.0.0-20261023171626-3473b442eed5/go.mod h1:AaabzsObZ8Z76AcaWbo6swRROrJsblyIGB7HbieeJA4=
 github.com/xyproto/randomstring v1.0.5 h1:YtlWPoRdgMu3NZtP45drfy1GKoojuR7hmRcnhZqKjWU=
 github.com/xyproto/randomstring v1.0.5/go.mod h1:rgmS5DeNXLivK7YprL0pY+lTuhNQW3iGxZ18UQApw/E=
 github.com/yuin/goldmark v1.8.5 h1:r6N5afV5qj/5S4UTch8agZHJ8UxNCMwX7WjkkJam2NA=
