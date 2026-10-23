@@ -620,7 +620,7 @@ func applicationUpdate(ctx context.Context, version, endpoint string) (bool, err
 	}
 	latest := response.Header.Get("X-OFDGo-Build-Version")
 	if latest == "" {
-		return false, errors.New("未提供构建版")
+		return false, errors.New("缺少构建版本")
 	}
 	return latest != version, nil
 }
