@@ -40,6 +40,7 @@
 	flex: 0 0 auto;
 	padding-left: var(--titlebar-left, 0px);
 	padding-right: var(--titlebar-right, 10px);
+	border-top: 1px solid var(--line);
 	background: var(--titlebar-background);
 	color: var(--titlebar-foreground);
 	user-select: none;
