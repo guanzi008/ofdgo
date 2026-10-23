@@ -867,7 +867,7 @@ button:not(:disabled):hover {
 }
 
 .about-dialog {
-	width: 460px;
+	width: max-content;
 }
 
 .about-row {
