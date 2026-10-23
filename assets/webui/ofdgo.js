@@ -5153,7 +5153,11 @@ function watchApplicationUpdates(checksum) {
 			}
 			const latest = nativeHost ? await nativeHost.call("update.check", {}) : await applicationChecksum("./", { method: "HEAD", cache: "no-store" });
 			if (nativeHost) {
-				el.refreshAppButton.hidden = !latest;
+				const hidden = !latest;
+				if (el.refreshAppButton.hidden !== hidden) {
+					el.refreshAppButton.hidden = hidden;
+					updateTitleBarRegions();
+				}
 			} else if (latest) {
 				el.refreshAppButton.hidden = latest === checksum;
 			}
