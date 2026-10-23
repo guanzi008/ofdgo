@@ -210,6 +210,7 @@ func (h *Host) resource(r *http.Request) (*guigo.Resource, error) {
 		contentType = http.DetectContentType(header)
 	}
 	headers := http.Header{"Content-Type": {contentType}, "Content-Length": {strconv.FormatInt(size, 10)}, "Cache-Control": {"no-store"}, "Accept-Ranges": {"bytes"}}
+	headers.Set("X-OFDGo-Build-Version", build.Version)
 	start, length, status := int64(0), size, http.StatusOK
 	if value := r.Header.Get("Range"); value != "" && r.Method == http.MethodGet {
 		if !strings.HasPrefix(value, "bytes=") || strings.Contains(value, ",") {
