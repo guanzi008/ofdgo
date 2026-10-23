@@ -131,6 +131,14 @@ func NormalizeCFFCharstringsAt(data []byte, unitsPerEm uint16) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if _, cid := dict[1230]; !cid {
+		for op := 1231; op <= 1238; op++ {
+			if _, exists := dict[op]; exists {
+				delete(dict, op)
+				changed = true
+			}
+		}
+	}
 	if transform != nil {
 		scale := 1 / float64(unitsPerEm)
 		dict[1207] = []float64{scale, 0, 0, scale, 0, 0}
@@ -331,10 +339,9 @@ func SanitizeCFF(data []byte) ([]byte, error) {
 		localSubrData = data[start:end]
 	}
 	charStringsData := data[charStringsOff:charEnd]
-	delete(topDict, 1230)
-	delete(topDict, 1236)
-	delete(topDict, 1237)
-	delete(topDict, 1234)
+	for op := 1230; op <= 1238; op++ {
+		delete(topDict, op)
+	}
 	delete(topDict, 15)
 	delete(topDict, 16)
 	var finalPrivData []byte
@@ -494,10 +501,9 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 		}
 		inlined[gid] = output.Bytes()
 	}
-	delete(topDict, 1230)
-	delete(topDict, 1236)
-	delete(topDict, 1237)
-	delete(topDict, 1234)
+	for op := 1230; op <= 1238; op++ {
+		delete(topDict, op)
+	}
 	delete(topDict, 15)
 	delete(topDict, 16)
 	delete(topDict, 1206)

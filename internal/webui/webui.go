@@ -3984,7 +3984,7 @@ func (e *businessEngine) changeCompositeText(page int, path ofdgo.ObjectPath, in
 }
 
 // editorFont 读取对象编辑使用的字体，匹配的外部字体不嵌入文档
-// 入参: args 字体资源标识
+// 入参: args 字体资源标识、可选的原字形映射标记
 // 返回: any 字体数据, error 错误信息
 func (e *businessEngine) editorFont(args []platformValue) (any, error) {
 	if e.currentEditor == nil {
@@ -3994,11 +3994,10 @@ func (e *businessEngine) editorFont(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(args) > 1 && args[1].Bool() {
-		_, data, _, _, err = ofdgo.FixFontDataAggressive(data, true, false)
-		if err != nil {
-			return nil, err
-		}
+	mapped := len(args) > 1 && args[1].Bool()
+	_, data, _, _, err = ofdgo.FixFontDataAggressive(data, mapped, false)
+	if err != nil {
+		return nil, err
 	}
 	return successResult(map[string]any{"bytes": bytesToJS(data)}), nil
 }
