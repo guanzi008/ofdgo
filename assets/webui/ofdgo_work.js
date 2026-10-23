@@ -92,6 +92,8 @@ async function readResource(event, navigation) {
 		bundle = await readBundle(meta, CLIENT_PREFIX + event.clientId);
 	}
 	if (!bundle || !await caches.has(bundle.name)) {
+		const client = await self.clients.get(event.clientId);
+		if (client && resourceURL(client.url) !== self.registration.scope) return fetch(event.request);
 		return Response.error();
 	}
 	if (event.resultingClientId) {
