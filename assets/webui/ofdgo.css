@@ -39,8 +39,9 @@
 }
 
 .print-settings {
+	flex: 1;
 	min-width: 0;
-	max-height: 100%;
+	min-height: 0;
 	margin: 0;
 	padding: 0;
 	overflow: auto;
@@ -58,11 +59,9 @@
 .print-settings [hidden] { display: none !important; }
 .print-dialog :is(input, select, button):focus-visible { outline-offset: -2px; }
 .print-field { display: flex; min-width: 0; align-items: center; gap: 6px; }
-.print-dialog .print-settings input[type="number"] { min-width: 0; width: 100%; }
 .print-dialog .print-field > :is(input, select) { flex: 1 1 0; min-width: 0; width: 0; }
 .print-field > :is(.print-check, button) { flex: 0 0 80px; justify-content: center; }
-.print-field:has(#printBackReverse) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.print-field:has(#printBackReverse) .print-check { justify-content: start; }
+.print-field:has(#printBackReverse) .print-check:first-child { flex: 1; justify-content: start; }
 .print-field > span { flex: none; color: var(--text-muted); white-space: nowrap; }
 .print-dialog .print-settings .print-margins input { padding: 0 3px; text-align: center; }
 .print-check { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
@@ -70,38 +69,36 @@
 .print-options label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .print-options > label:nth-child(3n) { justify-content: center; }
 .print-check input, .print-options input { margin: 0; accent-color: var(--accent); }
-.print-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; margin-top: 12px; }
-.print-footer > .form-status { min-width: 0; margin: 0; overflow-wrap: anywhere; }
-.print-dialog .form-actions { grid-template-columns: 80px 80px; margin: 0; }
+.print-settings-panel, .print-preview { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 12px; }
+.print-dialog .form-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.print-preview-stage { position: relative; display: flex; flex: 1; min-height: 0; }
+.print-preview-stage .print-progress { position: absolute; bottom: 12px; width: calc(100% - 24px); max-width: 420px; }
+.print-progress:has(.progress-label:empty) { display: none; }
+.print-progress:has(.progress-spinner[hidden]) { grid-template-columns: minmax(0, 1fr); }
+.print-progress .progress-label { white-space: normal; overflow-wrap: anywhere; }
 
 .print-preview-page {
 	display: grid;
+	flex: 1;
 	min-width: 0;
-	height: 100%;
 	min-height: 0;
 	justify-items: safe center;
 	align-items: safe center;
 	padding: 12px;
-	overflow: auto;
+	overflow: hidden;
 	background: #e1e6e9;
 	border: 1px solid var(--line);
 }
 
 .print-preview-page img { display: block; max-width: none; background: white; box-shadow: var(--shadow-soft); }
-.print-preview-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 7px; }
-.print-dialog .print-preview-tools input { width: 52px; text-align: center; }
-.print-dialog .print-preview-tools select { width: 70px; }
+.print-preview-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 5px; }
 #ofdgoPrintDocument { display: none; }
 
 @media (max-width: 680px) {
 	.print-content { grid-template-columns: minmax(0, 1fr); height: auto; min-height: 0; }
-	.print-settings { max-height: 34dvh; }
-	.print-preview-page { height: 32dvh; min-height: 160px; }
-	.print-footer { grid-template-columns: minmax(0, 1fr); gap: 8px; }
-	.print-footer > .form-status:empty { display: none; }
-	.print-preview-tools { gap: 5px; }
-	.print-dialog .print-preview-tools input { width: 42px; }
-	.print-dialog .form-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.print-settings { flex: none; max-height: 34dvh; }
+	.print-preview-stage { flex: none; height: 32dvh; min-height: 160px; }
+	.print-preview-tools { justify-content: space-between; }
 }
 
 @media print {
@@ -1488,8 +1485,6 @@ button:not(:disabled):hover {
 .info-custom-row input,
 .gradient-stop-row input[type="number"],
 .structure-attribute > input,
-.print-preview-tools input,
-.print-preview-tools select,
 .print-options select,
 .form-row input[type="text"],
 .form-row input[type="password"],
