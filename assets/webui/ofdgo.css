@@ -72,10 +72,9 @@
 .print-settings-panel, .print-preview { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 12px; }
 .print-dialog .form-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .print-preview-stage { position: relative; display: flex; flex: 1; min-height: 0; }
-.print-preview-stage .print-progress { position: absolute; bottom: 12px; width: calc(100% - 24px); max-width: 420px; }
+.print-preview-stage .print-progress { position: absolute; bottom: 12px; max-width: calc(100% - 24px); }
 .print-progress:has(.progress-label:empty) { display: none; }
 .print-progress:has(.progress-spinner[hidden]) { grid-template-columns: minmax(0, 1fr); }
-.print-progress .progress-label { white-space: normal; overflow-wrap: anywhere; }
 
 .print-preview-page {
 	display: grid;
