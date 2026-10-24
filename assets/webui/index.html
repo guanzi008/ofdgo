@@ -674,7 +674,7 @@
 		</dialog>
 		<dialog id="printPanel" class="form-dialog print-dialog">
 			<form id="printForm">
-				<h2 id="printTitle" class="form-title">打印设置</h2>
+				<h2 id="printTitle" class="form-title">文档打印</h2>
 				<div class="print-content">
 					<div class="print-settings-panel">
 						<fieldset id="printSettings" class="print-settings">
@@ -701,8 +701,7 @@
 							<div class="form-row" data-print-row="sides" hidden><label for="printSides">打印纸面</label><select id="printSides"><option value="all">正反两面</option><option value="front">只印正面</option><option value="back">只印背面</option></select></div>
 							<div class="form-row" data-print-row="manual" hidden><span>背面处理</span><div class="print-field"><label class="print-check"><input id="printBackReverse" type="checkbox">倒序送纸</label><label class="print-check" title="背面旋转180°"><input id="printBackRotate" type="checkbox">背面旋转</label></div></div>
 							<div class="form-row"><label for="printContents">打印内容</label><select id="printContents"><option value="documentAndAnnotations">文档注解</option><option value="document">文档表单</option><option value="annotations">仅限注解</option><option value="forms">仅限表单</option></select></div>
-							<div class="print-options"><label><input id="printRotate" type="checkbox" checked>自动旋转</label><label><input id="printGrayscale" type="checkbox">灰度打印</label><label><input id="printBorders" type="checkbox">页面边框</label><label><input id="printCropMarks" type="checkbox">裁切标记</label><label><input id="printRaster" type="checkbox">图像打印</label><div class="form-select"><select id="printDPI" title="图像精度"><option value="96">96 DPI</option><option value="150">150 DPI</option><option value="300" selected>300 DPI</option><option value="600">600 DPI</option></select><span id="printDPIValue">300</span></div></div>
-							<div class="print-options" data-print-row="poster" hidden><label title="仅拼接超出纸面的页面"><input id="printTileOnlyLarge" type="checkbox" checked>仅拼大页</label><label><input id="printLabels" type="checkbox" checked>拼接标签</label></div>
+							<div class="print-options"><label><input id="printRotate" type="checkbox" checked>自动旋转</label><label><input id="printGrayscale" type="checkbox">灰度打印</label><label><input id="printBorders" type="checkbox">页面边框</label><label><input id="printCropMarks" type="checkbox">裁切标记</label><label><input id="printRaster" type="checkbox">图像打印</label><div class="form-select"><select id="printDPI" title="图像精度"><option value="96">96 DPI</option><option value="150">150 DPI</option><option value="300" selected>300 DPI</option><option value="600">600 DPI</option></select><span id="printDPIValue">300</span></div><label data-print-row="poster" title="仅拼接超出纸面的页面" hidden><input id="printTileOnlyLarge" type="checkbox" checked>仅拼大页</label><label data-print-row="poster" hidden><input id="printLabels" type="checkbox" checked>拼接标签</label></div>
 						</fieldset>
 						<div class="form-actions"><button id="printCancel" class="button" type="button">关闭</button><button id="printSubmit" class="button" type="submit" disabled>打印</button></div>
 					</div>
