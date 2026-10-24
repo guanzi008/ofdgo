@@ -60,14 +60,14 @@
 .print-dialog :is(input, select, button):focus-visible { outline-offset: -2px; }
 .print-field { display: flex; min-width: 0; align-items: center; gap: 6px; }
 .print-dialog .print-field > :is(input, select) { flex: 1 1 0; min-width: 0; width: 0; }
-.print-field > :is(.print-check, button) { flex: 0 0 80px; justify-content: center; }
+.print-field > :is(.print-check, button) { flex: 0 0 80px; }
 .print-field:has(#printBackReverse) .print-check:first-child { flex: 1; justify-content: start; }
 .print-field > span { flex: none; color: var(--text-muted); white-space: nowrap; }
 .print-dialog .print-settings .print-margins input { padding: 0 3px; text-align: center; }
 .print-check { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .print-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)) 80px; grid-auto-rows: var(--control-height); align-items: center; gap: 8px; margin-top: 12px; }
 .print-options label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-.print-options > label:nth-child(3n) { justify-content: center; }
+.print-field > .print-check, .print-options > label:nth-child(3n) { justify-content: flex-end; }
 .print-check input, .print-options input { margin: 0; accent-color: var(--accent); }
 .print-settings-panel, .print-preview { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 12px; }
 .print-dialog .form-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1502,7 +1502,7 @@ button:not(:disabled):hover {
 	color: #1f2428;
 }
 
-.form-row .form-select select {
+.form-select select {
 	-webkit-appearance: none;
 	appearance: none;
 	color: transparent;

@@ -1,7 +1,7 @@
 export class PrintDialog {
 	constructor(options) {
 		Object.assign(this, options);
-		this.el = Object.fromEntries(["Panel", "Form", "Settings", "Printer", "Properties", "Copies", "Collation", "Duplex", "BackReverse", "BackRotate", "Contents", "Scope", "Range", "Parity", "Reverse", "Mode", "Paper", "Width", "Height", "Orientation", "Scaling", "Scale", "MarginTop", "MarginRight", "MarginBottom", "MarginLeft", "Grid", "PageOrder", "Gap", "Binding", "BookletSheets", "SheetFrom", "SheetTo", "Overlap", "Sides", "Rotate", "Grayscale", "Borders", "CropMarks", "Raster", "DPI", "TileOnlyLarge", "Labels", "Preview", "Previous", "Next", "PreviewNumber", "PageControl", "PageCount", "Status", "Spinner", "ProgressTrack", "ProgressBar", "Cancel", "Submit"].map(name => [name, document.querySelector(`#print${name}`)]));
+		this.el = Object.fromEntries(["Panel", "Form", "Settings", "Printer", "Properties", "Copies", "Collation", "Duplex", "BackReverse", "BackRotate", "Contents", "Scope", "Range", "Parity", "Reverse", "Mode", "Paper", "Width", "Height", "Orientation", "Scaling", "Scale", "MarginTop", "MarginRight", "MarginBottom", "MarginLeft", "Grid", "PageOrder", "Gap", "Binding", "BookletSheets", "SheetFrom", "SheetTo", "Overlap", "Sides", "Rotate", "Grayscale", "Borders", "CropMarks", "Raster", "DPI", "DPIValue", "TileOnlyLarge", "Labels", "Preview", "Previous", "Next", "PreviewNumber", "PageControl", "PageCount", "Status", "Spinner", "ProgressTrack", "ProgressBar", "Cancel", "Submit"].map(name => [name, document.querySelector(`#print${name}`)]));
 		this.printerOptions = this.el.Printer.innerHTML;
 		this.paperOptions = this.el.Paper.innerHTML;
 		this.queue = Promise.resolve();
@@ -305,6 +305,7 @@ export class PrintDialog {
 
 	controls() {
 		const count = this.layout?.sides.length || 0, busy = !!this.running || !!this.loading;
+		this.el.DPIValue.textContent = this.el.DPI.value;
 		this.el.Settings.disabled = busy;
 		this.el.Submit.disabled = !count || busy;
 		if (this.el.Printer.value !== "pdf" && this.manual() && this.el.Sides.value === "back" && !this.layout?.backContent) this.el.Submit.disabled = true;
