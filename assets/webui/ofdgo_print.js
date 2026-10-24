@@ -37,7 +37,9 @@ export class PrintDialog {
 		this.side = 0;
 		this.sequence++;
 		this.el.Form.reset();
-		this.mode = null;
+		this.orientation = this.el.Orientation.value;
+		this.duplexBeforeBooklet = this.el.Duplex.value;
+		this.scalingBeforeBooklet = this.el.Scaling.value;
 		try {
 			const saved = JSON.parse(localStorage.getItem("ofdgo.print.v2") || "null");
 			for (const [name, value] of Object.entries(saved || {})) {
@@ -46,6 +48,7 @@ export class PrintDialog {
 				else if (node && typeof value === "string") node.value = value;
 			}
 		} catch {}
+		this.mode = this.el.Mode.value;
 		if (this.el.BookletSheets.value === "0") this.el.BookletSheets.value = "";
 		this.el.Scope.value = context.selection.length ? "selected" : "all";
 		this.el.Scope.querySelector('option[value="selected"]').disabled = !context.selection.length;
@@ -64,12 +67,16 @@ export class PrintDialog {
 		this.loading = true;
 		this.controls();
 		this.el.Printer.innerHTML = this.printerOptions;
+		const browser = this.el.Printer.querySelector('option[value="browser"]');
+		browser.disabled = !!this.nativeHost || typeof window.print !== "function";
+		if (browser.disabled) this.el.Printer.value = "pdf";
 		try {
 			if (this.nativeHost) {
-				this.el.Printer.querySelector('option[value="browser"]').textContent = "系统打印";
+				browser.textContent = "系统打印";
 				const capabilities = await this.nativeHost.call("print.capabilities", {});
 				if (!this.current(sequence)) return;
 				this.capabilities = capabilities;
+				browser.disabled = !capabilities.systemDialog;
 				const printers = capabilities.direct ? await this.nativeHost.call("print.printers", {}) : [];
 				if (!this.current(sequence)) return;
 				for (const printer of printers) this.el.Printer.add(new Option(printer.name, `device:${printer.name}`));
@@ -114,7 +121,7 @@ export class PrintDialog {
 				this.el.Orientation.value = profile.options.orientation;
 				this.el.Copies.max = Math.min(999, profile.maxCopies || 999);
 				this.el.Copies.value = 1;
-				this.el.Grayscale.checked = !profile.color;
+				this.el.Grayscale.checked = profile.options.color === "grayscale";
 				this.el.Grayscale.disabled = !profile.color;
 				this.el.Properties.hidden = !profile.properties;
 			} else this.el.Grayscale.disabled = false;
@@ -125,11 +132,12 @@ export class PrintDialog {
 
 	async properties() {
 		if (!this.isDevice() || this.running || this.loading) return;
+		const sequence = this.sequence;
 		this.loading = true;
 		this.controls();
 		try { await this.nativeHost.call("print.properties", {printer:this.el.Printer.value.slice(7)}); }
-		catch (error) { this.el.Status.textContent = error.message; }
-		finally { this.loading = false; if (this.current()) await this.choosePrinter(); }
+		catch (error) { if (this.current(sequence)) this.el.Status.textContent = error.message; }
+		finally { if (this.current(sequence)) { this.loading = false; await this.choosePrinter(); } }
 	}
 
 	deviceOptions() {
@@ -150,7 +158,7 @@ export class PrintDialog {
 			return value;
 		};
 		let [paperWidth, paperHeight] = el.Paper.value === "source" ? [0, 0] : el.Paper.value === "custom" ? [number("Width"), number("Height")] : el.Paper.value.split(",").map(Number);
-		if (el.Orientation.value === "landscape" && paperWidth < paperHeight) [paperWidth, paperHeight] = [paperHeight, paperWidth];
+		if (el.Orientation.value === "landscape") [paperWidth, paperHeight] = [paperHeight, paperWidth];
 		if (profile) [paperWidth, paperHeight] = [profile.width, profile.height];
 		const scope = el.Scope.value;
 		const [rows, columns] = el.Grid.value.split(",").map(Number);
@@ -164,9 +172,9 @@ export class PrintDialog {
 			margins:{top:number("MarginTop"), right:number("MarginRight"), bottom:number("MarginBottom"), left:number("MarginLeft")},
 			...(profile ? {printableArea:{x:profile.printableArea.x, y:profile.printableArea.y, w:profile.printableArea.width, h:profile.printableArea.height}} : {}),
 			copies:this.isDevice() ? number("Copies") : 1, collate:el.Collation.checked, duplex,
-			scale:number("Scale") / 100, rotate:el.Rotate.checked, reverse:el.Reverse.checked !== (manual && el.Sides.value === "back" && el.BackReverse.checked), parity:el.Parity.value, sides:el.Sides.value,
+			scale:el.Scale.disabled ? 1 : number("Scale") / 100, rotate:el.Rotate.checked, reverse:el.Reverse.checked !== (manual && el.Sides.value === "back" && el.BackReverse.checked), parity:el.Parity.value, sides:el.Sides.value,
 			backRotate:manual && el.BackRotate.checked,
-			rows, columns, pageOrder:el.PageOrder.value, gap:number("Gap"), binding:el.Binding.value, bookletSheets:el.BookletSheets.value ? number("BookletSheets") : 0, overlap:number("Overlap"),
+			rows, columns, pageOrder:el.PageOrder.value, gap:el.Gap.disabled ? 0 : number("Gap"), binding:el.Binding.value, bookletSheets:!el.BookletSheets.disabled && el.BookletSheets.value ? number("BookletSheets") : 0, overlap:el.Overlap.disabled ? 0 : number("Overlap"),
 			...(el.Mode.value === "booklet" ? {sheetFrom:el.SheetFrom.value ? number("SheetFrom") : 0, sheetTo:el.SheetTo.value ? number("SheetTo") : 0} : {}),
 			contents:el.Contents.value, grayscale:el.Grayscale.checked, borders:el.Borders.checked, cropMarks:el.CropMarks.checked, raster:el.Raster.checked, dpi:number("DPI"), tileOnlyLarge:el.TileOnlyLarge.checked, labels:el.Labels.checked
 		};
@@ -201,6 +209,7 @@ export class PrintDialog {
 		const rows = {device:this.isDevice(), sides:el.Duplex.value !== "simplex", manual:isManual, range:el.Scope.value === "range", paper:el.Paper.value === "custom", scale:el.Scaling.value === "custom" || mode === "poster", multiple:mode === "multiple", gap:mode === "multiple" || mode === "booklet", booklet:mode === "booklet", poster:mode === "poster"};
 		for (const row of el.Panel.querySelectorAll("[data-print-row]")) {
 			row.hidden = !rows[row.dataset.printRow];
+			for (const input of row.querySelectorAll("input, select")) input.disabled = row.hidden;
 		}
 		el.Scaling.disabled = mode === "poster" || mode === "booklet";
 		el.DPI.disabled = !el.Raster.checked && !el.Grayscale.checked;
@@ -246,7 +255,8 @@ export class PrintDialog {
 	current(sequence = this.sequence) { return this.el.Panel.open && sequence === this.sequence && this.context && !this.context.tab.closed; }
 
 	async preview(index) {
-		if (!this.layout || this.running || index < 0 || index >= this.layout.sides.length) return;
+		if (!this.layout || this.running) return;
+		if (!Number.isInteger(index) || index < 0 || index >= this.layout.sides.length) { this.controls(); return; }
 		const sequence = this.sequence, preview = this.previewSequence = (this.previewSequence || 0) + 1;
 		this.side = index;
 		this.controls();
@@ -266,7 +276,7 @@ export class PrintDialog {
 			this.previewURL = url;
 			this.el.Preview.replaceChildren(img);
 			this.resize();
-		} catch (error) { if (this.current(sequence)) { this.el.Status.textContent = error.message; this.layout = null; this.controls(); } }
+		} catch (error) { if (this.current(sequence) && preview === this.previewSequence) { this.el.Status.textContent = error.message; this.layout = null; this.controls(); } }
 	}
 
 	resize() {
@@ -336,7 +346,7 @@ export class PrintDialog {
 			if (!this.current(sequence)) throw new DOMException("打印已取消", "AbortError");
 			this.previousTitle = document.title;
 			document.title = context.name;
-			this.waiting = job.deviceOptions ? "native" : "browser";
+			this.waiting = this.nativeHost ? "native" : "browser";
 			this.controls();
 			this.el.Status.textContent = job.deviceOptions ? "正在提交打印作业" : "正在打开打印窗口";
 			if (job.deviceOptions) {
@@ -353,6 +363,7 @@ export class PrintDialog {
 				const capabilities = await this.nativeHost.call("print.capabilities", {});
 				if (!this.current(sequence)) throw new DOMException("打印已取消", "AbortError");
 				if (!capabilities.systemDialog) throw new Error("当前运行时不支持系统打印");
+				if (!capabilities.dialogCompletion) this.waiting = "browser";
 				await this.nativeHost.call("print.dialog", {kind:"system"});
 				if (this.current(sequence) && capabilities.dialogCompletion) this.finishPrint();
 			} else if (typeof window.print === "function") window.print();
