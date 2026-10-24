@@ -18,7 +18,7 @@ export class PrintDialog {
 		this.el.Next.addEventListener("click", () => this.preview(this.side + 1));
 		this.el.PreviewNumber.addEventListener("change", () => this.preview(Number(this.el.PreviewNumber.value) - 1));
 		this.el.Zoom.addEventListener("change", () => this.resize());
-		new ResizeObserver(() => this.resize()).observe(this.el.Preview);
+		new ResizeObserver(([entry]) => { this.previewSize = entry.contentRect; this.resize(); }).observe(this.el.Preview);
 		window.addEventListener("afterprint", () => { if (this.waiting === "browser") this.finishPrint(); });
 		window.addEventListener("beforeprint", () => {
 			if (!this.root?.children.length) {
@@ -41,7 +41,7 @@ export class PrintDialog {
 		this.duplexBeforeBooklet = this.el.Duplex.value;
 		this.scalingBeforeBooklet = this.el.Scaling.value;
 		try {
-			const saved = JSON.parse(localStorage.getItem("ofdgo.print.v2") || "null");
+			const saved = JSON.parse(localStorage.getItem("ofdgo.print") || "null");
 			for (const [name, value] of Object.entries(saved || {})) {
 				const node = this.el[name];
 				if (node?.type === "checkbox" && typeof value === "boolean") node.checked = value;
@@ -280,9 +280,11 @@ export class PrintDialog {
 	}
 
 	resize() {
+		const fit = this.el.Zoom.value === "fit";
+		this.el.Preview.style.overflow = fit ? "hidden" : "auto";
 		const img = this.el.Preview.querySelector("img"), side = this.layout?.sides[this.side];
-		if (!img || !side) return;
-		const factor = this.el.Zoom.value === "fit" ? Math.min((this.el.Preview.clientWidth - 24) / side.width, (this.el.Preview.clientHeight - 24) / side.height) : Number(this.el.Zoom.value) * 96 / 25.4;
+		if (!img || !side || !this.previewSize) return;
+		const factor = fit ? Math.min(this.previewSize.width / side.width, this.previewSize.height / side.height) : Number(this.el.Zoom.value) * 96 / 25.4;
 		img.style.width = `${Math.max(1, side.width * factor)}px`;
 		img.style.height = `${Math.max(1, side.height * factor)}px`;
 	}
@@ -305,7 +307,7 @@ export class PrintDialog {
 	remember() {
 		const saved = {};
 		for (const [name, node] of Object.entries(this.el)) if (node.closest("#printSettings") && !["Printer", "Copies", "Paper", "Scope", "Range", "Parity", "Reverse", "Sides", "Contents", "SheetFrom", "SheetTo"].includes(name) && node.matches("input, select")) saved[name] = node.type === "checkbox" ? node.checked : node.value;
-		try { localStorage.setItem("ofdgo.print.v2", JSON.stringify(saved)); } catch {}
+		try { localStorage.setItem("ofdgo.print", JSON.stringify(saved)); } catch {}
 	}
 
 	createRoot() {
