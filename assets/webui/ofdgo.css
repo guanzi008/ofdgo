@@ -35,14 +35,14 @@
 	grid-template-columns: 310px minmax(0, 1fr);
 	height: min(62dvh, 660px);
 	min-height: 240px;
-	gap: 14px;
+	gap: 12px;
 }
 
 .print-settings {
 	min-width: 0;
 	max-height: 100%;
 	margin: 0;
-	padding: 0 8px 0 0;
+	padding: 0;
 	overflow: auto;
 	border: 0;
 }
@@ -66,7 +66,7 @@
 .print-field > span { flex: none; color: var(--text-muted); white-space: nowrap; }
 .print-dialog .print-settings .print-margins input { padding: 0 3px; text-align: center; }
 .print-check { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-.print-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(90px, 1fr); grid-auto-rows: var(--control-height); align-items: center; gap: 8px; margin-top: 12px; }
+.print-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: var(--control-height); align-items: center; gap: 8px; margin-top: 12px; }
 .print-options label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .print-check input, .print-options input { margin: 0; accent-color: var(--accent); }
 .print-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; margin-top: 12px; }

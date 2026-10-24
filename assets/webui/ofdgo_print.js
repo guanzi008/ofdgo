@@ -45,7 +45,7 @@ export class PrintDialog {
 			for (const [name, value] of Object.entries(saved || {})) {
 				const node = this.el[name];
 				if (node?.type === "checkbox" && typeof value === "boolean") node.checked = value;
-				else if (node && typeof value === "string") node.value = value;
+				else if (node && typeof value === "string" && (!node.options || [...node.options].some(option => option.value === value))) node.value = value;
 			}
 		} catch {}
 		this.mode = this.el.Mode.value;
