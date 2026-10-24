@@ -4,6 +4,7 @@ export class PrintDialog {
 		this.el = Object.fromEntries(["Panel", "Form", "Settings", "Printer", "Properties", "Copies", "Collation", "Duplex", "BackReverse", "BackRotate", "Contents", "Scope", "Range", "Parity", "Reverse", "Mode", "Paper", "Width", "Height", "Orientation", "Scaling", "Scale", "MarginTop", "MarginRight", "MarginBottom", "MarginLeft", "Grid", "PageOrder", "Gap", "Binding", "BookletSheets", "SheetFrom", "SheetTo", "Overlap", "Sides", "Rotate", "Grayscale", "Borders", "CropMarks", "Raster", "DPI", "DPIValue", "TileOnlyLarge", "Labels", "Preview", "Previous", "Next", "PreviewNumber", "PageControl", "PageCount", "Status", "Spinner", "ProgressTrack", "ProgressBar", "Cancel", "Submit"].map(name => [name, document.querySelector(`#print${name}`)]));
 		this.printerOptions = this.el.Printer.innerHTML;
 		this.paperOptions = this.el.Paper.innerHTML;
+		this.settings = new WeakMap();
 		this.queue = Promise.resolve();
 		this.sequence = 0;
 		this.urls = [];
@@ -34,43 +35,40 @@ export class PrintDialog {
 
 	open(context) {
 		if (this.el.Panel.open) return;
+		const saved = this.settings.get(context.tab)?.get(context.document);
 		this.context = context;
+		this.restoring = true;
 		this.prepared = false;
 		this.layout = null;
 		this.job = this.profile = null;
 		this.side = 0;
 		this.sequence++;
+		this.el.Printer.innerHTML = this.printerOptions;
+		this.el.Paper.innerHTML = this.paperOptions;
 		this.el.Form.reset();
-		this.orientation = this.el.Orientation.value;
-		this.duplexBeforeBooklet = this.el.Duplex.value;
-		this.scalingBeforeBooklet = this.el.Scaling.value;
-		try {
-			const saved = JSON.parse(localStorage.getItem("ofdgo.print") || "null");
-			for (const [name, value] of Object.entries(saved || {})) {
-				const node = this.el[name];
-				if (node?.type === "checkbox" && typeof value === "boolean") node.checked = value;
-				else if (node && typeof value === "string" && (!node.options || [...node.options].some(option => option.value === value))) node.value = value;
-			}
-		} catch {}
+		this.orientation = saved?.orientation ?? this.el.Orientation.value;
+		this.duplexBeforeBooklet = saved?.duplex ?? this.el.Duplex.value;
+		this.scalingBeforeBooklet = saved?.scaling ?? this.el.Scaling.value;
+		this.restore(saved);
 		this.mode = this.el.Mode.value;
-		if (this.el.BookletSheets.value === "0") this.el.BookletSheets.value = "";
-		this.el.Scope.value = context.selection.length ? "selected" : "all";
+		if (!saved) this.el.Scope.value = context.selection.length ? "selected" : "all";
 		this.el.Scope.querySelector('option[value="selected"]').disabled = !context.selection.length;
-		this.el.Contents.value = context.annotations ? "documentAndAnnotations" : "document";
+		this.el.Sides.value = this.manual() ? "front" : "all";
+		if (!saved) this.el.Contents.value = context.annotations ? "documentAndAnnotations" : "document";
 		this.status();
 		this.el.Preview.replaceChildren();
 		this.show(this.el.Panel);
-		this.loadDevices();
+		this.loadDevices(saved);
 	}
 
 	isDevice() { return this.el.Printer.value.startsWith("device:"); }
 	manual() { return this.el.Duplex.value.startsWith("manual"); }
 
-	async loadDevices() {
+	async loadDevices(saved) {
 		const sequence = ++this.sequence;
+		const selected = saved?.values.Printer;
 		this.loading = true;
 		this.controls();
-		this.el.Printer.innerHTML = this.printerOptions;
 		const browser = this.el.Printer.querySelector('option[value="browser"]');
 		browser.disabled = !!this.nativeHost || typeof window.print !== "function";
 		if (browser.disabled) this.el.Printer.value = "pdf";
@@ -89,19 +87,23 @@ export class PrintDialog {
 			}
 		} catch (error) { if (this.current(sequence)) this.status(error.message); }
 		finally {
-			if (this.current(sequence)) { this.loading = false; await this.choosePrinter(); }
+			if (this.current(sequence)) {
+				this.loading = false;
+				if ([...this.el.Printer.options].some(option => option.value === selected && !option.disabled)) this.el.Printer.value = selected;
+				await this.choosePrinter(this.el.Printer.value === selected ? saved : null);
+			}
 		}
 	}
 
-	async choosePrinter() {
+	async choosePrinter(saved) {
 		const sequence = ++this.sequence;
 		const paper = this.el.Paper.value;
 		this.layout = this.job = this.profile = null;
 		this.loading = true;
 		this.status();
 		this.controls();
-		this.el.Paper.innerHTML = this.paperOptions;
 		if (!this.isDevice()) {
+			this.el.Paper.innerHTML = this.paperOptions;
 			this.el.Paper.value = paper;
 			if (!this.el.Paper.value) {
 				const [width, height] = paper.split(",").map(Number);
@@ -133,7 +135,12 @@ export class PrintDialog {
 			} else this.el.Grayscale.disabled = false;
 		} catch (error) { if (this.current(sequence)) { this.status(error.message); return; } }
 		finally { if (this.current(sequence)) { this.loading = false; this.controls(); } }
-		if (this.current(sequence)) this.schedule();
+		if (this.current(sequence)) {
+			this.restore(saved);
+			if (this.el.Scope.value === "selected" && !this.context.selection.length) this.el.Scope.value = "all";
+			this.restoring = false;
+			this.schedule();
+		}
 	}
 
 	async properties() {
@@ -248,7 +255,6 @@ export class PrintDialog {
 			this.layout = layout;
 			if (this.isDevice()) this.el.Copies.max = Math.min(999, this.profile.maxCopies || 999, layout.copiesLimit > 0 ? layout.copiesLimit : 999);
 			this.job = {deviceOptions, fingerprint:profile?.fingerprint, manual:this.manual(), sides:options.sides, backContent:layout.backContent};
-			this.remember();
 			await this.preview(Math.min(this.side, layout.sides.length - 1));
 			if (!this.current(sequence) || this.layout !== layout) return;
 			this.status();
@@ -320,10 +326,23 @@ export class PrintDialog {
 		this.el.Cancel.disabled = !!this.waiting;
 	}
 
+	restore(saved) {
+		for (const [name, value] of Object.entries(saved?.values || {})) {
+			if (name === "Printer") continue;
+			const node = this.el[name];
+			if (node.type === "checkbox") node.checked = value;
+			else if (!node.options || [...node.options].some(option => option.value === value)) node.value = value;
+		}
+	}
+
 	remember() {
-		const saved = {};
-		for (const [name, node] of Object.entries(this.el)) if (node.closest("#printSettings") && !["Printer", "Copies", "Paper", "Scope", "Range", "Parity", "Reverse", "Sides", "Contents", "SheetFrom", "SheetTo"].includes(name) && node.matches("input, select")) saved[name] = node.type === "checkbox" ? node.checked : node.value;
-		try { localStorage.setItem("ofdgo.print", JSON.stringify(saved)); } catch {}
+		const context = this.context;
+		if (!context || this.restoring) return;
+		let settings = this.settings.get(context.tab);
+		if (!settings) this.settings.set(context.tab, settings = new Map());
+		const values = {};
+		for (const [name, node] of Object.entries(this.el)) if (node.closest("#printSettings") && name !== "Sides" && node.matches("input, select")) values[name] = node.type === "checkbox" ? node.checked : node.value;
+		settings.set(context.document, {values, orientation:this.orientation, duplex:this.duplexBeforeBooklet, scaling:this.scalingBeforeBooklet});
 	}
 
 	createRoot() {
@@ -428,6 +447,7 @@ export class PrintDialog {
 
 	close() {
 		const context = this.context;
+		this.remember();
 		this.sequence++;
 		clearTimeout(this.timer);
 		if (context) this.cancel(context.tab);

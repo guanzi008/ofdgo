@@ -670,7 +670,7 @@ function openPrintPanel() {
 	const tab = documentTab();
 	if (!tab.state.doc || !tab.state.ready || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
 	printDialog ||= createPrintDialog();
-	printDialog.open({tab, call:(name, ...args) => callTabWASM(tab, name, ...args), page:tab.state.pageIndex,
+	printDialog.open({tab, document:documentEntryKey(tab.state.doc.documents?.[tab.state.doc.documentIndex || 0]), call:(name, ...args) => callTabWASM(tab, name, ...args), page:tab.state.pageIndex,
 		selection:tab.state.pageSelection.size ? selectedPageIndexes() : [], annotations:tab.state.renderAnnotations,
 		name:tab.state.fileName || tab.state.doc.title || "OFDGo"});
 }
