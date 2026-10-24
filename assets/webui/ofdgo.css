@@ -26,6 +26,98 @@
 	--shadow-page: 0 14px 30px rgba(31, 36, 40, 0.16);
 }
 
+.form-dialog.print-dialog {
+	width: 920px;
+}
+
+.print-content {
+	display: grid;
+	grid-template-columns: 310px minmax(0, 1fr);
+	gap: 14px;
+}
+
+.print-settings {
+	min-width: 0;
+	max-height: calc(100dvh - 230px);
+	margin: 0;
+	padding: 0 8px 0 0;
+	overflow: auto;
+	border: 0;
+}
+
+.print-settings .form-row {
+	display: grid;
+	grid-template-columns: 4em minmax(0, 1fr);
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 8px;
+}
+
+.print-settings [hidden] { display: none !important; }
+.print-dialog :is(input, select, button):focus-visible { outline-offset: -2px; }
+.print-field { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.print-dialog .print-settings input[type="number"] { min-width: 0; width: 100%; }
+.print-dialog .print-field > :is(input, select) { flex: 1 1 0; min-width: 0; width: 0; }
+.print-field > :is(.print-check, button) { flex: 0 0 80px; justify-content: center; }
+.print-field:has(#printBackReverse) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.print-field:has(#printBackReverse) .print-check { justify-content: start; }
+.print-field > span { flex: none; color: var(--text-muted); white-space: nowrap; }
+.print-dialog .print-settings .print-margins input { padding: 0 3px; text-align: center; }
+.print-check { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.print-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: var(--control-height); align-items: center; gap: 8px; margin: 12px 0 0 calc(4em + 8px); }
+.print-options label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.print-check input, .print-options input { margin: 0; accent-color: var(--accent); }
+.print-dialog .form-actions { grid-template-columns: minmax(0, 1fr) 80px 80px; margin-top: 12px; }
+.print-dialog .form-actions > .form-status { overflow-wrap: anywhere; }
+.print-dialog .form-actions > .form-status:empty { display: none; }
+.print-dialog .form-actions > button:first-of-type { grid-column: 2; }
+
+.print-preview {
+	display: flex;
+	min-width: 0;
+	min-height: 300px;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.print-preview-page {
+	display: grid;
+	height: min(62dvh, 660px);
+	min-height: 240px;
+	justify-items: center;
+	align-items: start;
+	padding: 12px;
+	overflow: auto;
+	background: #e1e6e9;
+	border: 1px solid var(--line);
+}
+
+.print-preview-page img { display: block; max-width: none; background: white; box-shadow: var(--shadow-soft); }
+.print-preview-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 7px; }
+.print-dialog .print-preview-tools input { width: 52px; text-align: center; }
+.print-dialog .print-preview-tools select { width: 70px; }
+#ofdgoPrintDocument { display: none; }
+
+@media (max-width: 680px) {
+	.print-content { grid-template-columns: minmax(0, 1fr); }
+	.print-settings { max-height: 34dvh; }
+	.print-preview-page { height: 32dvh; min-height: 160px; }
+	.print-preview { min-height: 210px; }
+	.print-dialog .form-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.print-dialog .form-actions > .form-status { grid-column: 1 / -1; }
+	.print-dialog .form-actions > button:first-of-type { grid-column: 1; }
+}
+
+@media print {
+	html, body { height: auto !important; min-height: 0 !important; overflow: visible !important; margin: 0 !important; padding: 0 !important; background: white !important; }
+	body > :not(#ofdgoPrintDocument) { display: none !important; }
+	dialog { display: none !important; }
+	#ofdgoPrintDocument { display: block !important; color: black; background: white; }
+	#ofdgoPrintDocument section { display: block; margin: 0; padding: 0; overflow: hidden; break-after: page; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+	#ofdgoPrintDocument section:last-child { break-after: auto; }
+	#ofdgoPrintDocument img { display: block; width: 100%; height: 100%; }
+}
+
 * {
 	box-sizing: border-box;
 }
@@ -654,6 +746,7 @@ button:not(:disabled):hover {
 .save-as-icon,
 .edit-icon,
 .convert-icon,
+.print-icon,
 .pages-icon,
 .info-icon {
 	width: 16px;
@@ -663,7 +756,7 @@ button:not(:disabled):hover {
 }
 
 .open-icon {
-	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7V4h6l3 3h9v13H3Z'/%3E%3C/svg%3E") center / contain no-repeat;
+	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7V3h6l3 4h9v14H3Z'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
 .close-icon {
@@ -692,6 +785,10 @@ button:not(:disabled):hover {
 
 .convert-icon {
 	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7h18l-4-4M21 17H3l4 4'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+.print-icon {
+	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9V3h12v6M6 17H3V9h18v8h-3M6 13h12v8H6Z'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
 .pages-icon {
@@ -1395,6 +1492,9 @@ button:not(:disabled):hover {
 .info-custom-row input,
 .gradient-stop-row input[type="number"],
 .structure-attribute > input,
+.print-preview-tools input,
+.print-preview-tools select,
+.print-options select,
 .form-row input[type="text"],
 .form-row input[type="password"],
 .form-row input[type="number"],

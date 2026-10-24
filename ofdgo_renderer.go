@@ -47,6 +47,8 @@ type Renderer struct {
 	pageText              *PageText
 	pageContext           context.Context
 	textOnly              bool
+	printing              bool
+	printContents         string
 	textContentOnly       bool
 	backends              RenderBackends
 	backendStates         map[any]any
@@ -84,6 +86,8 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	next.OutputContext = ctx
 	next.TransparentBackground = r.TransparentBackground
 	next.decodeImages = r.decodeImages
+	next.printing = r.printing
+	next.printContents = r.printContents
 	next.imageCache = r.imageCache
 	next.fontDigests = r.fontDigests
 	next.fontPreparations = r.fontPreparations
@@ -150,6 +154,7 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 		opts = append(opts, WithFontFS(r.fontFS...))
 	}
 	renderer := NewRenderer(reader, opts...)
+	renderer.printing = r.printing
 	renderer.sharedBackendStates = r.sharedBackendStates
 	renderer.fontPreparations = r.fontPreparations
 	renderer.fontDigests = r.fontDigests

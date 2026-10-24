@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -106,7 +107,7 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 	h.conversionPool = h.resources.ConversionPool()
 	defer h.close()
 	bindings := make(map[string]guigo.HandlerFunc)
-	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "drop.release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title", "window.info", "window.drag", "window.close", "update.check", "update.open"} {
+	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "drop.release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title", "window.info", "window.drag", "window.close", "update.check", "update.open", "print.capabilities", "print.dialog", "print.printers", "print.query", "print.properties", "print"} {
 		bindings["ofdgo.host."+name] = func(ctx context.Context, args any) (any, error) { return h.call(ctx, name, args) }
 	}
 	static := http.FileServerFS(webuiassets.NativeFS)
@@ -305,6 +306,44 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 	text := func(key string) string { value, _ := args[key].(string); return value }
 	flag := func(key string) bool { value, _ := args[key].(bool); return value }
 	switch name {
+	case "print.capabilities", "print.dialog", "print.printers", "print.query", "print.properties", "print":
+		h.mu.Lock()
+		window := h.window
+		h.mu.Unlock()
+		if window == nil {
+			return nil, fmt.Errorf("窗口尚未就绪")
+		}
+		if name == "print.capabilities" {
+			return window.PrintCapabilities(ctx)
+		}
+		if name == "print.dialog" {
+			return nil, window.ShowPrintUI(ctx, text("kind"))
+		}
+		if name == "print.printers" {
+			return window.ListPrinters(ctx)
+		}
+		if name == "print.properties" {
+			return nil, window.ShowPrinterProperties(ctx, text("printer"))
+		}
+		data, err := json.Marshal(args)
+		if err != nil {
+			return nil, err
+		}
+		var options guigo.PrintOptions
+		if err := json.Unmarshal(data, &options); err != nil {
+			return nil, err
+		}
+		profile, err := window.QueryPrinter(ctx, options)
+		if err != nil {
+			return nil, err
+		}
+		if name == "print.query" {
+			return profile, nil
+		}
+		if text("fingerprint") == "" || text("fingerprint") != profile.Fingerprint {
+			return nil, fmt.Errorf("打印机设置已变化，请重新预览")
+		}
+		return window.Print(ctx, options)
 	case "engine.open":
 		engine := webui.NewNativeEngine(h.files.resolve)
 		parallelism, cacheBytes := runtime.GOMAXPROCS(0), int64(128<<20)

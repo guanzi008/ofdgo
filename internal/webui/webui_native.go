@@ -357,6 +357,7 @@ func (e *NativeEngine) Close() error {
 	e.gate <- struct{}{}
 	defer func() { <-e.gate }()
 	e.closed = true
+	_, _ = e.discardPrint(nil)
 	_ = e.waitRenders(context.Background())
 	e.renderIdle = nil
 	e.saveSnapshot = nil

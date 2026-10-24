@@ -331,6 +331,12 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 			{Name: "PDF.Popup.Rect", Value: fmt.Sprintf("%g %g %g %g", popup.Rect.XMin, popup.Rect.YMin, popup.Rect.XMax, popup.Rect.YMax)},
 		}...)
 	}
+	if annotation.Subtype != "Popup" {
+		if converted.Parameters == nil {
+			converted.Parameters = &AnnotationParameters{}
+		}
+		converted.Parameters.Parameter = append(converted.Parameters.Parameter, AnnotationParameter{Name: "PDF.Printable", Value: strconv.FormatBool(flags&4 != 0 && flags&2 == 0 && !invisible)})
+	}
 	if len(actions) != 0 {
 		region, err := NewShape(ShapeRectangle, Box{X: playback.X - box.X, Y: playback.Y - box.Y, W: playback.W, H: playback.H})
 		if err != nil {

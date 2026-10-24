@@ -77,6 +77,9 @@ func (r *Renderer) WalkPage(page *PageContent, visitor PageVisitor) error {
 		}
 	}
 	for order := range 3 {
+		if r.printing && (r.printContents == "annotations" || r.printContents == "forms") {
+			break
+		}
 		if r.Reader.doc != nil {
 			for _, ref := range page.Template {
 				kind := ref.ZOrder
@@ -103,6 +106,18 @@ func (r *Renderer) WalkPage(page *PageContent, visitor PageVisitor) error {
 	}
 	if r.RenderAnnotations {
 		for _, annotation := range r.Reader.Annots[page.ID] {
+			if r.printing && (r.printContents == "document" && annotation.Subtype != "Widget" || r.printContents == "forms" && annotation.Subtype != "Widget" || r.printContents == "annotations" && annotation.Subtype == "Widget") {
+				continue
+			}
+			if r.printing && annotation.Parameters != nil {
+				for _, parameter := range annotation.Parameters.Parameter {
+					if parameter.Name == "PDF.Printable" && (parameter.Value == "true" || parameter.Value == "false") {
+						visible := parameter.Value == "true"
+						annotation.Visible = &visible
+						break
+					}
+				}
+			}
 			if annotation.Visible != nil && !*annotation.Visible && !pageIncludesHidden(visitor) {
 				continue
 			}
@@ -110,6 +125,9 @@ func (r *Renderer) WalkPage(page *PageContent, visitor PageVisitor) error {
 				return err
 			}
 		}
+	}
+	if r.printing && (r.printContents == "annotations" || r.printContents == "forms") {
+		return nil
 	}
 	for _, stamp := range r.Reader.Stamps[page.ID] {
 		if r.pageContext != nil {

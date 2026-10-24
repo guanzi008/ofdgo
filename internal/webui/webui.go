@@ -423,6 +423,7 @@ type businessEngine struct {
 	currentSession *Session
 	currentEditor  *ofdgo.Editor
 	saveSnapshot   *ofdgo.Editor
+	printDocument  *ofdgo.PrintDocument
 	pendingImport  *ofdgo.Reader
 	copiedObjects  *editorClipboard
 	copiedStyle    *ofdgo.GraphicObject
@@ -7445,6 +7446,11 @@ func (c *outputContext) Err() error {
 // businessCommands 共用业务命令表
 func (e *businessEngine) businessCommands() map[string]func([]platformValue) (any, error) {
 	return map[string]func([]platformValue) (any, error){
+		"ofdgoPreparePrint":           e.preparePrint,
+		"ofdgoLayoutPrint":            e.layoutPrint,
+		"ofdgoPrintSide":              e.printSide,
+		"ofdgoPrintPDF":               e.printPDF,
+		"ofdgoDiscardPrint":           e.discardPrint,
 		"ofdgoDetectFormat":           e.detectDocumentFormat,
 		"ofdgoOpen":                   e.openDocument,
 		"ofdgoSelectDocument":         e.selectDocument,
@@ -7594,6 +7600,8 @@ func (e *businessEngine) operationContext() context.Context {
 func failureResult(err error) apiResult {
 	result := apiResult{Error: err.Error()}
 	switch {
+	case errors.Is(err, ofdgo.ErrPrintDenied):
+		result.Code, result.Error = "printDenied", "文档禁止打印"
 	case errors.Is(err, ofdgo.ErrPDFPassword):
 		result.Code, result.Error = "pdfPassword", "PDF密码缺失或错误"
 	case errors.Is(err, ofdgo.ErrCredentialsRequired):

@@ -1,0 +1,411 @@
+export class PrintDialog {
+	constructor(options) {
+		Object.assign(this, options);
+		this.el = Object.fromEntries(["Panel", "Form", "Settings", "Printer", "Properties", "Copies", "Collation", "Duplex", "BackReverse", "BackRotate", "Contents", "Scope", "Range", "Parity", "Reverse", "Mode", "Paper", "Width", "Height", "Orientation", "Scaling", "Scale", "MarginTop", "MarginRight", "MarginBottom", "MarginLeft", "Grid", "PageOrder", "Gap", "Binding", "BookletSheets", "SheetFrom", "SheetTo", "Overlap", "Sides", "Rotate", "Grayscale", "Borders", "CropMarks", "Raster", "DPI", "TileOnlyLarge", "Labels", "Preview", "Previous", "Next", "PreviewNumber", "PageCount", "Zoom", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#print${name}`)]));
+		this.printerOptions = this.el.Printer.innerHTML;
+		this.paperOptions = this.el.Paper.innerHTML;
+		this.queue = Promise.resolve();
+		this.sequence = 0;
+		this.urls = [];
+		this.root = document.querySelector("#ofdgoPrintDocument");
+		this.el.Settings.addEventListener("input", event => { if (event.target === this.el.Printer) this.choosePrinter(); else this.schedule(); });
+		this.el.Properties.addEventListener("click", () => this.properties());
+		this.el.Form.addEventListener("submit", event => { event.preventDefault(); this.print(); });
+		this.el.Cancel.addEventListener("click", () => this.el.Panel.close());
+		this.el.Panel.addEventListener("close", () => this.close());
+		this.el.Panel.addEventListener("cancel", event => { if (this.waiting) event.preventDefault(); });
+		this.el.Previous.addEventListener("click", () => this.preview(this.side - 1));
+		this.el.Next.addEventListener("click", () => this.preview(this.side + 1));
+		this.el.PreviewNumber.addEventListener("change", () => this.preview(Number(this.el.PreviewNumber.value) - 1));
+		this.el.Zoom.addEventListener("change", () => this.resize());
+		new ResizeObserver(() => this.resize()).observe(this.el.Preview);
+		window.addEventListener("afterprint", () => { if (this.waiting === "browser") this.finishPrint(); });
+		window.addEventListener("beforeprint", () => {
+			if (!this.root?.children.length) {
+				this.root ||= this.createRoot();
+				this.root.textContent = "请先在OFDGo中打开打印预览，准备完整文档后打印。";
+			}
+		});
+	}
+
+	open(context) {
+		if (this.el.Panel.open) return;
+		this.context = context;
+		this.prepared = false;
+		this.layout = null;
+		this.job = this.profile = null;
+		this.side = 0;
+		this.sequence++;
+		this.el.Form.reset();
+		this.mode = null;
+		try {
+			const saved = JSON.parse(localStorage.getItem("ofdgo.print.v2") || "null");
+			for (const [name, value] of Object.entries(saved || {})) {
+				const node = this.el[name];
+				if (node?.type === "checkbox" && typeof value === "boolean") node.checked = value;
+				else if (node && typeof value === "string") node.value = value;
+			}
+		} catch {}
+		if (this.el.BookletSheets.value === "0") this.el.BookletSheets.value = "";
+		this.el.Scope.value = context.selection.length ? "selected" : "all";
+		this.el.Scope.querySelector('option[value="selected"]').disabled = !context.selection.length;
+		this.el.Contents.value = context.annotations ? "documentAndAnnotations" : "document";
+		this.el.Status.textContent = "";
+		this.el.Preview.replaceChildren();
+		this.show(this.el.Panel);
+		this.loadDevices();
+	}
+
+	isDevice() { return this.el.Printer.value.startsWith("device:"); }
+	manual() { return this.el.Duplex.value.startsWith("manual"); }
+
+	async loadDevices() {
+		const sequence = ++this.sequence;
+		this.loading = true;
+		this.controls();
+		this.el.Printer.innerHTML = this.printerOptions;
+		try {
+			if (this.nativeHost) {
+				this.el.Printer.querySelector('option[value="browser"]').textContent = "系统打印";
+				const capabilities = await this.nativeHost.call("print.capabilities", {});
+				if (!this.current(sequence)) return;
+				this.capabilities = capabilities;
+				const printers = capabilities.direct ? await this.nativeHost.call("print.printers", {}) : [];
+				if (!this.current(sequence)) return;
+				for (const printer of printers) this.el.Printer.add(new Option(printer.name, `device:${printer.name}`));
+				const printer = printers.find(printer => printer.default) || printers[0];
+				this.el.Printer.value = printer ? `device:${printer.name}` : "pdf";
+			}
+		} catch (error) { if (this.current(sequence)) this.el.Status.textContent = error.message; }
+		finally {
+			if (this.current(sequence)) { this.loading = false; await this.choosePrinter(); }
+		}
+	}
+
+	async choosePrinter() {
+		const sequence = ++this.sequence;
+		const paper = this.el.Paper.value;
+		this.layout = this.job = this.profile = null;
+		this.loading = true;
+		this.controls();
+		this.el.Paper.innerHTML = this.paperOptions;
+		if (!this.isDevice()) {
+			this.el.Paper.value = paper;
+			if (!this.el.Paper.value) {
+				const [width, height] = paper.split(",").map(Number);
+				if (width > 0 && height > 0 && Number.isFinite(width) && Number.isFinite(height)) {
+					this.el.Paper.value = "custom";
+					this.el.Width.value = width;
+					this.el.Height.value = height;
+				} else this.el.Paper.value = "210,297";
+			}
+		}
+		this.el.Properties.hidden = true;
+		try {
+			if (this.isDevice()) {
+				const profile = await this.nativeHost.call("print.query", {printer:this.el.Printer.value.slice(7), copies:1, duplex:"simplex"});
+				if (!this.current(sequence)) return;
+				this.profile = profile;
+				this.el.Paper.replaceChildren(...profile.papers.map(paper => new Option(paper.name, `${paper.width},${paper.height}`)));
+				if (profile.customPaper) this.el.Paper.add(new Option("自定义", "custom"));
+				this.el.Paper.value = `${profile.options.width},${profile.options.height}`;
+				if (!this.el.Paper.value && profile.customPaper) { this.el.Paper.value = "custom"; this.el.Width.value = profile.options.width; this.el.Height.value = profile.options.height; }
+				if (!this.el.Paper.value) throw new Error("设备默认纸张不在支持列表中");
+				this.el.Orientation.value = profile.options.orientation;
+				this.el.Copies.max = Math.min(999, profile.maxCopies || 999);
+				this.el.Copies.value = 1;
+				this.el.Grayscale.checked = !profile.color;
+				this.el.Grayscale.disabled = !profile.color;
+				this.el.Properties.hidden = !profile.properties;
+			} else this.el.Grayscale.disabled = false;
+		} catch (error) { if (this.current(sequence)) { this.el.Status.textContent = error.message; return; } }
+		finally { if (this.current(sequence)) { this.loading = false; this.controls(); } }
+		if (this.current(sequence)) this.schedule();
+	}
+
+	async properties() {
+		if (!this.isDevice() || this.running || this.loading) return;
+		this.loading = true;
+		this.controls();
+		try { await this.nativeHost.call("print.properties", {printer:this.el.Printer.value.slice(7)}); }
+		catch (error) { this.el.Status.textContent = error.message; }
+		finally { this.loading = false; if (this.current()) await this.choosePrinter(); }
+	}
+
+	deviceOptions() {
+		const [width, height] = this.el.Paper.value === "custom" ? [Number(this.el.Width.value), Number(this.el.Height.value)] : this.el.Paper.value.split(",").map(Number);
+		const manual = this.manual(), partial = this.el.Sides.value !== "all";
+		return {printer:this.el.Printer.value.slice(7), width, height, orientation:this.el.Orientation.value,
+			copies:Number(this.el.Copies.value), collation:this.el.Collation.checked ? "collated" : "uncollated",
+			duplex:manual || partial ? "simplex" : this.el.Duplex.value, color:this.el.Grayscale.checked ? "grayscale" : "color",
+			scale:1, pagesPerSide:1, margins:{top:0,right:0,bottom:0,left:0},
+			...(this.capabilities?.backgrounds ? {backgrounds:true} : {}), ...(this.capabilities?.headersFooters ? {headersFooters:false} : {})};
+	}
+
+	options(profile) {
+		const el = this.el;
+		const number = name => {
+			const value = Number(el[name].value);
+			if (!el[name].value.trim() || !Number.isFinite(value)) throw new Error("请输入有效数值");
+			return value;
+		};
+		let [paperWidth, paperHeight] = el.Paper.value === "source" ? [0, 0] : el.Paper.value === "custom" ? [number("Width"), number("Height")] : el.Paper.value.split(",").map(Number);
+		if (el.Orientation.value === "landscape" && paperWidth < paperHeight) [paperWidth, paperHeight] = [paperHeight, paperWidth];
+		if (profile) [paperWidth, paperHeight] = [profile.width, profile.height];
+		const scope = el.Scope.value;
+		const [rows, columns] = el.Grid.value.split(",").map(Number);
+		if (scope === "selected" && !this.context.selection.length) throw new Error("未选择页面");
+		if (scope === "range" && !el.Range.value.trim()) throw new Error("请输入页码范围");
+		const manual = this.manual(), duplex = el.Duplex.value.replace("manualL", "l").replace("manualS", "s");
+		if (manual && this.isDevice() && number("Copies") !== 1) throw new Error("手动双面每次仅支持1份");
+		return {
+			...(scope === "current" ? {pages:[this.context.page]} : scope === "selected" ? {pages:this.context.selection} : scope === "range" ? {pageRange:el.Range.value.trim()} : {}),
+			mode:el.Mode.value, scaling:el.Scaling.value, paperWidth, paperHeight,
+			margins:{top:number("MarginTop"), right:number("MarginRight"), bottom:number("MarginBottom"), left:number("MarginLeft")},
+			...(profile ? {printableArea:{x:profile.printableArea.x, y:profile.printableArea.y, w:profile.printableArea.width, h:profile.printableArea.height}} : {}),
+			copies:this.isDevice() ? number("Copies") : 1, collate:el.Collation.checked, duplex,
+			scale:number("Scale") / 100, rotate:el.Rotate.checked, reverse:el.Reverse.checked !== (manual && el.Sides.value === "back" && el.BackReverse.checked), parity:el.Parity.value, sides:el.Sides.value,
+			backRotate:manual && el.BackRotate.checked,
+			rows, columns, pageOrder:el.PageOrder.value, gap:number("Gap"), binding:el.Binding.value, bookletSheets:el.BookletSheets.value ? number("BookletSheets") : 0, overlap:number("Overlap"),
+			...(el.Mode.value === "booklet" ? {sheetFrom:el.SheetFrom.value ? number("SheetFrom") : 0, sheetTo:el.SheetTo.value ? number("SheetTo") : 0} : {}),
+			contents:el.Contents.value, grayscale:el.Grayscale.checked, borders:el.Borders.checked, cropMarks:el.CropMarks.checked, raster:el.Raster.checked, dpi:number("DPI"), tileOnlyLarge:el.TileOnlyLarge.checked, labels:el.Labels.checked
+		};
+	}
+
+	schedule() {
+		const el = this.el, mode = el.Mode.value;
+		const source = el.Paper.querySelector('option[value="source"]');
+		if (source) source.disabled = mode !== "single";
+		if (mode !== "single" && el.Paper.value === "source") el.Paper.value = "210,297";
+		if (mode === "booklet" && this.mode !== "booklet") {
+			this.orientation = el.Orientation.value;
+			this.duplexBeforeBooklet = el.Duplex.value;
+			this.scalingBeforeBooklet = el.Scaling.value;
+			el.Scaling.value = "shrink";
+			el.Duplex.value = this.isDevice() && !this.profile?.duplex ? "manualShortEdge" : "shortEdge";
+		} else if (mode !== "booklet" && this.mode === "booklet") {
+			el.Orientation.value = this.orientation;
+			el.Duplex.value = this.duplexBeforeBooklet;
+			el.Scaling.value = this.scalingBeforeBooklet;
+		}
+		if (mode === "booklet") el.Orientation.value = "landscape";
+		this.mode = mode;
+		if (this.isDevice() && !this.profile?.duplex && ["longEdge", "shortEdge"].includes(el.Duplex.value)) el.Duplex.value = el.Duplex.value === "longEdge" ? "manualLongEdge" : "manualShortEdge";
+		if (mode === "booklet" && el.Duplex.value === "simplex") el.Duplex.value = this.isDevice() && !this.profile?.duplex ? "manualShortEdge" : "shortEdge";
+		if (el.Duplex.value === "simplex") el.Sides.value = "all";
+		const isManual = this.manual();
+		el.Sides.querySelector('option[value="all"]').disabled = isManual;
+		if (isManual && el.Sides.value === "all") el.Sides.value = "front";
+		for (const option of el.Duplex.options) option.disabled = this.isDevice() && !this.profile?.duplex && ["longEdge", "shortEdge"].includes(option.value) || mode === "booklet" && ["simplex", "longEdge", "manualLongEdge"].includes(option.value);
+		el.Orientation.disabled = mode === "booklet" || el.Paper.value === "source";
+		const rows = {device:this.isDevice(), sides:el.Duplex.value !== "simplex", manual:isManual, range:el.Scope.value === "range", paper:el.Paper.value === "custom", scale:el.Scaling.value === "custom" || mode === "poster", multiple:mode === "multiple", gap:mode === "multiple" || mode === "booklet", booklet:mode === "booklet", poster:mode === "poster"};
+		for (const row of el.Panel.querySelectorAll("[data-print-row]")) {
+			row.hidden = !rows[row.dataset.printRow];
+		}
+		el.Scaling.disabled = mode === "poster" || mode === "booklet";
+		el.DPI.disabled = !el.Raster.checked && !el.Grayscale.checked;
+		const sequence = ++this.sequence;
+		this.layout = null;
+		this.job = null;
+		this.controls();
+		clearTimeout(this.timer);
+		this.timer = setTimeout(() => {
+			this.queue = this.queue.catch(() => {}).then(() => this.refresh(sequence));
+		}, 160);
+	}
+
+	async refresh(sequence) {
+		if (!this.current(sequence)) return;
+		const context = this.context;
+		try {
+			if (!this.el.Form.reportValidity()) return;
+			const deviceOptions = this.isDevice() ? this.deviceOptions() : null;
+			const profile = deviceOptions ? await this.nativeHost.call("print.query", deviceOptions) : null;
+			if (!this.current(sequence)) return;
+			this.profile = profile;
+			const options = this.options(profile);
+			this.el.Status.textContent = "正在准备打印";
+			const layout = await context.call(this.prepared ? "ofdgoLayoutPrint" : "ofdgoPreparePrint", options);
+			if (!this.current(sequence)) return;
+			this.prepared = true;
+			this.layout = layout;
+			if (this.isDevice()) this.el.Copies.max = Math.min(999, this.profile.maxCopies || 999, layout.copiesLimit > 0 ? layout.copiesLimit : 999);
+			this.job = {deviceOptions, fingerprint:profile?.fingerprint, manual:this.manual(), sides:options.sides, backContent:layout.backContent};
+			this.el.Status.textContent = "";
+			if (layout.sides.some(side => side.placements.some(placement => placement.clipped))) this.el.Status.textContent = "内容超出可打印区域";
+			if (this.manual() && options.sides === "back" && !layout.backContent) this.el.Status.textContent = "背面为空白";
+			this.remember();
+			await this.preview(Math.min(this.side, layout.sides.length - 1));
+		} catch (error) {
+			if (this.current(sequence)) this.el.Status.textContent = error.code === "printDenied" ? "文档禁止打印" : error.message;
+		} finally {
+			if (this.current(sequence)) this.controls();
+		}
+	}
+
+	current(sequence = this.sequence) { return this.el.Panel.open && sequence === this.sequence && this.context && !this.context.tab.closed; }
+
+	async preview(index) {
+		if (!this.layout || this.running || index < 0 || index >= this.layout.sides.length) return;
+		const sequence = this.sequence, preview = this.previewSequence = (this.previewSequence || 0) + 1;
+		this.side = index;
+		this.controls();
+		try {
+			let {svg} = await this.context.call("ofdgoPrintSide", index);
+			if (!this.current(sequence) || preview !== this.previewSequence) return;
+			if (this.profile) {
+				const area = this.profile.printableArea;
+				svg = svg.replace("</svg>", `<rect x="${area.x}" y="${area.y}" width="${area.width}" height="${area.height}" fill="none" stroke="#88949e" stroke-width="0.2" stroke-dasharray="1 1"/></svg>`);
+			}
+			const url = URL.createObjectURL(new Blob([svg], {type:"image/svg+xml"}));
+			const img = new Image();
+			img.src = url;
+			try { await img.decode(); } catch (error) { URL.revokeObjectURL(url); throw error; }
+			if (!this.current(sequence) || preview !== this.previewSequence) { URL.revokeObjectURL(url); return; }
+			if (this.previewURL) URL.revokeObjectURL(this.previewURL);
+			this.previewURL = url;
+			this.el.Preview.replaceChildren(img);
+			this.resize();
+		} catch (error) { if (this.current(sequence)) { this.el.Status.textContent = error.message; this.layout = null; this.controls(); } }
+	}
+
+	resize() {
+		const img = this.el.Preview.querySelector("img"), side = this.layout?.sides[this.side];
+		if (!img || !side) return;
+		const factor = this.el.Zoom.value === "fit" ? Math.min((this.el.Preview.clientWidth - 24) / side.width, (this.el.Preview.clientHeight - 24) / side.height) : Number(this.el.Zoom.value) * 96 / 25.4;
+		img.style.width = `${Math.max(1, side.width * factor)}px`;
+		img.style.height = `${Math.max(1, side.height * factor)}px`;
+	}
+
+	controls() {
+		const count = this.layout?.sides.length || 0, busy = !!this.running || !!this.loading;
+		this.el.Settings.disabled = busy;
+		this.el.Submit.disabled = !count || busy;
+		if (this.el.Printer.value !== "pdf" && this.manual() && this.el.Sides.value === "back" && !this.layout?.backContent) this.el.Submit.disabled = true;
+		this.el.Previous.disabled = busy || !count || this.side === 0;
+		this.el.Next.disabled = busy || !count || this.side + 1 === count;
+		this.el.PreviewNumber.disabled = busy || !count;
+		this.el.PreviewNumber.max = count || 1;
+		this.el.PreviewNumber.value = count ? this.side + 1 : 1;
+		this.el.PageCount.textContent = `/ ${count}`;
+		this.el.Cancel.textContent = busy && !this.waiting ? "取消" : "关闭";
+		this.el.Cancel.disabled = !!this.waiting;
+	}
+
+	remember() {
+		const saved = {};
+		for (const [name, node] of Object.entries(this.el)) if (node.closest("#printSettings") && !["Printer", "Copies", "Paper", "Scope", "Range", "Parity", "Reverse", "Sides", "Contents", "SheetFrom", "SheetTo"].includes(name) && node.matches("input, select")) saved[name] = node.type === "checkbox" ? node.checked : node.value;
+		try { localStorage.setItem("ofdgo.print.v2", JSON.stringify(saved)); } catch {}
+	}
+
+	createRoot() {
+		const root = document.createElement("div");
+		root.id = "ofdgoPrintDocument";
+		document.body.append(root);
+		return root;
+	}
+
+	async print() {
+		if (!this.layout || !this.job || this.running) return;
+		if (this.el.Printer.value === "pdf") return this.pdf();
+		const sequence = this.sequence, context = this.context;
+		const job = this.job;
+		this.running = true;
+		this.controls();
+		try {
+			this.root ||= this.createRoot();
+			this.root.replaceChildren();
+			const style = document.createElement("style");
+			this.root.append(style);
+			for (let i = 0; i < this.layout.sides.length; i++) {
+				if (!this.current(sequence)) throw new DOMException("打印已取消", "AbortError");
+				this.el.Status.textContent = `正在准备纸面 ${i + 1}/${this.layout.sides.length}`;
+				const {svg} = await context.call("ofdgoPrintSide", i);
+				if (!this.current(sequence)) throw new DOMException("打印已取消", "AbortError");
+				const url = URL.createObjectURL(new Blob([svg], {type:"image/svg+xml"}));
+				this.urls.push(url);
+				const img = new Image(), section = document.createElement("section"), side = this.layout.sides[i];
+				img.src = url;
+				section.append(img);
+				section.style.cssText = `page:ofdgoPrint${i};width:${side.width}mm;height:${side.height}mm`;
+				style.textContent += `@page ofdgoPrint${i}{size:${side.width}mm ${side.height}mm;margin:0}`;
+				this.root.append(section);
+				await img.decode();
+			}
+			await document.fonts.ready;
+			if (!this.current(sequence)) throw new DOMException("打印已取消", "AbortError");
+			this.previousTitle = document.title;
+			document.title = context.name;
+			this.waiting = job.deviceOptions ? "native" : "browser";
+			this.controls();
+			this.el.Status.textContent = job.deviceOptions ? "正在提交打印作业" : "正在打开打印窗口";
+			if (job.deviceOptions) {
+				const result = await this.nativeHost.call("print", {...job.deviceOptions, fingerprint:job.fingerprint});
+				if (this.current(sequence)) {
+					this.finishPrint();
+					if (!result?.submitted) throw new Error("打印作业未被接受");
+					if (job.manual && job.sides === "front") {
+						if (job.backContent) { this.el.Sides.value = "back"; this.schedule(); }
+						else this.el.Status.textContent = "背面为空白";
+					}
+				}
+			} else if (this.nativeHost) {
+				const capabilities = await this.nativeHost.call("print.capabilities", {});
+				if (!this.current(sequence)) throw new DOMException("打印已取消", "AbortError");
+				if (!capabilities.systemDialog) throw new Error("当前运行时不支持系统打印");
+				await this.nativeHost.call("print.dialog", {kind:"system"});
+				if (this.current(sequence) && capabilities.dialogCompletion) this.finishPrint();
+			} else if (typeof window.print === "function") window.print();
+			else throw new Error("当前浏览器不支持打印");
+		} catch (error) {
+			if (this.current(sequence)) {
+				this.finishPrint();
+				this.el.Status.textContent = error.name === "AbortError" ? "打印已取消" : error.message;
+			}
+		} finally {
+			if (this.current(sequence)) {
+				if (!this.waiting) this.running = false;
+				this.controls();
+			}
+		}
+	}
+
+	finishPrint() {
+		if (this.previousTitle !== undefined) { document.title = this.previousTitle; delete this.previousTitle; }
+		this.root?.replaceChildren();
+		for (const url of this.urls) URL.revokeObjectURL(url);
+		this.urls = [];
+		this.el.Status.textContent = "";
+		this.waiting = this.running = false;
+		this.controls();
+	}
+
+	async pdf() {
+		if (!this.layout || this.running) return;
+		const sequence = this.sequence, context = this.context;
+		this.running = true;
+		this.controls();
+		this.el.Status.textContent = "正在生成打印PDF";
+		try {
+			const result = await context.call("ofdgoPrintPDF");
+			if (this.current(sequence)) {
+				await this.download(result.bytes, "application/pdf", `${context.name.replace(/\.[^.]+$/, "")}-打印.pdf`);
+				if (this.current(sequence)) this.el.Status.textContent = "";
+			}
+		} catch (error) { if (this.current(sequence)) this.el.Status.textContent = error.message; }
+		finally { if (this.current(sequence)) { this.running = false; this.controls(); } }
+	}
+
+	close() {
+		const context = this.context;
+		this.sequence++;
+		clearTimeout(this.timer);
+		if (context) this.cancel(context.tab);
+		this.finishPrint();
+		if (this.previewURL) URL.revokeObjectURL(this.previewURL);
+		this.previewURL = null;
+		this.el.Preview.replaceChildren();
+		this.context = null;
+		this.queue = this.queue.catch(() => {}).then(() => context?.call("ofdgoDiscardPrint").catch(() => {}));
+	}
+}

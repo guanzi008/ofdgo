@@ -417,6 +417,7 @@ class BrowserEngine {
 			"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoExportInvoice", "ofdgoValidateInvoice",
 			"ofdgoActionList", "ofdgoPageSettings", "ofdgoReadAnnotation", "ofdgoPreviewSignatureSeal",
 			"ofdgoExportFormats", "ofdgoOutputFormats", "ofdgoParsePageRange", "ofdgoExportPage", "ofdgoExportDocument",
+			"ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF", "ofdgoDiscardPrint",
 			"ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion"
 		].includes(data.name)) this.invalidatePages();
 		const preferred = data.name === "ofdgoRenderPage" ? [...this.slots].find(slot => !slot.busy && slot.pages.has(data.args[0])) : null;

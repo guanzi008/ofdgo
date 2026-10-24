@@ -99,6 +99,7 @@ func (w *wasmEngines) close(args []js.Value) (any, error) {
 		return nil, nil
 	}
 	delete(w.engines, id)
+	_, _ = e.discardPrint(nil)
 	e.clearImport()
 	err := e.currentSession.Close()
 	*e = businessEngine{}

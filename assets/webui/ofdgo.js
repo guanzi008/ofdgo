@@ -1,6 +1,7 @@
 import { SVG_NAMESPACE, CanvasEditor, canEditObject, editTextValue, richTextModel, fontFaceStyle, missingGlyphMessage, objectEditReason, selectedText, lineShape, selectionBounds, pagePoint } from "./ofdgo_edit.js";
 import { FontManager, FontPicker } from "./ofdgo_font.js";
 import { nativeHost, createEngineWorker, engineLimits, documentBytes, saveFilePicker, directoryPicker } from "./ofdgo_host.js";
+import { PrintDialog } from "./ofdgo_print.js";
 import { DocumentDialogs } from "./ofdgo_util.js";
 
 const MM_TO_PX = 96 / 25.4;
@@ -187,6 +188,8 @@ function createDocumentState() {
 let state = createDocumentState();
 
 const el = {
+	printButton: document.querySelector("#printButton"),
+	printPanel: document.querySelector("#printPanel"),
 	documentTitleBar: document.querySelector("#documentTitleBar"),
 	documentTabs: document.querySelector("#documentTabs"),
 	documentNewTab: document.querySelector("#documentNewTab"),
@@ -649,6 +652,30 @@ const el = {
 	fontList: document.querySelector("#fontList"),
 	statusText: document.querySelector("#statusText"),
 };
+
+let printDialog = null;
+
+function createPrintDialog() {
+	return new PrintDialog({
+		nativeHost,
+		show: panel => documentDialogs.showApplication(panel),
+		download: downloadBytes,
+		cancel: tab => {
+			for (const [id, request] of wasmRequests) if (request.tab === tab && ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF"].includes(request.name)) tab.worker?.postMessage({type:"cancel", id});
+		},
+	});
+}
+
+function openPrintPanel() {
+	const tab = documentTab();
+	if (!tab.state.doc || !tab.state.ready || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
+	printDialog ||= createPrintDialog();
+	printDialog.open({tab, call:(name, ...args) => callTabWASM(tab, name, ...args), page:tab.state.pageIndex,
+		selection:[...tab.state.pageSelection].sort((a,b) => a-b), annotations:tab.state.renderAnnotations,
+		name:tab.state.fileName || tab.state.doc.title || "OFDGo"});
+}
+
+el.printButton.addEventListener("click", openPrintPanel);
 
 const fontManager = new FontManager({
 	host: nativeHost,
@@ -1857,6 +1884,11 @@ function handleKeyDown(event) {
 	}
 	const key = event.key;
 	const target = event.target;
+	if ((event.ctrlKey || event.metaKey) && !event.shiftKey && key.toLowerCase() === "p") {
+		event.preventDefault();
+		openPrintPanel();
+		return;
+	}
 	if (nativeHost && (event.ctrlKey || event.metaKey) && (key === "Tab" || key.toLowerCase() === "w")) {
 		event.preventDefault();
 		if (document.body.hasAttribute("data-busy") || formDialogOpen()) return;
@@ -1976,6 +2008,7 @@ function handleKeyDown(event) {
 }
 
 function formDialogOpen() {
+	if (el.printPanel.open) return true;
 	return Boolean(sealPreview || resourceManager.pick) || el.aboutPanel.open || el.closePanel.open || el.attachmentDialog.open || settingsElements.Panel.open || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
 		|| resourceElements.Panel.open || el.structureDialog.open || el.versionPanel.open || el.batchPagesPanel.open || el.objectStylePanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
@@ -13547,6 +13580,7 @@ function updateDocumentControls() {
 	const count = state.doc?.documents?.length || 0, index = managedDocumentIndex(), manager = state.documentManagement;
 	const busy = document.body.hasAttribute("data-busy");
 	const disabled = !state.doc || !state.ready || state.exporting || busy;
+	el.printButton.disabled = disabled;
 	el.documentManageButton.hidden = !state.editing;
 	el.documentManageButton.disabled = disabled || state.saving;
 	resourceElements.ManageButton.disabled = disabled;
@@ -13599,6 +13633,7 @@ function updateControls() {
 	el.outputCompression.disabled = !hasDoc || state.exporting;
 	el.exportPageButton.disabled = !hasDoc || state.exporting || !state.exportFormats.length;
 	el.exportButton.disabled = !hasDoc || state.exporting || !state.exportFormats.length;
+	el.printButton.disabled = !hasDoc || !state.ready || state.exporting || document.body.hasAttribute("data-busy");
 	updateDPIControl();
 }
 

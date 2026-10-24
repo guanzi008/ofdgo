@@ -138,9 +138,13 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		return fmt.Errorf("no pages found")
 	}
 	doc := r.Reader.doc
-	navigation, err := newPDFNavigation(r, doc, pages)
-	if err != nil {
-		return err
+	navigation := &pdfNavigation{}
+	if !r.printing {
+		var err error
+		navigation, err = newPDFNavigation(r, doc, pages)
+		if err != nil {
+			return err
+		}
 	}
 	buf, direct := writer.(*bytes.Buffer)
 	if r.Compression.Mode != CompressionUnchanged {
@@ -182,16 +186,20 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 			buf.Truncate(start)
 			return fmt.Errorf("failed to read page %d: %w", i+1, err)
 		}
-		if err := navigation.addPage(r, i, content, pages); err != nil {
-			buf.Truncate(start)
-			return fmt.Errorf("failed to read page %d navigation: %w", i+1, err)
+		if !r.printing {
+			if err := navigation.addPage(r, i, content, pages); err != nil {
+				buf.Truncate(start)
+				return fmt.Errorf("failed to read page %d navigation: %w", i+1, err)
+			}
 		}
 		if i > 0 {
 			p.NewPage(page.Box.W, page.Box.H)
 			renderer.images = append(renderer.images, nil)
 			renderer.text = append(renderer.text, codecpdf.TextPage{})
 		}
-		navigation.apply(p, i)
+		if !r.printing {
+			navigation.apply(p, i)
+		}
 		if err := r.renderCanvasPageToContext(canvas.NewContext(renderer), content, !r.TransparentBackground); err != nil {
 			buf.Truncate(start)
 			return fmt.Errorf("failed to render page %d: %w", i+1, err)
@@ -216,7 +224,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 			return err
 		}
 	}
-	if doc != nil {
+	if doc != nil && !r.printing {
 		if err := navigation.addOutlines(doc.Outlines.OutlineElem, 0, navigation.bookmarks, navigation.pageIndex, pages); err != nil {
 			buf.Truncate(start)
 			return err
