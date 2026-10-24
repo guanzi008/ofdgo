@@ -72,7 +72,6 @@ export class PrintDialog {
 		if (browser.disabled) this.el.Printer.value = "pdf";
 		try {
 			if (this.nativeHost) {
-				browser.textContent = "系统打印";
 				const capabilities = await this.nativeHost.call("print.capabilities", {});
 				if (!this.current(sequence)) return;
 				this.capabilities = capabilities;
@@ -233,7 +232,7 @@ export class PrintDialog {
 			if (!this.current(sequence)) return;
 			this.profile = profile;
 			const options = this.options(profile);
-			this.el.Status.textContent = "正在准备打印";
+			this.el.Status.textContent = "准备打印…";
 			const layout = await context.call(this.prepared ? "ofdgoLayoutPrint" : "ofdgoPreparePrint", options);
 			if (!this.current(sequence)) return;
 			this.prepared = true;
@@ -331,7 +330,7 @@ export class PrintDialog {
 			this.root.append(style);
 			for (let i = 0; i < this.layout.sides.length; i++) {
 				if (!this.current(sequence)) throw new DOMException("打印已取消", "AbortError");
-				this.el.Status.textContent = `正在准备纸面 ${i + 1}/${this.layout.sides.length}`;
+				this.el.Status.textContent = `准备纸面 ${i + 1}/${this.layout.sides.length}`;
 				const {svg} = await context.call("ofdgoPrintSide", i);
 				if (!this.current(sequence)) throw new DOMException("打印已取消", "AbortError");
 				const url = URL.createObjectURL(new Blob([svg], {type:"image/svg+xml"}));
@@ -350,7 +349,7 @@ export class PrintDialog {
 			document.title = context.name;
 			this.waiting = this.nativeHost ? "native" : "browser";
 			this.controls();
-			this.el.Status.textContent = job.deviceOptions ? "正在提交打印作业" : "正在打开打印窗口";
+			this.el.Status.textContent = job.deviceOptions ? "提交打印…" : "打开打印…";
 			if (job.deviceOptions) {
 				const result = await this.nativeHost.call("print", {...job.deviceOptions, fingerprint:job.fingerprint});
 				if (this.current(sequence)) {
@@ -398,7 +397,7 @@ export class PrintDialog {
 		const sequence = this.sequence, context = this.context;
 		this.running = true;
 		this.controls();
-		this.el.Status.textContent = "正在生成打印PDF";
+		this.el.Status.textContent = "生成文件…";
 		try {
 			const result = await context.call("ofdgoPrintPDF");
 			if (this.current(sequence)) {
