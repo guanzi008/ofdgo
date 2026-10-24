@@ -671,7 +671,7 @@ function openPrintPanel() {
 	if (!tab.state.doc || !tab.state.ready || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
 	printDialog ||= createPrintDialog();
 	printDialog.open({tab, call:(name, ...args) => callTabWASM(tab, name, ...args), page:tab.state.pageIndex,
-		selection:[...tab.state.pageSelection].sort((a,b) => a-b), annotations:tab.state.renderAnnotations,
+		selection:tab.state.pageSelection.size ? selectedPageIndexes() : [], annotations:tab.state.renderAnnotations,
 		name:tab.state.fileName || tab.state.doc.title || "OFDGo"});
 }
 
