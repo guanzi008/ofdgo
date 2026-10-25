@@ -495,13 +495,13 @@
 				<label class="form-row"><span>摘要</span><textarea id="infoAbstract" rows="2"></textarea></label>
 				<details><summary><span>关键词</span></summary><div id="infoKeywordRows" class="info-rows"></div><button id="infoKeywordAdd" class="icon-button" type="button" title="添加词条">+</button></details>
 				<details><summary><span>文档属性</span></summary>
-					<label class="form-row"><span>文档标识</span><input id="infoDocId" type="text"></label>
-					<label class="form-row"><span>文档用途</span><input id="infoDocUsage" type="text"></label>
-					<label class="form-row"><span>封面路径</span><input id="infoCover" type="text"></label>
 					<label class="form-row"><span>创建日期</span><input id="infoCreationDate" type="text"></label>
 					<label class="form-row"><span>修改日期</span><input id="infoModDate" type="text"></label>
 					<label class="form-row"><span>制作软件</span><input id="infoCreator" type="text"></label>
 					<label class="form-row"><span>软件版本</span><input id="infoCreatorVersion" type="text"></label>
+					<label class="form-row"><span>文档标识</span><input id="infoDocId" type="text"></label>
+					<label class="form-row"><span>文档用途</span><input id="infoDocUsage" type="text"></label>
+					<label class="form-row"><span>封面路径</span><input id="infoCover" type="text"></label>
 				</details>
 				<details><summary><span>扩展属性</span></summary><div id="infoCustomRows" class="info-rows"></div><button id="infoCustomAdd" class="icon-button" type="button" title="添加属性">+</button></details>
 				<div class="form-actions"><div id="infoStatus" class="form-status"></div><button id="infoCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
@@ -850,18 +850,6 @@
 							<details><summary>文档属性</summary>
 								<dl class="meta-list">
 									<div hidden>
-										<dt>文档标识</dt>
-										<dd id="metaDocId"></dd>
-									</div>
-									<div hidden>
-										<dt>文档用途</dt>
-										<dd id="metaDocUsage"></dd>
-									</div>
-									<div hidden>
-										<dt>封面路径</dt>
-										<dd id="metaCover"></dd>
-									</div>
-									<div hidden>
 										<dt>创建日期</dt>
 										<dd id="metaCreationDate"></dd>
 									</div>
@@ -876,6 +864,18 @@
 									<div hidden>
 										<dt>软件版本</dt>
 										<dd id="metaCreatorVersion"></dd>
+									</div>
+									<div hidden>
+										<dt>文档标识</dt>
+										<dd id="metaDocId"></dd>
+									</div>
+									<div hidden>
+										<dt>文档用途</dt>
+										<dd id="metaDocUsage"></dd>
+									</div>
+									<div hidden>
+										<dt>封面路径</dt>
+										<dd id="metaCover"></dd>
 									</div>
 								</dl>
 							</details>
