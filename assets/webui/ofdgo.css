@@ -1839,7 +1839,7 @@ body[data-hide-meta] .meta-panel {
 .search-results,
 .editor-toolbar,
 .document-list,
-.meta-content {
+.meta-panel {
 	scrollbar-width: thin;
 	scrollbar-color: var(--line-strong) transparent;
 }
@@ -1855,15 +1855,13 @@ body[data-hide-meta] .meta-panel {
 	line-height: 1.5;
 }
 
-.page-list-panel,
-.meta-panel {
+.page-list-panel {
 	display: flex;
 	flex-direction: column;
 	overflow: hidden;
 }
 
-.navigation-content,
-.meta-content {
+.navigation-content {
 	flex: 1;
 	min-height: 0;
 	overflow: auto;
@@ -1887,19 +1885,11 @@ body[data-hide-meta] .meta-panel {
 	border-left: 1px solid var(--line);
 }
 
-.meta-document-actions {
-	justify-content: flex-start;
-	margin-bottom: 12px;
-}
-
-.meta-panel[data-empty="true"] #metaDocumentPanel,
-.meta-panel[data-empty="true"] #metaSecurityPanel {
+.meta-panel[data-empty="true"] #metaDocumentPanel {
 	display: none;
 }
 
-#metaFontsPanel > .doc-font-panel,
-#metaFontsPanel > .doc-font-panel[hidden] + .font-panel,
-#metaSecurityPanel > .security-panel {
+.meta-panel[data-empty="true"] > .font-panel {
 	margin-top: 0;
 	padding-top: 0;
 	border-top: 0;
@@ -4588,7 +4578,7 @@ audio.page-media {
 	}
 
 	body[data-hide-meta] .meta-panel {
-		display: flex;
+		display: block;
 	}
 
 	body[data-hide-pages] .page-list-panel {
