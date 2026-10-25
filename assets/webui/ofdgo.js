@@ -2067,7 +2067,8 @@ async function openAboutPanel() {
 		el.aboutVersion.textContent = "版本信息异常";
 		return;
 	}
-	el.aboutVersion.textContent = `${date.toISOString().slice(0, 10).replaceAll("-", "")}-${match[2].slice(0, 7)}`;
+	const day = date.toLocaleDateString("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).replaceAll("/", "");
+	el.aboutVersion.textContent = `${day}-${match[2].slice(0, 7)}`;
 }
 
 async function refreshFileAssociations() {
