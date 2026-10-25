@@ -2903,6 +2903,7 @@ async function activateDocumentTab(tab, closing = false) {
 async function mountDocumentTab(tab) {
 	if (!isForegroundDocument(tab)) return;
 	const state = tab.state;
+	const openSeq = state.openSeq;
 	const callWASM = (name, ...args) => callTabWASM(tab, name, ...args);
 	if (tab.opening || tab.error) {
 		renderPageList();
@@ -2927,11 +2928,11 @@ async function mountDocumentTab(tab) {
 			state.doc = await callWASM("ofdgoConfigure", await fontManager.files(fontManager.records()), state.renderAnnotations);
 			tab.configurePending = false;
 		}
-		if (!isForegroundDocument(tab)) return;
+		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
 		await openDocument({ doc: state.wasmExited ? undefined : state.doc, pageIndex: state.pageIndex, fitMode: state.fitMode || "free", scale: state.scale,
-			skipAutoFonts: !tab.initialLoad, keepSearch: true, keepCache: true, restoreTab: !tab.initialLoad, resetScroll: Boolean(tab.initialLoad), openSeq: state.openSeq });
+			skipAutoFonts: !tab.initialLoad, keepSearch: true, keepCache: true, restoreTab: !tab.initialLoad, resetScroll: Boolean(tab.initialLoad), openSeq });
+		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
 		tab.configurePending = false;
-		if (workspace.active !== tab) return;
 		tab.initialLoad = false;
 		if (view?.anchor) restoreScaleAnchor(view.anchor);
 		showNavigation(view?.navigation || el.pagesTab);
@@ -5747,6 +5748,7 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 	tab.state.fileName = file.name || remote?.name || STATUS.opening;
 	tab.status = STATUS.opening;
 	workspace.tabs.push(tab);
+	setBusy(true, "正在读取文档", 10, STATUS.opening, tab);
 	await activateDocumentTab(tab);
 	if (workspace.active === tab && !previous.state.doc && !previous.opening && !previous.state.dirty && !previous.error) {
 		workspace.tabs.splice(workspace.tabs.indexOf(previous), 1);
@@ -5754,7 +5756,6 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 	}
 	renderDocumentTabs();
 	const current = () => !tab.closed && tab.opening === request;
-	setBusy(true, "正在读取文档", 10, STATUS.opening, tab);
 	let accepted = false;
 	let originalSource = null;
 	try {
@@ -5809,8 +5810,9 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 		tab.busy = false;
 		accepted = true;
 		if (isForegroundDocument(tab)) {
-			await openDocument({doc, pageIndex: tab.state.pageIndex, activateActions: true, resetScroll: true, openSeq: tab.state.openSeq});
-			if (isForegroundDocument(tab)) tab.initialLoad = false;
+			const openSeq = tab.state.openSeq;
+			await openDocument({doc, pageIndex: tab.state.pageIndex, activateActions: true, resetScroll: true, openSeq});
+			if (isForegroundDocument(tab) && openSeq === tab.state.openSeq) tab.initialLoad = false;
 		}
 		else tab.status = "文档已打开";
 	} catch (err) {
@@ -5821,7 +5823,7 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 		}
 	} finally {
 		if (tab.opening === request) tab.opening = null;
-		if (!tab.closed) setBusy(false, "", 0, "", tab);
+		if (!accepted && !tab.closed) setBusy(false, "", 0, "", tab);
 		renderDocumentTabs();
 		const source = tab.state.ofdBytes;
 		if (!accepted && tab.worker) {
