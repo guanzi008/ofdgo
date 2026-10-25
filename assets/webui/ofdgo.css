@@ -1843,7 +1843,7 @@ body[data-hide-meta] .meta-panel {
 .search-results,
 .editor-toolbar,
 .document-list,
-.meta-panel {
+.meta-content {
 	scrollbar-width: thin;
 	scrollbar-color: var(--line-strong) transparent;
 }
@@ -1859,13 +1859,15 @@ body[data-hide-meta] .meta-panel {
 	line-height: 1.5;
 }
 
-.page-list-panel {
+.page-list-panel,
+.meta-panel {
 	display: flex;
 	flex-direction: column;
 	overflow: hidden;
 }
 
-.navigation-content {
+.navigation-content,
+.meta-content {
 	flex: 1;
 	min-height: 0;
 	overflow: auto;
@@ -1887,6 +1889,17 @@ body[data-hide-meta] .meta-panel {
 .meta-panel {
 	border-right: 0;
 	border-left: 1px solid var(--line);
+}
+
+.meta-document-actions {
+	justify-content: flex-start;
+	margin-bottom: 12px;
+}
+
+#metaFontsPanel > .doc-font-panel {
+	margin-top: 0;
+	padding-top: 0;
+	border-top: 0;
 }
 
 .meta-panel .panel-row {
@@ -4568,7 +4581,7 @@ audio.page-media {
 	}
 
 	body[data-hide-meta] .meta-panel {
-		display: block;
+		display: flex;
 	}
 
 	body[data-hide-pages] .page-list-panel {

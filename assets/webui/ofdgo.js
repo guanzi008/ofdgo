@@ -183,6 +183,8 @@ function createDocumentState() {
 		encryptionChanged: false,
 		showPages: !COMPACT_LAYOUT.matches,
 		showMeta: !COMPACT_LAYOUT.matches,
+		metaTab: "document",
+		metaScroll: {document: 0, fonts: 0},
 	};
 }
 
@@ -592,6 +594,12 @@ const el = {
 	searchNext: document.querySelector("#searchNext"),
 	searchResults: document.querySelector("#searchResults"),
 	metaPanel: document.querySelector(".meta-panel"),
+	metaTabs: document.querySelector("#metaTabs"),
+	metaContent: document.querySelector("#metaContent"),
+	documentMetaTab: document.querySelector("#documentMetaTab"),
+	fontsMetaTab: document.querySelector("#fontsMetaTab"),
+	metaDocumentPanel: document.querySelector("#metaDocumentPanel"),
+	metaFontsPanel: document.querySelector("#metaFontsPanel"),
 	renderVectorButton: document.querySelector("#renderVectorButton"),
 	renderRasterButton: document.querySelector("#renderRasterButton"),
 	refreshAppButton: document.querySelector("#refreshAppButton"),
@@ -1735,17 +1743,22 @@ document.querySelector("#objectActionsButton").addEventListener("click", async (
 });
 el.outlinesTab.addEventListener("click", () => showNavigation(el.outlinesTab));
 el.searchTab.addEventListener("click", focusSearch);
-el.navigationTabs.addEventListener("keydown", (event) => {
+el.documentMetaTab.addEventListener("click", () => showMetaSection(el.documentMetaTab));
+el.fontsMetaTab.addEventListener("click", () => showMetaSection(el.fontsMetaTab));
+for (const [container, buttons, show] of [
+	[el.navigationTabs, [el.pagesTab, el.outlinesTab, el.annotationsTab, el.searchTab], showNavigation],
+	[el.metaTabs, [el.documentMetaTab, el.fontsMetaTab], showMetaSection],
+]) container.addEventListener("keydown", (event) => {
 	if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
 		return;
 	}
 	if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
 		event.preventDefault();
-		const tabs = [el.pagesTab, el.outlinesTab, el.annotationsTab, el.searchTab].filter((tab) => !tab.hidden);
+		const tabs = buttons.filter((tab) => !tab.hidden);
 		const current = tabs.indexOf(event.target);
 		const index = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
 			: (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
-		showNavigation(tabs[index]);
+		show(tabs[index]);
 		tabs[index].focus({ preventScroll: true });
 	}
 });
@@ -2781,8 +2794,9 @@ function detachDocumentView() {
 	window.clearTimeout(wasmRecoveryTimer);
 	wasmRecoveryTimer = 0;
 	const selection = canvasEditor.selected;
+	state.metaScroll[state.metaTab] = el.metaContent.scrollTop;
 	tab.view = { anchor: state.doc ? scaleAnchor() : null, navigation: el.navigationTabs.querySelector('[data-selected="true"]'),
-		navigationTop: el.navigationContent.scrollTop, metaTop: el.metaPanel.scrollTop, tool: canvasEditor.tool,
+		navigationTop: el.navigationContent.scrollTop, tool: canvasEditor.tool,
 		selection: selection ? {index: selection.index, ids: (selection.items || [selection]).map(item => item.id)} : canvasEditor.pendingSelection,
 		richClipboard: canvasEditor.richClipboard, search: el.searchInput.value };
 	tab.view.searchStatus = state.searchRunning ? "搜索已暂停" : el.searchStatus.textContent;
@@ -2943,7 +2957,6 @@ async function mountDocumentTab(tab) {
 		if (view?.anchor) restoreScaleAnchor(view.anchor);
 		showNavigation(view?.navigation || el.pagesTab);
 		el.navigationContent.scrollTop = view?.navigationTop || 0;
-		el.metaPanel.scrollTop = view?.metaTop || 0;
 		canvasEditor.setTool(view?.tool || "");
 	} else {
 		renderPageList();
@@ -2954,6 +2967,7 @@ async function mountDocumentTab(tab) {
 	}
 	renderFontList();
 	updateFontSummary();
+	renderMetaSections();
 	updateControls();
 	tab.controlsPending = false;
 	setStatus(tab.status);
@@ -6517,8 +6531,10 @@ async function openDocument(options = {}) {
 			el.viewerPanel.scrollTop = 0;
 			el.navigationContent.scrollLeft = 0;
 			el.navigationContent.scrollTop = 0;
-			el.metaPanel.scrollLeft = 0;
-			el.metaPanel.scrollTop = 0;
+			state.metaTab = "document";
+			state.metaScroll = {document: 0, fonts: 0};
+			el.metaContent.scrollLeft = 0;
+			renderMetaSections();
 		}
 		applyFit(false);
 		if (options.keepPreview) {
@@ -11616,6 +11632,22 @@ function focusSearch() {
 	showNavigation(el.searchTab);
 	el.searchInput.focus({ preventScroll: true });
 	el.searchInput.select();
+}
+
+function showMetaSection(selected) {
+	state.metaScroll[state.metaTab] = el.metaContent.scrollTop;
+	state.metaTab = selected === el.fontsMetaTab ? "fonts" : "document";
+	renderMetaSections();
+}
+
+function renderMetaSections() {
+	for (const [tab, panel, name] of [[el.documentMetaTab, el.metaDocumentPanel, "document"], [el.fontsMetaTab, el.metaFontsPanel, "fonts"]]) {
+		const active = name === state.metaTab;
+		panel.hidden = !active;
+		tab.setAttribute("data-selected", String(active));
+		tab.tabIndex = active ? 0 : -1;
+	}
+	el.metaContent.scrollTop = state.metaScroll[state.metaTab];
 }
 
 function showNavigation(selected) {
