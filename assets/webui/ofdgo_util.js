@@ -30,9 +30,9 @@ export class DocumentDialogs {
 		root.defaultView.addEventListener("resize", () => this.paint());
 	}
 
-	register(panel) {
+	register(panel, { shared = true } = {}) {
 		if (this.records.has(panel)) return panel;
-		const record = { show: panel.show.bind(panel), showModal: panel.showModal.bind(panel), close: panel.close.bind(panel), owner: null, application: false, clicks: new WeakMap(), initial: this.snapshot(panel) };
+		const record = { show: panel.show.bind(panel), showModal: panel.showModal.bind(panel), close: panel.close.bind(panel), owner: null, application: false, shared, clicks: new WeakMap(), initial: shared ? this.snapshot(panel) : null };
 		this.records.set(panel, record);
 		panel.showModal = panel.show = () => this.openFor(this.owner, panel);
 		panel.close = value => {
@@ -91,6 +91,7 @@ export class DocumentDialogs {
 		this.unpaint();
 		this.records.get(panel).owner = tab;
 		this.prepare(entry, panel);
+		if (!this.records.get(panel).shared) this.document.body.append(panel);
 		if (!panel.open) this.records.get(panel).show();
 		this.paint();
 		this.focus();
@@ -124,9 +125,9 @@ export class DocumentDialogs {
 			this.unpaint();
 			if (value !== undefined) panel.returnValue = String(value);
 			panel.removeAttribute("open");
-			entry.snapshot = this.snapshot(panel);
+			if (this.records.get(panel).shared) entry.snapshot = this.snapshot(panel);
 		}
-		const result = value === undefined ? visible ? panel.returnValue : entry.snapshot.returnValue : String(value);
+		const result = value === undefined ? visible ? panel.returnValue : entry.snapshot?.returnValue ?? panel.returnValue : String(value);
 		state.stack = state.stack.filter(value => value !== panel);
 		const resolve = entry.resolve;
 		entry.resolve = entry.promise = null;
@@ -150,7 +151,11 @@ export class DocumentDialogs {
 		for (const [panel, entry] of this.current(tab)?.entries || []) {
 			const record = this.records.get(panel);
 			if (record.application || record.owner !== tab) continue;
-			entry.snapshot = this.snapshot(panel);
+			if (record.shared) entry.snapshot = this.snapshot(panel);
+			else {
+				entry.focus = panel.contains(this.document.activeElement) ? this.document.activeElement : null;
+				panel.remove();
+			}
 			panel.removeAttribute("open");
 		}
 		this.owner = null;
@@ -167,7 +172,8 @@ export class DocumentDialogs {
 		for (const [panel, entry] of state.entries) {
 			const record = this.records.get(panel);
 			if (record.application) continue;
-			this.applySnapshot(entry.snapshot, panel);
+			if (record.shared) this.applySnapshot(entry.snapshot, panel);
+			else this.document.body.append(panel);
 			record.owner = tab;
 		}
 		for (const [panel, entry] of state.entries) {
@@ -193,6 +199,11 @@ export class DocumentDialogs {
 		for (const entry of state?.entries.values() || []) entry.resolve?.(null);
 		for (const [panel] of state?.entries || []) {
 			const record = this.records.get(panel);
+			if (!record.shared) {
+				panel.remove();
+				this.records.delete(panel);
+				continue;
+			}
 			if (record.application || record.owner !== tab) continue;
 			this.applySnapshot(record.initial, panel);
 			record.owner = null;
@@ -303,11 +314,11 @@ export class DocumentDialogs {
 	focus(restore = false) {
 		const panel = this.current()?.stack.at(-1);
 		if (!panel || this.applicationOpen()) return;
-		const saved = restore ? this.current().entries.get(panel)?.snapshot.focus : null;
+		const saved = restore ? this.current().entries.get(panel)?.snapshot?.focus || this.current().entries.get(panel)?.focus : null;
 		const target = saved?.isConnected && panel.contains(saved) ? saved : panel.querySelector("[autofocus], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]") || panel;
 		if (restore || !panel.contains(this.document.activeElement)) target.focus({ preventScroll: true });
-		const selection = restore && this.current().entries.get(panel)?.snapshot.selection;
+		const selection = restore && this.current().entries.get(panel)?.snapshot?.selection;
 		if (selection?.anchor?.isConnected && selection.focus?.isConnected) this.document.getSelection().setBaseAndExtent(selection.anchor, selection.start, selection.focus, selection.end);
-		if (restore) for (const item of this.current().entries.get(panel)?.snapshot.nodes || []) { item.node.scrollTop = item.scrollTop; item.node.scrollLeft = item.scrollLeft; }
+		if (restore) for (const item of this.current().entries.get(panel)?.snapshot?.nodes || []) { item.node.scrollTop = item.scrollTop; item.node.scrollLeft = item.scrollLeft; }
 	}
 }

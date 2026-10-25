@@ -653,13 +653,15 @@ const el = {
 	statusText: document.querySelector("#statusText"),
 };
 
-let printDialog = null;
-
-function createPrintDialog() {
+function createPrintDialog(tab) {
+	const panel = el.printPanel.cloneNode(true);
+	el.printPanel.remove();
+	documentDialogs.register(panel, {shared:false});
 	return new PrintDialog({
+		panel,
 		nativeHost,
-		show: panel => documentDialogs.showApplication(panel),
-		download: downloadBytes,
+		show: panel => documentDialogs.openFor(tab, panel),
+		download: (bytes, mime, name) => nativeHost ? nativeHost.download(bytes, mime, name) : downloadBytes(bytes, mime, name),
 		cancel: tab => {
 			for (const [id, request] of wasmRequests) if (request.tab === tab && ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF"].includes(request.name)) tab.worker?.postMessage({type:"cancel", id});
 		},
@@ -669,8 +671,8 @@ function createPrintDialog() {
 function openPrintPanel() {
 	const tab = documentTab();
 	if (!tab.state.doc || !tab.state.ready || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
-	printDialog ||= createPrintDialog();
-	printDialog.open({tab, document:documentEntryKey(tab.state.doc.documents?.[tab.state.doc.documentIndex || 0]), call:(name, ...args) => callTabWASM(tab, name, ...args), page:tab.state.pageIndex,
+	tab.print ||= createPrintDialog(tab);
+	tab.print.open({tab, document:documentEntryKey(tab.state.doc.documents?.[tab.state.doc.documentIndex || 0]), call:(name, ...args) => callTabWASM(tab, name, ...args), page:tab.state.pageIndex,
 		selection:tab.state.pageSelection.size ? selectedPageIndexes() : [], annotations:tab.state.renderAnnotations,
 		name:tab.state.fileName || tab.state.doc.title || "OFDGo"});
 }
@@ -1891,7 +1893,7 @@ function handleKeyDown(event) {
 	}
 	if (nativeHost && (event.ctrlKey || event.metaKey) && (key === "Tab" || key.toLowerCase() === "w")) {
 		event.preventDefault();
-		if (document.body.hasAttribute("data-busy") || formDialogOpen()) return;
+		if (document.body.hasAttribute("data-busy") || formDialogOpen() && !documentTab().print?.context) return;
 		if (key.toLowerCase() === "w") closeTab(documentTab());
 		else {
 			const count = workspace.tabs.length, index = workspace.tabs.indexOf(documentTab());
@@ -2008,7 +2010,7 @@ function handleKeyDown(event) {
 }
 
 function formDialogOpen() {
-	if (el.printPanel.open) return true;
+	if (documentTab().print?.context) return true;
 	return Boolean(sealPreview || resourceManager.pick) || el.aboutPanel.open || el.closePanel.open || el.attachmentDialog.open || settingsElements.Panel.open || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
 		|| resourceElements.Panel.open || el.structureDialog.open || el.versionPanel.open || el.batchPagesPanel.open || el.objectStylePanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
@@ -2868,6 +2870,8 @@ async function mountDocumentTab(tab) {
 async function releaseDocumentTab(tab) {
 	if (tab.closed) return;
 	tab.closed = true;
+	tab.print?.destroy();
+	tab.print = null;
 	tab.opening?.controller.abort();
 	tab.opening = null;
 	documentDialogs?.release(tab);
@@ -5043,7 +5047,7 @@ function resizeViewer() {
 async function boot() {
 	documentDialogs = new DocumentDialogs({document, titlebar: el.documentTitleBar,
 		targets: () => [...document.body.children].filter(node => node !== el.documentTitleBar)});
-	for (const panel of document.querySelectorAll("dialog.form-dialog")) documentDialogs.register(panel);
+	for (const panel of document.querySelectorAll("dialog.form-dialog")) if (panel !== el.printPanel) documentDialogs.register(panel);
 	documentDialogs.setOwner(documentTab());
 	const openSeq = state.openSeq;
 	setBusy(true, "正在准备引擎", 8, STATUS.engine);

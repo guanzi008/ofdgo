@@ -1,7 +1,10 @@
+let printQueue = Promise.resolve();
+
 export class PrintDialog {
 	constructor(options) {
 		Object.assign(this, options);
-		this.el = Object.fromEntries(["Panel", "Form", "Settings", "Printer", "Properties", "Copies", "Collation", "Duplex", "BackReverse", "BackRotate", "Contents", "Scope", "Range", "Parity", "Reverse", "Mode", "Paper", "Width", "Height", "Orientation", "Scaling", "Scale", "MarginTop", "MarginRight", "MarginBottom", "MarginLeft", "Grid", "PageOrder", "Gap", "Binding", "BookletSheets", "SheetFrom", "SheetTo", "Overlap", "Sides", "Rotate", "Grayscale", "Borders", "CropMarks", "Raster", "DPI", "DPIValue", "TileOnlyLarge", "Labels", "Preview", "Previous", "Next", "PreviewNumber", "PageControl", "PageCount", "Status", "Spinner", "ProgressTrack", "ProgressBar", "Cancel", "Submit"].map(name => [name, document.querySelector(`#print${name}`)]));
+		const panel = this.panel || document.querySelector("#printPanel");
+		this.el = Object.fromEntries(["Panel", "Form", "Settings", "Printer", "Properties", "Copies", "Collation", "Duplex", "BackReverse", "BackRotate", "Contents", "Scope", "Range", "Parity", "Reverse", "Mode", "Paper", "Width", "Height", "Orientation", "Scaling", "Scale", "MarginTop", "MarginRight", "MarginBottom", "MarginLeft", "Grid", "PageOrder", "Gap", "Binding", "BookletSheets", "SheetFrom", "SheetTo", "Overlap", "Sides", "Rotate", "Grayscale", "Borders", "CropMarks", "Raster", "DPI", "DPIValue", "TileOnlyLarge", "Labels", "Preview", "Previous", "Next", "PreviewNumber", "PageControl", "PageCount", "Status", "Spinner", "ProgressTrack", "ProgressBar", "Cancel", "Submit"].map(name => [name, name === "Panel" ? panel : panel.querySelector(`#print${name}`)]));
 		this.printerOptions = this.el.Printer.innerHTML;
 		this.paperOptions = this.el.Paper.innerHTML;
 		this.settings = new WeakMap();
@@ -23,18 +26,23 @@ export class PrintDialog {
 			event.preventDefault();
 			if (!event.repeat) this.el.PreviewNumber.dispatchEvent(new Event("change"));
 		});
-		new ResizeObserver(([entry]) => { this.previewSize = entry.contentRect; this.resize(); }).observe(this.el.Preview);
-		window.addEventListener("afterprint", () => { if (this.waiting === "browser") this.finishPrint(); });
-		window.addEventListener("beforeprint", () => {
-			if (!this.root?.children.length) {
-				this.root ||= this.createRoot();
+		this.observer = new ResizeObserver(([entry]) => { this.previewSize = entry.contentRect; this.resize(); });
+		this.observer.observe(this.el.Preview);
+		this.afterPrint = () => { if (this.waiting === "browser") this.finishPrint("打印窗口已关闭"); };
+		this.beforePrint = () => {
+			if (!this.context || !this.el.Panel.open) return;
+			const root = document.querySelector("#ofdgoPrintDocument");
+			if (!root?.children.length) {
+				this.root = root || this.createRoot();
 				this.root.textContent = "请先在OFDGo中打开打印预览，准备完整文档后打印。";
 			}
-		});
+		};
+		window.addEventListener("afterprint", this.afterPrint);
+		window.addEventListener("beforeprint", this.beforePrint);
 	}
 
 	open(context) {
-		if (this.el.Panel.open) return;
+		if (this.context) return;
 		const saved = this.settings.get(context.tab)?.get(context.document);
 		this.context = context;
 		this.restoring = true;
@@ -242,7 +250,11 @@ export class PrintDialog {
 		if (!this.current(sequence)) return;
 		const context = this.context;
 		try {
-			if (!this.el.Form.reportValidity()) return;
+			if (!this.el.Form.checkValidity()) {
+				if (this.el.Panel.open) this.el.Form.reportValidity();
+				else this.status("请检查打印设置");
+				return;
+			}
 			this.status("正在准备预览", true);
 			const deviceOptions = this.isDevice() ? this.deviceOptions() : null;
 			const profile = deviceOptions ? await this.nativeHost.call("print.query", deviceOptions) : null;
@@ -267,7 +279,7 @@ export class PrintDialog {
 		}
 	}
 
-	current(sequence = this.sequence) { return this.el.Panel.open && sequence === this.sequence && this.context && !this.context.tab.closed; }
+	current(sequence = this.sequence) { return sequence === this.sequence && this.context && !this.context.tab.closed; }
 
 	async preview(index) {
 		if (!this.layout || this.running) return;
@@ -359,8 +371,15 @@ export class PrintDialog {
 		const job = this.job;
 		this.running = true;
 		this.controls();
+		this.status("正在等待打印", true);
+		const previous = printQueue;
+		let release;
+		printQueue = new Promise(resolve => { release = resolve; });
+		await previous;
+		if (!this.current(sequence)) { release(); return; }
+		this.releasePrint = release;
 		try {
-			this.root ||= this.createRoot();
+			this.root = document.querySelector("#ofdgoPrintDocument") || this.createRoot();
 			this.root.replaceChildren();
 			const style = document.createElement("style");
 			this.root.append(style);
@@ -382,15 +401,17 @@ export class PrintDialog {
 			}
 			await document.fonts.ready;
 			if (!this.current(sequence)) throw new DOMException("打印已取消", "AbortError");
-			this.previousTitle = document.title;
-			document.title = context.name;
+			if (this.el.Panel.open) {
+				this.previousTitle = document.title;
+				document.title = this.printTitle = context.name;
+			}
 			this.waiting = this.nativeHost ? "native" : "browser";
 			this.controls();
 			this.status(job.deviceOptions ? "正在提交打印" : "正在打开打印", true);
 			if (job.deviceOptions) {
 				const result = await this.nativeHost.call("print", {...job.deviceOptions, fingerprint:job.fingerprint});
+				this.finishPrint(result?.submitted ? "打印已提交" : "打印作业未被接受");
 				if (this.current(sequence)) {
-					this.finishPrint();
 					if (!result?.submitted) throw new Error("打印作业未被接受");
 					if (job.manual && job.sides === "front") {
 						if (job.backContent) { this.el.Sides.value = "back"; this.schedule(); }
@@ -403,12 +424,12 @@ export class PrintDialog {
 				if (!capabilities.systemDialog) throw new Error("当前运行时不支持系统打印");
 				if (!capabilities.dialogCompletion) this.waiting = "browser";
 				await this.nativeHost.call("print.dialog", {kind:"system"});
-				if (this.current(sequence) && capabilities.dialogCompletion) this.finishPrint();
+				if (capabilities.dialogCompletion) this.finishPrint("打印窗口已关闭");
 			} else if (typeof window.print === "function") window.print();
 			else throw new Error("当前浏览器不支持打印");
 		} catch (error) {
+			if (this.releasePrint === release) this.finishPrint();
 			if (this.current(sequence)) {
-				this.finishPrint();
 				this.status(error.name === "AbortError" ? "打印已取消" : error.message);
 			}
 		} finally {
@@ -419,14 +440,20 @@ export class PrintDialog {
 		}
 	}
 
-	finishPrint() {
-		if (this.previousTitle !== undefined) { document.title = this.previousTitle; delete this.previousTitle; }
-		this.root?.replaceChildren();
+	finishPrint(message = "") {
+		if (this.previousTitle !== undefined) {
+			if (document.title === this.printTitle) document.title = this.previousTitle;
+			delete this.previousTitle;
+		}
+		if (this.releasePrint) this.root?.replaceChildren();
 		for (const url of this.urls) URL.revokeObjectURL(url);
 		this.urls = [];
-		this.status();
+		this.releasePrint?.();
+		this.releasePrint = null;
+		this.status(message);
 		this.waiting = this.running = false;
 		this.controls();
+		if (this.destroyed) window.removeEventListener("afterprint", this.afterPrint);
 	}
 
 	async pdf() {
@@ -439,7 +466,7 @@ export class PrintDialog {
 			const result = await context.call("ofdgoPrintPDF");
 			if (this.current(sequence)) {
 				await this.download(result.bytes, "application/pdf", `${context.name.replace(/\.[^.]+$/, "")}-打印.pdf`);
-				if (this.current(sequence)) this.status();
+				if (this.current(sequence)) this.status("文件已生成");
 			}
 		} catch (error) { if (this.current(sequence)) this.status(error.message); }
 		finally { if (this.current(sequence)) { this.running = false; this.controls(); } }
@@ -451,11 +478,19 @@ export class PrintDialog {
 		this.sequence++;
 		clearTimeout(this.timer);
 		if (context) this.cancel(context.tab);
-		this.finishPrint();
+		if (!this.waiting) this.finishPrint();
 		if (this.previewURL) URL.revokeObjectURL(this.previewURL);
 		this.previewURL = null;
 		this.el.Preview.replaceChildren();
 		this.context = null;
 		this.queue = this.queue.catch(() => {}).then(() => context?.call("ofdgoDiscardPrint").catch(() => {}));
+	}
+
+	destroy() {
+		this.destroyed = true;
+		this.close();
+		this.observer.disconnect();
+		window.removeEventListener("beforeprint", this.beforePrint);
+		if (!this.waiting) window.removeEventListener("afterprint", this.afterPrint);
 	}
 }
