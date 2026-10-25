@@ -2609,7 +2609,7 @@ function renderDocumentTabs() {
 		item.draggable = true;
 		const name = document.createElement("span");
 		name.className = "document-tab-name";
-		const title = tab.state.doc || tab.opening || tab.error ? tab.state.fileName : "OFDGo";
+		const title = tab.state.doc || tab.opening || tab.error ? tab.state.fileName : "新标签";
 		name.textContent = `${tab.state.dirty ? "● " : ""}${title}`;
 		item.title = `${title}${tab.opening ? ` · ${STATUS.opening}` : tab.state.saving ? " · 正在保存" : tab.error ? ` · ${tab.error}` : ""}`;
 		item.dataset.loading = String(Boolean(tab.opening));
