@@ -1885,43 +1885,6 @@ body[data-hide-meta] .meta-panel {
 	border-left: 1px solid var(--line);
 }
 
-.meta-panel[data-empty="true"] #metaDocumentPanel {
-	display: none;
-}
-
-.meta-panel[data-empty="true"] > .font-panel {
-	margin-top: 0;
-	padding-top: 0;
-	border-top: 0;
-}
-
-.meta-panel .panel-row {
-	display: grid;
-	grid-template-columns: auto minmax(0, 1fr);
-	align-items: start;
-	margin-bottom: 8px;
-}
-
-.meta-panel .panel-title {
-	display: flex;
-	align-items: center;
-	min-height: 26px;
-}
-
-.meta-panel .panel-actions {
-	min-width: 0;
-	justify-self: end;
-}
-
-.meta-panel .count-pill {
-	justify-self: end;
-	max-width: 100%;
-	min-height: 26px;
-	height: auto;
-	white-space: normal;
-	overflow-wrap: anywhere;
-}
-
 .panel-title {
 	margin-bottom: 10px;
 	font-size: 12px;
@@ -3833,52 +3796,24 @@ audio.page-media {
 
 .meta-list {
 	display: grid;
-	gap: 8px;
+	gap: 12px;
 	margin: 0;
-	font-size: 12px;
-	line-height: 1.5;
 }
 
-.meta-list > div {
+.meta-list div {
 	display: grid;
-	grid-template-columns: 4em minmax(0, 1fr);
-	align-items: start;
-	gap: 8px;
-}
-
-.security-panel .meta-list > div {
-	grid-template-columns: 2em minmax(0, 1fr);
+	gap: 3px;
 }
 
 .meta-list dt {
+	font-size: 12px;
 	color: var(--text-muted);
-	overflow-wrap: anywhere;
-}
-
-.meta-list:not(#metaCustomData) dt {
-	white-space: nowrap;
 }
 
 .meta-list dd {
 	margin: 0;
 	overflow-wrap: anywhere;
-	white-space: pre-wrap;
-}
-
-.document-info .meta-list:not(#metaCustomData) dt {
-	text-align-last: justify;
-}
-
-.document-info details:not(:has(.meta-list > div:not([hidden]))) {
-	display: none;
-}
-
-.document-info details[open] > .meta-list {
-	margin-top: 8px;
-}
-
-#metaKeywords > span {
-	display: block;
+	line-height: 1.35;
 }
 
 .font-panel,
@@ -3886,7 +3821,7 @@ audio.page-media {
 .signature-panel,
 .structure-panel,
 .security-panel {
-	margin-top: 12px;
+	margin-top: 18px;
 	padding-top: 12px;
 	border-top: 1px solid var(--line);
 }
@@ -3930,7 +3865,6 @@ audio.page-media {
 	gap: 8px;
 }
 
-.document-info,
 .doc-font-row,
 .signature-row {
 	display: grid;
@@ -4125,19 +4059,16 @@ audio.page-media {
 
 .meta-panel .info-line {
 	grid-template-columns: 4em minmax(0, 1fr);
-	gap: 8px;
 }
 
-.signature-row .info-label {
+.meta-panel .info-label {
 	text-align-last: justify;
 }
 
-.document-info details,
 .signature-row details {
 	font-size: 12px;
 }
 
-.document-info summary,
 .signature-row summary {
 	cursor: pointer;
 	color: var(--accent-strong);

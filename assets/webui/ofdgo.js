@@ -597,20 +597,13 @@ const el = {
 	refreshAppButton: document.querySelector("#refreshAppButton"),
 	metaFile: document.querySelector("#metaFile"),
 	metaTitle: document.querySelector("#metaTitle"),
-	metaAuthor: document.querySelector("#metaAuthor"),
+	conversionNotice: document.querySelector("#conversionNotice"),
+	conversionWarnings: document.querySelector("#conversionWarnings"),
 	metaSubject: document.querySelector("#metaSubject"),
-	metaAbstract: document.querySelector("#metaAbstract"),
-	metaKeywords: document.querySelector("#metaKeywords"),
+	metaAuthor: document.querySelector("#metaAuthor"),
 	metaCreationDate: document.querySelector("#metaCreationDate"),
 	metaModDate: document.querySelector("#metaModDate"),
 	metaCreator: document.querySelector("#metaCreator"),
-	metaCreatorVersion: document.querySelector("#metaCreatorVersion"),
-	metaDocId: document.querySelector("#metaDocId"),
-	metaDocUsage: document.querySelector("#metaDocUsage"),
-	metaCover: document.querySelector("#metaCover"),
-	metaCustomData: document.querySelector("#metaCustomData"),
-	conversionNotice: document.querySelector("#conversionNotice"),
-	conversionWarnings: document.querySelector("#conversionWarnings"),
 	metaType: document.querySelector("#metaType"),
 	metaVersion: document.querySelector("#metaVersion"),
 	metaSignatures: document.querySelector("#metaSignatures"),
@@ -665,7 +658,6 @@ const el = {
 	annotationClose: document.querySelector("#annotationClose"),
 	annotationSubmit: document.querySelector("#annotationSubmit"),
 	annotationDetail: document.querySelector("#annotationDetail"),
-	docFontPanel: document.querySelector("#docFontPanel"),
 	docFontList: document.querySelector("#docFontList"),
 	docFontSummary: document.querySelector("#docFontSummary"),
 	availableFontSummary: document.querySelector("#availableFontSummary"),
@@ -2944,6 +2936,7 @@ async function mountDocumentTab(tab) {
 		if (view?.anchor) restoreScaleAnchor(view.anchor);
 		showNavigation(view?.navigation || el.pagesTab);
 		el.navigationContent.scrollTop = view?.navigationTop || 0;
+		el.metaPanel.scrollTop = view?.metaTop || 0;
 		canvasEditor.setTool(view?.tool || "");
 	} else {
 		renderPageList();
@@ -2954,7 +2947,6 @@ async function mountDocumentTab(tab) {
 	}
 	renderFontList();
 	updateFontSummary();
-	el.metaPanel.scrollTop = tab.view?.metaTop || 0;
 	updateControls();
 	tab.controlsPending = false;
 	setStatus(tab.status);
@@ -12638,43 +12630,23 @@ function renderMeta(keepDetails = false) {
 	el.metaPanel.setAttribute("data-busy", String(!!doc.detailsPending));
 	document.title = `${nativeHost ? "OFDGo" : "OFDGo WebUI"} - ${state.doc ? state.fileName : "OFD编辑器"}`;
 	el.metaFile.textContent = state.doc ? state.fileName : "-";
+	el.metaTitle.textContent = doc.title || "-";
+	el.metaAuthor.textContent = doc.author || "-";
 	for (const [field, value] of [
-		[el.metaTitle, doc.title || ""],
-		[el.metaAuthor, doc.author || ""],
-		[el.metaSubject, doc.subject || ""],
-		[el.metaAbstract, doc.abstract || ""],
+		[el.metaSubject, (doc.subject || "").trim()],
 		[el.metaCreationDate, formatDocumentTime(doc.creationDate)],
 		[el.metaModDate, formatDocumentTime(doc.modDate)],
-		[el.metaCreator, doc.creator || ""],
-		[el.metaCreatorVersion, doc.creatorVersion || ""],
-		[el.metaDocId, doc.docId || ""],
-		[el.metaDocUsage, doc.docUsage || ""],
-		[el.metaCover, doc.cover || ""],
-		[el.metaType, doc.docType || ""],
-		[el.metaVersion, doc.version || ""],
+		[el.metaCreator, [doc.creator, doc.creatorVersion].filter(Boolean).join(" ")],
 	]) {
 		field.textContent = value;
 		field.parentElement.hidden = !value;
 	}
-	el.metaKeywords.replaceChildren(...(doc.keywords || []).map(keyword => {
-		const item = document.createElement("span");
-		item.textContent = keyword || "-";
-		return item;
-	}));
-	el.metaKeywords.parentElement.hidden = !doc.keywords?.length;
-	el.metaCustomData.replaceChildren(...(doc.customData || []).map(field => {
-		const row = document.createElement("div"), name = document.createElement("dt"), value = document.createElement("dd");
-		name.textContent = field.Name || "-";
-		value.textContent = field.Value || "-";
-		row.append(name, value);
-		return row;
-	}));
-	el.metaCustomData.hidden = !doc.customData?.length;
+	el.metaType.textContent = doc.docType || "-";
+	el.metaVersion.textContent = doc.version || "-";
+	el.metaFonts.textContent = String(doc.fontCount || 0);
 	el.pageTotal.textContent = String(doc.pageCount || 0);
 	if (keepDetails && doc.detailsPending) return;
-	const detailsStatus = doc.detailsPending ? "读取中" : doc.detailsError ? "读取失败" : "";
-	el.metaSignatures.textContent = detailsStatus || String(doc.signatureCount || 0);
-	el.metaFonts.textContent = detailsStatus || String(doc.fontCount || 0);
+	el.metaSignatures.textContent = doc.detailsPending ? "正在检查签名" : doc.detailsError ? "读取失败" : String(doc.signatureCount || 0);
 	renderMetaContent(el.signatureList, [doc.signatures, doc.signatureError], renderSignatures);
 	updateStructureControls();
 	renderMetaContent(el.docFontList, doc.fonts || [], renderDocumentFonts);
@@ -13266,10 +13238,15 @@ function mountAnnotationNotes(index, surface, annotations) {
 
 function renderDocumentFonts() {
 	const fonts = state.doc?.fonts || [];
-	el.docFontPanel.hidden = !fonts.length;
 	el.docFontList.replaceChildren();
 	el.docFontSummary.textContent = fontSummary(fonts);
-	if (!fonts.length) return;
+	if (!fonts.length) {
+		const empty = document.createElement("div");
+		empty.className = "font-empty";
+		empty.textContent = "暂无字体";
+		el.docFontList.append(empty);
+		return;
+	}
 	const fragment = document.createDocumentFragment();
 	for (const font of fonts) {
 		const row = document.createElement("div");
@@ -13718,7 +13695,6 @@ function updateInvoiceControl(disabled) {
 
 function updateDocumentControls() {
 	const count = state.doc?.documents?.length || 0, index = managedDocumentIndex(), manager = state.documentManagement;
-	el.metaPanel.setAttribute("data-empty", String(!state.doc));
 	const busy = document.body.hasAttribute("data-busy");
 	const disabled = !state.doc || !state.ready || state.exporting || busy;
 	el.printButton.disabled = disabled;
