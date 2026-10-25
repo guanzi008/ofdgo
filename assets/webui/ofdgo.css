@@ -1586,6 +1586,7 @@ button:not(:disabled):hover {
 	display: grid;
 	align-items: center;
 	gap: 12px;
+	min-height: var(--control-height);
 }
 
 #infoPanel summary::after {
@@ -1595,6 +1596,22 @@ button:not(:disabled):hover {
 
 #infoPanel details[open] > summary::after {
 	content: "▾";
+}
+
+#infoPanel details > .form-row:last-child {
+	margin-bottom: 0;
+}
+
+#infoPanel textarea {
+	height: auto;
+	min-height: var(--control-height);
+	padding: 3px 6px;
+	line-height: calc(var(--control-height) - 8px);
+	resize: vertical;
+}
+
+#infoPanel .form-actions {
+	grid-template-columns: minmax(0, 1fr) repeat(2, 4em);
 }
 
 .info-fields {
@@ -1609,7 +1626,7 @@ button:not(:disabled):hover {
 .info-custom-row,
 .info-keyword-row {
 	display: grid;
-	grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) var(--control-height);
+	grid-template-columns: repeat(2, minmax(0, 1fr)) var(--control-height);
 	gap: 8px;
 	margin: 8px 0;
 }
