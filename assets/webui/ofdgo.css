@@ -970,19 +970,9 @@ button:not(:disabled):hover {
 }
 
 .association-heading {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 12px;
 	margin-bottom: 12px;
 	font-weight: 600;
 	white-space: nowrap;
-}
-
-#associationPermission {
-	color: var(--text-muted);
-	font-size: 12px;
-	font-weight: normal;
 }
 
 .association-row {

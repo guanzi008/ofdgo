@@ -197,7 +197,6 @@ const el = {
 	aboutPanel: document.querySelector("#aboutPanel"),
 	aboutVersion: document.querySelector("#aboutVersion"),
 	associationSection: document.querySelector("#associationSection"),
-	associationPermission: document.querySelector("#associationPermission"),
 	associationMessage: document.querySelector("#associationMessage"),
 	signButton: document.querySelector("#signButton"),
 	signPanel: document.querySelector("#signPanel"),
@@ -2058,18 +2057,16 @@ async function refreshFileAssociations() {
 	try {
 		const states = await nativeHost.call("association.query", {});
 		el.associationSection.hidden = !states.user.supported;
-		el.associationPermission.hidden = !states.machine.supported || states.machine.writable;
 		for (const row of el.associationSection.querySelectorAll(".association-row")) {
 			const state = states[row.dataset.scope];
 			const label = row.querySelector(".association-state");
-			label.textContent = state.error ? "不可用" : state.complete ? "已注册" : state.registered ? "待更新" : "未注册";
+			label.textContent = state.error || !state.writable ? "不可用" : state.complete ? "已注册" : state.registered ? "待更新" : "未注册";
 			label.title = state.error || "";
 			row.querySelector('[data-action="register"]').disabled = !state.writable || !!state.error || state.complete;
 			row.querySelector('[data-action="remove"]').disabled = !state.writable || !!state.error || !state.registered;
 		}
 	} catch (error) {
 		el.associationSection.hidden = false;
-		el.associationPermission.hidden = true;
 		for (const label of el.associationSection.querySelectorAll(".association-state")) label.textContent = "不可用";
 		el.associationMessage.textContent = `查询失败：${error.message}`;
 		el.associationMessage.hidden = false;
