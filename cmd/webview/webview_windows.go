@@ -18,7 +18,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"syscall"
@@ -28,9 +27,8 @@ import (
 )
 
 func main() {
-	dataDir := flag.String("data-dir", "", "browser data directory")
-	flag.Parse()
-	if err := webview.Run(context.Background(), flag.Args(), *dataDir); err != nil {
+	paths, dataDir := commandLine()
+	if err := webview.Run(context.Background(), paths, dataDir); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		message, _ := syscall.UTF16PtrFromString(err.Error())
 		title, _ := syscall.UTF16PtrFromString("OFDGo")
