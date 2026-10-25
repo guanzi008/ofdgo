@@ -4136,6 +4136,10 @@ audio.page-media {
 	gap: 8px;
 }
 
+.signature-row .info-label {
+	text-align-last: justify;
+}
+
 .document-info details,
 .signature-row details {
 	font-size: 12px;
