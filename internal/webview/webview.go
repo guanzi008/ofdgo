@@ -63,6 +63,10 @@ type Host struct {
 	fontFiles      map[string]string
 	fontError      error
 	pendingPaths   []string
+	launchMu       sync.Mutex
+	launchActivate bool
+	launchClosed   bool
+	launchPending  int
 	frontendReady  bool
 	closeAllowed   bool
 }
@@ -93,11 +97,38 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 	if err != nil {
 		return err
 	}
+	paths = append([]string(nil), paths...)
+	for index, path := range paths {
+		paths[index], err = filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+	}
+	h := &Host{pendingPaths: paths}
+	data, err := json.Marshal(paths)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(options.UserDataDir, 0700); err != nil {
+		return err
+	}
+	key, err := instanceDirectory(options.UserDataDir)
+	if err != nil {
+		return err
+	}
+	instance, err := guigo.OpenInstance(ctx, "OFDGo:"+key, data, h.receiveLaunch)
+	if err != nil || instance == nil {
+		return err
+	}
+	defer instance.Close()
 	files, err := newFileStore()
 	if err != nil {
 		return err
 	}
-	h := &Host{files: files, engines: make(map[string]*webui.NativeEngine), cancels: make(map[string]context.CancelFunc), fontFiles: make(map[string]string), pendingPaths: append([]string(nil), paths...)}
+	h.files = files
+	h.engines = make(map[string]*webui.NativeEngine)
+	h.cancels = make(map[string]context.CancelFunc)
+	h.fontFiles = make(map[string]string)
 	cacheBytes := int64(256 << 20)
 	if memory := conversionMemory; memory != nil {
 		cacheBytes = max(32<<20, memory()/8)
@@ -110,7 +141,7 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 	h.conversionPool = h.resources.ConversionPool()
 	defer h.close()
 	bindings := make(map[string]guigo.HandlerFunc)
-	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "drop.release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title", "window.info", "window.drag", "window.close", "update.check", "update.open", "association.query", "association.register", "association.remove", "print.capabilities", "print.dialog", "print.printers", "print.query", "print.properties", "print"} {
+	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "drop.release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "launch.done", "title", "window.info", "window.drag", "window.close", "update.check", "update.open", "association.query", "association.register", "association.remove", "print.capabilities", "print.dialog", "print.printers", "print.query", "print.properties", "print"} {
 		bindings["ofdgo.host."+name] = func(ctx context.Context, args any) (any, error) { return h.call(ctx, name, args) }
 	}
 	static := http.FileServerFS(webuiassets.NativeFS)
@@ -136,6 +167,9 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 		h.mu.Unlock()
 	}
 	options.OnClose = func() {
+		h.launchMu.Lock()
+		h.launchClosed = true
+		h.launchMu.Unlock()
 		h.mu.Lock()
 		for _, cancel := range h.cancels {
 			cancel()
@@ -278,6 +312,13 @@ func (h *Host) emit(name string, value any) {
 // openPaths 将操作系统提供的文件登记后交给界面
 // 入参: names 文件路径列表
 func (h *Host) openPaths(names []string) {
+	_ = h.sendPaths(names, "ofdgo.files")
+}
+
+// sendPaths 将文件登记后发送到指定界面入口
+// 入参: names 文件路径列表, event 界面事件名称
+// 返回: error 投递错误
+func (h *Host) sendPaths(names []string, event string) error {
 	files := make([]any, 0, len(names))
 	for _, name := range names {
 		file, err := h.files.addDrop(name)
@@ -290,12 +331,72 @@ func (h *Host) openPaths(names []string) {
 	h.mu.Lock()
 	w := h.window
 	h.mu.Unlock()
-	if w != nil && w.Emit("ofdgo.files", files) == nil {
-		return
+	var err error
+	if w == nil {
+		err = guigo.ErrClosed
+	} else {
+		err = w.Emit(event, files)
+	}
+	if err == nil {
+		return nil
 	}
 	for _, file := range files {
 		h.files.discardDrop(file.(map[string]any)["nativeFile"].(string))
 	}
+	return err
+}
+
+// receiveLaunch 接收已有进程转交的文件及激活请求
+// 入参: ctx 请求上下文, data 文件路径消息
+// 返回: error 接收错误
+func (h *Host) receiveLaunch(ctx context.Context, data []byte) error {
+	var paths []string
+	if err := json.Unmarshal(data, &paths); err != nil {
+		return err
+	}
+	for _, path := range paths {
+		if !filepath.IsAbs(path) {
+			return errors.New("file path must be absolute")
+		}
+	}
+	h.launchMu.Lock()
+	defer h.launchMu.Unlock()
+	if h.launchClosed {
+		return guigo.ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	h.pendingPaths = append(h.pendingPaths, paths...)
+	h.launchActivate = true
+	return h.flushLaunch()
+}
+
+// flushLaunch 在界面就绪后按接收顺序投递外部打开请求，调用方持有launchMu
+// 返回: error 投递错误
+func (h *Host) flushLaunch() error {
+	h.mu.Lock()
+	ready, window := h.frontendReady, h.window
+	h.mu.Unlock()
+	if !ready || window == nil {
+		return nil
+	}
+	if h.launchActivate {
+		if err := window.Activate(); err != nil {
+			return err
+		}
+		h.launchActivate = false
+	}
+	if len(h.pendingPaths) == 0 {
+		return nil
+	}
+	paths := h.pendingPaths
+	h.pendingPaths = nil
+	if err := h.sendPaths(paths, "ofdgo.launch"); err != nil {
+		return err
+	}
+	h.launchPending++
+	return nil
 }
 
 // call 执行宿主协议并保留业务结果结构
@@ -603,10 +704,16 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 			return window.TitleBarInfo()
 		}
 		if name == "window.close" {
+			h.launchMu.Lock()
+			defer h.launchMu.Unlock()
+			if h.launchPending != 0 || len(h.pendingPaths) != 0 {
+				return false, nil
+			}
+			h.launchClosed = true
 			h.mu.Lock()
 			h.closeAllowed = true
 			h.mu.Unlock()
-			return nil, window.Close()
+			return true, window.Close()
 		}
 		values, ok := args["regions"].([]any)
 		if !ok {
@@ -628,16 +735,20 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 			regions = append(regions, guigo.Rect{X: x, Y: y, Width: width, Height: height})
 		}
 		return nil, window.SetDragRegions(regions)
+	case "launch.done":
+		h.launchMu.Lock()
+		if h.launchPending > 0 {
+			h.launchPending--
+		}
+		h.launchMu.Unlock()
+		return nil, nil
 	case "ready":
+		h.launchMu.Lock()
+		defer h.launchMu.Unlock()
 		h.mu.Lock()
-		paths := h.pendingPaths
-		h.pendingPaths = nil
 		h.frontendReady = true
 		h.mu.Unlock()
-		if len(paths) != 0 {
-			h.openPaths(paths)
-		}
-		return nil, nil
+		return nil, h.flushLaunch()
 	}
 	return nil, fmt.Errorf("未知宿主操作")
 }
@@ -1019,6 +1130,9 @@ func (h *Host) closeEngine(id string) error {
 
 // close 取消任务并释放当前窗口持有的会话
 func (h *Host) close() {
+	h.launchMu.Lock()
+	h.launchClosed = true
+	h.launchMu.Unlock()
 	h.mu.Lock()
 	for _, cancel := range h.cancels {
 		cancel()

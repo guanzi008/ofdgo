@@ -726,6 +726,13 @@ class NativeHost {
 	}
 
 	async start(onFiles, onError) {
+		let launching = Promise.resolve();
+		this.bridge.on("ofdgo.launch", values => {
+			launching = launching.then(async () => {
+				try { await onFiles(values.map(value => new NativeFile(value)), true); }
+				finally { await this.call("launch.done", {}); }
+			}).catch(onError);
+		});
 		this.bridge.on("ofdgo.files", async values => {
 			try { await onFiles(values.map(value => new NativeFile(value))); }
 			catch (error) { onError(error); }

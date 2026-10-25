@@ -16,11 +16,19 @@ package webview
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 // conversionMemory 未提供系统内存探测时仅按并行数调度
 var conversionMemory func() int64
+
+// instanceDirectory 解析数据目录的实际路径，使符号链接复用同一实例
+// 入参: path 数据目录路径
+// 返回: string 规范路径, error 路径解析错误
+func instanceDirectory(path string) (string, error) {
+	return filepath.EvalSymlinks(path)
+}
 
 // fontNameLanguage 获取Linux区域设置对应的OpenType名称表标识
 // 返回: uint16 名称表平台标识, uint16 显示语言标识

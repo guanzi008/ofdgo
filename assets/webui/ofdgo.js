@@ -2631,7 +2631,15 @@ async function closeWorkspace() {
 async function closeApplicationWindow() {
 	window.removeEventListener("beforeunload", warnUnsaved);
 	window.removeEventListener("beforeunload", warnBatch);
-	await nativeHost.call("window.close", {});
+	let closed = false;
+	try {
+		closed = await nativeHost.call("window.close", {});
+	} finally {
+		if (!closed) {
+			window.addEventListener("beforeunload", warnUnsaved);
+			window.addEventListener("beforeunload", warnBatch);
+		}
+	}
 }
 
 function createDocumentTab(value = createDocumentState()) {
@@ -2848,18 +2856,20 @@ async function activateDocumentTab(tab, closing = false) {
 	const focused = el.documentTitleBar.contains(document.activeElement);
 	workspace.switching = true;
 	try {
-		if (!documentTab().busy && !await commitDocumentView()) return false;
-		detachDocumentView();
-		attachDocumentTab(tab);
-		if (focused) el.documentTabs.querySelector('[data-selected="true"]')?.focus({preventScroll: true});
-		workspace.switching = false;
+		try {
+			if (!documentTab().busy && !await commitDocumentView()) return false;
+			detachDocumentView();
+			attachDocumentTab(tab);
+			if (focused) el.documentTabs.querySelector('[data-selected="true"]')?.focus({preventScroll: true});
+		} finally {
+			workspace.switching = false;
+		}
 		await mountDocumentTab(tab);
 		return true;
 	} catch (error) {
 		if (isForegroundDocument(tab)) showError(error, !state.doc);
 		return false;
 	} finally {
-		if (workspace.active === tab) workspace.switching = false;
 		const next = workspace.nextTab;
 		workspace.nextTab = null;
 		if (next && next !== workspace.active && !next.closed) queueMicrotask(() => activateDocumentTab(next));
@@ -5163,7 +5173,25 @@ async function boot() {
 	}
 }
 
-async function openNativeFiles(files) {
+async function openNativeDocument(file) {
+	let retained = false;
+	try {
+		retained = await openOFD(file);
+	} catch (error) {
+		showError(error, !state.doc);
+	} finally {
+		if (!retained) await nativeHost.discardFiles([file]);
+	}
+}
+
+async function openNativeFiles(files, launch = false) {
+	if (launch) {
+		for (const file of files) {
+			while (workspace.closing || workspace.switching || batchElements.Panel.open || documentDialogs?.applicationOpen()) await new Promise(resolve => setTimeout(resolve, 100));
+			void openNativeDocument(file).catch(error => showError(error, !state.doc));
+		}
+		return;
+	}
 	let retained = [];
 	try {
 		if (workspace.closing || batchElements.Panel.open && batch.running) { setStatus("请等待当前操作完成"); return; }

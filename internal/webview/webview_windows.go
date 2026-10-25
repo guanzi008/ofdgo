@@ -15,12 +15,38 @@
 package webview
 
 import (
+	"os"
+	"strings"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 // memoryStatusProc 查询系统物理内存和提交额度
 var memoryStatusProc = syscall.NewLazyDLL("kernel32.dll").NewProc("GlobalMemoryStatusEx")
+
+// instanceDirectory 解析数据目录的实际路径，使目录联接及大小写别名复用同一实例
+// 入参: path 数据目录路径
+// 返回: string 规范路径, error 路径解析错误
+func instanceDirectory(path string) (string, error) {
+	dir, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer dir.Close()
+	buffer := make([]uint16, 256)
+	for {
+		n, err := windows.GetFinalPathNameByHandle(windows.Handle(dir.Fd()), &buffer[0], uint32(len(buffer)), 0)
+		if err != nil {
+			return "", err
+		}
+		if n < uint32(len(buffer)) {
+			return strings.ToLower(windows.UTF16ToString(buffer[:n])), nil
+		}
+		buffer = make([]uint16, n+1)
+	}
+}
 
 // fontNameLanguage 获取系统显示语言对应的OpenType名称表标识
 // 返回: uint16 名称表平台标识, uint16 系统显示语言标识
