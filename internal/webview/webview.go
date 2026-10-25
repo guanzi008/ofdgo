@@ -1050,15 +1050,17 @@ func (h *Host) close() {
 // 返回: guigo.Options 窗口配置, error 配置错误
 func windowOptions(dataDir string) (guigo.Options, error) {
 	appID := "ofdgo"
+	cacheName := appID
 	if runtime.GOOS == "windows" {
-		appID = "OFDGo"
+		appID = ""
+		cacheName = "OFDGo"
 	}
 	if dataDir == "" {
 		cache, err := os.UserCacheDir()
 		if err != nil {
 			return guigo.Options{}, err
 		}
-		dataDir = filepath.Join(cache, appID)
+		dataDir = filepath.Join(cache, cacheName)
 	}
 	dataDir, err := filepath.Abs(dataDir)
 	if err != nil {
