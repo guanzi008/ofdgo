@@ -1893,7 +1893,7 @@ function handleKeyDown(event) {
 	}
 	if (nativeHost && (event.ctrlKey || event.metaKey) && (key === "Tab" || key.toLowerCase() === "w")) {
 		event.preventDefault();
-		if (document.body.hasAttribute("data-busy") || formDialogOpen() && !documentTab().print?.context) return;
+		if (document.body.hasAttribute("data-busy") || documentDialogs?.applicationOpen() || formDialogOpen() && !documentTab().print?.context) return;
 		if (key.toLowerCase() === "w") closeTab(documentTab());
 		else {
 			const count = workspace.tabs.length, index = workspace.tabs.indexOf(documentTab());

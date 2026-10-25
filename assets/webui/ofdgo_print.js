@@ -11,7 +11,6 @@ export class PrintDialog {
 		this.queue = Promise.resolve();
 		this.sequence = 0;
 		this.urls = [];
-		this.root = document.querySelector("#ofdgoPrintDocument");
 		this.el.Settings.addEventListener("input", event => { if (event.target === this.el.Printer) this.choosePrinter(); else this.schedule(); });
 		this.el.Properties.addEventListener("click", () => this.properties());
 		this.el.Form.addEventListener("submit", event => { event.preventDefault(); this.print(); });
@@ -266,9 +265,9 @@ export class PrintDialog {
 			this.prepared = true;
 			this.layout = layout;
 			if (this.isDevice()) this.el.Copies.max = Math.min(999, this.profile.maxCopies || 999, layout.copiesLimit > 0 ? layout.copiesLimit : 999);
-			this.job = {deviceOptions, fingerprint:profile?.fingerprint, manual:this.manual(), sides:options.sides, backContent:layout.backContent};
 			await this.preview(Math.min(this.side, layout.sides.length - 1));
 			if (!this.current(sequence) || this.layout !== layout) return;
+			this.job = {deviceOptions, fingerprint:profile?.fingerprint, manual:this.manual(), sides:options.sides, backContent:layout.backContent};
 			this.status();
 			if (layout.sides.some(side => side.placements.some(placement => placement.clipped))) this.status("内容超出可打印区域");
 			if (this.manual() && options.sides === "back" && !layout.backContent) this.status("背面为空白");
@@ -325,7 +324,7 @@ export class PrintDialog {
 		const count = this.layout?.sides.length || 0, busy = !!this.running || !!this.loading;
 		this.el.DPIValue.textContent = this.el.DPI.value;
 		this.el.Settings.disabled = busy;
-		this.el.Submit.disabled = !count || busy;
+		this.el.Submit.disabled = !count || !this.job || busy;
 		if (this.el.Printer.value !== "pdf" && this.manual() && this.el.Sides.value === "back" && !this.layout?.backContent) this.el.Submit.disabled = true;
 		this.el.Previous.disabled = busy || !count || this.side === 0;
 		this.el.Next.disabled = busy || !count || this.side + 1 === count;
@@ -366,6 +365,7 @@ export class PrintDialog {
 
 	async print() {
 		if (!this.layout || !this.job || this.running) return;
+		this.previewSequence++;
 		if (this.el.Printer.value === "pdf") return this.pdf();
 		const sequence = this.sequence, context = this.context;
 		const job = this.job;
@@ -411,12 +411,9 @@ export class PrintDialog {
 			if (job.deviceOptions) {
 				const result = await this.nativeHost.call("print", {...job.deviceOptions, fingerprint:job.fingerprint});
 				this.finishPrint(result?.submitted ? "打印已提交" : "打印作业未被接受");
-				if (this.current(sequence)) {
-					if (!result?.submitted) throw new Error("打印作业未被接受");
-					if (job.manual && job.sides === "front") {
-						if (job.backContent) { this.el.Sides.value = "back"; this.schedule(); }
-						else this.status("背面为空白");
-					}
+				if (this.current(sequence) && result?.submitted && job.manual && job.sides === "front") {
+					if (job.backContent) { this.el.Sides.value = "back"; this.schedule(); }
+					else this.status("背面为空白");
 				}
 			} else if (this.nativeHost) {
 				const capabilities = await this.nativeHost.call("print.capabilities", {});
