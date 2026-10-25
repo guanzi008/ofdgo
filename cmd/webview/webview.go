@@ -38,22 +38,22 @@ func parseArguments(args []string) ([]string, string, bool) {
 	var dataDir string
 	for len(args) > 0 {
 		arg := args[0]
-		args = args[1:]
 		switch {
 		case arg == "--":
-			return args, dataDir, true
+			return args[1:], dataDir, true
 		case arg == "--data-dir":
-			if len(args) == 0 {
+			if len(args) < 2 || strings.HasPrefix(args[1], "-") {
 				return nil, dataDir, false
 			}
-			dataDir, args = args[0], args[1:]
+			dataDir, args = args[1], args[1:]
 		case strings.HasPrefix(arg, "--data-dir="):
 			dataDir = strings.TrimPrefix(arg, "--data-dir=")
 		case strings.HasPrefix(arg, "-"):
 			return nil, dataDir, false
 		default:
-			return append([]string{arg}, args...), dataDir, true
+			return args, dataDir, true
 		}
+		args = args[1:]
 	}
 	return nil, dataDir, true
 }
