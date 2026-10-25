@@ -490,10 +490,10 @@
 			<form id="infoForm">
 				<h2 id="infoPanelTitle" class="form-title">文档信息</h2>
 				<label class="form-row"><span>标题</span><textarea id="infoTitle" rows="1" autofocus></textarea></label>
-				<label class="form-row"><span>主题</span><textarea id="infoSubject" rows="1"></textarea></label>
 				<label class="form-row"><span>作者</span><textarea id="infoAuthor" rows="1"></textarea></label>
+				<label class="form-row"><span>主题</span><textarea id="infoSubject" rows="1"></textarea></label>
 				<label class="form-row"><span>摘要</span><textarea id="infoAbstract" rows="2"></textarea></label>
-				<details><summary><span>关键词</span></summary><div id="infoKeywordRows" class="info-rows"></div><button id="infoKeywordAdd" class="icon-button" type="button" title="添加词条">+</button></details>
+				<details><summary><span>关键词</span></summary><div class="info-fields"><div id="infoKeywordRows" class="info-rows"></div><button id="infoKeywordAdd" class="icon-button" type="button" title="添加词条">+</button></div></details>
 				<details><summary><span>其他属性</span></summary>
 					<label class="form-row"><span>标识</span><input id="infoDocId" type="text"></label>
 					<label class="form-row"><span>用途</span><input id="infoDocUsage" type="text"></label>
@@ -503,7 +503,7 @@
 					<label class="form-row"><span>制作软件</span><input id="infoCreator" type="text"></label>
 					<label class="form-row"><span>软件版本</span><input id="infoCreatorVersion" type="text"></label>
 				</details>
-				<details><summary><span>扩展字段</span></summary><div id="infoCustomRows" class="info-rows"></div><button id="infoCustomAdd" class="icon-button" type="button" title="添加字段">+</button></details>
+				<details><summary><span>扩展字段</span></summary><div class="info-fields"><div id="infoCustomRows" class="info-rows"></div><button id="infoCustomAdd" class="icon-button" type="button" title="添加字段">+</button></div></details>
 				<div class="form-actions"><div id="infoStatus" class="form-status"></div><button id="infoCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
@@ -825,13 +825,13 @@
 						<dt>标题</dt>
 						<dd id="metaTitle">-</dd>
 					</div>
-					<div hidden>
-						<dt>主题</dt>
-						<dd id="metaSubject"></dd>
-					</div>
 					<div>
 						<dt>作者</dt>
 						<dd id="metaAuthor">-</dd>
+					</div>
+					<div hidden>
+						<dt>主题</dt>
+						<dd id="metaSubject"></dd>
 					</div>
 					<div hidden>
 						<dt>摘要</dt>
@@ -869,6 +869,9 @@
 						<dt>软件版本</dt>
 						<dd id="metaCreatorVersion"></dd>
 					</div>
+				</dl>
+				<dl id="metaCustomData" class="meta-list" hidden></dl>
+				<dl class="meta-list">
 					<div>
 						<dt>类型</dt>
 						<dd id="metaType">-</dd>
@@ -886,7 +889,6 @@
 						<dd id="metaFonts">0</dd>
 					</div>
 				</dl>
-				<dl id="metaCustomData" class="meta-list" hidden></dl>
 				<details id="conversionNotice" class="conversion-notice" hidden>
 					<summary>提示</summary>
 					<div id="conversionWarnings" class="panel-detail"></div>

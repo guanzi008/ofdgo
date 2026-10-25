@@ -1590,10 +1590,15 @@ button:not(:disabled):hover {
 
 #infoPanel summary::after {
 	content: "▸";
+	justify-self: end;
 }
 
 #infoPanel details[open] > summary::after {
 	content: "▾";
+}
+
+.info-fields {
+	margin-left: calc(4em + 12px);
 }
 
 .info-rows {
@@ -3807,7 +3812,7 @@ audio.page-media {
 	white-space: pre-wrap;
 }
 
-#metaCustomData:not([hidden]) {
+.meta-list + .meta-list:not([hidden]) {
 	margin-top: 12px;
 }
 
