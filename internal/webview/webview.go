@@ -43,9 +43,6 @@ import (
 	"github.com/xiaoqidun/ofdgo/internal/webui"
 )
 
-// applicationID 标识原生应用，与版本及可执行文件路径无关
-const applicationID = "me.aite.ofdgo"
-
 const applicationVersionURL = "https://ofdgo.aite.me/"
 const applicationDownloadURL = "https://ofdgo.aite.me/releases/"
 
@@ -977,16 +974,16 @@ func (h *Host) close() {
 // 入参: dataDir 自定义浏览器数据目录
 // 返回: guigo.Options 窗口配置, error 配置错误
 func windowOptions(dataDir string) (guigo.Options, error) {
+	appID := "ofdgo"
+	if runtime.GOOS == "windows" {
+		appID = "OFDGo"
+	}
 	if dataDir == "" {
 		cache, err := os.UserCacheDir()
 		if err != nil {
 			return guigo.Options{}, err
 		}
-		name := "ofdgo"
-		if runtime.GOOS == "windows" {
-			name = "OFDGo"
-		}
-		dataDir = filepath.Join(cache, name)
+		dataDir = filepath.Join(cache, appID)
 	}
 	dataDir, err := filepath.Abs(dataDir)
 	if err != nil {
@@ -997,7 +994,7 @@ func windowOptions(dataDir string) (guigo.Options, error) {
 		return guigo.Options{}, err
 	}
 	return guigo.Options{
-		AppID:    applicationID,
+		AppID:    appID,
 		Title:    "OFDGo - OFD编辑器",
 		TitleBar: guigo.TitleBarContent,
 		TitleBarColors: guigo.TitleBarColors{
