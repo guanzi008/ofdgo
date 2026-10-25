@@ -11704,8 +11704,8 @@ function renderOutlines(reset = true) {
 		state.outlineSelection = null;
 	}
 	const outlines = state.doc?.outlines || [];
-	el.pageListTitle.hidden = true;
-	el.navigationTabs.hidden = false;
+	el.pageListTitle.hidden = Boolean(state.doc);
+	el.navigationTabs.hidden = !state.doc;
 	el.outlinesTab.hidden = outlines.length === 0 && !state.editing;
 	el.outlineList.replaceChildren();
 	if (state.editing) {
