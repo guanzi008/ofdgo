@@ -40,3 +40,5 @@ require (
 	modernc.org/token v1.1.0 // indirect
 	star-tex.org/x/tex v0.7.1 // indirect
 )
+
+replace github.com/xiaoqidun/guigo => github.com/guanzi008/guigo v0.0.0-20261026121204-909b50457046
