@@ -816,79 +816,87 @@
 				<div id="documentRow" class="document-row" hidden>
 					<select id="documentSelect" class="document-select" title="切换文档"></select>
 				</div>
-				<dl class="meta-list">
-					<div>
-						<dt>文件名称</dt>
-						<dd id="metaFile">-</dd>
-					</div>
-					<div>
-						<dt>标题</dt>
-						<dd id="metaTitle">-</dd>
-					</div>
-					<div>
-						<dt>作者</dt>
-						<dd id="metaAuthor">-</dd>
-					</div>
-					<div hidden>
-						<dt>主题</dt>
-						<dd id="metaSubject"></dd>
-					</div>
-					<div hidden>
-						<dt>摘要</dt>
-						<dd id="metaAbstract"></dd>
-					</div>
-					<div hidden>
-						<dt>关键词</dt>
-						<dd id="metaKeywords"></dd>
-					</div>
-					<div hidden>
-						<dt>文档标识</dt>
-						<dd id="metaDocId"></dd>
-					</div>
-					<div hidden>
-						<dt>文档用途</dt>
-						<dd id="metaDocUsage"></dd>
-					</div>
-					<div hidden>
-						<dt>封面路径</dt>
-						<dd id="metaCover"></dd>
-					</div>
-					<div hidden>
-						<dt>创建日期</dt>
-						<dd id="metaCreationDate"></dd>
-					</div>
-					<div hidden>
-						<dt>修改日期</dt>
-						<dd id="metaModDate"></dd>
-					</div>
-					<div hidden>
-						<dt>制作软件</dt>
-						<dd id="metaCreator"></dd>
-					</div>
-					<div hidden>
-						<dt>软件版本</dt>
-						<dd id="metaCreatorVersion"></dd>
-					</div>
-				</dl>
-				<dl id="metaCustomData" class="meta-list" hidden></dl>
-				<dl class="meta-list">
-					<div>
-						<dt>文档类型</dt>
-						<dd id="metaType">-</dd>
-					</div>
-					<div>
-						<dt>格式版本</dt>
-						<dd id="metaVersion">-</dd>
-					</div>
-					<div>
-						<dt>签名数量</dt>
-						<dd id="metaSignatures">0</dd>
-					</div>
-					<div>
-						<dt>字体数量</dt>
-						<dd id="metaFonts">0</dd>
-					</div>
-				</dl>
+				<div class="document-info">
+					<dl class="meta-list">
+						<div>
+							<dt>文件</dt>
+							<dd id="metaFile">-</dd>
+						</div>
+						<div>
+							<dt>标题</dt>
+							<dd id="metaTitle">-</dd>
+						</div>
+						<div>
+							<dt>作者</dt>
+							<dd id="metaAuthor">-</dd>
+						</div>
+						<div hidden>
+							<dt>主题</dt>
+							<dd id="metaSubject"></dd>
+						</div>
+						<div hidden>
+							<dt>摘要</dt>
+							<dd id="metaAbstract"></dd>
+						</div>
+						<div hidden>
+							<dt>关键词</dt>
+							<dd id="metaKeywords"></dd>
+						</div>
+					</dl>
+					<details><summary>文档属性</summary>
+						<dl class="meta-list">
+							<div hidden>
+								<dt>标识</dt>
+								<dd id="metaDocId"></dd>
+							</div>
+							<div hidden>
+								<dt>用途</dt>
+								<dd id="metaDocUsage"></dd>
+							</div>
+							<div hidden>
+								<dt>封面</dt>
+								<dd id="metaCover"></dd>
+							</div>
+							<div hidden>
+								<dt>创建</dt>
+								<dd id="metaCreationDate"></dd>
+							</div>
+							<div hidden>
+								<dt>修改</dt>
+								<dd id="metaModDate"></dd>
+							</div>
+							<div hidden>
+								<dt>软件</dt>
+								<dd id="metaCreator"></dd>
+							</div>
+							<div hidden>
+								<dt>版本</dt>
+								<dd id="metaCreatorVersion"></dd>
+							</div>
+						</dl>
+					</details>
+					<details><summary>扩展字段</summary><dl id="metaCustomData" class="meta-list" hidden></dl></details>
+					<details><summary>格式信息</summary>
+						<dl class="meta-list">
+							<div>
+								<dt>类型</dt>
+								<dd id="metaType">-</dd>
+							</div>
+							<div>
+								<dt>版本</dt>
+								<dd id="metaVersion">-</dd>
+							</div>
+							<div>
+								<dt>签名</dt>
+								<dd id="metaSignatures">0</dd>
+							</div>
+							<div>
+								<dt>字体</dt>
+								<dd id="metaFonts">0</dd>
+							</div>
+						</dl>
+					</details>
+				</div>
 				<details id="conversionNotice" class="conversion-notice" hidden>
 					<summary>提示</summary>
 					<div id="conversionWarnings" class="panel-detail"></div>
@@ -897,16 +905,16 @@
 					<div class="panel-row"><div id="securityPanelTitle" class="panel-title compact">安全</div><div class="panel-actions"><button id="encryptSaveButton" class="small-button" type="button" disabled>加密</button><button id="signButton" class="small-button" type="button" disabled>签章</button><button id="verifyButton" class="small-button" type="button" disabled>验签</button></div></div>
 					<dl class="meta-list"><div><dt>加密</dt><dd id="securityEncryption">未加密</dd></div><div id="securitySchemeRow" hidden><dt>方式</dt><dd id="securityScheme"></dd></div><div id="securityMethodRow" hidden><dt>算法</dt><dd id="securityMethod"></dd></div></dl>
 				</section>
-				<section id="structurePanel" class="structure-panel" hidden>
-					<div class="panel-row"><div id="structurePanelTitle" class="panel-title compact">结构</div><div class="panel-actions"><span id="structureSummary" class="count-pill">0</span><button id="structureManage" class="small-button" type="button" hidden>管理</button></div></div>
-					<div id="structureList" class="structure-list"></div>
-				</section>
 				<section id="signaturePanel" class="signature-panel" hidden>
 					<div class="panel-row">
 						<div id="signaturePanelTitle" class="panel-title compact">签名</div>
 						<span id="signatureSummary" class="count-pill">0</span>
 					</div>
 					<div id="signatureList" class="signature-list"></div>
+				</section>
+				<section id="structurePanel" class="structure-panel" hidden>
+					<div class="panel-row"><div id="structurePanelTitle" class="panel-title compact">结构</div><div class="panel-actions"><span id="structureSummary" class="count-pill">0</span><button id="structureManage" class="small-button" type="button" hidden>管理</button></div></div>
+					<div id="structureList" class="structure-list"></div>
 				</section>
 				<section class="doc-font-panel">
 					<div class="panel-row">
