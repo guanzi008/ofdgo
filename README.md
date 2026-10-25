@@ -87,6 +87,32 @@ set GOARCH=amd64
 go build -o ofdgo_windows_amd64.exe -trimpath -ldflags "-H windowsgui -s -w -buildid=" ./cmd/webview
 ```
 
+## UOS 20 龙芯版
+
+我在 UOS 20 龙芯机上用[龙芯社区的 Go 1.26.4](https://www.loongnix.cn/zh/toolchain/Golang/downloads-Go1.26/)编译。窗口调用[单独维护的 GUIGo 龙芯版](https://github.com/guanzi008/guigo)，版本固定在 `go.mod`。构建前装好 `gcc`、`pkg-config`、`libgtk-3-dev`；运行需要 `libgtk-3-0` 和 `libwebkit2gtk-4.0-37`。
+
+```shell
+curl -fLO https://ftp.loongnix.cn/toolchain/golang/go-1.26/abi1.0/go1.26.4.linux-loong64.tar.gz
+curl -fLO https://ftp.loongnix.cn/toolchain/golang/go-1.26/abi1.0/go1.26.4.linux-loong64.sha256
+sha256sum -c go1.26.4.linux-loong64.sha256
+mkdir -p "$HOME/sdk/go1.26.4-abi1.0"
+tar -xzf go1.26.4.linux-loong64.tar.gz --strip-components=1 -C "$HOME/sdk/go1.26.4-abi1.0"
+
+./scripts/build-uos20-loongarch64.sh
+./ofdgo_uos20_loongarch64 [文件.ofd]
+```
+
+这版能打开、另存 OFD，也能在打印预览里导出 PDF。我还没接上直接打印到系统打印机。
+
+## AOSC OS 龙芯版
+
+在 AOSC OS 龙芯环境装好 `go`、`gcc`、`pkgconf` 和 `gtk-3` 后构建。运行需要 `gtk-3` 和 `webkit2gtk`。
+
+```shell
+./scripts/build-aosc-loongarch64.sh
+./ofdgo_aosc_loongarch64 [文件.ofd]
+```
+
 # 安装引擎
 ```shell
 go get -u github.com/xiaoqidun/ofdgo
