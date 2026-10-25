@@ -688,7 +688,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 				return 0, err
 			}
 		}
-		data, err = editorCreatorXML(data, e.source.fallbackDocID, reader.documentIndex)
+		data, _, err = editorDocInfoXML(data, e.source.fallbackDocID, reader.documentIndex)
 		if err != nil {
 			return 0, err
 		}

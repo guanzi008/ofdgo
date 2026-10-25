@@ -45,6 +45,7 @@ func editorUpdateInfoXML(data []byte, docID string, index int, before, after Doc
 		{"DocID", before.DocID, after.DocID}, {"Title", before.Title, after.Title}, {"Author", before.Author, after.Author},
 		{"Subject", before.Subject, after.Subject}, {"Abstract", before.Abstract, after.Abstract},
 		{"CreationDate", before.CreationDate, after.CreationDate}, {"ModDate", before.ModDate, after.ModDate},
+		{"DocUsage", before.DocUsage, after.DocUsage}, {"Cover", before.Cover, after.Cover},
 		{"Creator", before.Creator, after.Creator}, {"CreatorVersion", before.CreatorVersion, after.CreatorVersion},
 	} {
 		if field[1] != field[2] {
@@ -136,17 +137,6 @@ func editorKeywords(data []byte, info *editorXML, values []string) ([]byte, erro
 		}
 	}
 	return editorPatchXML(data, patches), nil
-}
-
-// editorCreatorXML 更新指定文档的制作软件，移除原软件版本，保留其余根索引内容
-// 入参: data 当前根索引XML, docID 缺少文档描述时使用的标识, index 文档索引
-// 返回: []byte 修改后的XML, error 解析错误
-func editorCreatorXML(data []byte, docID string, index int) ([]byte, error) {
-	data, info, err := editorDocInfoXML(data, docID, index)
-	if err != nil {
-		return nil, err
-	}
-	return editorXMLSetText(data, info, [][2]string{{"Creator", ofdCreator}, {"CreatorVersion", ""}})
 }
 
 // editorDocInfoXML 获取文档描述，修改缺少描述的源文件时补建标准容器及标识

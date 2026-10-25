@@ -82,36 +82,61 @@ type pageBoxInfo struct {
 	valid bool
 }
 
+// DocumentMetadata 文档描述，供信息展示与包内文档管理共用
+type DocumentMetadata struct {
+	DocID          string             `json:"docId"`
+	Title          string             `json:"title"`
+	Author         string             `json:"author"`
+	Subject        string             `json:"subject"`
+	Abstract       string             `json:"abstract"`
+	CreationDate   string             `json:"creationDate"`
+	ModDate        string             `json:"modDate"`
+	DocUsage       string             `json:"docUsage"`
+	Cover          string             `json:"cover"`
+	Keywords       []string           `json:"keywords,omitempty"`
+	Creator        string             `json:"creator"`
+	CreatorVersion string             `json:"creatorVersion"`
+	CustomData     []ofdgo.CustomData `json:"customData,omitempty"`
+}
+
+// documentMetadata 复制文档描述，集合字段与读取器及编辑器互不影响
+// 入参: info 文档描述
+// 返回: DocumentMetadata 界面元数据
+func documentMetadata(info ofdgo.DocInfo) DocumentMetadata {
+	metadata := DocumentMetadata{
+		DocID: info.DocID, Title: info.Title, Author: info.Author, Subject: info.Subject, Abstract: info.Abstract,
+		CreationDate: info.CreationDate, ModDate: info.ModDate, DocUsage: info.DocUsage, Cover: info.Cover,
+		Keywords: slices.Clone(info.Keywords), Creator: info.Creator, CreatorVersion: info.CreatorVersion,
+	}
+	if info.CustomDatas != nil {
+		metadata.CustomData = slices.Clone(info.CustomDatas.CustomData)
+	}
+	return metadata
+}
+
 // DocumentInfo 文档信息
 type DocumentInfo struct {
-	DocumentIndex   int                `json:"documentIndex"`
-	DocumentVersion string             `json:"documentVersion"`
-	VersionCount    int                `json:"versionCount"`
-	Documents       []DocumentEntry    `json:"documents,omitempty"`
-	Encryption      EncryptionInfo     `json:"encryption"`
-	Version         string             `json:"version"`
-	DocType         string             `json:"docType"`
-	Title           string             `json:"title"`
-	Author          string             `json:"author"`
-	Subject         string             `json:"subject"`
-	CustomData      []ofdgo.CustomData `json:"customData,omitempty"`
-	CreationDate    string             `json:"creationDate"`
-	ModDate         string             `json:"modDate"`
-	Creator         string             `json:"creator"`
-	CreatorVersion  string             `json:"creatorVersion,omitempty"`
-	PageCount       int                `json:"pageCount"`
-	FontCount       int                `json:"fontCount"`
-	SignatureCount  int                `json:"signatureCount"`
-	SignatureError  string             `json:"signatureError,omitempty"`
-	AttachmentError string             `json:"attachmentError,omitempty"`
-	Attachments     []AttachmentInfo   `json:"attachments,omitempty"`
-	Fonts           []FontInfo         `json:"fonts"`
-	Signatures      []SignatureInfo    `json:"signatures"`
-	Pages           []PageInfo         `json:"pages"`
-	Outlines        []OutlineInfo      `json:"outlines,omitempty"`
-	Structures      []ofdgo.Structure  `json:"structures,omitempty"`
-	StructureError  string             `json:"structureError,omitempty"`
-	DetailsPending  bool               `json:"detailsPending,omitempty"`
+	DocumentMetadata
+	DocumentIndex   int               `json:"documentIndex"`
+	DocumentVersion string            `json:"documentVersion"`
+	VersionCount    int               `json:"versionCount"`
+	Documents       []DocumentEntry   `json:"documents,omitempty"`
+	Encryption      EncryptionInfo    `json:"encryption"`
+	Version         string            `json:"version"`
+	DocType         string            `json:"docType"`
+	PageCount       int               `json:"pageCount"`
+	FontCount       int               `json:"fontCount"`
+	SignatureCount  int               `json:"signatureCount"`
+	SignatureError  string            `json:"signatureError,omitempty"`
+	AttachmentError string            `json:"attachmentError,omitempty"`
+	Attachments     []AttachmentInfo  `json:"attachments,omitempty"`
+	Fonts           []FontInfo        `json:"fonts"`
+	Signatures      []SignatureInfo   `json:"signatures"`
+	Pages           []PageInfo        `json:"pages"`
+	Outlines        []OutlineInfo     `json:"outlines,omitempty"`
+	Structures      []ofdgo.Structure `json:"structures,omitempty"`
+	StructureError  string            `json:"structureError,omitempty"`
+	DetailsPending  bool              `json:"detailsPending,omitempty"`
 }
 
 // VersionEntry 版本管理列表中的入口，空ID表示主文档
@@ -124,14 +149,11 @@ type VersionEntry struct {
 
 // DocumentEntry 包内文档入口，管理列表按需补充元数据和页数
 type DocumentEntry struct {
-	Index      int                `json:"index"`
-	Title      string             `json:"title"`
-	Root       string             `json:"root"`
-	ID         string             `json:"id"`
-	Author     string             `json:"author,omitempty"`
-	Subject    string             `json:"subject,omitempty"`
-	CustomData []ofdgo.CustomData `json:"customData,omitempty"`
-	PageCount  *int               `json:"pageCount,omitempty"`
+	DocumentMetadata
+	Index     int    `json:"index"`
+	Root      string `json:"root"`
+	ID        string `json:"id"`
+	PageCount *int   `json:"pageCount,omitempty"`
 }
 
 // DocumentDetails 不含页面数组的文档补充信息
@@ -647,19 +669,10 @@ func (s *Session) Summary() DocumentInfo {
 	info.DocumentVersion, _ = s.Reader.DocumentVersionID()
 	info.VersionCount, _ = s.Reader.DocumentVersionCount()
 	for index, body := range s.Reader.OFD.DocBody {
-		info.Documents = append(info.Documents, DocumentEntry{Index: index, Title: body.DocInfo.Title, Root: body.DocRoot, ID: body.DocInfo.DocID})
+		info.Documents = append(info.Documents, DocumentEntry{Index: index, DocumentMetadata: DocumentMetadata{Title: body.DocInfo.Title}, Root: body.DocRoot, ID: body.DocInfo.DocID})
 	}
 	if docInfo, err := s.Reader.DocInfo(); err == nil && docInfo != nil {
-		info.Title = docInfo.Title
-		info.Author = docInfo.Author
-		info.Subject = docInfo.Subject
-		if docInfo.CustomDatas != nil {
-			info.CustomData = append([]ofdgo.CustomData(nil), docInfo.CustomDatas.CustomData...)
-		}
-		info.CreationDate = docInfo.CreationDate
-		info.ModDate = docInfo.ModDate
-		info.Creator = docInfo.Creator
-		info.CreatorVersion = docInfo.CreatorVersion
+		info.DocumentMetadata = documentMetadata(*docInfo)
 	}
 	if fonts, err := s.Reader.Fonts(); err == nil {
 		for _, font := range fonts {
@@ -5599,7 +5612,7 @@ func (e *businessEngine) loadImport(args []platformValue) (any, error) {
 	entries := make([]DocumentEntry, reader.DocumentCount())
 	signed := doc.Signatures != ""
 	for index, body := range reader.OFD.DocBody {
-		entries[index] = DocumentEntry{Index: index, Title: body.DocInfo.Title, Root: body.DocRoot, ID: body.DocInfo.DocID}
+		entries[index] = DocumentEntry{Index: index, DocumentMetadata: DocumentMetadata{Title: body.DocInfo.Title}, Root: body.DocRoot, ID: body.DocInfo.DocID}
 		signed = signed || body.Signatures != ""
 	}
 	return map[string]any{"pageCount": len(doc.Pages.Page), "signed": doc.Signatures != "", "documentsSigned": signed, "encrypted": reader.Encryption().Encrypted, "documents": entries, "documentCount": len(entries)}, nil
@@ -5735,50 +5748,52 @@ func (e *businessEngine) createDocument(args []platformValue) (any, error) {
 	return e.previewEditor(editor, args[3].Bool())
 }
 
-// updateInfo 修改文档信息和自定义字段，保留其他元数据及创建程序标识
-// 入参: args 标题、作者、主题、可选自定义字段JSON及文档索引
+// updateInfo 修改完整文档描述，按字段来源保留自定义内容的扩展属性
+// 入参: args 文档描述JSON及文档索引，未提交字段保持原值
 // 返回: any 编辑状态, error 错误信息
 func (e *businessEngine) updateInfo(args []platformValue) (any, error) {
 	return e.changeObjects(func() error {
-		if len(args) < 3 || len(args) > 5 {
+		if len(args) != 2 {
 			return fmt.Errorf("invalid document info arguments")
 		}
-		index := e.currentEditor.DocumentIndex()
-		if len(args) > 4 {
-			index = args[4].Int()
-		}
+		index := args[1].Int()
 		info, err := e.currentEditor.DocumentInfo(index)
 		if err != nil {
 			return err
 		}
-		info.Title, info.Author, info.Subject = args[0].String(), args[1].String(), args[2].String()
-		if len(args) > 3 {
-			var submitted []struct {
+		var submitted struct {
+			ofdgo.DocInfo
+			CustomData []struct {
 				ofdgo.CustomData
 				Source *int
 			}
-			if err := json.Unmarshal([]byte(args[3].String()), &submitted); err != nil {
-				return err
-			}
-			var previous []ofdgo.CustomData
-			if info.CustomDatas != nil {
-				previous = info.CustomDatas.CustomData
-			}
-			fields := make([]ofdgo.CustomData, len(submitted))
-			for i, field := range submitted {
-				if field.Source != nil {
-					if *field.Source < 0 || *field.Source >= len(previous) {
-						return fmt.Errorf("invalid custom data source")
-					}
-					fields[i] = previous[*field.Source]
-				}
-				fields[i].Name, fields[i].Value = field.Name, field.Value
-			}
-			if !slices.Equal(previous, fields) {
-				info.CustomDatas = &ofdgo.CustomDatas{CustomData: fields}
-			}
 		}
-		return e.currentEditor.SetDocumentInfo(index, info)
+		submitted.DocInfo = info
+		if err := json.Unmarshal([]byte(args[0].String()), &submitted); err != nil {
+			return err
+		}
+		var previous []ofdgo.CustomData
+		if info.CustomDatas != nil {
+			previous = info.CustomDatas.CustomData
+		}
+		fields := make([]ofdgo.CustomData, len(submitted.CustomData))
+		for i, field := range submitted.CustomData {
+			if field.Source != nil {
+				if *field.Source < 0 || *field.Source >= len(previous) {
+					return fmt.Errorf("invalid custom data source")
+				}
+				fields[i] = previous[*field.Source]
+			}
+			fields[i].Name, fields[i].Value = field.Name, field.Value
+		}
+		submitted.CustomDatas = info.CustomDatas
+		if submitted.CustomData != nil && !slices.Equal(previous, fields) {
+			submitted.CustomDatas = &ofdgo.CustomDatas{CustomData: fields}
+		}
+		if slices.Equal(info.Keywords, submitted.Keywords) {
+			submitted.Keywords = info.Keywords
+		}
+		return e.currentEditor.SetDocumentInfo(index, submitted.DocInfo)
 	})
 }
 
@@ -5798,10 +5813,7 @@ func (e *businessEngine) packageDocuments(args []platformValue) (any, error) {
 		entry := &entries[i]
 		body := e.currentSession.Reader.OFD.DocBody[i]
 		entry.Index, entry.Root, entry.ID = i, body.DocRoot, info.DocID
-		entry.Title, entry.Author, entry.Subject = info.Title, info.Author, info.Subject
-		if info.CustomDatas != nil {
-			entry.CustomData = info.CustomDatas.CustomData
-		}
+		entry.DocumentMetadata = documentMetadata(info)
 		if i == e.currentEditor.DocumentIndex() {
 			count := e.currentEditor.PageCount()
 			entry.PageCount = &count

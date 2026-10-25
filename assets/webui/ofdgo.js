@@ -15,6 +15,7 @@ const SCROLL_SEGMENT_SIZE = 1000000;
 const OBJECT_CLIPBOARD_TYPE = "application/x-ofdgo-objects";
 const RESOURCE_KINDS = [["Font", "字体"], ["Image", "图片"], ["Audio", "音频"], ["Video", "视频"], ["Attachment", "附件"], ["ColorSpace", "色彩"], ["DrawParam", "样式"]];
 const SETTINGS_KINDS = [["bookmarks", "书签"], ["actions", "动作"], ["templates", "模板"], ["layers", "图层"], ["extensions", "扩展"]];
+const INFO_FIELDS = ["title", "author", "subject", "abstract", "docId", "docUsage", "cover", "creationDate", "modDate", "creator", "creatorVersion"];
 const STATUS = {
 	ready: "选择 OFD、PDF 文件",
 	opening: "正在打开文档",
@@ -346,6 +347,16 @@ const el = {
 	infoCustomAdd: document.querySelector("#infoCustomAdd"),
 	infoAuthor: document.querySelector("#infoAuthor"),
 	infoSubject: document.querySelector("#infoSubject"),
+	infoAbstract: document.querySelector("#infoAbstract"),
+	infoDocId: document.querySelector("#infoDocId"),
+	infoDocUsage: document.querySelector("#infoDocUsage"),
+	infoCover: document.querySelector("#infoCover"),
+	infoCreationDate: document.querySelector("#infoCreationDate"),
+	infoModDate: document.querySelector("#infoModDate"),
+	infoCreator: document.querySelector("#infoCreator"),
+	infoCreatorVersion: document.querySelector("#infoCreatorVersion"),
+	infoKeywordRows: document.querySelector("#infoKeywordRows"),
+	infoKeywordAdd: document.querySelector("#infoKeywordAdd"),
 	infoCancel: document.querySelector("#infoCancel"),
 	infoStatus: document.querySelector("#infoStatus"),
 	paragraphPanel: document.querySelector("#paragraphPanel"),
@@ -589,10 +600,17 @@ const el = {
 	conversionNotice: document.querySelector("#conversionNotice"),
 	conversionWarnings: document.querySelector("#conversionWarnings"),
 	metaSubject: document.querySelector("#metaSubject"),
+	metaAbstract: document.querySelector("#metaAbstract"),
+	metaDocId: document.querySelector("#metaDocId"),
+	metaDocUsage: document.querySelector("#metaDocUsage"),
+	metaCover: document.querySelector("#metaCover"),
+	metaKeywords: document.querySelector("#metaKeywords"),
+	metaCustomData: document.querySelector("#metaCustomData"),
 	metaAuthor: document.querySelector("#metaAuthor"),
 	metaCreationDate: document.querySelector("#metaCreationDate"),
 	metaModDate: document.querySelector("#metaModDate"),
 	metaCreator: document.querySelector("#metaCreator"),
+	metaCreatorVersion: document.querySelector("#metaCreatorVersion"),
 	metaType: document.querySelector("#metaType"),
 	metaVersion: document.querySelector("#metaVersion"),
 	metaSignatures: document.querySelector("#metaSignatures"),
@@ -1004,43 +1022,56 @@ editorClick(el.documentDownButton, () => {
 editorClick(el.infoButton, () => {
 	state.infoDocumentIndex = managedDocumentIndex();
 	const info = state.documentManagement?.entries?.[state.infoDocumentIndex] || state.doc;
-	for (const key of ["Title", "Author", "Subject"]) el[`info${key}`].value = info[key.toLowerCase()] || "";
+	for (const key of INFO_FIELDS) setInfoInput(el[`info${key[0].toUpperCase()}${key.slice(1)}`], info[key] || "");
+	el.infoKeywordRows.replaceChildren();
+	for (const keyword of info.keywords || []) addInfoRow(el.infoKeywordRows, [keyword]);
 	el.infoCustomRows.replaceChildren();
-	for (const [index, field] of (info.customData || []).entries()) addCustomDataRow(field, index);
+	for (const [index, field] of (info.customData || []).entries()) addInfoRow(el.infoCustomRows, [field.Name, field.Value], index);
 	el.infoStatus.textContent = "";
 	el.infoPanel.showModal();
 });
 el.infoCancel.addEventListener("click", () => el.infoPanel.close());
 el.infoPanel.addEventListener("cancel", event => { if (el.infoForm.inert) event.preventDefault(); });
 el.infoPanel.addEventListener("close", () => { if (!el.infoPanel.open) state.infoDocumentIndex = null; });
-el.infoCustomAdd.addEventListener("click", () => addCustomDataRow());
+el.infoKeywordAdd.addEventListener("click", () => addInfoRow(el.infoKeywordRows, [""]));
+el.infoCustomAdd.addEventListener("click", () => addInfoRow(el.infoCustomRows, ["", ""]));
 el.infoForm.addEventListener("submit", async event => {
 	event.preventDefault();
-	const fields = [...el.infoCustomRows.children].map(row => ({Name: row.children[0].value, Value: row.children[1].value, Source: row.sourceIndex}));
-	const args = [el.infoTitle.value, el.infoAuthor.value, el.infoSubject.value, JSON.stringify(fields)];
-	if (state.infoDocumentIndex !== null) args.push(state.infoDocumentIndex);
-	if (await changeDocument("ofdgoUpdateInfo", null, ...args)) el.infoPanel.close();
+	const info = Object.fromEntries(INFO_FIELDS.map(key => [key, infoInputValue(el[`info${key[0].toUpperCase()}${key.slice(1)}`])]));
+	info.keywords = [...el.infoKeywordRows.children].map(row => infoInputValue(row.children[0]));
+	info.customData = [...el.infoCustomRows.children].map(row => ({Name: infoInputValue(row.children[0]), Value: infoInputValue(row.children[1]), Source: row.sourceIndex}));
+	if (await changeDocument("ofdgoUpdateInfo", null, JSON.stringify(info), state.infoDocumentIndex)) el.infoPanel.close();
 });
 
-function addCustomDataRow(field = {Name: "", Value: ""}, sourceIndex) {
+function setInfoInput(input, value) {
+	input.defaultValue = value;
+	input.value = value;
+	input.dataset.initialValue = input.value;
+}
+
+function infoInputValue(input) {
+	return input.value === input.dataset.initialValue ? input.defaultValue : input.value;
+}
+
+function addInfoRow(container, values, sourceIndex) {
 	const row = document.createElement("div");
 	row.sourceIndex = sourceIndex;
-	row.className = "info-custom-row";
-	for (const [key, label] of [["Name", "名称"], ["Value", "内容"]]) {
-		const input = document.createElement("input");
-		input.type = "text";
-		input.value = field[key];
-		input.placeholder = label;
+	row.className = values.length === 1 ? "info-keyword-row" : "info-custom-row";
+	for (const [index, value] of values.entries()) {
+		const input = document.createElement("textarea");
+		input.rows = 1;
+		setInfoInput(input, value);
+		input.placeholder = values.length === 1 ? "关键词" : index === 0 ? "名称" : "内容";
 		row.append(input);
 	}
 	const remove = document.createElement("button");
 	remove.type = "button";
 	remove.className = "icon-button";
 	remove.textContent = "×";
-	remove.title = "删除字段";
+	remove.title = values.length === 1 ? "删除词条" : "删除字段";
 	remove.addEventListener("click", () => row.remove());
 	row.append(remove);
-	el.infoCustomRows.append(row);
+	container.append(row);
 }
 el.annotationClose.addEventListener("click", () => el.annotationNote.close());
 el.annotationNote.addEventListener("close", () => { state.annotationEdit = null; });
@@ -4761,8 +4792,7 @@ async function changeDocument(name, item, ...args) {
 		}
 		setEditorInfo(doc);
 		if (name === "ofdgoUpdateInfo") {
-			Object.assign(state.doc, { title: doc.title, author: doc.author, subject: doc.subject, customData: doc.customData,
-				documents: doc.documents, documentIndex: doc.documentIndex });
+			for (const key of [...INFO_FIELDS, "keywords", "customData", "documents", "documentIndex"]) state.doc[key] = doc[key];
 			renderMeta();
 			updateControls();
 			rememberEditorView(before, revision);
@@ -12610,14 +12640,33 @@ function renderMeta(keepDetails = false) {
 	el.metaTitle.textContent = doc.title || "-";
 	el.metaAuthor.textContent = doc.author || "-";
 	for (const [field, value] of [
-		[el.metaSubject, (doc.subject || "").trim()],
+		[el.metaSubject, doc.subject || ""],
+		[el.metaAbstract, doc.abstract || ""],
+		[el.metaDocId, doc.docId || ""],
+		[el.metaDocUsage, doc.docUsage || ""],
+		[el.metaCover, doc.cover || ""],
 		[el.metaCreationDate, formatDocumentTime(doc.creationDate)],
 		[el.metaModDate, formatDocumentTime(doc.modDate)],
-		[el.metaCreator, [doc.creator, doc.creatorVersion].filter(Boolean).join(" ")],
+		[el.metaCreator, doc.creator || ""],
+		[el.metaCreatorVersion, doc.creatorVersion || ""],
 	]) {
 		field.textContent = value;
 		field.parentElement.hidden = !value;
 	}
+	el.metaKeywords.replaceChildren(...(doc.keywords || []).map(keyword => {
+		const item = document.createElement("span");
+		item.textContent = keyword || "-";
+		return item;
+	}));
+	el.metaKeywords.parentElement.hidden = !doc.keywords?.length;
+	el.metaCustomData.replaceChildren(...(doc.customData || []).map(field => {
+		const row = document.createElement("div"), name = document.createElement("dt"), value = document.createElement("dd");
+		name.textContent = field.Name || "-";
+		value.textContent = field.Value || "-";
+		row.append(name, value);
+		return row;
+	}));
+	el.metaCustomData.hidden = !doc.customData?.length;
 	el.metaType.textContent = doc.docType || "-";
 	el.metaVersion.textContent = doc.version || "-";
 	el.metaFonts.textContent = String(doc.fontCount || 0);

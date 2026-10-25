@@ -415,7 +415,7 @@ func (e *Editor) editDocumentSnapshot(ctx context.Context, reader *Reader, edit 
 	return nil
 }
 
-// adoptDocumentReader 接入已加载的编辑入口，跨文档或版本时重建页面与资源状态
+// adoptDocumentReader 接入已加载的编辑入口，同文档重建自定义字段来源，跨文档或版本时重建页面与资源状态
 // 入参: ctx 取消上下文, reader 不拥有输入文件的独立阅读器
 // 返回: error 编辑器初始化错误
 func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader) error {
@@ -441,6 +441,13 @@ func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader) error 
 				source.structureStarts[index] = starts
 			}
 		}
+		source.info.CustomDatas = cloneEditorData(reader.OFD.DocBody[reader.documentIndex].DocInfo.CustomDatas)
+		if source.info.CustomDatas != nil {
+			for i := range source.info.CustomDatas.CustomData {
+				source.info.CustomDatas.CustomData[i].sourceIndex = i + 1
+			}
+		}
+		e.Info.CustomDatas = cloneEditorData(source.info.CustomDatas)
 		e.source = &source
 	} else {
 		next, err := reader.EditorContext(ctx)

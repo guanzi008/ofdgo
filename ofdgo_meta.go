@@ -49,6 +49,8 @@ type DocInfo struct {
 	Abstract       string       `xml:"Abstract"`
 	CreationDate   string       `xml:"CreationDate"`
 	ModDate        string       `xml:"ModDate"`
+	DocUsage       string       `xml:"DocUsage"`
+	Cover          string       `xml:"Cover"`
 	Keywords       Keywords     `xml:"Keywords,omitempty"`
 	Creator        string       `xml:"Creator"`
 	CreatorVersion string       `xml:"CreatorVersion"`
@@ -133,6 +135,10 @@ func (info *DocInfo) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 			target = &info.CreationDate
 		case "ModDate":
 			target = &info.ModDate
+		case "DocUsage":
+			target = &info.DocUsage
+		case "Cover":
+			target = &info.Cover
 		case "Keywords":
 			target = &info.Keywords
 		case "Creator":
