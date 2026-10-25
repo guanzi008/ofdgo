@@ -184,7 +184,7 @@ function createDocumentState() {
 		showPages: !COMPACT_LAYOUT.matches,
 		showMeta: !COMPACT_LAYOUT.matches,
 		metaTab: "document",
-		metaScroll: {document: 0, fonts: 0},
+		metaScroll: {document: 0, fonts: 0, security: 0},
 	};
 }
 
@@ -598,8 +598,10 @@ const el = {
 	metaContent: document.querySelector("#metaContent"),
 	documentMetaTab: document.querySelector("#documentMetaTab"),
 	fontsMetaTab: document.querySelector("#fontsMetaTab"),
+	securityMetaTab: document.querySelector("#securityMetaTab"),
 	metaDocumentPanel: document.querySelector("#metaDocumentPanel"),
 	metaFontsPanel: document.querySelector("#metaFontsPanel"),
+	metaSecurityPanel: document.querySelector("#metaSecurityPanel"),
 	renderVectorButton: document.querySelector("#renderVectorButton"),
 	renderRasterButton: document.querySelector("#renderRasterButton"),
 	refreshAppButton: document.querySelector("#refreshAppButton"),
@@ -1745,9 +1747,10 @@ el.outlinesTab.addEventListener("click", () => showNavigation(el.outlinesTab));
 el.searchTab.addEventListener("click", focusSearch);
 el.documentMetaTab.addEventListener("click", () => showMetaSection(el.documentMetaTab));
 el.fontsMetaTab.addEventListener("click", () => showMetaSection(el.fontsMetaTab));
+el.securityMetaTab.addEventListener("click", () => showMetaSection(el.securityMetaTab));
 for (const [container, buttons, show] of [
 	[el.navigationTabs, [el.pagesTab, el.outlinesTab, el.annotationsTab, el.searchTab], showNavigation],
-	[el.metaTabs, [el.documentMetaTab, el.fontsMetaTab], showMetaSection],
+	[el.metaTabs, [el.documentMetaTab, el.fontsMetaTab, el.securityMetaTab], showMetaSection],
 ]) container.addEventListener("keydown", (event) => {
 	if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
 		return;
@@ -6532,7 +6535,7 @@ async function openDocument(options = {}) {
 			el.navigationContent.scrollLeft = 0;
 			el.navigationContent.scrollTop = 0;
 			state.metaTab = "document";
-			state.metaScroll = {document: 0, fonts: 0};
+			state.metaScroll = {document: 0, fonts: 0, security: 0};
 			el.metaContent.scrollLeft = 0;
 			renderMetaSections();
 		}
@@ -11636,12 +11639,12 @@ function focusSearch() {
 
 function showMetaSection(selected) {
 	state.metaScroll[state.metaTab] = el.metaContent.scrollTop;
-	state.metaTab = selected === el.fontsMetaTab ? "fonts" : "document";
+	state.metaTab = selected === el.securityMetaTab ? "security" : selected === el.fontsMetaTab ? "fonts" : "document";
 	renderMetaSections();
 }
 
 function renderMetaSections() {
-	for (const [tab, panel, name] of [[el.documentMetaTab, el.metaDocumentPanel, "document"], [el.fontsMetaTab, el.metaFontsPanel, "fonts"]]) {
+	for (const [tab, panel, name] of [[el.documentMetaTab, el.metaDocumentPanel, "document"], [el.fontsMetaTab, el.metaFontsPanel, "fonts"], [el.securityMetaTab, el.metaSecurityPanel, "security"]]) {
 		const active = name === state.metaTab;
 		panel.hidden = !active;
 		tab.setAttribute("data-selected", String(active));

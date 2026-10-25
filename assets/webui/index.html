@@ -805,6 +805,7 @@
 				<div id="metaTabs" class="navigation-tabs">
 					<button id="documentMetaTab" type="button" data-selected="true">文档</button>
 					<button id="fontsMetaTab" type="button" data-selected="false" tabindex="-1">字体</button>
+					<button id="securityMetaTab" type="button" data-selected="false" tabindex="-1">安全</button>
 				</div>
 				<div id="metaContent" class="meta-content">
 					<div id="metaDocumentPanel">
@@ -904,17 +905,6 @@
 							<summary>提示</summary>
 							<div id="conversionWarnings" class="panel-detail"></div>
 						</details>
-						<section id="securityPanel" class="security-panel" hidden>
-							<div class="panel-row"><div id="securityPanelTitle" class="panel-title compact">安全</div><div class="panel-actions"><button id="encryptSaveButton" class="small-button" type="button" disabled>加密</button><button id="signButton" class="small-button" type="button" disabled>签章</button><button id="verifyButton" class="small-button" type="button" disabled>验签</button></div></div>
-							<dl class="meta-list"><div><dt>加密</dt><dd id="securityEncryption">未加密</dd></div><div id="securitySchemeRow" hidden><dt>方式</dt><dd id="securityScheme"></dd></div><div id="securityMethodRow" hidden><dt>算法</dt><dd id="securityMethod"></dd></div></dl>
-						</section>
-						<section id="signaturePanel" class="signature-panel" hidden>
-							<div class="panel-row">
-								<div id="signaturePanelTitle" class="panel-title compact">签名</div>
-								<span id="signatureSummary" class="count-pill">0</span>
-							</div>
-							<div id="signatureList" class="signature-list"></div>
-						</section>
 						<section id="structurePanel" class="structure-panel" hidden>
 							<div class="panel-row"><div id="structurePanelTitle" class="panel-title compact">结构</div><div class="panel-actions"><span id="structureSummary" class="count-pill">0</span><button id="structureManage" class="small-button" type="button" hidden>管理</button></div></div>
 							<div id="structureList" class="structure-list"></div>
@@ -940,6 +930,19 @@
 							</div>
 							<div id="fontPermissionHint" class="font-permission-hint" hidden>系统字体未授权</div>
 							<div id="fontList" class="font-list"></div>
+						</section>
+					</div>
+					<div id="metaSecurityPanel" hidden>
+						<section id="securityPanel" class="security-panel" hidden>
+							<div class="panel-row"><div id="securityPanelTitle" class="panel-title compact">安全</div><div class="panel-actions"><button id="encryptSaveButton" class="small-button" type="button" disabled>加密</button><button id="signButton" class="small-button" type="button" disabled>签章</button><button id="verifyButton" class="small-button" type="button" disabled>验签</button></div></div>
+							<dl class="meta-list"><div><dt>加密</dt><dd id="securityEncryption">未加密</dd></div><div id="securitySchemeRow" hidden><dt>方式</dt><dd id="securityScheme"></dd></div><div id="securityMethodRow" hidden><dt>算法</dt><dd id="securityMethod"></dd></div></dl>
+						</section>
+						<section id="signaturePanel" class="signature-panel" hidden>
+							<div class="panel-row">
+								<div id="signaturePanelTitle" class="panel-title compact">签名</div>
+								<span id="signatureSummary" class="count-pill">0</span>
+							</div>
+							<div id="signatureList" class="signature-list"></div>
 						</section>
 					</div>
 				</div>
