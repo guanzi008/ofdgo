@@ -1155,12 +1155,12 @@ func (p *pdfImporter) documentMetadata(ctx context.Context, strict bool) error {
 		name string
 		text *string
 	}{{"CreationDate", &projected.CreationDate}, {"ModDate", &projected.ModDate}} {
+		*field.text = ""
 		if value, ok := values[field.name]; ok {
 			date, day, _, err := codecpdf.MetadataDate(value.text, value.xmp)
 			if err != nil {
 				return fmt.Errorf("PDF metadata %s: %w", field.name, err)
 			}
-			*field.text = ""
 			if day {
 				*field.text = date.Format("2006-01-02")
 			}
