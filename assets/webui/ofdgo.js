@@ -1071,14 +1071,14 @@ function addInfoRow(container, values, sourceIndex) {
 		const input = document.createElement("textarea");
 		input.rows = 1;
 		setInfoInput(input, value);
-		input.placeholder = values.length === 1 ? "关键词" : index === 0 ? "名称" : "内容";
+		input.placeholder = values.length === 1 ? "关键词" : index === 0 ? "属性名" : "属性值";
 		row.append(input);
 	}
 	const remove = document.createElement("button");
 	remove.type = "button";
 	remove.className = "icon-button";
 	remove.textContent = "×";
-	remove.title = values.length === 1 ? "删除词条" : "删除字段";
+	remove.title = values.length === 1 ? "删除词条" : "删除属性";
 	remove.addEventListener("click", () => row.remove());
 	row.append(remove);
 	container.append(row);

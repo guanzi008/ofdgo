@@ -1614,10 +1614,6 @@ button:not(:disabled):hover {
 	grid-template-columns: minmax(0, 1fr) repeat(2, 4em);
 }
 
-.info-fields {
-	margin-left: calc(4em + 12px);
-}
-
 .info-rows {
 	max-height: 240px;
 	overflow-y: auto;
