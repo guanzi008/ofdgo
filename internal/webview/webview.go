@@ -116,11 +116,12 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 	if err != nil {
 		return err
 	}
-	instance, err := guigo.OpenInstance(ctx, "OFDGo:"+key, data, h.receiveLaunch)
+	instance, err := guigo.OpenWindowInstance(ctx, "OFDGo:"+key, data, h.receiveLaunch)
 	if err != nil || instance == nil {
 		return err
 	}
 	defer instance.Close()
+	options.Instance = instance
 	files, err := newFileStore()
 	if err != nil {
 		return err
