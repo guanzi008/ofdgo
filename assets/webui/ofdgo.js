@@ -2591,7 +2591,7 @@ function advanceDocumentSequence() {
 }
 
 function copyApplicationPreferences(target) {
-	for (const key of ["pageLayoutPreference", "renderAnnotations", "renderBackend", "renderMode", "renderDPI", "showPages", "showMeta", "exportFormats"]) target[key] = state[key];
+	for (const key of ["showPages", "showMeta", "exportFormats"]) target[key] = state[key];
 	const { fontChoice, ...defaults } = state.textDefaults;
 	target.textDefaults = { ...defaults, ...(target.textDefaults.fontChoice ? {fontChoice: target.textDefaults.fontChoice} : {}) };
 }
@@ -2735,11 +2735,11 @@ function detachDocumentView() {
 }
 
 function attachDocumentTab(tab) {
-	tab.configurePending ||= tab.state.renderAnnotations !== state.renderAnnotations;
 	copyApplicationPreferences(tab.state);
 	workspace.active = tab;
 	tab.touched = Date.now();
 	state = tab.state;
+	el.imageDPI.value = String(state.renderDPI);
 	for (const face of state.svgFonts.values()) document.fonts.add(face);
 	state.textFontID = undefined;
 	resourceManager = tab.resources;
@@ -2768,6 +2768,8 @@ function attachDocumentTab(tab) {
 	canvasEditor.pendingSelection = tab.view?.selection || null;
 	documentDialogs?.setOwner(tab);
 	workspace.resourceView = resourceElements.Panel.open ? resourceManager : null;
+	setContinuous(state.continuous);
+	updatePanControl();
 	trimWorkspaceCaches();
 	renderDocumentTabs();
 }
@@ -6019,6 +6021,7 @@ async function refreshPageDisplay(anchor = scaleAnchor(0)) {
 }
 
 async function changeDisplayMode(mode = state.renderMode) {
+	const tab = documentTab(), state = tab.state;
 	if (document.body.hasAttribute("data-busy")) {
 		el.imageDPI.value = String(state.renderDPI);
 		updateDPIControl();
@@ -6037,11 +6040,13 @@ async function changeDisplayMode(mode = state.renderMode) {
 	} catch (err) {
 		state.renderDPI = previous.dpi;
 		state.renderMode = previous.mode;
-		el.imageDPI.value = String(previous.dpi);
-		resetPageLoading();
 		state.pageCache.clear();
-		updateDisplayControls();
-		showError(err, false);
+		if (isForegroundDocument(tab)) {
+			el.imageDPI.value = String(previous.dpi);
+			resetPageLoading();
+			updateDisplayControls();
+			showError(err, false);
+		}
 	}
 }
 
@@ -13331,11 +13336,15 @@ function togglePan() {
 	setPan(!state.panMode);
 }
 
+function updatePanControl() {
+	el.viewerPanel.classList.toggle("pan-mode", state.panMode);
+	el.panButton.setAttribute("data-pressed", String(state.panMode));
+}
+
 function setPan(enabled) {
 	endPan();
 	state.panMode = enabled;
-	el.viewerPanel.classList.toggle("pan-mode", state.panMode);
-	el.panButton.setAttribute("data-pressed", String(state.panMode));
+	updatePanControl();
 	updateEditorTools();
 }
 
@@ -13624,8 +13633,8 @@ function updateControls() {
 	el.panButton.disabled = !hasDoc;
 	el.continuousButton.disabled = !hasDoc;
 	el.pageLayoutButton.disabled = pageCount < 2 || document.body.hasAttribute("data-busy");
-	el.pageLayoutButton.textContent = state.pageLayout === 1 ? "单页" : "双页";
-	el.pageLayoutButton.dataset.short = state.pageLayout === 1 ? "单" : "双";
+	el.pageLayoutButton.textContent = state.pageLayoutPreference === 1 ? "单页" : "双页";
+	el.pageLayoutButton.dataset.short = state.pageLayoutPreference === 1 ? "单" : "双";
 	el.fitButton.toggleAttribute("data-pressed", hasDoc && state.fitMode === "width");
 	el.fitHeightButton.toggleAttribute("data-pressed", hasDoc && state.fitMode === "height");
 	updateAnnotationButton();
