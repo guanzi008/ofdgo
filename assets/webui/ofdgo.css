@@ -3873,8 +3873,8 @@ audio.page-media {
 	white-space: pre-wrap;
 }
 
-.document-info .meta-list > div {
-	grid-template-columns: 3em minmax(0, 1fr);
+.document-info .meta-list:not(#metaCustomData) dt {
+	text-align-last: justify;
 }
 
 .document-info details:not(:has(.meta-list > div:not([hidden]))) {
