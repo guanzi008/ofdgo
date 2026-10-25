@@ -67,6 +67,12 @@ type Host struct {
 	closeAllowed   bool
 }
 
+// associationState 保存单个范围的登记状态和查询错误
+type associationState struct {
+	guigo.AssociationStatus
+	Error string `json:"error,omitempty"`
+}
+
 // engineClose 保存并发关闭共享的完成通知及结果
 type engineClose struct {
 	done chan struct{}
@@ -104,7 +110,7 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 	h.conversionPool = h.resources.ConversionPool()
 	defer h.close()
 	bindings := make(map[string]guigo.HandlerFunc)
-	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "drop.release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title", "window.info", "window.drag", "window.close", "update.check", "update.open", "print.capabilities", "print.dialog", "print.printers", "print.query", "print.properties", "print"} {
+	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "drop.release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "title", "window.info", "window.drag", "window.close", "update.check", "update.open", "association.query", "association.register", "association.remove", "print.capabilities", "print.dialog", "print.printers", "print.query", "print.properties", "print"} {
 		bindings["ofdgo.host."+name] = func(ctx context.Context, args any) (any, error) { return h.call(ctx, name, args) }
 	}
 	static := http.FileServerFS(webuiassets.NativeFS)
@@ -370,6 +376,10 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		return applicationUpdate(ctx, build.Version, applicationVersionURL)
 	case "update.open":
 		return nil, guigo.OpenURL(applicationDownloadURL)
+	case "association.query":
+		return queryAssociations()
+	case "association.register", "association.remove":
+		return nil, changeAssociations(text("scope"), name == "association.remove")
 	case "engine.close":
 		return nil, h.closeEngine(text("engine"))
 	case "engine.finish":
@@ -630,6 +640,71 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		return nil, nil
 	}
 	return nil, fmt.Errorf("未知宿主操作")
+}
+
+// associationOptions 提供Windows文件关联的固定应用配置
+// 返回: guigo.AssociationOptions 应用配置, error 路径错误
+func associationOptions() (guigo.AssociationOptions, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return guigo.AssociationOptions{}, err
+	}
+	return guigo.AssociationOptions{
+		AppID: "OFDGo", Name: "OFDGo", Description: "OFD、PDF阅读与编辑工具",
+		Executable: executable, Arguments: []string{"--"},
+		Types: []guigo.FileAssociation{
+			{ID: "OFD", Name: "OFD文档", Extensions: []string{".ofd"}},
+			{ID: "PDF", Name: "PDF文档", Extensions: []string{".pdf"}},
+		},
+	}, nil
+}
+
+// queryAssociations 分别查询两个范围，不因其中一个失败而隐藏另一个
+// 返回: any 两个范围的状态, error 配置错误
+func queryAssociations() (any, error) {
+	options, err := associationOptions()
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]associationState)
+	for _, scope := range []guigo.AssociationScope{guigo.AssociationUser, guigo.AssociationMachine} {
+		state, err := guigo.QueryFileAssociations(options, scope)
+		row := associationState{AssociationStatus: state}
+		if err != nil {
+			row.Error = associationError(err).Error()
+		}
+		result[string(scope)] = row
+	}
+	return result, nil
+}
+
+// changeAssociations 执行固定应用配置的单范围注册或撤销
+// 入参: scope 作用范围, remove 是否撤销
+// 返回: error 操作错误
+func changeAssociations(scope string, remove bool) error {
+	options, err := associationOptions()
+	if err != nil {
+		return err
+	}
+	if remove {
+		err = guigo.UnregisterFileAssociations(options, guigo.AssociationScope(scope))
+	} else {
+		err = guigo.RegisterFileAssociations(options, guigo.AssociationScope(scope))
+	}
+	return associationError(err)
+}
+
+// associationError 区分未提升权限和实际访问失败，提供简短提示
+// 入参: err 操作错误
+// 返回: error 用户提示或原始错误
+func associationError(err error) error {
+	if errors.Is(err, guigo.ErrAssociationElevationRequired) {
+		return errors.New("需管理员权限")
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return errors.New("无权访问")
+	}
+	return err
 }
 
 // applicationUpdate 比较官网和当前程序的完整构建版本

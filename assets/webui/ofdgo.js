@@ -196,6 +196,9 @@ const el = {
 	aboutButton: document.querySelector("#aboutButton"),
 	aboutPanel: document.querySelector("#aboutPanel"),
 	aboutVersion: document.querySelector("#aboutVersion"),
+	associationSection: document.querySelector("#associationSection"),
+	associationPermission: document.querySelector("#associationPermission"),
+	associationMessage: document.querySelector("#associationMessage"),
 	signButton: document.querySelector("#signButton"),
 	signPanel: document.querySelector("#signPanel"),
 	signForm: document.querySelector("#signForm"),
@@ -1499,6 +1502,7 @@ el.pageForm.addEventListener("submit", async (event) => {
 	}
 });
 el.aboutButton.addEventListener("click", openAboutPanel);
+el.associationSection.addEventListener("click", changeFileAssociation);
 let aboutBackdrop = false;
 el.aboutPanel.addEventListener("pointerdown", event => { aboutBackdrop = event.target === el.aboutPanel; });
 el.aboutPanel.addEventListener("click", event => {
@@ -2017,7 +2021,9 @@ function formDialogOpen() {
 
 async function openAboutPanel() {
 	el.aboutVersion.textContent = "读取中";
+	el.associationMessage.hidden = true;
 	documentDialogs.showApplication(el.aboutPanel);
+	if (nativeHost) void refreshFileAssociations();
 	let raw = "";
 	try {
 		const response = await fetch("./", { cache: "no-store" });
@@ -2039,6 +2045,56 @@ async function openAboutPanel() {
 		return;
 	}
 	el.aboutVersion.textContent = `${date.toISOString().slice(0, 10).replaceAll("-", "")}-${match[2].slice(0, 7)}`;
+}
+
+async function refreshFileAssociations() {
+	if (!nativeHost || el.associationSection.dataset.busy) return;
+	el.associationSection.dataset.busy = "true";
+	for (const control of el.associationSection.querySelectorAll("button")) control.disabled = true;
+	for (const label of el.associationSection.querySelectorAll(".association-state")) {
+		label.textContent = "查询中";
+		label.title = "";
+	}
+	try {
+		const states = await nativeHost.call("association.query", {});
+		el.associationSection.hidden = !states.user.supported;
+		el.associationPermission.hidden = !states.machine.supported || states.machine.writable;
+		for (const row of el.associationSection.querySelectorAll(".association-row")) {
+			const state = states[row.dataset.scope];
+			const label = row.querySelector(".association-state");
+			label.textContent = state.error ? "不可用" : state.complete ? "已注册" : state.registered ? "待更新" : "未注册";
+			label.title = state.error || "";
+			row.querySelector('[data-action="register"]').disabled = !state.writable || !!state.error || state.complete;
+			row.querySelector('[data-action="remove"]').disabled = !state.writable || !!state.error || !state.registered;
+		}
+	} catch (error) {
+		el.associationSection.hidden = false;
+		el.associationPermission.hidden = true;
+		for (const label of el.associationSection.querySelectorAll(".association-state")) label.textContent = "不可用";
+		el.associationMessage.textContent = `查询失败：${error.message}`;
+		el.associationMessage.hidden = false;
+	} finally {
+		delete el.associationSection.dataset.busy;
+	}
+}
+
+async function changeFileAssociation(event) {
+	const button = event.target.closest("button[data-action]");
+	if (!nativeHost || !button || button.disabled || el.associationSection.dataset.busy) return;
+	const row = button.closest(".association-row");
+	el.associationSection.dataset.busy = "true";
+	for (const control of el.associationSection.querySelectorAll("button")) control.disabled = true;
+	el.associationMessage.hidden = true;
+	row.querySelector(".association-state").textContent = button.dataset.action === "register" ? "注册中" : "撤销中";
+	try {
+		await nativeHost.call(`association.${button.dataset.action}`, {scope:row.dataset.scope});
+	} catch (error) {
+		el.associationMessage.textContent = `${row.firstElementChild.textContent}：${error.message}`;
+		el.associationMessage.hidden = false;
+	} finally {
+		delete el.associationSection.dataset.busy;
+		await refreshFileAssociations();
+	}
 }
 
 function setObjectDimension(input, value) {
