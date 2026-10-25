@@ -1892,7 +1892,13 @@ body[data-hide-meta] .meta-panel {
 	margin-bottom: 12px;
 }
 
+.meta-panel[data-empty="true"] #metaDocumentPanel,
+.meta-panel[data-empty="true"] #metaSecurityPanel {
+	display: none;
+}
+
 #metaFontsPanel > .doc-font-panel,
+#metaFontsPanel > .doc-font-panel[hidden] + .font-panel,
 #metaSecurityPanel > .security-panel {
 	margin-top: 0;
 	padding-top: 0;

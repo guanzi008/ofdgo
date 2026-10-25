@@ -675,6 +675,7 @@ const el = {
 	annotationClose: document.querySelector("#annotationClose"),
 	annotationSubmit: document.querySelector("#annotationSubmit"),
 	annotationDetail: document.querySelector("#annotationDetail"),
+	docFontPanel: document.querySelector("#docFontPanel"),
 	docFontList: document.querySelector("#docFontList"),
 	docFontSummary: document.querySelector("#docFontSummary"),
 	availableFontSummary: document.querySelector("#availableFontSummary"),
@@ -12672,9 +12673,9 @@ function renderMeta(keepDetails = false) {
 	el.metaPanel.setAttribute("data-busy", String(!!doc.detailsPending));
 	document.title = `${nativeHost ? "OFDGo" : "OFDGo WebUI"} - ${state.doc ? state.fileName : "OFD编辑器"}`;
 	el.metaFile.textContent = state.doc ? state.fileName : "-";
-	el.metaTitle.textContent = doc.title || "-";
-	el.metaAuthor.textContent = doc.author || "-";
 	for (const [field, value] of [
+		[el.metaTitle, doc.title || ""],
+		[el.metaAuthor, doc.author || ""],
 		[el.metaSubject, doc.subject || ""],
 		[el.metaAbstract, doc.abstract || ""],
 		[el.metaCreationDate, formatDocumentTime(doc.creationDate)],
@@ -12684,6 +12685,8 @@ function renderMeta(keepDetails = false) {
 		[el.metaDocId, doc.docId || ""],
 		[el.metaDocUsage, doc.docUsage || ""],
 		[el.metaCover, doc.cover || ""],
+		[el.metaType, doc.docType || ""],
+		[el.metaVersion, doc.version || ""],
 	]) {
 		field.textContent = value;
 		field.parentElement.hidden = !value;
@@ -12702,12 +12705,11 @@ function renderMeta(keepDetails = false) {
 		return row;
 	}));
 	el.metaCustomData.hidden = !doc.customData?.length;
-	el.metaType.textContent = doc.docType || "-";
-	el.metaVersion.textContent = doc.version || "-";
-	el.metaFonts.textContent = String(doc.fontCount || 0);
 	el.pageTotal.textContent = String(doc.pageCount || 0);
 	if (keepDetails && doc.detailsPending) return;
-	el.metaSignatures.textContent = doc.detailsPending ? "正在检查签名" : doc.detailsError ? "读取失败" : String(doc.signatureCount || 0);
+	const detailsStatus = doc.detailsPending ? "读取中" : doc.detailsError ? "读取失败" : "";
+	el.metaSignatures.textContent = detailsStatus || String(doc.signatureCount || 0);
+	el.metaFonts.textContent = detailsStatus || String(doc.fontCount || 0);
 	renderMetaContent(el.signatureList, [doc.signatures, doc.signatureError], renderSignatures);
 	updateStructureControls();
 	renderMetaContent(el.docFontList, doc.fonts || [], renderDocumentFonts);
@@ -13299,15 +13301,10 @@ function mountAnnotationNotes(index, surface, annotations) {
 
 function renderDocumentFonts() {
 	const fonts = state.doc?.fonts || [];
+	el.docFontPanel.hidden = !fonts.length;
 	el.docFontList.replaceChildren();
 	el.docFontSummary.textContent = fontSummary(fonts);
-	if (!fonts.length) {
-		const empty = document.createElement("div");
-		empty.className = "font-empty";
-		empty.textContent = "暂无字体";
-		el.docFontList.append(empty);
-		return;
-	}
+	if (!fonts.length) return;
 	const fragment = document.createDocumentFragment();
 	for (const font of fonts) {
 		const row = document.createElement("div");
@@ -13756,6 +13753,7 @@ function updateInvoiceControl(disabled) {
 
 function updateDocumentControls() {
 	const count = state.doc?.documents?.length || 0, index = managedDocumentIndex(), manager = state.documentManagement;
+	el.metaPanel.setAttribute("data-empty", String(!state.doc));
 	const busy = document.body.hasAttribute("data-busy");
 	const disabled = !state.doc || !state.ready || state.exporting || busy;
 	el.printButton.disabled = disabled;
