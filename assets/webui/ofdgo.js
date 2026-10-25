@@ -15,7 +15,7 @@ const SCROLL_SEGMENT_SIZE = 1000000;
 const OBJECT_CLIPBOARD_TYPE = "application/x-ofdgo-objects";
 const RESOURCE_KINDS = [["Font", "字体"], ["Image", "图片"], ["Audio", "音频"], ["Video", "视频"], ["Attachment", "附件"], ["ColorSpace", "色彩"], ["DrawParam", "样式"]];
 const SETTINGS_KINDS = [["bookmarks", "书签"], ["actions", "动作"], ["templates", "模板"], ["layers", "图层"], ["extensions", "扩展"]];
-const INFO_FIELDS = ["title", "author", "subject", "abstract", "creationDate", "modDate", "creator", "creatorVersion", "docId", "docUsage", "cover"];
+const INFO_FIELDS = ["docId", "title", "author", "subject", "abstract", "creationDate", "modDate", "docUsage", "cover", "creator", "creatorVersion"];
 const STATUS = {
 	ready: "选择 OFD、PDF 文件",
 	opening: "正在打开文档",
@@ -342,19 +342,19 @@ const el = {
 	versionClose: document.querySelector("#versionClose"),
 	infoPanel: document.querySelector("#infoPanel"),
 	infoForm: document.querySelector("#infoForm"),
+	infoDocId: document.querySelector("#infoDocId"),
 	infoTitle: document.querySelector("#infoTitle"),
 	infoAuthor: document.querySelector("#infoAuthor"),
 	infoSubject: document.querySelector("#infoSubject"),
 	infoAbstract: document.querySelector("#infoAbstract"),
-	infoKeywordRows: document.querySelector("#infoKeywordRows"),
-	infoKeywordAdd: document.querySelector("#infoKeywordAdd"),
 	infoCreationDate: document.querySelector("#infoCreationDate"),
 	infoModDate: document.querySelector("#infoModDate"),
-	infoCreator: document.querySelector("#infoCreator"),
-	infoCreatorVersion: document.querySelector("#infoCreatorVersion"),
-	infoDocId: document.querySelector("#infoDocId"),
 	infoDocUsage: document.querySelector("#infoDocUsage"),
 	infoCover: document.querySelector("#infoCover"),
+	infoKeywordRows: document.querySelector("#infoKeywordRows"),
+	infoKeywordAdd: document.querySelector("#infoKeywordAdd"),
+	infoCreator: document.querySelector("#infoCreator"),
+	infoCreatorVersion: document.querySelector("#infoCreatorVersion"),
 	infoCustomRows: document.querySelector("#infoCustomRows"),
 	infoCustomAdd: document.querySelector("#infoCustomAdd"),
 	infoCancel: document.querySelector("#infoCancel"),

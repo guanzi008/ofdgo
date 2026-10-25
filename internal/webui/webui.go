@@ -84,18 +84,18 @@ type pageBoxInfo struct {
 
 // DocumentMetadata 文档描述，供信息展示与包内文档管理共用
 type DocumentMetadata struct {
+	DocID          string             `json:"docId"`
 	Title          string             `json:"title"`
 	Author         string             `json:"author"`
 	Subject        string             `json:"subject"`
 	Abstract       string             `json:"abstract"`
-	Keywords       []string           `json:"keywords,omitempty"`
 	CreationDate   string             `json:"creationDate"`
 	ModDate        string             `json:"modDate"`
-	Creator        string             `json:"creator"`
-	CreatorVersion string             `json:"creatorVersion"`
-	DocID          string             `json:"docId"`
 	DocUsage       string             `json:"docUsage"`
 	Cover          string             `json:"cover"`
+	Keywords       []string           `json:"keywords,omitempty"`
+	Creator        string             `json:"creator"`
+	CreatorVersion string             `json:"creatorVersion"`
 	CustomData     []ofdgo.CustomData `json:"customData,omitempty"`
 }
 
@@ -104,9 +104,9 @@ type DocumentMetadata struct {
 // 返回: DocumentMetadata 界面元数据
 func documentMetadata(info ofdgo.DocInfo) DocumentMetadata {
 	metadata := DocumentMetadata{
-		Title: info.Title, Author: info.Author, Subject: info.Subject, Abstract: info.Abstract, Keywords: slices.Clone(info.Keywords),
-		CreationDate: info.CreationDate, ModDate: info.ModDate, Creator: info.Creator, CreatorVersion: info.CreatorVersion,
-		DocID: info.DocID, DocUsage: info.DocUsage, Cover: info.Cover,
+		DocID: info.DocID, Title: info.Title, Author: info.Author, Subject: info.Subject, Abstract: info.Abstract,
+		CreationDate: info.CreationDate, ModDate: info.ModDate, DocUsage: info.DocUsage, Cover: info.Cover,
+		Keywords: slices.Clone(info.Keywords), Creator: info.Creator, CreatorVersion: info.CreatorVersion,
 	}
 	if info.CustomDatas != nil {
 		metadata.CustomData = slices.Clone(info.CustomDatas.CustomData)
