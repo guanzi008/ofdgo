@@ -791,12 +791,24 @@ func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []b
 	return nil
 }
 
+// editorResourceSelection 保存单次输出中同一编辑快照的资源筛选结果
+type editorResourceSelection struct {
+	owner         *Editor
+	fonts, images []editorResource
+	spaces        []ColorSpace
+	files         map[string]bool
+}
+
 // usedResources 沿图层、对象及资源依赖筛选新增资源和共享文件，不修改资源池
 // 入参: ctx 取消上下文
 // 返回: []editorResource 新增字体, []editorResource 新增图片, []ColorSpace 新增颜色空间, map[string]bool 独立资源文件集合, error 取消错误
 func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResource, spaces []ColorSpace, sourceFiles map[string]bool, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, nil, nil, err
+	}
+	if e.output != nil && e.output.resources != nil && e.output.resources.owner == e {
+		cached := e.output.resources
+		return slices.Clone(cached.fonts), slices.Clone(cached.images), slices.Clone(cached.spaces), maps.Clone(cached.files), nil
 	}
 	used := make(map[string]bool)
 	promoted := make(map[string]bool)
@@ -944,6 +956,9 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, nil, nil, nil, err
+	}
+	if e.output != nil {
+		e.output.resources = &editorResourceSelection{owner: e, fonts: slices.Clone(fonts), images: slices.Clone(images), spaces: slices.Clone(spaces), files: maps.Clone(files)}
 	}
 	return fonts, images, spaces, files, nil
 }

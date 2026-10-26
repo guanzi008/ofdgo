@@ -21,10 +21,43 @@ import (
 
 // editorChange 页面或对象操作及其修订标识
 type editorChange struct {
-	undo   func(*Editor)
-	redo   func(*Editor)
-	before uint64
-	after  uint64
+	undo    func(*Editor)
+	redo    func(*Editor)
+	before  uint64
+	after   uint64
+	changes EditorChanges
+}
+
+// EditorChanges 描述最近一次修改或历史回放的刷新范围
+// All表示文档结构或共享资源变化；否则Pages为受影响的零基页码
+// 返回值只覆盖最近一次操作，调用方应在每次操作后读取
+type EditorChanges struct {
+	All   bool  `json:"all"`
+	Pages []int `json:"pages,omitempty"`
+}
+
+// Changes 获取最近一次有效修改的独立刷新范围
+// 返回: EditorChanges 变化范围；未发生修改时为空
+func (e *Editor) Changes() EditorChanges {
+	return EditorChanges{All: e.changes.All, Pages: slices.Clone(e.changes.Pages)}
+}
+
+// merge 合并同一事务中的变化范围
+// 入参: change 待合并的变化
+func (c *EditorChanges) merge(change EditorChanges) {
+	if c.All {
+		return
+	}
+	if change.All {
+		c.All = true
+		c.Pages = nil
+		return
+	}
+	for _, page := range change.Pages {
+		if !slices.Contains(c.Pages, page) {
+			c.Pages = append(c.Pages, page)
+		}
+	}
 }
 
 // Transaction 将多项修改作为一次原子操作提交，失败时保留原文档及历史
@@ -37,6 +70,8 @@ func (e *Editor) Transaction(edit func(*Editor) error) error {
 	before.Info = cloneEditorData(e.Info)
 	next := e.transactionSnapshot()
 	next.history, next.historyIndex, next.historyLimit = nil, 0, 0
+	pending := &EditorChanges{}
+	next.transactionChanges = pending
 	*e = next
 	committed := false
 	defer func() {
@@ -48,6 +83,11 @@ func (e *Editor) Transaction(edit func(*Editor) error) error {
 		return err
 	}
 	changed := e.revision != before.revision
+	changes := *pending
+	if e.transactionChanges != pending {
+		changes = EditorChanges{All: true}
+	}
+	e.transactionChanges = before.transactionChanges
 	e.history, e.historyIndex, e.historyLimit = before.history, before.historyIndex, before.historyLimit
 	if !sameBackend(e.backends.FontResources, before.backends.FontResources) {
 		e.clearFontResourceCache()
@@ -62,7 +102,7 @@ func (e *Editor) Transaction(edit func(*Editor) error) error {
 	}
 	if changed {
 		e.serial, e.revision = before.serial, before.revision
-		e.recordTransaction(before)
+		e.recordTransaction(before, changes)
 	}
 	committed = true
 	return nil
@@ -108,6 +148,7 @@ func (e *Editor) Undo() bool {
 	e.historyIndex--
 	change := e.history[e.historyIndex]
 	change.undo(e)
+	e.changes, e.objectIndex = change.changes, nil
 	e.revision = change.before
 	return true
 }
@@ -120,6 +161,7 @@ func (e *Editor) Redo() bool {
 	}
 	change := e.history[e.historyIndex]
 	change.redo(e)
+	e.changes, e.objectIndex = change.changes, nil
 	e.historyIndex++
 	e.revision = change.after
 	return true
@@ -132,15 +174,12 @@ func (e *Editor) Revision() uint64 {
 	return e.revision
 }
 
-// transactionSnapshot 复制可变容器，保留只读XML、图元及二进制资源的共享
+// transactionSnapshot 复制顶层容器，共享按替换方式更新的页面图层、图元和二进制资源
 // 返回: Editor 独立事务状态
 func (e *Editor) transactionSnapshot() Editor {
 	next := *e
 	next.Info = cloneEditorData(e.Info)
-	next.pages = make([]PageContent, len(e.pages))
-	for i, page := range e.pages {
-		next.pages[i] = copyEditorPage(page)
-	}
+	next.pages = slices.Clone(e.pages)
 	next.resources = slices.Clone(e.resources)
 	next.fonts, next.images, next.resourceID = maps.Clone(e.fonts), maps.Clone(e.images), maps.Clone(e.resourceID)
 	next.origins = maps.Clone(e.origins)
@@ -213,9 +252,13 @@ func (e *Editor) retainDocumentResources(source *Editor) {
 }
 
 // recordTransaction 记录事务快照，在各自资源视图中保留后续注册的资源
-// 入参: before 修改前的文档状态
-func (e *Editor) recordTransaction(before Editor) {
-	if change := e.recordChange(); change != nil {
+// 入参: before 修改前的文档状态, changes 可选的事务变化范围
+func (e *Editor) recordTransaction(before Editor, changes ...EditorChanges) {
+	scope := EditorChanges{All: true}
+	if len(changes) != 0 {
+		scope = changes[0]
+	}
+	if change := e.recordChangeScope(scope); change != nil {
 		after := e.transactionSnapshot()
 		before.history, after.history = nil, nil
 		change.undo = func(e *Editor) {
@@ -230,10 +273,23 @@ func (e *Editor) recordTransaction(before Editor) {
 }
 
 // recordChange 分配修订标识并为已完成的有效修改预留记录
+// 入参: pages 受影响页码，省略表示全局变化
 // 返回: *editorChange 记录，未启用历史时为nil
-func (e *Editor) recordChange() *editorChange {
+func (e *Editor) recordChange(pages ...int) *editorChange {
+	return e.recordChangeScope(EditorChanges{All: len(pages) == 0, Pages: slices.Clone(pages)})
+}
+
+// recordChangeScope 分配修订并记录变更范围，事务中同步合并
+// 入参: scope 变更范围
+// 返回: *editorChange 可补充回放操作的记录
+func (e *Editor) recordChangeScope(scope EditorChanges) *editorChange {
+	e.objectIndex = nil
+	e.changes = scope
+	if e.transactionChanges != nil {
+		e.transactionChanges.merge(scope)
+	}
 	e.serial++
-	change := editorChange{before: e.revision, after: e.serial}
+	change := editorChange{before: e.revision, after: e.serial, changes: scope}
 	e.revision = e.serial
 	if e.historyLimit == 0 {
 		return nil

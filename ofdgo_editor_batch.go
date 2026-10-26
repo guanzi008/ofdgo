@@ -30,6 +30,36 @@ type editorObjectPosition struct {
 	index int
 }
 
+// editorObjectIndex 复用最近页面的只读对象位置，图层容器替换后重新建立
+type editorObjectIndex struct {
+	layers    []Layer
+	positions map[string]editorObjectPosition
+}
+
+// objectPositions 获取页面的对象位置索引，重复编号保留第一个匹配
+// 入参: page 内部只读页面
+// 返回: map[string]editorObjectPosition 只读索引
+func (e *Editor) objectPositions(page *PageContent) map[string]editorObjectPosition {
+	layers := page.Content.Layer
+	if len(layers) == 0 {
+		return nil
+	}
+	if cached := e.objectIndex; cached != nil && len(cached.layers) == len(layers) && &cached.layers[0] == &layers[0] {
+		return cached.positions
+	}
+	positions := make(map[string]editorObjectPosition)
+	for i, layer := range layers {
+		for j, object := range layer.Objects {
+			id := editorObjectID(object)
+			if _, exists := positions[id]; id != "" && !exists {
+				positions[id] = editorObjectPosition{i, j}
+			}
+		}
+	}
+	e.objectIndex = &editorObjectIndex{layers: layers, positions: positions}
+	return positions
+}
+
 // ObjectPosition 对象在图层或页块直接成员中的位置，Index从0开始，Count不含嵌套页块的对象
 type ObjectPosition struct {
 	Layer     string
@@ -709,7 +739,7 @@ func (e *Editor) replaceLayers(page int, layers []Layer) {
 func (e *Editor) replacePreparedLayers(page int, after []Layer) {
 	if e.historyLimit == 0 {
 		e.pages[page].Content.Layer = after
-		e.recordChange()
+		e.recordChange(page)
 		return
 	}
 	before := copyEditorPage(e.pages[page])
@@ -738,7 +768,7 @@ func (e *Editor) replacePreparedLayers(page int, after []Layer) {
 		e.pages[page].Content.Layer = copyEditorPage(PageContent{Content: Content{Layer: layers}}).Content.Layer
 	}
 	apply(e, after)
-	if change := e.recordChange(); change != nil {
+	if change := e.recordChange(page); change != nil {
 		change.undo = func(e *Editor) { apply(e, before.Content.Layer) }
 		change.redo = func(e *Editor) { apply(e, after) }
 	}
@@ -835,6 +865,15 @@ func (e *Editor) updateObjectOrigins(page int, objects []GraphicObject, preserve
 		return nil
 	}
 	apply := func(e *Editor, objects []GraphicObject, origins map[string]*editorObjectOrigin) {
+		layers := slices.Clone(e.pages[page].Content.Layer)
+		cloned := make(map[int]bool)
+		for _, index := range indexes {
+			if !cloned[index.layer] {
+				layers[index.layer].Objects = slices.Clone(layers[index.layer].Objects)
+				cloned[index.layer] = true
+			}
+		}
+		e.pages[page].Content.Layer = layers
 		for i, index := range indexes {
 			e.pages[page].Content.Layer[index.layer].Objects[index.index] = objects[i]
 		}
@@ -843,7 +882,7 @@ func (e *Editor) updateObjectOrigins(page int, objects []GraphicObject, preserve
 		}
 	}
 	apply(e, after, afterOrigins)
-	if change := e.recordChange(); change != nil {
+	if change := e.recordChange(page); change != nil {
 		change.undo = func(e *Editor) { apply(e, before, beforeOrigins) }
 		change.redo = func(e *Editor) { apply(e, after, afterOrigins) }
 	}
@@ -891,30 +930,19 @@ func (e *Editor) selectedObjects(page int, ids []string) ([]GraphicObject, []edi
 	if len(ids) == 0 {
 		return objects, indexes, nil
 	}
-	selected := make(map[string]int, len(ids))
+	positions := e.objectPositions(content)
+	selected := make(map[string]bool, len(ids))
 	for i, id := range ids {
-		if _, exists := selected[id]; exists {
+		if selected[id] {
 			return nil, nil, fmt.Errorf("duplicate object %q", id)
 		}
-		selected[id] = i
-	}
-	for i, layer := range content.Content.Layer {
-		for j, object := range layer.Objects {
-			id := editorObjectID(object)
-			if index, ok := selected[id]; ok && id != "" {
-				objects[index] = object
-				indexes[index] = editorObjectPosition{i, j}
-				delete(selected, id)
-				if len(selected) == 0 {
-					return objects, indexes, nil
-				}
-			}
-		}
-	}
-	for _, id := range ids {
-		if _, missing := selected[id]; missing {
+		selected[id] = true
+		position, ok := positions[id]
+		if !ok {
 			return nil, nil, fmt.Errorf("object %q not found on page %d", id, page)
 		}
+		indexes[i] = position
+		objects[i] = content.Content.Layer[position.layer].Objects[position.index]
 	}
 	return objects, indexes, nil
 }

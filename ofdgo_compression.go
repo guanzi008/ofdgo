@@ -70,6 +70,7 @@ type outputOptimization struct {
 	protected bool
 	completed int
 	deflater  *flate.Writer
+	resources *editorResourceSelection
 }
 
 // outputCompressionBuffer 限制候选ZIP编码，不能缩小时终止本次压缩

@@ -19,6 +19,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
 	"sync"
 )
@@ -241,6 +242,22 @@ func (e *Editor) copiedLayerStyle(object GraphicObject) string {
 // 入参: value 原值
 // 返回: T 独立副本
 func cloneEditorData[T any](value T) T {
+	switch source := any(value).(type) {
+	case GraphicObject:
+		return any(copyEditorGraphicObject(source)).(T)
+	case TextObject:
+		return any(copyEditorTextObject(source)).(T)
+	case PathObject:
+		return any(copyEditorPathObject(source)).(T)
+	case ImageObject:
+		return any(copyEditorImageObject(source)).(T)
+	case CompositeGraphicUnit:
+		return any(copyEditorCompositeGraphicUnit(source)).(T)
+	case PageContent:
+		return any(copyEditorPageContent(source)).(T)
+	case Layer:
+		return any(copyEditorLayer(source)).(T)
+	}
 	source := reflect.ValueOf(value)
 	if !source.IsValid() {
 		return value
@@ -335,4 +352,175 @@ func editorCloneFields(kind reflect.Type) []int {
 	}
 	actual, _ := editorClonePlans.LoadOrStore(kind, fields)
 	return actual.([]int)
+}
+
+// copyEditorGraphicObject 复制GraphicObject的可变字段，保留内部只读状态
+// 入参: value 原值
+// 返回: GraphicObject 独立副本
+func copyEditorGraphicObject(value GraphicObject) GraphicObject {
+	value.TextObject = copyEditorTextObject(value.TextObject)
+	value.PathObject = copyEditorPathObject(value.PathObject)
+	value.ImageObject = copyEditorImageObject(value.ImageObject)
+	value.CompositeGraphicUnit = copyEditorCompositeGraphicUnit(value.CompositeGraphicUnit)
+	return value
+}
+
+// copyEditorTextObject 复制TextObject的可变字段，保留内部只读状态
+// 入参: value 原值
+// 返回: TextObject 独立副本
+func copyEditorTextObject(value TextObject) TextObject {
+	if value.DashOffset != nil {
+		copied := *value.DashOffset
+		value.DashOffset = &copied
+	}
+	if value.Alpha != nil {
+		copied := *value.Alpha
+		value.Alpha = &copied
+	}
+	if value.Visible != nil {
+		copied := *value.Visible
+		value.Visible = &copied
+	}
+	if value.Fill != nil {
+		copied := *value.Fill
+		value.Fill = &copied
+	}
+	if value.Stroke != nil {
+		copied := *value.Stroke
+		value.Stroke = &copied
+	}
+	value.StrokeColor = cloneEditorData(value.StrokeColor)
+	value.FillColor = cloneEditorData(value.FillColor)
+	value.CGTransform = slices.Clone(value.CGTransform)
+	value.TextCode = slices.Clone(value.TextCode)
+	value.Clips = cloneEditorData(value.Clips)
+	value.Actions = cloneEditorData(value.Actions)
+	return value
+}
+
+// copyEditorPathObject 复制PathObject的可变字段，保留内部只读状态
+// 入参: value 原值
+// 返回: PathObject 独立副本
+func copyEditorPathObject(value PathObject) PathObject {
+	if value.DashOffset != nil {
+		copied := *value.DashOffset
+		value.DashOffset = &copied
+	}
+	if value.Alpha != nil {
+		copied := *value.Alpha
+		value.Alpha = &copied
+	}
+	if value.Visible != nil {
+		copied := *value.Visible
+		value.Visible = &copied
+	}
+	if value.Stroke != nil {
+		copied := *value.Stroke
+		value.Stroke = &copied
+	}
+	if value.Fill != nil {
+		copied := *value.Fill
+		value.Fill = &copied
+	}
+	value.StrokeColor = cloneEditorData(value.StrokeColor)
+	value.FillColor = cloneEditorData(value.FillColor)
+	value.Clips = cloneEditorData(value.Clips)
+	value.Actions = cloneEditorData(value.Actions)
+	return value
+}
+
+// copyEditorImageObject 复制ImageObject的可变字段，保留内部只读状态
+// 入参: value 原值
+// 返回: ImageObject 独立副本
+func copyEditorImageObject(value ImageObject) ImageObject {
+	if value.Alpha != nil {
+		copied := *value.Alpha
+		value.Alpha = &copied
+	}
+	if value.Visible != nil {
+		copied := *value.Visible
+		value.Visible = &copied
+	}
+	value.Border = cloneEditorData(value.Border)
+	value.Clips = cloneEditorData(value.Clips)
+	value.Actions = cloneEditorData(value.Actions)
+	return value
+}
+
+// copyEditorCompositeGraphicUnit 复制CompositeGraphicUnit的可变字段，保留内部只读状态
+// 入参: value 原值
+// 返回: CompositeGraphicUnit 独立副本
+func copyEditorCompositeGraphicUnit(value CompositeGraphicUnit) CompositeGraphicUnit {
+	if value.Alpha != nil {
+		copied := *value.Alpha
+		value.Alpha = &copied
+	}
+	if value.Visible != nil {
+		copied := *value.Visible
+		value.Visible = &copied
+	}
+	value.Objects = slices.Clone(value.Objects)
+	for i := range value.Objects {
+		value.Objects[i] = copyEditorGraphicObject(value.Objects[i])
+	}
+	value.TextObject = slices.Clone(value.TextObject)
+	for i := range value.TextObject {
+		value.TextObject[i] = copyEditorTextObject(value.TextObject[i])
+	}
+	value.PathObject = slices.Clone(value.PathObject)
+	for i := range value.PathObject {
+		value.PathObject[i] = copyEditorPathObject(value.PathObject[i])
+	}
+	value.ImageObject = slices.Clone(value.ImageObject)
+	for i := range value.ImageObject {
+		value.ImageObject[i] = copyEditorImageObject(value.ImageObject[i])
+	}
+	value.CompositeGraphicUnit = slices.Clone(value.CompositeGraphicUnit)
+	for i := range value.CompositeGraphicUnit {
+		value.CompositeGraphicUnit[i] = copyEditorCompositeGraphicUnit(value.CompositeGraphicUnit[i])
+	}
+	value.Clips = cloneEditorData(value.Clips)
+	value.Actions = cloneEditorData(value.Actions)
+	return value
+}
+
+// copyEditorPageContent 复制PageContent的可变字段，保留内部只读状态
+// 入参: value 原值
+// 返回: PageContent 独立副本
+func copyEditorPageContent(value PageContent) PageContent {
+	value.Template = slices.Clone(value.Template)
+	value.PageRes = slices.Clone(value.PageRes)
+	value.Content.Layer = slices.Clone(value.Content.Layer)
+	for i := range value.Content.Layer {
+		value.Content.Layer[i] = copyEditorLayer(value.Content.Layer[i])
+	}
+	value.Actions = cloneEditorData(value.Actions)
+	return value
+}
+
+// copyEditorLayer 复制Layer的可变字段，保留内部只读状态
+// 入参: value 原值
+// 返回: Layer 独立副本
+func copyEditorLayer(value Layer) Layer {
+	value.Objects = slices.Clone(value.Objects)
+	for i := range value.Objects {
+		value.Objects[i] = copyEditorGraphicObject(value.Objects[i])
+	}
+	value.TextObject = slices.Clone(value.TextObject)
+	for i := range value.TextObject {
+		value.TextObject[i] = copyEditorTextObject(value.TextObject[i])
+	}
+	value.PathObject = slices.Clone(value.PathObject)
+	for i := range value.PathObject {
+		value.PathObject[i] = copyEditorPathObject(value.PathObject[i])
+	}
+	value.ImageObject = slices.Clone(value.ImageObject)
+	for i := range value.ImageObject {
+		value.ImageObject[i] = copyEditorImageObject(value.ImageObject[i])
+	}
+	value.CompositeGraphicUnit = slices.Clone(value.CompositeGraphicUnit)
+	for i := range value.CompositeGraphicUnit {
+		value.CompositeGraphicUnit[i] = copyEditorCompositeGraphicUnit(value.CompositeGraphicUnit[i])
+	}
+	return value
 }

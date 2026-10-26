@@ -253,7 +253,7 @@ func (e *Editor) replaceGroup(page int, indexes []editorObjectPosition, objects 
 		}
 	}
 	apply(e, after, origins)
-	if change := e.recordChange(); change != nil {
+	if change := e.recordChange(page); change != nil {
 		change.undo = func(e *Editor) { apply(e, before, previous) }
 		change.redo = func(e *Editor) { apply(e, after, origins) }
 	}

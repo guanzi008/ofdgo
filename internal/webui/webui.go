@@ -365,11 +365,12 @@ type editorClipboard struct {
 // editorInfo 编辑文档信息与操作状态
 type editorInfo struct {
 	DocumentInfo
-	Revision         uint64   `json:"revision"`
-	CanUndo          bool     `json:"canUndo"`
-	CanRedo          bool     `json:"canRedo"`
-	PageCapabilities []uint   `json:"pageCapabilities"`
-	EditWarnings     []string `json:"editWarnings,omitempty"`
+	Revision         uint64              `json:"revision"`
+	CanUndo          bool                `json:"canUndo"`
+	CanRedo          bool                `json:"canRedo"`
+	PageCapabilities []uint              `json:"pageCapabilities"`
+	EditWarnings     []string            `json:"editWarnings,omitempty"`
+	Changes          ofdgo.EditorChanges `json:"changes"`
 }
 
 // editorPageInfo 页面操作结果与目标页面
@@ -3203,7 +3204,7 @@ func (e *businessEngine) encodeResult(result apiResult) string {
 // editorSummary 获取当前编辑文档状态
 // 返回: editorInfo 文档信息
 func (e *businessEngine) editorSummary() editorInfo {
-	info := editorInfo{DocumentInfo: e.currentSession.Summary(), Revision: e.currentEditor.Revision(), CanUndo: e.currentEditor.CanUndo(), CanRedo: e.currentEditor.CanRedo()}
+	info := editorInfo{DocumentInfo: e.currentSession.Summary(), Revision: e.currentEditor.Revision(), CanUndo: e.currentEditor.CanUndo(), CanRedo: e.currentEditor.CanRedo(), Changes: e.currentEditor.Changes()}
 	if !e.currentSession.doc.Permissions.Edit {
 		info.EditWarnings = append(info.EditWarnings, "原文件声明不允许编辑")
 	}
@@ -6740,6 +6741,25 @@ func (e *businessEngine) previewEditor(editor *ofdgo.Editor, annotations bool) (
 			session.fontFS = e.currentSession.fontFS
 			session.Renderer.SetFontFS(session.fontFS)
 			editor.SetFontFS(session.fontFS)
+		}
+		changes := editor.Changes()
+		if editor == e.currentEditor && !changes.All && len(session.boxCache) == len(e.currentSession.boxCache) {
+			changed := changes.Pages
+			for index, page := range e.currentSession.pageCache {
+				if !slices.Contains(changed, index) {
+					session.pageCache[index] = page
+				}
+			}
+			for _, index := range e.currentSession.textOrder {
+				if !slices.Contains(changed, index) {
+					session.cachePageText(index, e.currentSession.textCache[index])
+				}
+			}
+			for index, box := range e.currentSession.boxCache {
+				if !slices.Contains(changed, index) {
+					session.boxCache[index] = box
+				}
+			}
 		}
 		if editor == e.currentEditor {
 			session.input, e.currentSession.input = e.currentSession.input, nil

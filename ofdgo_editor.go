@@ -46,38 +46,41 @@ const editorPathValidationLimit = 1024
 // 阶段可重复，准备完成不代表保存成功
 // 回调不可重入修改编辑器，可返回context.Canceled等调用方停止原因
 type Editor struct {
-	OnWriteProgress  func(stage string, completed, total int) error
-	Info             DocInfo
-	pages            []PageContent
-	resources        []editorResource
-	runtimeResources *Resources
-	fonts            map[string]*FontResource
-	fontRegistration editorFontRegistration
-	fontDirs         []string
-	fontFS           []fs.FS
-	fontRenderer     *Renderer
-	fontSourcesCache *fontSourceCache
-	fontMetrics      map[string]FontMetrics
-	backends         RenderBackends
-	images           map[string]image.Point
-	resourceID       map[editorResourceKey]string
-	maxID            int
-	history          []editorChange
-	historyIndex     int
-	historyLimit     int
-	revision         uint64
-	serial           uint64
-	source           *editorSource
-	origins          map[string]*editorObjectOrigin
-	removedPages     map[string]bool
-	structureRemaps  map[string][]map[string]string
-	outlines         []byte
-	encryption       *encryptionState
-	output           *outputOptimization
-	saveTarget       Output
-	snapshotArchive  *editorSnapshotArchive
-	validatedPaths   *renderCache[string, bool]
-	richIndex        *richTextIndex
+	OnWriteProgress    func(stage string, completed, total int) error
+	Info               DocInfo
+	pages              []PageContent
+	resources          []editorResource
+	runtimeResources   *Resources
+	fonts              map[string]*FontResource
+	fontRegistration   editorFontRegistration
+	fontDirs           []string
+	fontFS             []fs.FS
+	fontRenderer       *Renderer
+	fontSourcesCache   *fontSourceCache
+	fontMetrics        map[string]FontMetrics
+	backends           RenderBackends
+	images             map[string]image.Point
+	resourceID         map[editorResourceKey]string
+	maxID              int
+	history            []editorChange
+	historyIndex       int
+	historyLimit       int
+	revision           uint64
+	serial             uint64
+	source             *editorSource
+	origins            map[string]*editorObjectOrigin
+	removedPages       map[string]bool
+	structureRemaps    map[string][]map[string]string
+	outlines           []byte
+	encryption         *encryptionState
+	output             *outputOptimization
+	saveTarget         Output
+	snapshotArchive    *editorSnapshotArchive
+	validatedPaths     *renderCache[string, bool]
+	changes            EditorChanges
+	transactionChanges *EditorChanges
+	objectIndex        *editorObjectIndex
+	richIndex          *richTextIndex
 }
 
 // editorResource 文档内嵌资源
@@ -892,13 +895,8 @@ func (e *Editor) findObject(page int, id string) (*Layer, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	for i := range content.Content.Layer {
-		layer := &content.Content.Layer[i]
-		for index, object := range layer.Objects {
-			if editorObjectID(object) == id && id != "" {
-				return layer, index, nil
-			}
-		}
+	if position, ok := e.objectPositions(content)[id]; ok {
+		return &content.Content.Layer[position.layer], position.index, nil
 	}
 	return nil, 0, fmt.Errorf("object %q not found on page %d", id, page)
 }

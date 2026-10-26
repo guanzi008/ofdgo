@@ -34,8 +34,9 @@ type editorFontUsage struct {
 	unsafe bool
 }
 
-// editorFontSubset 保存单个新增字体最近一次裁剪结果，不保留历史字形集合
+// editorFontSubset 保存单个新增字体及其快照最近一次裁剪结果，不保留历史字形集合
 type editorFontSubset struct {
+	source [32]byte
 	glyphs []uint16
 	data   []byte
 	mapped bool
@@ -317,13 +318,13 @@ func (e *Editor) subsetSnapshotFonts(ctx context.Context, progress editorProgres
 	if e.source == nil || e.backends.FontResources == nil {
 		return nil, ctx.Err()
 	}
-	candidates := make(map[string]bool)
-	for _, resource := range e.resources {
+	candidates := make(map[string]int)
+	for i, resource := range e.resources {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		if resource.font != nil && resource.font.FontFile != "" && e.source.reader.fileNames[resource.name] {
-			candidates[resource.name] = true
+			candidates[resource.name] = i
 		}
 	}
 	if len(candidates) == 0 {
@@ -399,15 +400,24 @@ func (e *Editor) subsetSnapshotFonts(ctx context.Context, progress editorProgres
 		if font.unsafe {
 			continue
 		}
-		subset, err := e.backends.FontResources.SubsetFont(data, slices.Sorted(maps.Keys(glyphs)), preserve)
-		if err != nil {
-			return nil, err
+		ids := slices.Sorted(maps.Keys(glyphs))
+		checksum := sha256.Sum256(data)
+		resource := &e.resources[candidates[name]]
+		if resource.subset == nil || resource.subset.source != checksum || resource.subset.mapped != preserve || !slices.Equal(resource.subset.glyphs, ids) {
+			subset, err := e.backends.FontResources.SubsetFont(data, ids, preserve)
+			if err != nil {
+				return nil, err
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if len(subset) >= len(data) {
+				subset = nil
+			}
+			resource.subset = &editorFontSubset{source: checksum, glyphs: ids, data: subset, mapped: preserve}
 		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if len(subset) != 0 && len(subset) < len(data) {
-			result[name] = subset
+		if len(resource.subset.data) != 0 {
+			result[name] = resource.subset.data
 		}
 	}
 	return result, progress.report("fonts", len(candidates), len(candidates))
@@ -593,7 +603,7 @@ func (e *Editor) subsetNewFonts(progress editorProgress) (map[string][]byte, err
 			return nil, err
 		}
 		resource := &e.resources[i]
-		if resource.font == nil {
+		if resource.font == nil || e.source != nil && e.source.reader.fileNames[resource.name] {
 			continue
 		}
 		usage := used[resource.font.ID]

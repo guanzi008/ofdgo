@@ -4828,6 +4828,9 @@ async function changeDocument(name, item, ...args) {
 		openSeq = advanceDocumentSequence();
 		if (changingFont) {
 			await refreshFontBinding(doc, openSeq);
+		} else if (restoring && !doc.changes?.all && doc.changes?.pages?.length === 1 && doc.changes.pages[0] === state.pageIndex && (restoredIndex < 0 || restoredIndex === state.pageIndex)) {
+			if (location) canvasEditor.pendingSelection = {index:state.pageIndex, ids:location.ids};
+			await refreshEditorPage(doc, state.pageIndex, openSeq, clearSelection);
 		} else if (item || name === "ofdgoPasteObjects" || inserting || editingAnnotation) {
 			await refreshEditorPage(doc, item ? item.index : args[0], openSeq, clearSelection);
 		} else {
@@ -4960,7 +4963,7 @@ async function refreshFontBinding(doc, openSeq) {
 
 async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 	state.doc = doc;
-	resetSearch();
+	const search = refreshSearchPages([index], openSeq);
 	state.documentSelection = null;
 	pageView.resetPageLoading();
 	try {
@@ -4997,6 +5000,7 @@ async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 			renderMeta(true);
 			updateControls();
 			loadDocumentDetails(openSeq);
+			await search;
 			for (const shell of el.svgHost.children) pageView.observeFlowPage(shell);
 			for (const button of el.pageList.children) pageView.observeThumbnail(button, Number(button.dataset.pageIndex), openSeq);
 		}
@@ -10769,6 +10773,39 @@ function resetSearch(clearInput = true) {
 	el.searchResults.replaceChildren();
 	updateSearchCount();
 	clearSearchHighlights();
+}
+
+async function refreshSearchPages(pages, openSeq) {
+	const tab = documentTab(), target = tab.state, query = target.searchQuery;
+	if (!query || target.searchRunning) { resetSearch(false); return; }
+	const seq = ++target.searchSeq;
+	target.searchRunning = true;
+	const selected = target.searchMatches[target.searchIndex];
+	try {
+		const matches = target.searchMatches.filter(match => !pages.includes(match.page));
+		for (const page of pages) {
+			const result = await callTabWASM(tab, "ofdgoSearchPage", page, query);
+			if (tab.closed || target.openSeq !== openSeq || target.searchSeq !== seq) return;
+			for (const match of result || []) matches.push({...match, page});
+		}
+		matches.sort((a,b) => a.page - b.page);
+		target.searchMatches = matches;
+		target.searchIndex = selected ? matches.indexOf(selected) : -1;
+		if (isForegroundDocument(tab)) {
+			el.searchResults.replaceChildren();
+			clearSearchHighlights();
+			el.searchStatus.textContent = matches.length ? "搜索完成" : "暂无结果";
+			renderSearchResults();
+			if (target.searchIndex >= 0) renderSearchHighlights(matches[target.searchIndex].page);
+		}
+	} catch (err) {
+		if (target.openSeq === openSeq && target.searchSeq === seq) {
+			target.searchQuery = "";
+			if (isForegroundDocument(tab)) { resetSearch(false); showError(err, false); }
+		}
+	} finally {
+		if (target.searchSeq === seq) target.searchRunning = false;
+	}
 }
 
 async function searchDocument() {
