@@ -2802,7 +2802,6 @@ function detachDocumentView() {
 	state.scrollFrame = state.thumbnailFrame = state.openActionFrame = 0;
 	state.openActionTask = null;
 	pageView.resetPageLoading();
-	state.pageRenderRunning = state.pageRenderWorkers > 0;
 	state.pageWindow = null;
 	state.thumbnailWindow = null;
 	state.visiblePages.clear();

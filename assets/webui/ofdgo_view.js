@@ -229,6 +229,7 @@ export function createPageView(context) {
 				task.resolve(null);
 			}
 			context.state.pageRenderQueue = [];
+			context.state.pageRenderRunning = context.state.pageRenderWorkers > 0;
 			context.state.pagePrefetchIndex = null;
 			context.state.pagePrefetchDirection = 1;
 			context.state.pageInFlight.clear();
@@ -339,7 +340,7 @@ export function createPageView(context) {
 			const current = context.state.pageInFlight.get(key);
 			if (current) {
 				current.priority = Math.min(current.priority, priority);
-				if (current.preview && !options.preview) return current.promise.then(() => pageView.loadPageData(index, options));
+				if (current.preview && !options.preview) return current.promise.then(() => openSeq === context.state.openSeq ? pageView.loadPageData(index, options) : null);
 				return current.promise;
 			}
 			if (!options.refresh && context.state.pageCache.has(index) && (options.preview || !context.state.pageCache.get(index).previewOnly)) {
@@ -369,14 +370,18 @@ export function createPageView(context) {
 				return;
 			}
 			context.state.pageRenderRunning = true;
-			requestAnimationFrame(pageView.processPageRenderQueue);
+			const tab = context.documentTab(), openSeq = tab.state.openSeq;
+			requestAnimationFrame(() => {
+				if (context.activeTab === tab && openSeq === tab.state.openSeq) pageView.processPageRenderQueue();
+			});
 		},
 
 		async processPageRenderQueue() {
-			const tab = context.documentTab();
+			const tab = context.documentTab(), openSeq = tab.state.openSeq;
 			await context.nextFrame();
-			if (context.activeTab !== tab) return;
-			await Promise.all(Array.from({ length: nativeHost?.parallelism || context.wasmWorker?.parallelism || 1 }, () => pageView.processPageRenderTasks()));
+			if (context.activeTab !== tab || openSeq !== tab.state.openSeq) return;
+			const available = (nativeHost?.parallelism || context.wasmWorker?.parallelism || 1) - tab.state.pageRenderWorkers;
+			await Promise.all(Array.from({ length: Math.max(0, available) }, () => pageView.processPageRenderTasks()));
 		},
 
 		async processPageRenderTasks() {
@@ -516,21 +521,22 @@ export function createPageView(context) {
 		},
 
 		async loadSVGFonts(fonts, openSeq) {
+			const state = context.state;
 			for (const font of fonts) {
 				if (openSeq !== context.state.openSeq) {
 					return;
 				}
-				if (context.state.svgFonts.has(font.name)) {
+				if (state.svgFonts.has(font.name)) {
 					continue;
 				}
 				const key = `${openSeq}:${font.name}`;
-				let loading = context.state.svgFontLoads.get(key);
+				let loading = state.svgFontLoads.get(key);
 				if (!loading) {
 					loading = pageView.loadSVGFont(font, openSeq);
-					context.state.svgFontLoads.set(key, loading);
+					state.svgFontLoads.set(key, loading);
 				}
 				try { await loading; }
-				finally { if (context.state.svgFontLoads.get(key) === loading) context.state.svgFontLoads.delete(key); }
+				finally { if (state.svgFontLoads.get(key) === loading) state.svgFontLoads.delete(key); }
 			}
 		},
 
@@ -807,7 +813,9 @@ export function createPageView(context) {
 		async togglePageLayout() {
 			if (!(context.state.doc?.pageCount > 1) || document.body.hasAttribute("data-busy")) return;
 			const openSeq = context.state.openSeq;
-			if (!await context.canvasEditor.commitNudge() || !await context.canvasEditor.commitText() || !await context.canvasEditor.commitCrop() || openSeq !== context.state.openSeq) return;
+			if (!await context.canvasEditor.commitNudge() || openSeq !== context.state.openSeq) return;
+			if (!await context.canvasEditor.commitText() || openSeq !== context.state.openSeq) return;
+			if (!await context.canvasEditor.commitCrop() || openSeq !== context.state.openSeq) return;
 			context.state.pageLayoutPreference = context.state.pageLayout === 1 ? 2 : 1;
 			pageView.layoutPages();
 			pageView.layoutThumbnails();
@@ -1207,7 +1215,9 @@ export function createPageView(context) {
 		async toggleContinuous() {
 			if (!context.state.doc || document.body.hasAttribute("data-busy")) return;
 			const openSeq = context.state.openSeq;
-			if (!await context.canvasEditor.commitNudge() || !await context.canvasEditor.commitText() || !await context.canvasEditor.commitCrop() || openSeq !== context.state.openSeq) return;
+			if (!await context.canvasEditor.commitNudge() || openSeq !== context.state.openSeq) return;
+			if (!await context.canvasEditor.commitText() || openSeq !== context.state.openSeq) return;
+			if (!await context.canvasEditor.commitCrop() || openSeq !== context.state.openSeq) return;
 			const anchor = context.state.fitMode === "free" ? pageView.scaleAnchor() : null;
 			pageView.setContinuous(!context.state.continuous);
 			if (context.state.pageWindow) {
