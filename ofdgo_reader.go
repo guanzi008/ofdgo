@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -27,6 +28,9 @@ import (
 	"slices"
 	"strings"
 )
+
+// ErrIncompleteDocument 表示渐进阅读快照尚未包含请求的页面或完整文档
+var ErrIncompleteDocument = errors.New("document content is incomplete")
 
 // Reader OFD文件阅读器
 // Reader及共享它的Renderer需串行调用
@@ -50,6 +54,7 @@ type Reader struct {
 	drawParamCache            map[string]*DrawParam
 	compositeGraphicUnitCache map[string]*CompositeGraphicUnit
 	pageHeaderCache           map[string]PageContent
+	pageReady                 map[string]bool
 	pageContents              *renderCache[pageContentKey, PageContent]
 	doc                       *Document
 	relatedPending            bool
@@ -211,7 +216,7 @@ func (r *Reader) DocumentContext(ctx context.Context, index int) (*Reader, error
 	if index < 0 || index >= r.DocumentCount() {
 		return nil, fmt.Errorf("document index %d out of range", index)
 	}
-	next := &Reader{Path: r.Path, Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: index, resources: r.resources}
+	next := &Reader{Path: r.Path, Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: index, resources: r.resources, pageReady: r.pageReady}
 	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}
@@ -1098,6 +1103,9 @@ func resolveResourcePath(resPath, baseLoc, filePath string) string {
 // 入参: ctx 取消上下文, page 页面对象, textOnly 是否仅用于文字提取, template 是否按模板页读取
 // 返回: *PageContent 页面内容, error 错误信息
 func (r *Reader) readPageContent(ctx context.Context, page Page, textOnly, template bool) (*PageContent, error) {
+	if !template && r.pageReady != nil && !r.pageReady[page.ID] {
+		return nil, ErrIncompleteDocument
+	}
 	fullPath := r.ResPath(page.BaseLoc)
 	data, err := r.readFileViewContext(ctx, fullPath)
 	if err != nil {

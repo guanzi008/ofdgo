@@ -191,7 +191,7 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 	if e.closed {
 		return nativeFailure(fmt.Errorf("native engine is closed"))
 	}
-	if name == "ofdgoRenderPage" && e.currentSession != nil {
+	if name == "ofdgoRenderPage" && e.currentSession != nil && e.pdf == nil {
 		defer func() {
 			if failure := recover(); failure != nil {
 				result = nativeFailure(fmt.Errorf("%v", failure))
@@ -312,6 +312,10 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 		return nativeFailure(fmt.Errorf("unknown operation: %s", name))
 	}
 	call := &nativeCall{engine: e, ctx: ctx, emit: emit}
+	if e.pdf != nil {
+		e.pdf.progress = platformValueOf(call.progress("conversion", "", true))
+		e.pdf.font = platformValueOf(nativeCallback(call.font))
+	}
 	defer func() {
 		if err := call.abort(); err != nil {
 			if result == nil || result["ok"] == true {
@@ -328,6 +332,9 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 	values := make([]platformValue, len(prepared))
 	for i, arg := range prepared {
 		values[i] = platformValueOf(arg)
+	}
+	if err := e.preparePDF(name, values); err != nil {
+		return nativeFailure(err)
 	}
 	data, err := e.safeCall(fn, values)
 	if err != nil {
@@ -357,6 +364,7 @@ func (e *NativeEngine) Close() error {
 	e.gate <- struct{}{}
 	defer func() { <-e.gate }()
 	e.closed = true
+	e.clearPDF()
 	_, _ = e.discardPrint(nil)
 	_ = e.waitRenders(context.Background())
 	e.renderIdle = nil
@@ -955,7 +963,7 @@ func (c *nativeCall) prepare(name string, args []any) ([]any, error) {
 		return append(args, checkpoint), nil
 	case "ofdgoImportPages", "ofdgoImportDocuments", "ofdgoImportImages":
 		return append(args, c.progress("import", "", true)), nil
-	case "ofdgoConvertPDF":
+	case "ofdgoOpenPDF":
 		return append(args, c.progress("conversion", "", true), nativeCallback(c.font)), nil
 	case "ofdgoExportImages", "ofdgoExportPage", "ofdgoExportDocument", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion", "ofdgoSaveDocument", "ofdgoSaveSigned":
 		if len(args) == 0 {

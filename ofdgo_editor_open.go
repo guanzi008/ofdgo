@@ -131,6 +131,9 @@ func (r *Reader) Editor() (*Editor, error) {
 // 入参: ctx 取消上下文
 // 返回: *Editor 编辑器, error 初始化或取消错误
 func (r *Reader) EditorContext(ctx context.Context) (*Editor, error) {
+	if r.pageReady != nil {
+		return nil, ErrIncompleteDocument
+	}
 	_, err := r.DocContext(ctx)
 	if err != nil {
 		return nil, err

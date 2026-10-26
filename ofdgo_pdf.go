@@ -69,6 +69,25 @@ type PDFImportReport struct {
 	Warnings     []pdfgo.Diagnostic
 }
 
+// PDFImport 按页转换PDF，实例需串行使用，输入源由调用方持有至Close
+// 页面阅读快照独立于后续转换，Finish完成全局结构后交付独立编辑文档
+// 转换失败后可用Reset重建，输入及回调在会话存续期间须保持有效
+type PDFImport struct {
+	input    *Input
+	importer *pdfImporter
+	options  PDFImportOptions
+	pages    []PageContent
+	ready    []bool
+	err      error
+	finished bool
+}
+
+// pdfImportInput 将输入读取绑定到当前转换上下文
+type pdfImportInput struct {
+	input    *Input
+	importer *pdfImporter
+}
+
 // pdfImporter 保存单次转换的对象与资源状态
 type pdfImporter struct {
 	resources          *Resources
@@ -212,21 +231,34 @@ func (o pdfObjectOrigin) merge(other pdfObjectOrigin) pdfObjectOrigin {
 // 入参: ctx 取消上下文, input 输入源, options 转换选项
 // 返回: *Editor 编辑文档, PDFImportReport 转换统计, error 错误信息
 func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Editor, PDFImportReport, error) {
+	pending, err := NewPDFImport(ctx, input, options)
+	if err != nil {
+		return nil, PDFImportReport{}, err
+	}
+	defer pending.Close()
+	return pending.Finish(ctx)
+}
+
+// NewPDFImport 建立PDF页面索引和文档信息，不转换页面图元
+// 内部复制输入密码供Reset使用，Close时清除；其他选项引用需保持有效
+// 入参: ctx 取消上下文, input 调用方持有的输入源, options 转换选项
+// 返回: *PDFImport 增量转换会话, error 读取错误
+func NewPDFImport(ctx context.Context, input *Input, options PDFImportOptions) (*PDFImport, error) {
 	if options.Resources == nil {
 		options.Resources, _ = NewResources(ResourceOptions{})
 	}
 	ctx = options.Resources.context(ctx)
 	if input == nil {
-		return nil, PDFImportReport{}, fmt.Errorf("missing source")
+		return nil, fmt.Errorf("missing source")
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, PDFImportReport{}, err
+		return nil, err
 	}
 	if err := options.Compression.Validate(); err != nil {
-		return nil, PDFImportReport{}, err
+		return nil, err
 	}
 	if !finite(options.RasterDPI) || options.RasterDPI < 0 {
-		return nil, PDFImportReport{}, fmt.Errorf("invalid PDF raster DPI")
+		return nil, fmt.Errorf("invalid PDF raster DPI")
 	}
 	renderer := NewRenderer(&Reader{resources: options.Resources}, options.RendererOptions...)
 	if options.Backends != nil {
@@ -236,18 +268,25 @@ func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Ed
 		renderer.DPI = options.RasterDPI
 	}
 	if !finite(renderer.DPI) || renderer.DPI <= 0 {
-		return nil, PDFImportReport{}, fmt.Errorf("invalid PDF raster DPI")
+		return nil, fmt.Errorf("invalid PDF raster DPI")
 	}
+	keep := false
+	options.Password = slices.Clone(options.Password)
+	defer func() {
+		if !keep {
+			clear(options.Password)
+		}
+	}()
 	progress := editorProgress(options.OnProgress).withContext(ctx)
 	if err := progress.report("open", 0, 0); err != nil {
-		return nil, PDFImportReport{}, err
+		return nil, err
 	}
 	editor := NewEditor()
 	editor.runtimeResources = options.Resources
 	editor.SetRenderBackends(renderer.Backends())
 	editor.fontDirs, editor.fontFS = renderer.FontSources()
 	editor.fontSourcesCache = renderer.fontSourcesCache
-	importer := pdfImporter{resources: options.Resources, ctx: ctx, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, page: -1, fontIDs: map[*pdfgo.Font]string{}, fonts: map[*pdfgo.Font]*pdfImportedFont{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}, structureBindings: &pdfStructureBindings{}}
+	importer := &pdfImporter{resources: options.Resources, ctx: ctx, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, page: -1, fontIDs: map[*pdfgo.Font]string{}, fonts: map[*pdfgo.Font]*pdfImportedFont{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}, structureBindings: &pdfStructureBindings{}}
 	readOptions := pdfgo.ReaderOptions{Password: options.Password, PasswordUTF8: options.PasswordUTF8, ShapeText: importer.shapePDFText}
 	if !options.Strict {
 		importer.warning = func(warning pdfgo.Diagnostic) {
@@ -256,22 +295,26 @@ func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Ed
 		}
 		readOptions.Warning = importer.warning
 	}
-	reader, err := pdfgo.NewReaderWithOptions(convertReader{ctx: ctx, input: input}, input.Size(), readOptions)
+	reader, err := pdfgo.NewReaderWithOptions(&pdfImportInput{input: input, importer: importer}, input.Size(), readOptions)
 	if err != nil {
-		return nil, PDFImportReport{}, err
+		return nil, err
 	}
-	defer reader.Close()
+	defer func() {
+		if !keep {
+			reader.Close()
+		}
+	}()
 	importer.reader = reader
 	if err := importer.prepareStructure(ctx); err != nil {
-		return nil, PDFImportReport{}, fmt.Errorf("import PDF structure: %w", err)
+		return nil, fmt.Errorf("import PDF structure: %w", err)
 	}
 	outputIntents, err := reader.OutputIntents()
 	if err != nil {
-		return nil, PDFImportReport{}, fmt.Errorf("import PDF output intents: %w", err)
+		return nil, fmt.Errorf("import PDF output intents: %w", err)
 	}
 	if len(outputIntents) != 0 {
 		if options.Strict {
-			return nil, PDFImportReport{}, &pdfgo.UnsupportedError{Feature: "PDF output intent conversion"}
+			return nil, &pdfgo.UnsupportedError{Feature: "PDF output intent conversion"}
 		}
 		importer.report.Warnings = append(importer.report.Warnings, pdfgo.Diagnostic{Message: "PDF output intents preserved as metadata; not applied to rendering"})
 	}
@@ -281,10 +324,14 @@ func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Ed
 	importer.halftones = options.Halftones
 	importer.compression = options.Compression
 	importer.references = &codecpdf.ReferenceCache{}
-	defer importer.references.Close()
+	defer func() {
+		if !keep {
+			importer.references.Close()
+		}
+	}()
 	importer.halftoneWarnings = make(map[*pdfgo.Halftone]bool)
 	if err := progress.report("pages", 0, 0); err != nil {
-		return nil, PDFImportReport{}, err
+		return nil, err
 	}
 	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
 		_, width, height := codecpdf.PageMatrix(page)
@@ -298,82 +345,229 @@ func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Ed
 		return progress.report("pages", index+1, 0)
 	})
 	if err != nil {
-		return nil, PDFImportReport{}, err
+		return nil, err
 	}
 	if len(editor.pages) != 0 {
 		importer.page = -1
 		if err := importer.documentMetadata(ctx, options.Strict); err != nil {
-			return nil, PDFImportReport{}, fmt.Errorf("import PDF metadata: %w", err)
+			return nil, fmt.Errorf("import PDF metadata: %w", err)
 		}
 		if err := importer.documentAttachments(ctx); err != nil {
-			return nil, PDFImportReport{}, fmt.Errorf("import PDF attachments: %w", err)
+			return nil, fmt.Errorf("import PDF attachments: %w", err)
 		}
 		if err := importer.outlines(ctx); err != nil {
-			return nil, PDFImportReport{}, fmt.Errorf("import PDF outlines: %w", err)
+			return nil, fmt.Errorf("import PDF outlines: %w", err)
 		}
 		if err := importer.documentOpenActions(ctx); err != nil {
-			return nil, PDFImportReport{}, fmt.Errorf("import PDF document actions: %w", err)
+			return nil, fmt.Errorf("import PDF document actions: %w", err)
 		}
 		importer.page = 0
 	}
 	if err := progress.report("convert", 0, len(editor.pages)); err != nil {
-		return nil, PDFImportReport{}, err
+		return nil, err
 	}
-	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
-		matrix, width, height := codecpdf.PageMatrix(page)
-		importer.matrix = matrix
-		importer.page = index
-		importer.rasterWarned = false
-		importer.pageBox = page.CropBox
-		importer.pageWidth = width
-		importer.pageHeight = height
-		importer.maskClips = make(map[*pdfgo.SoftMask]pdfgo.Path)
-		importer.compositeCache = nil
-		importer.compositeNodes = nil
-		importer.compositeSpace = nil
-		importer.patternCells = nil
-		importer.patternOrigins = nil
-		importer.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
-		importer.textOrigins = nil
-		importer.clipPaths = nil
-		importer.annotationData = nil
-		importer.annotationBindings = nil
-		if err := importer.pageOpenActions(ctx, page); err != nil {
-			return fmt.Errorf("import PDF page %d actions: %w", index+1, err)
+	if len(editor.pages) == 0 {
+		return nil, fmt.Errorf("PDF contains no pages")
+	}
+	keep = true
+	return &PDFImport{input: input, importer: importer, options: options, pages: cloneEditorData(editor.pages), ready: make([]bool, len(editor.pages))}, nil
+}
+
+// ReadAt 读取当前操作需要的数据，不取得输入所有权
+// 入参: data 目标缓冲, offset 文件偏移
+// 返回: int 读取字节数, error 读取或取消错误
+func (r *pdfImportInput) ReadAt(data []byte, offset int64) (int, error) {
+	if err := r.importer.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.input.ReadAt(data, offset)
+}
+
+// PageCount 返回文档页数
+// 返回: int 页面总数
+func (p *PDFImport) PageCount() int { return len(p.pages) }
+
+// Ready 返回指定页是否转换完成
+// 入参: index 页面索引，从0开始
+// 返回: bool 页面是否就绪
+func (p *PDFImport) Ready(index int) bool {
+	return index >= 0 && index < len(p.ready) && p.ready[index]
+}
+
+// SetEncryption 设置转换文档的输出加密方式，不改变PDF读取凭据
+// 入参: options 加密选项，nil取消输出加密
+// 返回: error 加密配置错误
+func (p *PDFImport) SetEncryption(options *EncryptionOptions) error {
+	if p.importer == nil {
+		return fmt.Errorf("PDF import is closed")
+	}
+	return p.importer.editor.SetEncryption(options)
+}
+
+// ConvertPage 转换指定页面，已完成的页面不重复处理
+// 入参: ctx 取消上下文, index 页面索引，从0开始
+// 返回: error 转换或取消错误
+func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
+	if p.importer == nil {
+		return fmt.Errorf("PDF import is closed")
+	}
+	if p.err != nil {
+		return p.err
+	}
+	if index < 0 || index >= len(p.pages) {
+		return fmt.Errorf("invalid page index: %d", index)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.ready[index] {
+		return nil
+	}
+	defer func() {
+		if err != nil {
+			p.err = err
 		}
-		if err := importer.compositePage(nil, func(visitor pdfgo.Visitor) error { return reader.WalkPage(ctx, page, visitor) }); err != nil {
-			return fmt.Errorf("import PDF page %d: %w", index+1, err)
-		}
-		if err := importer.annotations(ctx, page, options.Strict); err != nil {
-			return fmt.Errorf("import PDF page %d: %w", index+1, err)
-		}
-		if err := importer.commitAnnotations(); err != nil {
-			return fmt.Errorf("import PDF page %d: %w", index+1, err)
-		}
-		if err := importer.commitObjects(); err != nil {
-			return fmt.Errorf("import PDF page %d: %w", index+1, err)
-		}
-		importer.report.Pages++
-		if err := progress.report("convert", index+1, len(editor.pages)); err != nil {
+	}()
+	importer := p.importer
+	importer.ctx = importer.resources.context(ctx)
+	ctx = importer.ctx
+	importer.renderer.OutputContext = ctx
+	page := importer.pageOrder[index]
+	matrix, width, height := codecpdf.PageMatrix(page)
+	importer.matrix = matrix
+	importer.page = index
+	importer.rasterWarned = false
+	importer.pageBox = page.CropBox
+	importer.pageWidth = width
+	importer.pageHeight = height
+	importer.maskClips = make(map[*pdfgo.SoftMask]pdfgo.Path)
+	importer.compositeCache = nil
+	importer.compositeNodes = nil
+	importer.compositeSpace = nil
+	importer.patternCells = nil
+	importer.patternOrigins = nil
+	importer.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
+	importer.textOrigins = nil
+	importer.clipPaths = nil
+	importer.annotationData = nil
+	importer.annotationBindings = nil
+	if err := importer.pageOpenActions(ctx, page); err != nil {
+		return fmt.Errorf("import PDF page %d actions: %w", index+1, err)
+	}
+	if err := importer.compositePage(nil, func(visitor pdfgo.Visitor) error { return importer.reader.WalkPage(ctx, page, visitor) }); err != nil {
+		return fmt.Errorf("import PDF page %d: %w", index+1, err)
+	}
+	if err := importer.annotations(ctx, page, p.options.Strict); err != nil {
+		return fmt.Errorf("import PDF page %d: %w", index+1, err)
+	}
+	if err := importer.commitAnnotations(); err != nil {
+		return fmt.Errorf("import PDF page %d: %w", index+1, err)
+	}
+	if err := importer.commitObjects(); err != nil {
+		return fmt.Errorf("import PDF page %d: %w", index+1, err)
+	}
+	importer.report.Pages++
+	if err := editorProgress(p.options.OnProgress).withContext(ctx).report("convert", importer.report.Pages, len(p.pages)); err != nil {
+		return err
+	}
+	if p.options.Progress != nil {
+		if err := p.options.Progress(importer.report.Pages); err != nil {
 			return err
 		}
-		if options.Progress != nil {
-			if err := options.Progress(index + 1); err != nil {
-				return err
-			}
+	}
+
+	p.ready[index] = true
+	return nil
+}
+
+// Reader 创建指定页的独立阅读快照，其他页仅保留尺寸和标识
+// 未包含的页面返回ErrIncompleteDocument；index为-1时仅返回索引，完整编辑或导出须使用Finish
+// 入参: ctx 取消上下文, index 页面索引
+// 返回: *Reader 阅读快照, error 转换或构建错误
+func (p *PDFImport) Reader(ctx context.Context, index int) (*Reader, error) {
+	if p.importer == nil {
+		return nil, fmt.Errorf("PDF import is closed")
+	}
+	if p.err != nil {
+		return nil, p.err
+	}
+	if index != -1 {
+		if err := p.ConvertPage(ctx, index); err != nil {
+			return nil, err
 		}
-		return ctx.Err()
-	})
+	}
+	snapshot := *p.importer.editor
+	snapshot.pages = slices.Clone(p.pages)
+	if index >= 0 {
+		snapshot.pages[index] = p.importer.editor.pages[index]
+	}
+	reader, err := snapshot.Reader(ctx)
 	if err != nil {
-		return nil, PDFImportReport{}, err
+		return nil, err
 	}
-	if importer.report.Pages == 0 {
-		return nil, PDFImportReport{}, fmt.Errorf("PDF contains no pages")
+	reader.pageReady = make(map[string]bool)
+	if index >= 0 {
+		reader.pageReady[reader.doc.Pages.Page[index].ID] = true
 	}
-	if err := importer.documentStructures(ctx); err != nil {
-		return nil, PDFImportReport{}, fmt.Errorf("import PDF structure: %w", err)
+	return reader, nil
+}
+
+// Finish 转换尚未就绪的页面并补全文档结构，返回独立编辑文档
+// 入参: ctx 取消上下文
+// 返回: *Editor 编辑文档, PDFImportReport 转换统计, error 转换错误
+func (p *PDFImport) Finish(ctx context.Context) (*Editor, PDFImportReport, error) {
+	if p.importer == nil {
+		return nil, PDFImportReport{}, fmt.Errorf("PDF import is closed")
 	}
-	return editor, importer.report, nil
+	for index := range p.pages {
+		if err := p.ConvertPage(ctx, index); err != nil {
+			return nil, PDFImportReport{}, err
+		}
+	}
+	if !p.finished {
+		p.importer.ctx = p.importer.resources.context(ctx)
+		if err := p.importer.documentStructures(p.importer.ctx); err != nil {
+			p.err = err
+			return nil, PDFImportReport{}, fmt.Errorf("import PDF structure: %w", err)
+		}
+		p.finished = true
+	}
+	return p.importer.editor, p.importer.report, nil
+}
+
+// Reset 放弃已转换内容并重建索引，保留文档标识及输出加密策略
+// 失败时保留原会话，已交付的阅读快照不受影响；输入源仍由调用方持有
+// 入参: ctx 本次重建的取消上下文
+// 返回: error 重建错误
+func (p *PDFImport) Reset(ctx context.Context) error {
+	if p.importer == nil {
+		return fmt.Errorf("PDF import is closed")
+	}
+	next, err := NewPDFImport(ctx, p.input, p.options)
+	if err != nil {
+		return err
+	}
+	next.importer.editor.Info.DocID = p.importer.editor.Info.DocID
+	next.importer.editor.encryption = p.importer.editor.encryption
+	p.Close()
+	*p = *next
+	return nil
+}
+
+// Close 释放PDF索引、引用缓存和转换状态，不关闭调用方的输入源
+// 返回: error 关闭错误
+func (p *PDFImport) Close() error {
+	if p.importer == nil {
+		return nil
+	}
+	p.importer.references.Close()
+	err := p.importer.reader.Close()
+	p.importer = nil
+	p.pages, p.ready = nil, nil
+	clear(p.options.Password)
+	p.options = PDFImportOptions{}
+	p.input = nil
+	return err
 }
 
 // ConvertPDF 将PDF转换并写入OFD，转换阶段失败时不写入目标

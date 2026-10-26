@@ -35,7 +35,7 @@ class BrowserScheduler {
 	}
 
 	priority(task) {
-		return Number(task.worker.batch || this.owner(task.worker, task.data)?.foreground === false) + Number(!!task.data.preload);
+		return Number(task.worker.batch || this.owner(task.worker, task.data)?.foreground === false) + Number(!!task.data.preload || !!task.data.background);
 	}
 
 	submit(worker, data, transfer) {
@@ -92,8 +92,8 @@ class BrowserScheduler {
 				const busy = [...task.worker.operations.values()].some(data => data.engineID === task.data.engineID && data.name !== "ofdgoSaveSnapshot");
 				const snapshot = task.data.name === "ofdgoSaveSnapshot" && [...task.worker.operations.values()].some(data => data.engineID === task.data.engineID && data.name === "ofdgoSaveSnapshot");
 				const active = this.active();
-				const interactive = task.worker.primary && this.owner(task.worker, task.data)?.foreground === true && !task.data.preload;
-				const foregroundActive = [...this.workers].some(worker => [...worker.operations.values()].some(data => data.name !== "ofdgoSaveSnapshot" && worker.primary && this.owner(worker, data)?.foreground === true && !data.preload));
+				const interactive = task.worker.primary && this.owner(task.worker, task.data)?.foreground === true && !task.data.preload && !task.data.background;
+				const foregroundActive = [...this.workers].some(worker => [...worker.operations.values()].some(data => data.name !== "ofdgoSaveSnapshot" && worker.primary && this.owner(worker, data)?.foreground === true && !data.preload && !data.background));
 				const continuing = task.worker.primary && [...task.worker.operations.values()].some(data => data.engineID === task.data.engineID);
 				const available = continuing || active < this.limit || interactive && !foregroundActive && active < this.limit + 1;
 				if (busy || snapshot || !available || !task.worker.primary && active && this.memory + (64 << 20) > this.budget) { i++; continue; }
@@ -307,6 +307,8 @@ class BrowserEngine {
 		this.primary.onerror = event => this.onerror?.(event);
 		this.primary.onmessageerror = event => this.onmessageerror?.(event);
 		this.requests = new Map();
+		this.fontRequests = new Map();
+		this.primaryPages = new Set();
 		this.slots = new Set();
 		this.sequence = 0;
 		this.revision = 0;
@@ -323,8 +325,9 @@ class BrowserEngine {
 	configurePages(source) {
 		const current = this.pageSource;
 		const fonts = (source?.fonts || []).map(font => font?.data !== undefined ? {name:font.name, data:font.data} : font);
+		const sameNames = JSON.stringify(source?.fontNames || []) === JSON.stringify(current?.fontNames || []);
 		const sameFonts = current && fonts.length === current.fonts.length && fonts.every((font, index) => font === current.fonts[index] || font?.data !== undefined && font.name === current.fonts[index]?.name && font.data === current.fonts[index]?.data);
-		if (source && current && source.file === current.file && (source.document || 0) === current.document && (source.version || "") === current.version && source.annotations === current.annotations && source.revision === current.revision && sameFonts) return;
+		if (source && current && source.file === current.file && !!source.pdf === !!current.pdf && (source.document || 0) === current.document && (source.version || "") === current.version && source.annotations === current.annotations && source.revision === current.revision && sameFonts && sameNames) return;
 		this.invalidatePages();
 		if (!source || this.closed) return;
 		this.pageSource = {...source, fonts, document:source.document || 0, version:source.version || ""};
@@ -347,6 +350,7 @@ class BrowserEngine {
 
 	invalidatePages() {
 		this.revision++;
+		this.primaryPages.clear();
 		this.source = null;
 		this.pageSource = null;
 		this.parallelism = 1;
@@ -358,6 +362,7 @@ class BrowserEngine {
 	closeSlot(slot, error = new DOMException("页面加载已取消", "AbortError")) {
 		if (!this.slots.delete(slot)) return;
 		slot.worker.terminate();
+		for (const [id, request] of this.fontRequests) if (request.worker === slot.worker) this.fontRequests.delete(id);
 		slot.rejectReady(error);
 		for (const pending of slot.pending.values()) pending.reject(error);
 		slot.pending.clear();
@@ -378,6 +383,12 @@ class BrowserEngine {
 				if (this.source) this.parallelism = engineScheduler.limit;
 				if (data.type === "ready") { resolve(); return; }
 				if (data.type === "exit") { this.closeSlot(slot, new Error("页面加载失败")); return; }
+				if (data.type === "font") {
+					const request = `${slot.worker.engineID}:${data.request}`;
+					this.fontRequests.set(request, {worker:slot.worker, request:data.request});
+					this.onmessage?.({data:{...data, id:slot.requestID, request}});
+					return;
+				}
 				if (data.type) return;
 				const request = slot.pending.get(data.id);
 				if (!request) return;
@@ -389,7 +400,9 @@ class BrowserEngine {
 		});
 		this.slots.add(slot);
 		slot.ready = ready.then(async () => {
-			let opened = await this.callSlot(slot, "ofdgoOpen", [source.file, source.fonts, source.annotations]);
+			let opened = source.pdf
+				? await this.callSlot(slot, "ofdgoOpenPDF", [source.file, source.fonts, null, source.annotations, source.fontNames])
+				: await this.callSlot(slot, "ofdgoOpen", [source.file, source.fonts, source.annotations]);
 			if ((source.document || 0) !== (opened.data.documentIndex || 0)) opened = await this.callSlot(slot, "ofdgoSelectDocument", [source.document]);
 			if ((source.version || "") !== (opened.data.documentVersion || "")) await this.callSlot(slot, "ofdgoSelectVersion", [source.version || ""]);
 			if (this.slots.has(slot)) this.startupTime = performance.now() - started;
@@ -409,6 +422,7 @@ class BrowserEngine {
 	}
 
 	pageSlot(data) {
+		if (this.primaryPages.has(data.args[0])) return null;
 		const preferred = [...this.slots].find(slot => !slot.busy && slot.pages.has(data.args[0]));
 		const pending = [...this.requests.values()].filter(slot => slot === null).length - Number(this.requests.has(data.id));
 		if (!preferred && pending <= 0) return null;
@@ -440,6 +454,14 @@ class BrowserEngine {
 
 	postMessage(data, transfer) {
 		if (this.closed) return;
+		if (data.type === "font" && typeof data.request === "string") {
+			const request = this.fontRequests.get(data.request);
+			if (request) {
+				this.fontRequests.delete(data.request);
+				request.worker.postMessage({...data, request:request.request}, transfer);
+			}
+			return;
+		}
 		if (!data.type && data.preload && this.pagesPaused) {
 			this.onmessage?.({data:{engineID:this.engineID, id:data.id, ok:false, canceled:true, error:"预加载已暂停"}});
 			return;
@@ -451,7 +473,7 @@ class BrowserEngine {
 			return;
 		}
 		if (!data.type && data.name !== "ofdgoRenderPage" && ![
-			"ofdgoDocumentInfo", "ofdgoDocumentVersions", "ofdgoDocumentNavigation", "ofdgoOpenLinks", "ofdgoOutlineLinks", "ofdgoRenderBackends", "ofdgoSVGFontData",
+			"ofdgoLoadPDF", "ofdgoDocumentInfo", "ofdgoDocumentVersions", "ofdgoDocumentNavigation", "ofdgoOpenLinks", "ofdgoOutlineLinks", "ofdgoRenderBackends", "ofdgoSVGFontData",
 			"ofdgoSearchPage", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences", "ofdgoResourceTargets",
 			"ofdgoResourceLocations", "ofdgoFontPreview", "ofdgoFontFaces", "ofdgoFontFace", "ofdgoMatchFontFiles",
 			"ofdgoImages", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoPackageDocuments", "ofdgoVerifySignatures",
@@ -472,11 +494,19 @@ class BrowserEngine {
 
 	renderSlot(slot, data, transfer) {
 		slot.busy = true;
+		slot.requestID = data.id;
 		this.requests.set(data.id, slot);
 		const revision = this.revision;
 		let fallback = false;
 		slot.ready.then(() => this.callSlot(slot, data.name, data.args, !!data.preload)).then(result => {
 			if (revision !== this.revision) throw new DOMException("页面加载已取消", "AbortError");
+			if (this.source.pdf && ((JSON.parse(result.data.annotations || "null") || []).length || result.data.links?.length)) {
+				this.primaryPages.add(data.args[0]);
+				this.requests.set(data.id, this.primary);
+				fallback = true;
+				this.primary.postMessage(data, transfer);
+				return;
+			}
 			slot.lastPage = data.args[0];
 			slot.pages.delete(slot.lastPage);
 			slot.pages.add(slot.lastPage);
@@ -612,13 +642,13 @@ class NativeHost {
 		}
 	}
 
-	async decode(value, name = "", key = "", signal) {
+	async decode(value, signal) {
 		const reads = [];
 		const visit = (item, field, replace) => {
 			if (!item || typeof item !== "object" || item instanceof Blob || item instanceof ArrayBuffer || ArrayBuffer.isView(item)) return;
 			if (item.nativeFile) {
 				const file = new NativeFile(item);
-				if (field === "file" || name === "ofdgoConvertPDF" && field === "bytes") replace(file);
+				if (field === "file") replace(file);
 				else reads.push(this.readResource(file, signal).then(bytes => replace(field === "blob" ? new Blob([bytes], {type:item.type}) : new Uint8Array(bytes))));
 				return;
 			}
@@ -626,7 +656,7 @@ class NativeHost {
 				if (content && typeof content === "object") visit(content, Array.isArray(item) ? "" : child, result => item[child] = result);
 			}
 		};
-		visit(value, key, result => value = result);
+		visit(value, "", result => value = result);
 		const results = await Promise.allSettled(reads);
 		const failed = results.find(result => result.status === "rejected");
 		if (failed) throw failed.reason;
@@ -688,7 +718,7 @@ class NativeHost {
 					return;
 				}
 				if (data.type === "font") return;
-				if (["ofdgoDetectFormat", "ofdgoOpen", "ofdgoConvertPDF"].includes(data.name)) {
+				if (["ofdgoDetectFormat", "ofdgoOpen", "ofdgoOpenPDF"].includes(data.name)) {
 					const input = data.args?.[0];
 					if (input?.nativeFile && !input.temporary) inputs.add(input.nativeFile);
 				}
@@ -721,7 +751,7 @@ class NativeHost {
 					let decoded;
 					try {
 						controller.signal.throwIfAborted();
-						decoded = await host.decode(result, data.name, "", controller.signal);
+						decoded = await host.decode(result, controller.signal);
 						controller.signal.throwIfAborted();
 					}
 					catch (error) { await host.release(result); throw error; }

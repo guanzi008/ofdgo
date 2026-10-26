@@ -235,9 +235,9 @@ async function handleMessage(engine, { id, name, args }) {
 	let saveStamp;
 	let channel;
 	const signal = operations.get(id)?.signal;
-	const cancellable = ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF", "ofdgoResources", "ofdgoPrepareSave", "ofdgoSaveSnapshot", "ofdgoImportDocuments", "ofdgoImportImages", "ofdgoExportImages", "ofdgoConvertPDF", "ofdgoExportPage", "ofdgoExportDocument", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion", "ofdgoSaveDocument", "ofdgoSaveSigned", "ofdgoImportPages"].includes(name);
+	const cancellable = ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF", "ofdgoResources", "ofdgoPrepareSave", "ofdgoSaveSnapshot", "ofdgoImportDocuments", "ofdgoImportImages", "ofdgoExportImages", "ofdgoOpenPDF", "ofdgoExportPage", "ofdgoExportDocument", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion", "ofdgoSaveDocument", "ofdgoSaveSigned", "ofdgoImportPages"].includes(name);
 	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages" || name === "ofdgoImportDocuments";
-	const converting = name === "ofdgoConvertPDF";
+	const converting = name === "ofdgoOpenPDF";
 	const saving = name === "ofdgoSaveDocument" || name === "ofdgoSaveSnapshot" || name === "ofdgoSaveSigned";
 	const resources = ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF", "ofdgoResources", "ofdgoPrepareSave"].includes(name);
 	const key = name === "ofdgoOpen" ? args[3]?.key : name === "ofdgoSaveSigned" || name === "ofdgoLoadImport" ? args[1]?.key : null;
@@ -245,7 +245,7 @@ async function handleMessage(engine, { id, name, args }) {
 	const password = converting ? args[2] : name === "ofdgoSetEncryption" ? args[0]?.password : name === "ofdgoOpen" ? args[3]?.password : name === "ofdgoLoadImport" ? args[1]?.password : null;
 	try {
 		signal?.throwIfAborted();
-		if (["ofdgoOpen", "ofdgoLoadImport", "ofdgoConvertPDF"].includes(name) && args[0] instanceof Blob) {
+		if (["ofdgoOpen", "ofdgoOpenPDF", "ofdgoLoadImport"].includes(name) && args[0] instanceof Blob) {
 			const file = args[0], reader = new FileReaderSync();
 			args[0] = {size: file.size, read: (offset, size) => new Uint8Array(reader.readAsArrayBuffer(file.slice(offset, offset + size)))};
 		}
@@ -337,10 +337,21 @@ async function handleMessage(engine, { id, name, args }) {
 				if (!saving && args.some(value => value?.mode !== undefined)) args.push(done => finish(done));
 			}
 		}
+		if (engine.pdf && name !== "ofdgoOpenPDF") {
+			channel ||= new MessageChannel();
+			const context = await globalThis.ofdgoEngineCall(engine.id, "ofdgoPDFContext", (phase, completed, total, done) => {
+				postMessage({id, type: "conversion", phase, completed, total});
+				channel.port1.onmessage = () => done("", signal.aborted);
+				channel.port2.postMessage(null);
+			}, (name, done) => requestFont(engine, id, signal, name, done));
+			engine.pdf = JSON.parse(context).data === true;
+		}
 		const started = name === "ofdgoOpen" || name === "ofdgoRenderPage" ? performance.now() : null;
 		const payload = await globalThis.ofdgoEngineCall(engine.id, name, ...args);
 		signal?.throwIfAborted();
 		const result = typeof payload === "string" ? JSON.parse(payload) : payload;
+		if (result.ok && name === "ofdgoOpenPDF") engine.pdf = true;
+		if (result.ok && (name === "ofdgoOpen" || name === "ofdgoLoadPDF" && result.data.done)) engine.pdf = false;
 		if (started !== null && result.ok) result.elapsed = performance.now() - started;
 		if (cancellable && !importing && !converting && !resources && result.ok) {
 			result.data.size = size;

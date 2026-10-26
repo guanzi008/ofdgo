@@ -79,9 +79,19 @@ func (w *wasmEngines) call(args []js.Value) (any, error) {
 	if e == nil {
 		return nil, fmt.Errorf("unknown engine: %s", args[0].String())
 	}
+	if e.pdf != nil {
+		defer func() {
+			if e.currentSession != nil {
+				e.currentSession.Renderer.OutputContext = context.Background()
+			}
+		}()
+	}
 	fn := e.businessCommands()[args[1].String()]
 	if fn == nil {
 		return nil, fmt.Errorf("unknown operation: %s", args[1].String())
+	}
+	if err := e.preparePDF(args[1].String(), args[2:]); err != nil {
+		return nil, err
 	}
 	return fn(args[2:])
 }
@@ -100,6 +110,7 @@ func (w *wasmEngines) close(args []js.Value) (any, error) {
 	}
 	delete(w.engines, id)
 	_, _ = e.discardPrint(nil)
+	e.clearPDF()
 	e.clearImport()
 	err := e.currentSession.Close()
 	*e = businessEngine{}

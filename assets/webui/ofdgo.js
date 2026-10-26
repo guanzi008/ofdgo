@@ -116,6 +116,8 @@ function createDocumentState() {
 		textFontID: null,
 		textDefaults: { type: "TextObject", size: 16 * 25.4 / 72, color: "#000000", wrap: true, align: "left", paragraphHeight: 0, letterSpacing: 0 },
 		ofdBytes: null,
+		sourcePDF: false,
+		pdfComplete: false,
 		fileName: "ofdgo.ofd",
 		openSeq: 0,
 		pageSeq: 0,
@@ -5503,11 +5505,10 @@ async function loadWASM(tab = documentTab()) {
 			if (data.type === "progress") {
 				if (visible) setProgress(data.text, data.percent);
 			} else if (data.type === "conversion") {
-				if (visible && wasmRequests.get(data.id)?.openSeq === state.openSeq && !el.cancelExportButton.disabled) {
+				if (visible && wasmRequests.get(data.id)?.name !== "ofdgoLoadPDF" && wasmRequests.get(data.id)?.openSeq === state.openSeq && !el.cancelExportButton.disabled) {
 					if (data.phase === "open") setProgress("正在读取文档", null);
 					else if (data.phase === "pages") setProgress(data.completed ? `正在整理页面 · ${data.completed} 页` : "正在整理页面", null);
 					else if (data.phase === "convert") setProgress(`正在转换页面 · ${data.completed} / ${data.total} 页`, data.total ? 28 + data.completed / data.total * 22 : null);
-					else if (data.phase === "write.fonts") setProgress("正在处理字体", null);
 					else setProgress("正在生成文档", null);
 				}
 			} else if (data.type === "export") {
@@ -5723,7 +5724,6 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 	workspace.tabs.push(tab);
 	const current = () => !tab.closed && tab.opening === request;
 	let accepted = false;
-	let originalSource = null;
 	try {
 		setBusy(true, "正在读取文档", 10, STATUS.opening, tab);
 		await activateDocumentTab(tab);
@@ -5742,11 +5742,10 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 		const source = downloaded ? downloaded.file : file;
 		const format = await callTabWASM(tab, "ofdgoDetectFormat", source);
 		if (!current()) return;
-		let bytes = await documentBytes(source);
-		originalSource = bytes;
+		const bytes = await documentBytes(source);
 		tab.state.ofdBytes = bytes;
+		tab.state.sourcePDF = format === "pdf";
 		const name = (downloaded ? downloaded.name : file.name) || `ofdgo.${format}`;
-		let warnings = [];
 		let convertedDoc;
 		if (!current()) {
 			return;
@@ -5765,10 +5764,7 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 				}
 			}
 			if (!current()) return;
-			bytes = converted.bytes;
-			tab.state.ofdBytes = bytes;
-			convertedDoc = converted.doc;
-			warnings = JSON.parse(converted.warnings || "null") || [];
+			convertedDoc = converted;
 		}
 		await ensureTabEngine(tab);
 		if (!current()) return;
@@ -5776,7 +5772,7 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 		if (!current()) return;
 		tab.state.saveHandle = format === "ofd" && !remote ? handle || null : null;
 		tab.state.saveStamp = tab.state.saveHandle && !nativeHost ? {size: file.size, modified: file.lastModified} : null;
-		tab.state.conversionWarnings = warnings;
+		tab.state.conversionWarnings = [];
 		tab.state.fileName = (name || "ofdgo.ofd").replace(/\.pdf$/i, ".ofd");
 		if (remote && !/\.ofd$/i.test(tab.state.fileName)) tab.state.fileName += ".ofd";
 		tab.state.doc = doc;
@@ -5791,6 +5787,7 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 			if (isForegroundDocument(tab) && openSeq === tab.state.openSeq) tab.initialLoad = false;
 		}
 		else tab.status = "文档已打开";
+		if (tab.state.sourcePDF) completePDF(tab);
 	} catch (err) {
 		if (current()) {
 			tab.error = err.name === "AbortError" ? "打开已取消" : err.message;
@@ -5807,7 +5804,6 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 			if (nativeHost) await nativeHost.release(source);
 			tab.state.ofdBytes = null;
 		}
-		if (nativeHost && originalSource !== source) await nativeHost.release(originalSource);
 	}
 	return accepted;
 }
@@ -6313,22 +6309,15 @@ function requestCredentials(code, openSeq, pdf = false, tab = documentTab()) {
 async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, importing = false, pdf = false, tab = documentTab()) {
 	const state = tab.state;
 	const callWASM = (name, ...args) => callTabWASM(tab, name, ...args);
+	pdf ||= !importing && state.sourcePDF;
 	const current = () => !tab.closed && (Boolean(tab.opening) || openSeq === state.openSeq);
 	let credentials = null;
 	try {
 		while (current()) {
 			try {
 				if (pdf) {
-					const converted = await callWASM("ofdgoConvertPDF", data, fonts, credentials?.password || null);
-					let accepted = false;
-					try {
-						if (!current()) return converted;
-						converted.doc = await callWASM("ofdgoOpen", converted.bytes, fonts, state.renderAnnotations, credentials);
-						accepted = current();
-						return converted;
-					} finally {
-						if (!accepted && nativeHost) await nativeHost.release(converted.bytes);
-					}
+					state.pdfComplete = false;
+					return await callWASM("ofdgoOpenPDF", data, fonts, credentials?.password || null, state.renderAnnotations);
 				}
 				return importing ? await callWASM("ofdgoLoadImport", data?.nativeFile ? data : data.slice(), credentials)
 					: await callWASM("ofdgoOpen", data, fonts, state.renderAnnotations, credentials);
@@ -6444,8 +6433,10 @@ async function openDocument(options = {}) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		wasmWorker.configurePages?.(!state.editorInfo && !doc.encrypted && state.ofdBytes ? {
-			file: state.ofdBytes, fonts, annotations: state.renderAnnotations, document: doc.documentIndex, version: doc.documentVersion
+		const pageFonts = state.sourcePDF && !nativeHost && !state.editorInfo ? await fontManager.files(fontManager.records()) : fonts;
+		if (openSeq !== state.openSeq) return;
+		tab.worker.configurePages?.(!state.editorInfo && !doc.encrypted && state.ofdBytes ? {
+			file: state.ofdBytes, fonts: pageFonts, pdf: state.sourcePDF, fontNames: state.sourcePDF ? [...fontManager.localEntries().keys()] : [], annotations: state.renderAnnotations, document: doc.documentIndex, version: doc.documentVersion
 		} : null);
 		if (options.keepPreview) {
 			pageView.resetPageLoading();
@@ -6535,10 +6526,40 @@ async function openDocument(options = {}) {
 	}
 }
 
+async function completePDF(tab) {
+	const state = tab.state, source = state.ofdBytes, wasmSeq = state.wasmSeq;
+	if (tab.pdfTask?.wasmSeq === wasmSeq || state.pdfComplete || !state.sourcePDF || !source || state.editorInfo) return;
+	const task = {wasmSeq};
+	tab.pdfTask = task;
+	const current = () => !tab.closed && state.ofdBytes === source && state.wasmSeq === wasmSeq;
+	try {
+		while (current()) {
+			await new Promise(resolve => setTimeout(resolve, 0));
+			if (!current()) return;
+			const result = await callTabWASM(tab, "ofdgoLoadPDF");
+			if (!current()) return;
+			if (!result.done) continue;
+			state.pdfComplete = true;
+			state.conversionWarnings = JSON.parse(result.warnings || "null") || [];
+			if (!state.editorInfo) Object.assign(state.doc, result.doc);
+			if (isForegroundDocument(tab)) loadDocumentDetails(state.openSeq);
+			return;
+		}
+	} catch (err) {
+		if (current() && !err.canceled) {
+			tab.status = err.message;
+			if (isForegroundDocument(tab)) showError(err, false);
+		}
+	} finally {
+		if (tab.pdfTask === task) tab.pdfTask = null;
+	}
+}
+
 async function loadDocumentDetails(openSeq) {
 	const tab = documentTab(), state = tab.state;
 	const callWASM = (name, ...args) => callTabWASM(tab, name, ...args);
 	if (openSeq !== state.openSeq || !state.doc) return;
+	if (state.sourcePDF && !state.pdfComplete && !state.editorInfo) { completePDF(tab); return; }
 	try {
 		const details = await callWASM("ofdgoDocumentInfo");
 		if (openSeq !== state.openSeq) return;
@@ -9930,7 +9951,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			if (tab.closed || wasmSeq !== state.wasmSeq) return;
 			setBusy(true, "正在生成文件", null, status, tab);
 		}
-		const readingSave = saving && !state.editorInfo && indices === null && compression.mode === 0;
+		const readingSave = saving && !state.sourcePDF && !state.editorInfo && indices === null && compression.mode === 0;
 		const destination = !nativeHost && file && file === state.saveHandle && state.saveStamp ? {fileHandle: file, saveStamp: state.saveStamp} : file;
 		if (saving && indices === null && !readingSave) {
 			snapshotPrepared = true;
@@ -12350,13 +12371,13 @@ async function callTabWASM(tab, name, ...args) {
 		if (name === "ofdgoResources" && workspace.active === tab && resourceElements.Panel.open) resourceManager.requestID = id;
 		wasmRequests.set(id, { name, resolve, reject, openSeq: state.openSeq, tab });
 		if (name === "ofdgoExportMedia") wasmRequests.get(id).mediaID = args[0];
-		if (name === "ofdgoConvertPDF") {
+		if (name === "ofdgoOpenPDF" || state.sourcePDF && !state.editorInfo) {
 			const request = wasmRequests.get(id);
 			request.localFonts = fontManager.localEntries();
 			request.fontData = new Map();
-			args.push([...request.localFonts.keys()]);
+			if (name === "ofdgoOpenPDF") args.push([...request.localFonts.keys()]);
 		}
-		if (name === "ofdgoImportDocuments" || name === "ofdgoImportImages" || name === "ofdgoExportImages" || name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoExportResource" || name === "ofdgoExportVersion" || name === "ofdgoSaveDocument" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
+		if (name === "ofdgoImportDocuments" || name === "ofdgoImportImages" || name === "ofdgoExportImages" || name === "ofdgoOpenPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoExportResource" || name === "ofdgoExportVersion" || name === "ofdgoSaveDocument" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
 			state.exportRequestID = id;
 			if (visible) {
 				el.cancelExportButton.hidden = false;
@@ -12371,6 +12392,7 @@ async function callTabWASM(tab, name, ...args) {
 			}
 			if (name === "ofdgoLoadImport" && ArrayBuffer.isView(args[0]) && !nativeHost) transfer.push(args[0].buffer);
 			const message = {id, name, args};
+			if (name === "ofdgoLoadPDF") message.background = true;
 			if (name === "ofdgoRenderPage" && [...state.pageInFlight.values()].some(task => task.index === args[0] && pageView.pageRenderPriority(task, state) >= 6)) message.preload = true;
 			tab.worker.postMessage(message, transfer);
 		} catch (err) {

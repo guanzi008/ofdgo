@@ -229,7 +229,7 @@ export function createPageView(context) {
 			for (const task of context.state.pagePresentQueue.values()) task.resolve(null);
 			context.state.pagePresentQueue.clear();
 			for (const [id, request] of context.wasmRequests) {
-				if (request.tab === context.documentTab() && request.name === "ofdgoRenderPage") context.wasmWorker?.postMessage({ type: "cancel", id });
+				if (request.tab === context.documentTab() && request.name === "ofdgoRenderPage" && (!context.state.sourcePDF || context.state.pdfComplete || context.state.editorInfo)) context.wasmWorker?.postMessage({ type: "cancel", id });
 			}
 			for (const task of context.state.pageInFlight.values()) {
 				task.resolve(null);

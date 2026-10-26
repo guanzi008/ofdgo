@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xiaoqidun/ofdgo"
@@ -435,8 +436,21 @@ type outputContext struct {
 	cancel     context.CancelFunc
 	checkpoint func() error
 	checked    time.Time
-	pending    uint8
+	checks     atomic.Uint32
 	interval   uint8
+}
+
+// pendingPDF 保存当前标签的增量转换、输入及操作回调
+type pendingPDF struct {
+	importer  *ofdgo.PDFImport
+	retry     bool
+	input     *ofdgo.Input
+	page      int
+	next      int
+	progress  platformValue
+	font      platformValue
+	operation *outputContext
+	report    func(string, int, int) error
 }
 
 // businessEngine 独立文档、编辑、剪贴板及操作上下文
@@ -444,6 +458,8 @@ type businessEngine struct {
 	resources      *ofdgo.Resources
 	currentSession *Session
 	currentEditor  *ofdgo.Editor
+	pdf            *pendingPDF
+	pdfWarnings    []byte
 	saveSnapshot   *ofdgo.Editor
 	printDocument  *ofdgo.PrintDocument
 	pendingImport  *ofdgo.Reader
@@ -1394,58 +1410,243 @@ func (e *businessEngine) detectDocumentFormat(args []platformValue) (any, error)
 	return ofdgo.DetectFormat(input)
 }
 
-// convertPDFDocument 通过库转换PDF，不替换当前文档会话
-// 入参: args PDF数据、外部字体、UTF-8密码、字体目录、进度及字体读取回调
-// 返回: any OFD数据及转换警告, error 错误信息
-func (e *businessEngine) convertPDFDocument(args []platformValue) (any, error) {
-	if len(args) != 6 {
-		return nil, fmt.Errorf("missing PDF data")
+// clearPDF 释放当前标签的未完成转换和输入
+func (e *businessEngine) clearPDF() {
+	e.pdfWarnings = nil
+	if e.pdf == nil {
+		return
+	}
+	e.pdf.importer.Close()
+	e.pdf.input.Close()
+	e.pdf = nil
+}
+
+// pdfContext 更新当前操作的取消、进度和按需字体读取回调
+// 入参: args 进度及字体回调
+// 返回: any 是否仍有待转换内容, error 参数错误
+func (e *businessEngine) pdfContext(args []platformValue) (any, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("missing PDF callbacks")
+	}
+	if e.pdf != nil {
+		e.pdf.progress, e.pdf.font = args[0], args[1]
+	}
+	return e.pdf != nil, nil
+}
+
+// openPDF 建立PDF索引，当前页转换由阅读请求触发
+// 入参: args 输入、字体、密码、注解设置、字体目录、进度及字体回调
+// 返回: any 文档索引, error 打开错误
+func (e *businessEngine) openPDF(args []platformValue) (any, error) {
+	if len(args) != 7 {
+		return nil, fmt.Errorf("missing PDF input")
 	}
 	input, err := e.inputFromValue(args[0])
 	if err != nil {
 		return nil, err
 	}
-	defer input.Close()
+	pending := &pendingPDF{input: input, page: -1, progress: args[5], font: args[6]}
+	keep := false
+	var password []byte
+	defer func() { clear(password) }()
+	defer func() {
+		if !keep {
+			input.Close()
+			if pending.importer != nil {
+				pending.importer.Close()
+			}
+		}
+	}()
 	fonts, err := e.fontsFromJS(args[1])
 	if err != nil {
 		return nil, err
 	}
-	var output bytes.Buffer
-	options := ofdgo.PDFImportOptions{Resources: e.resources, OnProgress: e.editorOperationProgress(args[4]), PasswordUTF8: true}
 	if !args[2].IsNull() && !args[2].IsUndefined() {
-		options.Password, err = e.bytesFromJS(args[2])
+		password, err = e.bytesFromJS(args[2])
 		if err != nil {
 			return nil, err
 		}
-		defer clear(options.Password)
+		password = slices.Clone(password)
 	}
-	fontSources := []fs.FS{ofdgo.NewFontFS(fonts)}
-	if names := e.stringsFromJS(args[3]); len(names) > 0 {
-		fontSources = append(fontSources, ofdgo.NewLazyFontFS(names, func(name string) ([]byte, error) {
-			return e.loadConversionFont(args[5], name)
+	pending.operation, pending.report = e.newEditorOperationContext(pending.progress)
+	options := ofdgo.PDFImportOptions{Resources: e.resources, PasswordUTF8: true, Password: password,
+		OnProgress: func(stage string, completed, total int) error {
+			return pending.report(stage, completed, total)
+		},
+	}
+	sources := []fs.FS{ofdgo.NewFontFS(fonts)}
+	if names := e.stringsFromJS(args[4]); len(names) != 0 {
+		sources = append(sources, ofdgo.NewLazyFontFS(names, func(name string) ([]byte, error) {
+			return e.loadConversionFont(pending.font, name)
 		}))
 	}
-	options.RendererOptions = []ofdgo.RendererOption{ofdgo.WithFontFS(fontSources...)}
-	editor, report, err := ofdgo.ImportPDF(e.operationContext(), input, options)
+	options.RendererOptions = []ofdgo.RendererOption{ofdgo.WithFontFS(sources...)}
+	pending.importer, err = ofdgo.NewPDFImport(pending.operation, input, options)
 	if err != nil {
 		return nil, err
 	}
-	if len(options.Password) != 0 {
-		if err := editor.SetEncryption(&ofdgo.EncryptionOptions{Password: options.Password}); err != nil {
+	if len(password) != 0 {
+		if err := pending.importer.SetEncryption(&ofdgo.EncryptionOptions{Password: password}); err != nil {
 			return nil, err
 		}
 	}
-	editor.OnWriteProgress = func(stage string, completed, total int) error {
-		return options.OnProgress("write."+stage, completed, total)
-	}
-	if _, err := editor.WriteTo(&output); err != nil {
-		return nil, err
-	}
-	warnings, err := json.Marshal(report.Warnings)
+	reader, err := pending.importer.Reader(pending.operation, -1)
 	if err != nil {
 		return nil, err
 	}
-	return successResult(map[string]any{"bytes": bytesToJS(output.Bytes()), "warnings": string(warnings)}), nil
+	session, err := newSession(reader, OpenOptions{Fonts: fonts, RenderAnnotations: args[3].Bool()})
+	if err != nil {
+		return nil, err
+	}
+	e.clearPDF()
+	e.clearImport()
+	e.currentSession.Close()
+	e.currentSession, e.currentEditor = session, nil
+	e.copiedObjects, e.copiedStyle = nil, nil
+	e.pdf = pending
+	keep = true
+	return session.Summary(), nil
+}
+
+// pdfError 记录需要重建的取消状态，后续请求可继续使用原文档
+// 入参: err 转换错误
+// 返回: error 原错误
+func (e *businessEngine) pdfError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		e.pdf.retry = true
+	}
+	return err
+}
+
+// replacePDFReader 切换独立阅读快照，保留当前字体和注解设置
+// 入参: reader 已生成的阅读器
+// 返回: error 会话创建错误
+func (e *businessEngine) replacePDFReader(reader *ofdgo.Reader) error {
+	previous := e.currentSession
+	next, err := newSession(reader, OpenOptions{RenderAnnotations: previous.Renderer.RenderAnnotations})
+	if err != nil {
+		return err
+	}
+	dirs, sources := previous.Renderer.FontSources()
+	ofdgo.WithFontDirs(dirs...)(next.Renderer)
+	ofdgo.WithFontFS(sources...)(next.Renderer)
+	ofdgo.WithRenderBackends(previous.Renderer.Backends())(next.Renderer)
+	next.Renderer.OutputContext = e.pdf.operation
+	next.fontFS = previous.fontFS
+	next.svgFonts = previous.svgFonts
+	e.currentSession = next
+	return previous.Close()
+}
+
+// finishPDF 补全转换后直接创建阅读快照，不生成中间压缩包
+// 返回: []byte 转换警告JSON, error 转换错误
+func (e *businessEngine) finishPDF() ([]byte, error) {
+	if e.pdf == nil {
+		return e.pdfWarnings, nil
+	}
+	editor, report, err := e.pdf.importer.Finish(e.pdf.operation)
+	if err != nil {
+		return nil, e.pdfError(err)
+	}
+
+	reader, err := editor.Reader(e.pdf.operation)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.replacePDFReader(reader); err != nil {
+		return nil, err
+	}
+	warnings, err := json.Marshal(report.Warnings)
+	e.clearPDF()
+	e.pdfWarnings = warnings
+	return warnings, err
+}
+
+// loadPDF 按时间片补全未转换页面，全部完成后交付完整会话
+// 入参: args 空参数
+// 返回: any 完成标识、文档信息及警告, error 转换错误
+func (e *businessEngine) loadPDF(args []platformValue) (any, error) {
+	if e.currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	if e.pdf != nil {
+		deadline := time.Now().Add(32 * time.Millisecond)
+		for e.pdf.next < e.pdf.importer.PageCount() {
+			index := e.pdf.next
+			if !e.pdf.importer.Ready(index) {
+				if err := e.pdf.importer.ConvertPage(e.pdf.operation, index); err != nil {
+					return nil, e.pdfError(err)
+				}
+			}
+			e.pdf.next++
+			if time.Now().After(deadline) {
+				return map[string]any{"done": false}, nil
+			}
+		}
+	}
+	warnings, err := e.finishPDF()
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"done": true, "doc": e.currentSession.Summary(), "warnings": string(warnings)}, nil
+}
+
+// preparePDF 按命令准备页面快照或完整文档，不将未完成内容交给编辑和输出
+// 入参: name 命令名称, args 命令参数
+// 返回: error 转换或取消错误
+func (e *businessEngine) preparePDF(name string, args []platformValue) error {
+	if e.pdf == nil {
+		return nil
+	}
+	if name == "ofdgoPDFContext" || name == "ofdgoOpenPDF" || name == "ofdgoOpen" {
+		return nil
+	}
+	e.pdf.operation, e.pdf.report = e.newEditorOperationContext(e.pdf.progress)
+	e.pdf.operation.checked = time.Now()
+	e.pdf.operation.interval = 255
+	e.currentSession.Renderer.OutputContext = e.pdf.operation
+	if e.pdf.retry {
+		if err := e.pdf.importer.Reset(e.pdf.operation); err != nil {
+			return err
+		}
+		e.pdf.page, e.pdf.next, e.pdf.retry = -1, 0, false
+		reader, err := e.pdf.importer.Reader(e.pdf.operation, -1)
+		if err != nil {
+			return err
+		}
+		if err := e.replacePDFReader(reader); err != nil {
+			return err
+		}
+	}
+	switch name {
+	case "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDocumentNavigation", "ofdgoInvoices":
+		return nil
+	case "ofdgoOpenLinks":
+		if len(args) == 0 {
+			return nil
+		}
+		fallthrough
+	case "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoPageTextString":
+		if len(args) == 0 {
+			return fmt.Errorf("missing page index")
+		}
+		index := args[0].Int()
+		if e.pdf.page == index {
+			return nil
+		}
+		reader, err := e.pdf.importer.Reader(e.pdf.operation, index)
+		if err != nil {
+			return e.pdfError(err)
+		}
+		if err := e.replacePDFReader(reader); err != nil {
+			return err
+		}
+		e.pdf.page = index
+		return nil
+	default:
+		_, err := e.finishPDF()
+		return err
+	}
 }
 
 // convertFile 使用库转换独立文件，不读取或修改当前阅读和编辑会话
@@ -1641,6 +1842,7 @@ func (e *businessEngine) openDocument(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	e.clearPDF()
 	e.clearImport()
 	e.currentEditor = nil
 	e.copiedObjects = nil
@@ -1689,6 +1891,9 @@ func (e *businessEngine) configureDocument(args []platformValue) (any, error) {
 // 入参: args 浏览器参数
 // 返回: any 文档信息, error 错误信息
 func (e *businessEngine) documentInfo(args []platformValue) (any, error) {
+	if e.pdf != nil {
+		return map[string]any{"detailsPending": true}, nil
+	}
 	if e.currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
@@ -7418,8 +7623,8 @@ func (e *businessEngine) newOutputContext(checkpoint platformValue) *outputConte
 
 // newEditorOperationContext 在底层取消检查时保持最近的进度，避免版本处理期间界面无响应
 // 入参: callback 浏览器进度及取消回调
-// 返回: context.Context 操作上下文, func(string, int, int) error 阶段进度回调
-func (e *businessEngine) newEditorOperationContext(callback platformValue) (context.Context, func(string, int, int) error) {
+// 返回: *outputContext 操作上下文, func(string, int, int) error 阶段进度回调
+func (e *businessEngine) newEditorOperationContext(callback platformValue) (*outputContext, func(string, int, int) error) {
 	ctx, cancel := context.WithCancel(e.operationContext())
 	stage, completed, total := "ids", 0, 0
 	progress := e.editorOperationProgress(callback)
@@ -7436,16 +7641,15 @@ func (c *outputContext) Err() error {
 	if err := c.Context.Err(); err != nil {
 		return err
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.pending != 0 {
-		c.pending--
+	interval := uint32(c.interval) + 1
+	if c.interval == 0 {
+		interval = 16
+	}
+	if (c.checks.Add(1)-1)%interval != 0 {
 		return nil
 	}
-	c.pending = 15
-	if c.interval != 0 {
-		c.pending = c.interval
-	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if time.Since(c.checked) >= 50*time.Millisecond {
 		c.checked = time.Now()
 		if err := c.checkpoint(); err != nil {
@@ -7465,6 +7669,9 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoDiscardPrint":           e.discardPrint,
 		"ofdgoDetectFormat":           e.detectDocumentFormat,
 		"ofdgoOpen":                   e.openDocument,
+		"ofdgoOpenPDF":                e.openPDF,
+		"ofdgoLoadPDF":                e.loadPDF,
+		"ofdgoPDFContext":             e.pdfContext,
 		"ofdgoSelectDocument":         e.selectDocument,
 		"ofdgoDocumentVersions":       e.documentVersions,
 		"ofdgoExportVersion":          e.exportVersion,
@@ -7488,7 +7695,6 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoChangeVersion":          e.changeDocumentVersion,
 		"ofdgoChangeDocument":         e.changePackageDocument,
 		"ofdgoPackageDocuments":       e.packageDocuments,
-		"ofdgoConvertPDF":             e.convertPDFDocument,
 		"ofdgoConvertFile":            e.convertFile,
 		"ofdgoPackFiles":              e.packFiles,
 		"ofdgoOutputFormats":          func([]platformValue) (any, error) { return ofdgo.OutputFormats(), nil },
