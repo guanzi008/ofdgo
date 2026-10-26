@@ -1835,7 +1835,7 @@ export class CanvasEditor {
 			const rotation = run.rotation ?? source.rotation ?? 0, angle = rotation * Math.PI / 180;
 			const cos = Math.cos(angle), sin = Math.sin(angle);
 			context.font = `${italic ? "italic" : "normal"} ${weight} ${runSize}px "${runFace.family}"`;
-			const metrics = context.measureText("Mg"), baseline = (runSize + metrics.fontBoundingBoxAscent - metrics.fontBoundingBoxDescent) / 2;
+			const metrics = context.measureText("Mg"), baseline = metrics.fontBoundingBoxAscent, lineHeight = baseline + metrics.fontBoundingBoxDescent;
 			if (!line || run.line) {
 				if (line) position++;
 				line = document.createElement("div");
@@ -1849,7 +1849,7 @@ export class CanvasEditor {
 				left = Math.min(left, x);
 				top = Math.min(top, y - baseline);
 				right = Math.max(right, x);
-				bottom = Math.max(bottom, y + runSize - baseline);
+				bottom = Math.max(bottom, y + lineHeight - baseline);
 			}
 			for (const char of run.text) {
 				x = run.positions[index][0] * unit;
@@ -1861,7 +1861,7 @@ export class CanvasEditor {
 					span.dataset.glyph = glyph;
 					glyphPositions.push({ span, start: position, end: position + char.length });
 				}
-				Object.assign(span.style, { display: "inline-block", verticalAlign: "top", fontFamily: `"${runFace.family}"`, fontSize: `${runSize}px`, lineHeight: `${runSize}px`,
+				Object.assign(span.style, { display: "inline-block", verticalAlign: "top", fontFamily: `"${runFace.family}"`, fontSize: `${runSize}px`, lineHeight: `${lineHeight}px`,
 					fontWeight: String(weight), fontStyle: italic ? "italic" : "normal", color: editing.style?.color ?? run.color ?? item.color,
 					opacity: String((run.alpha ?? item.alpha ?? 255) / 255), transformOrigin: `left ${baseline}px`,
 					transform: `translate(${x - naturalX}px,${y - baseline - lineIndex * size}px) rotate(${rotation}deg) scale(${scale},${vscale})` });
@@ -1871,7 +1871,7 @@ export class CanvasEditor {
 				const advance = context.measureText(glyph || char).width;
 				if (glyph) span.style.width = `${advance}px`;
 				for (const dx of [0, advance * scale]) {
-					for (const dy of [-baseline * vscale, (runSize - baseline) * vscale]) {
+					for (const dy of [-baseline * vscale, (lineHeight - baseline) * vscale]) {
 						const px = x + dx * cos - dy * sin, py = y + dx * sin + dy * cos;
 						left = Math.min(left, px);
 						top = Math.min(top, py);
