@@ -418,6 +418,7 @@ func (e *Editor) compositeScope(page int, path ObjectPath) (*Reader, *Renderer, 
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	root.node.parent = &editorXML{name: xml.Name{Local: "Layer"}, attrs: []xml.Attr{{Name: xml.Name{Local: "ID"}, Value: layer.ID}, {Name: xml.Name{Local: "DrawParam"}, Value: layer.DrawParam}}, parent: &editorXML{name: xml.Name{Local: "Content"}}}
 	root.setStates(object.CompositeGraphicUnit.states)
 	reader, err := e.reader(nil)
 	if err != nil {
@@ -848,6 +849,7 @@ func (e *Editor) editCompositeScope(page int, path ObjectPath, edit func(*Render
 	next.setStates(root.states)
 	next.object.CompositeGraphicUnit.states = next.states
 	origin := e.objectOrigin(path.ID)
+	next.node.parent = root.node.parent
 	updated := &editorObjectOrigin{data: data, node: next.node, object: next.object}
 	if origin != nil {
 		next.node.parent = origin.node.parent

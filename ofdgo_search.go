@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -53,16 +54,26 @@ type TextSpan struct {
 	Matrix [6]float64 `json:"matrix"`
 }
 
-// TextMatch 文字匹配结果，ID为对象标识，Run为文本对象索引，Start和End为原文Unicode字符区间
+// TextMatch 文字匹配结果，ID和Run定位首个对象，Start和End为该对象内的Unicode字符区间
+// 跨对象匹配通过Parts保留各对象区间，Text和Boxes包含完整命中
 type TextMatch struct {
-	ID     string `json:"id"`
-	Run    int    `json:"run"`
-	Start  int    `json:"start"`
-	End    int    `json:"end"`
-	Before string `json:"before"`
-	Text   string `json:"text"`
-	After  string `json:"after"`
-	Boxes  []Box  `json:"boxes"`
+	ID     string          `json:"id"`
+	Run    int             `json:"run"`
+	Start  int             `json:"start"`
+	End    int             `json:"end"`
+	Before string          `json:"before"`
+	Text   string          `json:"text"`
+	After  string          `json:"after"`
+	Boxes  []Box           `json:"boxes"`
+	Parts  []TextMatchPart `json:"parts,omitempty"`
+}
+
+// TextMatchPart 跨对象匹配中的原文区间，Start和End为对象内Unicode字符偏移
+type TextMatchPart struct {
+	ID    string `json:"id"`
+	Run   int    `json:"run"`
+	Start int    `json:"start"`
+	End   int    `json:"end"`
 }
 
 // Token 读取文字页面所需的XML节点
@@ -172,7 +183,7 @@ func (p *PageText) WriteTo(writer io.Writer) (int64, error) {
 	return p.writeTo(writer, false)
 }
 
-// Search 按原文进行忽略大小写的字面匹配，不跨文本对象拼接或识别图像
+// Search 按原文进行忽略大小写的字面匹配，拼接同一行紧邻的文本对象，不识别图像
 // 入参: query 搜索文字
 // 返回: []TextMatch 匹配结果及上下文
 func (p *PageText) Search(query string) []TextMatch {
@@ -184,7 +195,7 @@ func (p *PageText) Search(query string) []TextMatch {
 	return matches
 }
 
-// SearchEach 逐项返回忽略大小写的字面匹配，不累积全部结果，在对象与匹配之间检查取消
+// SearchEach 逐项返回忽略大小写的字面匹配，拼接同一行紧邻对象，在索引构建及匹配之间检查取消
 // 入参: ctx 取消上下文, query 搜索文字, visit 匹配访问函数，可返回错误停止
 // 返回: error 取消或访问错误
 func (p *PageText) SearchEach(ctx context.Context, query string, visit func(TextMatch) error) error {
@@ -268,11 +279,39 @@ func (p *PageText) searchEach(ctx context.Context, query string, visit func(Text
 		return ctx.Err()
 	}
 	length := utf8.RuneCountInString(query)
-	for index, run := range p.Runs {
+	for first := 0; first < len(p.Runs); {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		text := foldText(run.Text)
+		last := first + 1
+		for last < len(p.Runs) && adjacentTextRuns(p.Runs[last-1], p.Runs[last]) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			last++
+		}
+		var source strings.Builder
+		offsets := make([]int, last-first+1)
+		for index := first; index < last; index++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			source.WriteString(p.Runs[index].Text)
+			offsets[index-first+1] = offsets[index-first] + utf8.RuneCountInString(p.Runs[index].Text)
+		}
+		var folded strings.Builder
+		folded.Grow(source.Len())
+		polled := 0
+		for _, char := range source.String() {
+			if polled%256 == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
+			polled++
+			folded.WriteRune(foldRune(char))
+		}
+		text := folded.String()
 		var runes []rune
 		codeOffset := 0
 		for offset := 0; offset < len(text); {
@@ -284,21 +323,24 @@ func (p *PageText) searchEach(ctx context.Context, query string, visit func(Text
 				break
 			}
 			if runes == nil {
-				runes = []rune(run.Text)
+				runes = []rune(source.String())
 			}
 			start := codeOffset + utf8.RuneCountInString(text[offset:offset+found])
 			offset += found
 			end := start + length
-			match := TextMatch{
-				ID:  run.ID,
-				Run: index, Start: start, End: end,
-				Before: string(runes[max(0, start-16):start]),
-				Text:   string(runes[start:end]),
-				After:  string(runes[end:min(len(runes), end+16)]),
-			}
-			for _, box := range run.Boxes[min(start, len(run.Boxes)):min(end, len(run.Boxes))] {
-				if box.W > 0 && box.H > 0 && (len(match.Boxes) == 0 || match.Boxes[len(match.Boxes)-1] != box) {
-					match.Boxes = append(match.Boxes, box)
+			begin := sort.Search(len(offsets)-1, func(i int) bool { return offsets[i+1] > start })
+			match := TextMatch{ID: p.Runs[first+begin].ID, Run: first + begin, Start: start - offsets[begin], End: min(end, offsets[begin+1]) - offsets[begin],
+				Before: string(runes[max(0, start-16):start]), Text: string(runes[start:end]), After: string(runes[end:min(len(runes), end+16)])}
+			for index := begin; index < last-first && offsets[index] < end; index++ {
+				run := p.Runs[first+index]
+				from, to := max(start, offsets[index])-offsets[index], min(end, offsets[index+1])-offsets[index]
+				if end > offsets[begin+1] {
+					match.Parts = append(match.Parts, TextMatchPart{ID: run.ID, Run: first + index, Start: from, End: to})
+				}
+				for _, box := range run.Boxes[min(from, len(run.Boxes)):min(to, len(run.Boxes))] {
+					if box.W > 0 && box.H > 0 && (len(match.Boxes) == 0 || match.Boxes[len(match.Boxes)-1] != box) {
+						match.Boxes = append(match.Boxes, box)
+					}
 				}
 			}
 			if err := visit(match); err != nil {
@@ -307,6 +349,7 @@ func (p *PageText) searchEach(ctx context.Context, query string, visit func(Text
 			offset += len(query)
 			codeOffset = end
 		}
+		first = last
 	}
 	return ctx.Err()
 }
@@ -315,19 +358,40 @@ func (p *PageText) searchEach(ctx context.Context, query string, visit func(Text
 // 入参: text 原文
 // 返回: string 匹配用文字
 func foldText(text string) string {
-	return strings.Map(func(char rune) rune {
-		if char < utf8.RuneSelf {
-			if char >= 'a' && char <= 'z' {
-				return char - ('a' - 'A')
-			}
-			return char
+	return strings.Map(foldRune, text)
+}
+
+// foldRune 统一单个Unicode大小写等价字符
+// 入参: char 原字符
+// 返回: rune 匹配字符
+func foldRune(char rune) rune {
+	if char < utf8.RuneSelf {
+		if char >= 'a' && char <= 'z' {
+			return char - ('a' - 'A')
 		}
-		folded := char
-		for next := unicode.SimpleFold(char); next != char; next = unicode.SimpleFold(next) {
-			folded = min(folded, next)
-		}
-		return folded
-	}, text)
+		return char
+	}
+	folded := char
+	for next := unicode.SimpleFold(char); next != char; next = unicode.SimpleFold(next) {
+		folded = min(folded, next)
+	}
+	return folded
+}
+
+// adjacentTextRuns 判断绘制顺序相邻的文字是否在同一行连续，缺少定位时保持独立
+// 入参: before 前对象, after 后对象
+// 返回: bool 是否可连续搜索
+func adjacentTextRuns(before, after TextRun) bool {
+	if before.Text == "" || after.Text == "" || len(before.Boxes) != utf8.RuneCountInString(before.Text) || len(after.Boxes) == 0 {
+		return false
+	}
+	a, b := before.Boxes[len(before.Boxes)-1], after.Boxes[0]
+	size := math.Min(a.H, b.H)
+	if size <= 0 || a.W <= 0 || b.W <= 0 {
+		return false
+	}
+	gap := b.X - a.X - a.W
+	return math.Abs(a.Y+a.H/2-b.Y-b.H/2) <= size*.25 && gap >= -size*.15 && gap <= size*.35 && b.X > a.X
 }
 
 // addRun 收集原始文本，字形索引不替代Unicode原文

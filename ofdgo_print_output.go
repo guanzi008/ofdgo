@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -76,18 +77,22 @@ func (p *PrintDocument) renderPrintSVG(ctx context.Context, index int, writer io
 	if writer == nil {
 		return fmt.Errorf("missing print writer")
 	}
-	var out bytes.Buffer
-	fmt.Fprintf(&out, `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="%gmm" height="%gmm" viewBox="0 0 %g %g"><rect width="100%%" height="100%%" fill="white"/>`, side.Width, side.Height, side.Width, side.Height)
+	out := bufio.NewWriter(convertWriter{ctx: ctx, writer: writer, count: new(int64)})
+	fmt.Fprintf(out, `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="%gmm" height="%gmm" viewBox="0 0 %g %g"><rect width="100%%" height="100%%" fill="white"/>`, side.Width, side.Height, side.Width, side.Height)
 	if p.options.Raster || p.options.Grayscale {
 		img, err := p.renderPrintImage(ctx, index, p.options.DPI)
 		if err != nil {
 			return err
 		}
-		var data bytes.Buffer
-		if err := png.Encode(&data, img); err != nil {
+		fmt.Fprintf(out, `<image width="%g" height="%g" xlink:href="data:image/png;base64,`, side.Width, side.Height)
+		encoder := base64.NewEncoder(base64.StdEncoding, out)
+		if err := png.Encode(encoder, img); err != nil {
 			return err
 		}
-		fmt.Fprintf(&out, `<image width="%g" height="%g" xlink:href="data:image/png;base64,%s"/>`, side.Width, side.Height, base64.StdEncoding.EncodeToString(data.Bytes()))
+		if err := encoder.Close(); err != nil {
+			return err
+		}
+		out.WriteString(`"/>`)
 	} else {
 		for i, placement := range side.Placements {
 			if err := ctx.Err(); err != nil {
@@ -97,23 +102,26 @@ func (p *PrintDocument) renderPrintSVG(ctx context.Context, index int, writer io
 			if err != nil {
 				return err
 			}
-			var data bytes.Buffer
-			if err := p.renderer.RenderToSVG(page, &data); err != nil {
+			c, m := placement.Clip, placement.Transform
+			fmt.Fprintf(out, `<defs><clipPath id="print%d"><rect x="%g" y="%g" width="%g" height="%g"/></clipPath></defs><g clip-path="url(#print%d)"><image width="%g" height="%g" transform="matrix(%g %g %g %g %g %g)" xlink:href="data:image/svg+xml;base64,`, i, c.X, c.Y, c.W, c.H, i, placement.Width, placement.Height, m[0], m[1], m[2], m[3], m[4], m[5])
+			encoder := base64.NewEncoder(base64.StdEncoding, out)
+			if err := p.renderer.RenderToSVG(page, encoder); err != nil {
 				return err
 			}
-			c, m := placement.Clip, placement.Transform
-			fmt.Fprintf(&out, `<defs><clipPath id="print%d"><rect x="%g" y="%g" width="%g" height="%g"/></clipPath></defs><g clip-path="url(#print%d)"><image width="%g" height="%g" transform="matrix(%g %g %g %g %g %g)" xlink:href="data:image/svg+xml;base64,%s"/></g>`, i, c.X, c.Y, c.W, c.H, i, placement.Width, placement.Height, m[0], m[1], m[2], m[3], m[4], m[5], base64.StdEncoding.EncodeToString(data.Bytes()))
+			if err := encoder.Close(); err != nil {
+				return err
+			}
+			out.WriteString(`"/></g>`)
 		}
 		for _, line := range p.printLines(side) {
-			fmt.Fprintf(&out, `<path d="M %g %g L %g %g" fill="none" stroke="black" stroke-width="0.15"/>`, line[0], line[1], line[2], line[3])
+			fmt.Fprintf(out, `<path d="M %g %g L %g %g" fill="none" stroke="black" stroke-width="0.15"/>`, line[0], line[1], line[2], line[3])
 		}
 		if side.Label != "" {
-			fmt.Fprintf(&out, `<text x="%g" y="%g" font-family="sans-serif" font-size="2.8" fill="black">%s</text>`, side.LabelX, side.LabelY, html.EscapeString(side.Label))
+			fmt.Fprintf(out, `<text x="%g" y="%g" font-family="sans-serif" font-size="2.8" fill="black">%s</text>`, side.LabelX, side.LabelY, html.EscapeString(side.Label))
 		}
 	}
 	out.WriteString(`</svg>`)
-	_, err = io.Copy(convertWriter{ctx: ctx, writer: writer, count: new(int64)}, &out)
-	return err
+	return out.Flush()
 }
 
 // RenderImage 按指定DPI输出一个纸面的独立白底图像，dpi为0时采用任务配置

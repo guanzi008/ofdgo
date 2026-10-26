@@ -16,12 +16,13 @@ package ofdgo
 
 import (
 	"bytes"
-
 	"encoding/xml"
+	"errors"
 	"fmt"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"maps"
 	"slices"
+
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
 // CompositeSelection 同一内部容器的独立选区快照，共享不可变字体和图片资源
@@ -36,6 +37,7 @@ type CompositeSelection struct {
 	containers []int
 	nodes      []*editorCompositeNode
 	source     *editorSourcePage
+	richText   map[int]richTextMetadata
 }
 
 // PasteCompositeSelection 将内部对象快照粘贴到页面顶层，保持嵌套结构、源继承外观和裁剪
@@ -73,9 +75,11 @@ func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []in
 	slices.Sort(indexes)
 	var owner *editorCompositeNode
 	var container *editorXML
-	selection := &CompositeSelection{editor: e, document: e.documentIdentity(), page: e.pages[page].ID, path: ObjectPath{ID: path.ID, Annotation: path.Annotation, Children: slices.Clone(path.Children)}}
+	selection := &CompositeSelection{richText: make(map[int]richTextMetadata), editor: e, document: e.documentIdentity(), page: e.pages[page].ID, path: ObjectPath{ID: path.ID, Annotation: path.Annotation, Children: slices.Clone(path.Children)}}
 	if path.Annotation == "" {
-		selection.source = e.objectOrigin(path.ID).page
+		if origin := e.objectOrigin(path.ID); origin != nil {
+			selection.source = origin.page
+		}
 	} else if e.source != nil {
 		selection.source = e.source.pages[e.pages[page].ID]
 	}
@@ -95,6 +99,11 @@ func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []in
 		copy := *node
 		copy.owner, copy.span = nil, nil
 		selection.nodes = append(selection.nodes, &copy)
+		if entry, err := e.richTextEntry(page, editorObjectID(node.object)); err == nil {
+			selection.richText[j] = cloneEditorData(entry.metadata)
+		} else if !errors.Is(err, ErrNotRichText) {
+			return nil, err
+		}
 	}
 	scope := root.loadedScope(path.Children)
 	for scope != owner {
@@ -134,62 +143,68 @@ func (e *Editor) PasteCompositeObjects(page int, path ObjectPath, selection *Com
 		return result, err
 	}
 	var result []int
-	err := e.editCompositeScope(page, path, func(renderer *Renderer, root *editorCompositeNode, _ []*editorCompositeNode) error {
-		scope := root.loadedScope(path.Children)
-		owner := scope
-		for i := 0; i < selection.references; i++ {
-			owner = owner.ref
-			if owner == nil {
-				return fmt.Errorf("composite resource container no longer exists")
+	err := e.Transaction(func(e *Editor) error {
+		err := e.editCompositeScope(page, path, func(renderer *Renderer, root *editorCompositeNode, _ []*editorCompositeNode) error {
+			scope := root.loadedScope(path.Children)
+			owner := scope
+			for i := 0; i < selection.references; i++ {
+				owner = owner.ref
+				if owner == nil {
+					return fmt.Errorf("composite resource container no longer exists")
+				}
 			}
-		}
-		container := owner.node
-		for _, index := range selection.containers {
-			containers := compositeContainers(container)
-			if index >= len(containers) {
-				return fmt.Errorf("composite page block no longer exists")
+			container := owner.node
+			for _, index := range selection.containers {
+				containers := compositeContainers(container)
+				if index >= len(containers) {
+					return fmt.Errorf("composite page block no longer exists")
+				}
+				container = containers[index]
 			}
-			container = containers[index]
-		}
-		box, _ := ParseBox(owner.object.CompositeGraphicUnit.Boundary)
-		parent := owner.parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(NewMatrix(owner.object.CompositeGraphicUnit.CTM))
-		nodes := make([]*editorCompositeNode, len(selection.nodes))
-		for i, node := range selection.nodes {
-			copy := *node
-			copy.parent, copy.boundaryInCTM = parent, owner.boundaryInCTM
-			nodes[i] = &copy
-		}
-		data, states, err := e.copyCompositeNodes(renderer, nodes, dx, dy)
+			box, _ := ParseBox(owner.object.CompositeGraphicUnit.Boundary)
+			parent := owner.parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(NewMatrix(owner.object.CompositeGraphicUnit.CTM))
+			nodes := make([]*editorCompositeNode, len(selection.nodes))
+			for i, node := range selection.nodes {
+				copy := *node
+				copy.parent, copy.boundaryInCTM = parent, owner.boundaryInCTM
+				nodes[i] = &copy
+			}
+			data, states, err := e.copyCompositeNodes(renderer, nodes, dx, dy)
+			if err != nil {
+				return err
+			}
+			maps.Copy(owner.states, states)
+			next, reached := 0, false
+			var count func(*editorCompositeNode)
+			count = func(node *editorCompositeNode) {
+				if node.ref != nil {
+					count(node.ref)
+				}
+				if reached {
+					return
+				}
+				for _, child := range node.children {
+					if node != owner || child.span.start < container.close {
+						next++
+					}
+				}
+				reached = node == owner
+			}
+			count(scope)
+			patch := editorXMLPatch{container.close, container.close, data}
+			if container.open == container.end {
+				patch = editorXMLContent(owner.data, container, data)
+			}
+			owner.patches = append(owner.patches, patch)
+			for i := range nodes {
+				result = append(result, next+i)
+			}
+			return nil
+		})
 		if err != nil {
 			return err
 		}
-		maps.Copy(owner.states, states)
-		next, reached := 0, false
-		var count func(*editorCompositeNode)
-		count = func(node *editorCompositeNode) {
-			if node.ref != nil {
-				count(node.ref)
-			}
-			if reached {
-				return
-			}
-			for _, child := range node.children {
-				if node != owner || child.span.start < container.close {
-					next++
-				}
-			}
-			reached = node == owner
-		}
-		count(scope)
-		patch := editorXMLPatch{container.close, container.close, data}
-		if container.open == container.end {
-			patch = editorXMLContent(owner.data, container, data)
-		}
-		owner.patches = append(owner.patches, patch)
-		for i := range nodes {
-			result = append(result, next+i)
-		}
-		return nil
+		return e.putCompositeRichTextCopies(page, path, result, selection.richText)
 	})
 	if err != nil {
 		return nil, err
@@ -226,7 +241,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 	renderer := e.newRenderer(reader)
 	var objects []GraphicObject
 	var remaps []map[string]string
-	for _, source := range selection.nodes {
+	for i, source := range selection.nodes {
 		copy, err := newEditorCompositeNode(source.data)
 		if err != nil {
 			return err
@@ -329,6 +344,14 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 			copy.object.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
 		}
 		object.origin = &editorObjectOrigin{editor: e, document: e.documentIdentity(), page: selection.source, data: copy.data, node: copy.node, object: copy.object}
+		if meta, ok := selection.richText[i]; ok {
+			unit, err := e.compositeDefinition(object.CompositeGraphicUnit.ResourceID)
+			if err != nil {
+				return err
+			}
+			meta.Digest = richTextDigest(unit.object.CompositeGraphicUnit.Objects)
+			object.richText = &meta
+		}
 		objects = append(objects, object)
 		remaps = append(remaps, copy.remaps...)
 	}

@@ -101,7 +101,7 @@ func (e *Editor) SetPageActions(index int, actions []Action) error {
 	}
 	before, after := cloneEditorData(page.Actions), cloneEditorData(actions)
 	page.Actions = cloneEditorData(after)
-	if change := e.recordChange(); change != nil {
+	if change := e.recordChange(index); change != nil {
 		change.undo = func(e *Editor) { e.pages[index].Actions = cloneEditorData(before) }
 		change.redo = func(e *Editor) { e.pages[index].Actions = cloneEditorData(after) }
 	}

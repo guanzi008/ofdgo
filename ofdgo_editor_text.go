@@ -187,7 +187,7 @@ func (e *Editor) UpdateTextContent(page int, id, value string, style TextStyle) 
 
 // RewriteText 保留原文的字形定位，不修改对象样式或文档
 // 等长替换保留各字原位；单段增删保留前缀和后缀步进，新增字符沿用局部字距
-// 方向、缩放和修饰原样保留；复杂布局仅支持等长替换，合并字形需显式重排
+// 方向、缩放和修饰原样保留；单段纵排沿用现有纵向步进，其他复杂布局仅支持等长替换，合并字形需显式重排
 // 首段缺失坐标仅在临时校验中恢复，不改写源坐标
 // 入参: obj 原文字对象, value 新内容
 // 返回: error 错误信息
@@ -210,7 +210,8 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 		return err
 	}
 	old, next := []rune(obj.Text()), []rune(value)
-	complex := obj.ReadDirection != 0 || obj.CharDirection != 0 || len(obj.CGTransform) != 0 || obj.VScale != 0 || obj.Decoration != ""
+	vertical := (obj.ReadDirection == 90 || obj.ReadDirection == 270) && obj.CharDirection == 0 && len(obj.TextCode) == 1 && obj.TextCode[0].DeltaY != ""
+	complex := obj.ReadDirection != 0 && !vertical || obj.CharDirection != 0 || len(obj.CGTransform) != 0 || obj.VScale != 0 || obj.Decoration != ""
 	if complex && len(old) != len(next) {
 		return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("changing positioned text length requires explicit layout")}
 	}
@@ -279,7 +280,12 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 				if obj.HScale != 0 {
 					unit *= obj.HScale
 				}
-				advance := func(char rune) float64 { return float64(sfnt.GlyphAdvance(sfnt.GlyphIndex(char))) * unit }
+				advance := func(char rune) float64 {
+					if vertical {
+						return 0
+					}
+					return float64(sfnt.GlyphAdvance(sfnt.GlyphIndex(char))) * unit
+				}
 				if codes[i].DeltaX != "" {
 					codes[i].DeltaX = rewriteTextDeltas(codes[i].DeltaX, runes, replacement, from, to, advance)
 				}

@@ -711,6 +711,7 @@ func editorPreservedObject(before, after GraphicObject) bool {
 	}
 	before = cloneEditorData(before)
 	before.state = after.state
+	before.richText = after.richText
 	switch before.Type {
 	case "TextObject":
 		a, b := &before.TextObject, after.TextObject

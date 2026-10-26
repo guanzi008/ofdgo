@@ -56,6 +56,7 @@ type richTextEntry struct {
 type richTextIndex struct {
 	source   *editorSource
 	revision uint64
+	remaps   map[string]int
 	entries  map[string]richTextEntry
 	err      error
 }
@@ -204,13 +205,20 @@ func (e *Editor) RichText(page int, id string) (RichText, error) {
 	if err != nil {
 		return RichText{}, err
 	}
+	return e.richTextObject(page, object)
+}
+
+// richTextObject 读取对象的编辑标引并校验标准内容
+// 入参: page 页面索引, object 当前对象
+// 返回: RichText 编辑内容, error 识别或持久化错误
+func (e *Editor) richTextObject(page int, object GraphicObject) (RichText, error) {
 	if object.Type == "TextObject" {
 		return e.promoteRichText(page, object)
 	}
 	if object.Type != "CompositeObject" {
 		return RichText{}, ErrNotRichText
 	}
-	entry, err := e.richTextEntry(page, id)
+	entry, err := e.richTextEntry(page, editorObjectID(object))
 	if err != nil {
 		return RichText{}, err
 	}
@@ -273,6 +281,163 @@ func (e *Editor) RichTextFrame(page int, id string) (Box, Matrix, error) {
 		return Box{}, Matrix{}, err
 	}
 	return entry.metadata.Frame, TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(object.CompositeGraphicUnit.CTM)).Multiply(TranslationMatrix(entry.metadata.Offset[0], entry.metadata.Offset[1])), nil
+}
+
+// AddCompositeRichText 向内部范围添加富文本，使用页面坐标并保存编辑标引
+// 入参: page 页面索引, path 父路径, box 页面编辑框, value 富文本
+// 返回: int 新成员序号, error 排版或提交错误
+func (e *Editor) AddCompositeRichText(page int, path ObjectPath, box Box, value RichText) (int, error) {
+	var index int
+	err := e.Transaction(func(e *Editor) error {
+		if _, err := creationBox(editorBoxString(box)); err != nil {
+			return err
+		}
+		object, meta, err := e.prepareRichText(box, value)
+		if err != nil {
+			return err
+		}
+		index, err = e.AddCompositeObject(page, path, object)
+		if err != nil {
+			return err
+		}
+		member, err := e.CompositeObject(page, path, index)
+		if err != nil {
+			return err
+		}
+		return e.putCompositeRichTextMetadata(page, member.Object, meta, -1)
+	})
+	return index, err
+}
+
+// CompositeRichText 读取内部富文本值及局部编辑框，不提升未标引的普通文字
+// 入参: page 页面索引, member 当前内部成员快照
+// 返回: RichText 编辑内容, Box 局部编辑框, Matrix 页面变换, error 识别或持久化错误
+func (e *Editor) CompositeRichText(page int, member CompositeMember) (RichText, Box, Matrix, error) {
+	if _, err := e.page(page); err != nil {
+		return RichText{}, Box{}, Matrix{}, err
+	}
+	if member.Object.Type != "CompositeObject" {
+		return RichText{}, Box{}, Matrix{}, ErrNotRichText
+	}
+	value, err := e.richTextObject(page, member.Object)
+	if err != nil {
+		return RichText{}, Box{}, Matrix{}, err
+	}
+	entry, err := e.richTextEntry(page, editorObjectID(member.Object))
+	if err != nil {
+		return RichText{}, Box{}, Matrix{}, err
+	}
+	return value, entry.metadata.Frame, member.Matrix.Multiply(TranslationMatrix(entry.metadata.Offset[0], entry.metadata.Offset[1])), nil
+}
+
+// UpdateCompositeRichText 原子重排内部富文本，保留父变换并隔离共享实例
+// 入参: page 页面索引, path 父路径, index 成员序号, value 富文本, offset 局部横向偏移, width 新段落宽度，零值保留
+// 返回: error 校验或提交错误
+func (e *Editor) UpdateCompositeRichText(page int, path ObjectPath, index int, value RichText, offset, width float64) error {
+	if !finite(offset) || !finite(width) || width < 0 || width == 0 && offset != 0 {
+		return fmt.Errorf("invalid rich text frame")
+	}
+	return e.Transaction(func(e *Editor) error {
+		var metadata richTextMetadata
+		entryIndex := -1
+		changed := false
+		err := e.editCompositeObjects(page, path, []int{index}, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
+			node := nodes[0]
+			current, frame, _, err := e.CompositeRichText(page, members[0])
+			if err != nil {
+				return fmt.Errorf("read composite member %s: %w", editorObjectID(members[0].Object), err)
+			}
+			if err := value.Validate(); err != nil {
+				return err
+			}
+			if offset == 0 && (width == 0 || width == frame.W) && reflect.DeepEqual(normalizeRichText(current), normalizeRichText(value)) {
+				return nil
+			}
+			if node.object.CompositeGraphicUnit.Clips != nil {
+				return fmt.Errorf("clipped rich text requires explicit clip removal before reflow")
+			}
+			entry, err := e.richTextEntry(page, editorObjectID(node.object))
+			if err != nil {
+				return fmt.Errorf("read composite node %s: %w", editorObjectID(node.object), err)
+			}
+			object := cloneEditorData(node.object)
+			if !node.boundaryInCTM {
+				object = compositeBoundary(object, node.parent, true)
+			}
+			unit := &object.CompositeGraphicUnit
+			box, err := creationBox(unit.Boundary)
+			if err != nil {
+				return err
+			}
+			matrix := TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(unit.CTM)).Multiply(TranslationMatrix(entry.metadata.Offset[0]+offset, entry.metadata.Offset[1]))
+			if width > 0 {
+				frame.W = width
+			}
+			next, meta, err := e.prepareRichText(frame, value)
+			if err != nil {
+				return err
+			}
+			placement := richTextPlacement(meta, matrix)
+			unit.ResourceID, unit.Boundary, unit.CTM = next.CompositeGraphicUnit.ResourceID, placement.Boundary, placement.CTM
+			if !node.boundaryInCTM {
+				object = compositeBoundary(object, node.parent, false)
+			}
+			metadata, entryIndex, changed = meta, entry.index, true
+			return node.update(object)
+		})
+		if err != nil || !changed {
+			return err
+		}
+		member, err := e.CompositeObject(page, path, index)
+		if err != nil {
+			return err
+		}
+		if entry, err := e.richTextEntry(page, editorObjectID(member.Object)); err == nil {
+			entryIndex = entry.index
+		} else if !errors.Is(err, ErrNotRichText) {
+			return err
+		}
+		return e.putCompositeRichTextMetadata(page, member.Object, metadata, entryIndex)
+	})
+}
+
+// putCompositeRichTextMetadata 在容器坐标规范化后更新标准内容摘要和编辑标引
+// 入参: page 页面索引, object 当前成员, meta 编辑信息, index 原入口或-1
+// 返回: error 资源或提交错误
+func (e *Editor) putCompositeRichTextMetadata(page int, object GraphicObject, meta richTextMetadata, index int) error {
+	unit, err := e.compositeDefinition(object.CompositeGraphicUnit.ResourceID)
+	if err != nil {
+		return err
+	}
+	meta.Digest = richTextDigest(unit.object.CompositeGraphicUnit.Objects)
+	return e.putRichTextMetadata(page, editorObjectID(object), meta, index)
+}
+
+// putCompositeRichTextCopies 一次读取复制后的选区，按对象顺序恢复富文本标引
+// 入参: page 页面索引, path 父路径, indexes 新成员序号, metadata 选区位置对应的编辑语义
+// 返回: error 读取或提交错误
+func (e *Editor) putCompositeRichTextCopies(page int, path ObjectPath, indexes []int, metadata map[int]richTextMetadata) error {
+	if len(metadata) == 0 {
+		return nil
+	}
+	selected := make([]int, 0, len(metadata))
+	values := make([]richTextMetadata, 0, len(metadata))
+	for i, index := range indexes {
+		if meta, ok := metadata[i]; ok {
+			selected = append(selected, index)
+			values = append(values, meta)
+		}
+	}
+	members, err := e.CompositeObjectsAt(page, path, selected)
+	if err != nil {
+		return err
+	}
+	for i, member := range members {
+		if err := e.putCompositeRichTextMetadata(page, member.Object, values[i], -1); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // prepareRichText 构造独立组合资源和不含字体编号的编辑标引
@@ -385,9 +550,15 @@ func (e *Editor) richTextEntry(page int, id string) (richTextEntry, error) {
 // 返回: *richTextIndex 只读缓存
 func (e *Editor) richTextMetadataIndex() *richTextIndex {
 	if index := e.richIndex; index != nil && index.source == e.source && index.revision == e.revision {
-		return index
+		valid := len(index.remaps) == len(e.structureRemaps)
+		for page, remaps := range e.structureRemaps {
+			valid = valid && index.remaps[page] == len(remaps)
+		}
+		if valid {
+			return index
+		}
 	}
-	index := &richTextIndex{source: e.source, revision: e.revision, entries: make(map[string]richTextEntry)}
+	index := &richTextIndex{source: e.source, revision: e.revision, remaps: e.structureRemapStarts(), entries: make(map[string]richTextEntry)}
 	e.richIndex = index
 	if e.source == nil {
 		return index
@@ -434,6 +605,17 @@ func (e *Editor) richTextMetadataIndex() *richTextIndex {
 			}
 		}
 	}
+	for page, remaps := range e.structureRemaps {
+		for _, ids := range remaps {
+			for from, to := range ids {
+				if _, exists := index.entries[page+"/"+to]; !exists {
+					if entry, ok := index.entries[page+"/"+from]; ok {
+						index.entries[page+"/"+to] = entry
+					}
+				}
+			}
+		}
+	}
 	return index
 }
 
@@ -447,7 +629,26 @@ func (e *Editor) putRichTextMetadata(page int, id string, meta richTextMetadata,
 	}
 	root := StructureNode{Name: "RichText", Namespace: richTextNamespace, Text: string(data)}
 	if index >= 0 {
-		return e.UpdateStructureNode(index, nil, root)
+		separate := false
+		err := e.editStructure(index, func(data []byte, node *editorXML, tag CustomTag) ([]byte, error) {
+			updated, err := rewriteStructureReferences(context.Background(), data, tag, func(pageID string, ids []string) (string, []string, error) {
+				var remaining []string
+				for _, objectID := range ids {
+					if editorResourceID(pageID) != editorResourceID(e.pages[page].ID) || editorResourceID(objectID) != editorResourceID(id) {
+						remaining = append(remaining, objectID)
+						separate = true
+					}
+				}
+				return pageID, remaining, nil
+			})
+			if err != nil || separate {
+				return updated, err
+			}
+			return updateStructureNodeXML(data, node, root)
+		})
+		if err != nil || !separate {
+			return err
+		}
 	}
 	root.Children = []StructureNode{{Name: "ObjectRef", Namespace: richTextNamespace, Attributes: []StructureAttribute{{Name: "PageRef", Value: e.pages[page].ID}}, Text: id}}
 	_, err = e.AddStructure(CustomTag{TypeID: richTextTagType, NameSpace: richTextNamespace}, root)

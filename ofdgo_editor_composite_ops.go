@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -45,31 +46,48 @@ func (e *Editor) CopyCompositeObjects(page int, path ObjectPath, indexes []int, 
 		return nil, fmt.Errorf("copy requires finite offsets")
 	}
 	var result []int
-	err := e.editCompositeObjects(page, path, indexes, func(renderer *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
-		container := nodes[0].span.parent
-		for i, node := range nodes {
-			if !members[i].Capabilities.Copy || node.span.parent != container {
-				return fmt.Errorf("copy requires editable members in the same container")
+	metadata := make(map[int]richTextMetadata)
+	err := e.Transaction(func(e *Editor) error {
+		err := e.editCompositeObjects(page, path, indexes, func(renderer *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
+			container := nodes[0].span.parent
+			for i, node := range nodes {
+				if !members[i].Capabilities.Copy || node.span.parent != container {
+					return fmt.Errorf("copy requires editable members in the same container")
+				}
 			}
-		}
-		slices.SortFunc(nodes, func(a, b *editorCompositeNode) int { return a.index - b.index })
-		data, states, err := e.copyCompositeNodes(renderer, nodes, dx, dy)
+			slices.SortFunc(nodes, func(a, b *editorCompositeNode) int { return a.index - b.index })
+			for i, node := range nodes {
+				if node.object.Type == "CompositeObject" {
+					entry, err := e.richTextEntry(page, editorObjectID(node.object))
+					if err == nil {
+						metadata[i] = entry.metadata
+					} else if !errors.Is(err, ErrNotRichText) {
+						return err
+					}
+				}
+			}
+			data, states, err := e.copyCompositeNodes(renderer, nodes, dx, dy)
+			if err != nil {
+				return err
+			}
+			owner := nodes[0].owner
+			maps.Copy(owner.states, states)
+			owner.patches = append(owner.patches, editorXMLPatch{container.close, container.close, data})
+			next := 0
+			for _, member := range owner.children {
+				if container.start < member.span.start && member.span.end <= container.close {
+					next = member.index + 1
+				}
+			}
+			for i := range nodes {
+				result = append(result, next+i)
+			}
+			return nil
+		})
 		if err != nil {
 			return err
 		}
-		owner := nodes[0].owner
-		maps.Copy(owner.states, states)
-		owner.patches = append(owner.patches, editorXMLPatch{container.close, container.close, data})
-		next := 0
-		for _, member := range owner.children {
-			if container.start < member.span.start && member.span.end <= container.close {
-				next = member.index + 1
-			}
-		}
-		for i := range nodes {
-			result = append(result, next+i)
-		}
-		return nil
+		return e.putCompositeRichTextCopies(page, path, result, metadata)
 	})
 	if err != nil {
 		return nil, err

@@ -20,6 +20,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"maps"
+	"path"
 	"slices"
 	"strings"
 )
@@ -337,7 +338,7 @@ func editorStructureIndexContext(ctx context.Context, base *editorSource, parts 
 	if base.document.CustomTags.Path == "" {
 		container := root.child("CustomTags")
 		if container == nil || len(container.children) == 0 {
-			name = packageAvailableName(base.reader, nil, base.reader.RootDir+"/CustomTags.xml")
+			name = packageAvailableName(base.reader, nil, path.Join(base.reader.RootDir, "CustomTags.xml"))
 			data, err = root.containerXML("CustomTags", nil, nil)
 			if err == nil {
 				root, err = parseEditorXMLContext(ctx, data)

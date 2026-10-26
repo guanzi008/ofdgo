@@ -126,6 +126,7 @@ function createDocumentState() {
 		searchMatches: [],
 		searchIndex: -1,
 		searchRunning: false,
+		searchTruncated: false,
 		navigationScroll: new Map(),
 		fontSyncPending: false,
 		fontCatalogLoading: false,
@@ -4254,7 +4255,7 @@ async function beginCanvasText(index, box, surface, page) {
 		const model = richTextModel(item);
 		const key = `temp-font-${crypto.randomUUID()}`;
 		model.runs[0].format.font = key;
-		canvasEditor.editText(item, face, null, state.composite ? null : { model, faces: new Map([[key, face]]), fonts: [{ key, data }] });
+		canvasEditor.editText(item, face, null, { model, faces: new Map([[key, face]]), fonts: [{ key, data }] });
 	} catch (err) {
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) showError(err, false);
 	} finally {
@@ -4704,13 +4705,13 @@ async function changeDocument(name, item, ...args) {
 		const annotated = !scoped && ids.some(id => id.startsWith("annotation:"));
 		const inserting = ["ofdgoInsertShape", "ofdgoInsertText", "ofdgoInsertImage", "ofdgoInsertInk"].includes(name) || name === "ofdgoSaveRichText" && !item;
 		const editingAnnotation = name === "ofdgoWriteAnnotation" && Boolean(state.annotationCreate?.item);
-		if (scope && inserting && name === "ofdgoSaveRichText") throw new Error("组合内部暂不支持新增富文本");
-		if (scope && inserting) args.push(scope.key);
+		const scopedRichText = scoped && name === "ofdgoSaveRichText";
+		if (scope && (inserting || scopedRichText)) args.push(scope.key);
 		const textSelection = name === "ofdgoUpdateTextSelection";
-		if (scoped && !operation && !textSelection) throw new Error("内部对象暂不支持此操作");
+		if (scoped && !operation && !textSelection && !scopedRichText) throw new Error("内部对象暂不支持此操作");
 		const doc = textSelection
 			? await callWASM(name, item.index, item.selectionIDs, ...args)
-			: scoped
+			: scoped && !scopedRichText
 			? await callWASM("ofdgoChangeCompositeObjects", item.index, scope.key, Array.isArray(item.id) ? item.id : members.map(member => member.id), operation, ...args)
 			: annotated && operation ? await callWASM("ofdgoChangeSelection", item.index, ids, operation, ...args)
 			: await callWASM(name, ...(item ? [item.index, item.id] : []), ...args);
@@ -9797,7 +9798,7 @@ async function runBatch() {
 						try {
 							const result = await batchCall(slot, "ofdgoConvertFile", [item.file, options, fonts, destination], progress => batchProgress(item, position, jobs.length, progress));
 							results[position] = result.files;
-							item.details = (result.pdf?.Warnings || []).map(warning => `${warning.Page ? `第${warning.Page}页：` : ""}${warning.Message}`);
+							item.details = (result.pdf?.Warnings || []).map(conversionWarningText);
 							for (const font of result.fonts || []) item.details.push(`${font.name}：${font.changed ? options.fontMode === 1 ? "已嵌入" : "已外置" : `未处理 · ${fontBindingError(font.reason)}`}`);
 							if (result.unchanged && !result.bytes) {
 								batchStatus(item, "unchanged", "原样");
@@ -10760,7 +10761,11 @@ function renderOutlines(reset = true) {
 	showNavigation(selected && !selected.hidden ? selected : el.pagesTab);
 }
 
+const SEARCH_MATCH_LIMIT = 10000;
+
 function resetSearch(clearInput = true) {
+	for (const [id, request] of wasmRequests) if (request.tab === documentTab() && request.name === "ofdgoSearchPage") cancelOperation(id);
+	state.searchTruncated = false;
 	state.searchRunning = false;
 	state.searchSeq += 1;
 	state.searchQuery = "";
@@ -10777,16 +10782,20 @@ function resetSearch(clearInput = true) {
 
 async function refreshSearchPages(pages, openSeq) {
 	const tab = documentTab(), target = tab.state, query = target.searchQuery;
-	if (!query || target.searchRunning) { resetSearch(false); return; }
+	if (!query || target.searchRunning || target.searchTruncated) { resetSearch(false); return; }
 	const seq = ++target.searchSeq;
 	target.searchRunning = true;
 	const selected = target.searchMatches[target.searchIndex];
 	try {
 		const matches = target.searchMatches.filter(match => !pages.includes(match.page));
 		for (const page of pages) {
-			const result = await callTabWASM(tab, "ofdgoSearchPage", page, query);
+			const result = await callTabWASM(tab, "ofdgoSearchPage", page, query, SEARCH_MATCH_LIMIT - matches.length + 1);
 			if (tab.closed || target.openSeq !== openSeq || target.searchSeq !== seq) return;
-			for (const match of result || []) matches.push({...match, page});
+			for (const match of result || []) {
+				if (matches.length === SEARCH_MATCH_LIMIT) { target.searchTruncated = true; break; }
+				matches.push({...match, page});
+			}
+			if (target.searchTruncated) break;
 		}
 		matches.sort((a,b) => a.page - b.page);
 		target.searchMatches = matches;
@@ -10794,7 +10803,7 @@ async function refreshSearchPages(pages, openSeq) {
 		if (isForegroundDocument(tab)) {
 			el.searchResults.replaceChildren();
 			clearSearchHighlights();
-			el.searchStatus.textContent = matches.length ? "搜索完成" : "暂无结果";
+			el.searchStatus.textContent = target.searchTruncated ? "已达结果上限" : matches.length ? "搜索完成" : "暂无结果";
 			renderSearchResults();
 			if (target.searchIndex >= 0) renderSearchHighlights(matches[target.searchIndex].page);
 		}
@@ -10829,8 +10838,8 @@ async function searchDocument() {
 	target.searchRunning = true;
 	try {
 		for (let page = 0; page < pageCount; page += 1) {
-			const matches = await callWASM("ofdgoSearchPage", page, query);
-			if (seq !== state.searchSeq || openSeq !== state.openSeq) {
+			const matches = await callWASM("ofdgoSearchPage", page, query, SEARCH_MATCH_LIMIT - target.searchMatches.length + 1);
+			if (target !== state || seq !== target.searchSeq || openSeq !== target.openSeq) {
 				return;
 			}
 			el.searchStatus.textContent = `正在搜索文字 · ${page + 1} / ${pageCount} 页`;
@@ -10838,16 +10847,18 @@ async function searchDocument() {
 				continue;
 			}
 			for (const match of matches) {
+				if (target.searchMatches.length === SEARCH_MATCH_LIMIT) { target.searchTruncated = true; break; }
 				state.searchMatches.push({ ...match, page });
 			}
 			renderSearchResults();
+			if (target.searchTruncated) break;
 		}
-		el.searchStatus.textContent = state.searchMatches.length ? "搜索完成" : "暂无结果";
+		el.searchStatus.textContent = target.searchTruncated ? "已达结果上限" : state.searchMatches.length ? "搜索完成" : "暂无结果";
 		if (state.searchIndex < 0 && state.searchMatches.length && !el.searchPanel.hidden && state.showPages) {
 			await selectSearchMatch(0);
 		}
 	} catch (err) {
-		if (seq === state.searchSeq && openSeq === state.openSeq) {
+		if (target === state && seq === target.searchSeq && openSeq === target.openSeq) {
 			state.searchQuery = "";
 			el.searchStatus.textContent = "搜索失败";
 			showError(err, false);
@@ -10900,6 +10911,7 @@ async function selectSearchMatch(index) {
 	index = (index + count) % count;
 	state.searchIndex = index;
 	const match = state.searchMatches[index];
+	const target = state;
 	const seq = state.searchSeq;
 	const openSeq = state.openSeq;
 	clearSearchHighlights();
@@ -10908,7 +10920,7 @@ async function selectSearchMatch(index) {
 		return;
 	}
 	await nextFrame();
-	if (seq !== state.searchSeq || openSeq !== state.openSeq || state.searchIndex !== index || state.pageIndex !== match.page) {
+	if (target !== state || seq !== state.searchSeq || openSeq !== state.openSeq || state.searchIndex !== index || state.pageIndex !== match.page) {
 		return;
 	}
 	renderSearchHighlights(match.page);
@@ -10928,7 +10940,7 @@ async function selectSearchMatch(index) {
 	if (state.editing) {
 		const node = [...pageView.pageShell(match.page).querySelectorAll(".edit-object")].find(node => canvasEditor.nodes.get(node)?.id === match.id);
 		const item = node && canvasEditor.nodes.get(node);
-		if (item?.type === "TextObject") {
+		if (item?.type === "TextObject" && !match.parts?.length) {
 			state.selectObjects = true;
 			pageView.setPan(false);
 			canvasEditor.setTool("");
@@ -11379,13 +11391,28 @@ function enablePageDrag(button, index) {
 	});
 }
 
+function conversionWarningText(warning) {
+	const location = [];
+	if (warning.Page > 0) location.push(`第${warning.Page}页`);
+	if (warning.Offset > 0) location.push(`位置${warning.Offset}`);
+	const messages = [
+		[/^PDF output intents preserved as metadata; not applied to rendering$/, "输出配置仅保留元数据"],
+		[/^PDF annotation has no usable static appearance$/, "注解缺少可用外观"],
+		[/^invalid PDF widget appearance replaced from field properties$/, "控件外观已按属性重建"],
+		[/^PDF 3D rendering unavailable; normal appearance retained:/, "三维内容使用静态外观"],
+		[/^PDF 3D markup default view visibility applied; view switching not transferred$/, "三维视图仅保留默认状态"]
+	];
+	const message = messages.find(([pattern]) => pattern.test(warning.Message))?.[1] || warning.Message;
+	return `${location.length ? location.join(" · ") + "：" : ""}${message}`;
+}
+
 function renderMeta(keepDetails = false) {
 	renderSecurity();
 	el.conversionNotice.hidden = !state.conversionWarnings.length;
 	renderMetaContent(el.conversionWarnings, state.conversionWarnings, () => {
 		el.conversionWarnings.replaceChildren(...state.conversionWarnings.map(warning => {
 			const item = document.createElement("p");
-			item.textContent = `第${warning.Page}页 · 位置${warning.Offset}：${warning.Message}`;
+			item.textContent = conversionWarningText(warning);
 			return item;
 		}));
 	});

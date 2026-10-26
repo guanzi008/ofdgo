@@ -40,6 +40,29 @@ func (e *Editor) AddCompositeObject(page int, path ObjectPath, object GraphicObj
 // 入参: page 页面索引, path 父路径, objects 当前文档快照或基本对象, dx 页面横向位移, dy 页面纵向位移
 // 返回: []int 新成员序号, error 错误信息
 func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []GraphicObject, dx, dy float64) ([]int, error) {
+	metadata, err := e.copiedRichTextMetadata(objects)
+	if err != nil {
+		return nil, err
+	}
+	if len(metadata) == 0 {
+		return e.copyObjectsToComposite(page, path, objects, dx, dy)
+	}
+	var indexes []int
+	err = e.Transaction(func(e *Editor) error {
+		var err error
+		indexes, err = e.copyObjectsToComposite(page, path, objects, dx, dy)
+		if err != nil {
+			return err
+		}
+		return e.putCompositeRichTextCopies(page, path, indexes, metadata)
+	})
+	return indexes, err
+}
+
+// copyObjectsToComposite 插入对象原文，由调用方同步富文本语义
+// 入参: page 页面索引, path 父路径, objects 对象快照, dx 横向位移, dy 纵向位移
+// 返回: []int 成员序号, error 校验或提交错误
+func (e *Editor) copyObjectsToComposite(page int, path ObjectPath, objects []GraphicObject, dx, dy float64) ([]int, error) {
 	if !finite(dx) || !finite(dy) {
 		return nil, fmt.Errorf("copy requires finite offsets")
 	}
@@ -49,6 +72,9 @@ func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []Gra
 			return nil
 		}
 		owner := root.loadedScope(path.Children)
+		if owner.ref != nil {
+			owner = owner.ref
+		}
 		box, _ := ParseBox(owner.object.CompositeGraphicUnit.Boundary)
 		parent := owner.parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(NewMatrix(owner.object.CompositeGraphicUnit.CTM))
 		inverse, ok := parent.Invert()

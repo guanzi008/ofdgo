@@ -382,6 +382,7 @@ export class PrintDialog {
 			this.root = document.querySelector("#ofdgoPrintDocument") || this.createRoot();
 			this.root.replaceChildren();
 			const style = document.createElement("style");
+			style.textContent = this.layout.sides.map((side, i) => `@page ofdgoPrint${i}{size:${side.width}mm ${side.height}mm;margin:0}`).join("");
 			this.root.append(style);
 			this.status("正在准备纸面", true, 0, this.layout.sides.length);
 			for (let i = 0; i < this.layout.sides.length; i++) {
@@ -394,7 +395,6 @@ export class PrintDialog {
 				img.src = url;
 				section.append(img);
 				section.style.cssText = `page:ofdgoPrint${i};width:${side.width}mm;height:${side.height}mm`;
-				style.textContent += `@page ofdgoPrint${i}{size:${side.width}mm ${side.height}mm;margin:0}`;
 				this.root.append(section);
 				await img.decode();
 				if (this.current(sequence)) this.status("正在准备纸面", true, i + 1, this.layout.sides.length);

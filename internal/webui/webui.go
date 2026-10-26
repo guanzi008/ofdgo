@@ -611,7 +611,7 @@ func (s *Session) PageText(index int) (*ofdgo.PageText, error) {
 	text := s.cachedPageText(index)
 	if text == nil {
 		var err error
-		text, err = s.readPageText(index)
+		text, err = s.readPageText(context.Background(), index)
 		if err != nil {
 			return nil, err
 		}
@@ -651,7 +651,7 @@ func (s *Session) PageTextString(index int) (string, error) {
 	text := s.cachedPageText(index)
 	if text == nil {
 		var err error
-		text, err = s.readPageText(index)
+		text, err = s.readPageText(context.Background(), index)
 		if err != nil {
 			return "", err
 		}
@@ -663,11 +663,37 @@ func (s *Session) PageTextString(index int) (string, error) {
 // 入参: index 页面索引, query 搜索文字
 // 返回: []ofdgo.TextMatch 匹配结果, error 错误信息
 func (s *Session) SearchPage(index int, query string) ([]ofdgo.TextMatch, error) {
-	text, err := s.PageText(index)
-	if err != nil {
+	return s.SearchPageContext(context.Background(), index, query, 0)
+}
+
+// SearchPageContext 搜索页面文字并限制累计结果，零上限返回全部，取消时不返回部分结果
+// 入参: ctx 取消上下文, index 页面索引, query 文字, limit 结果上限
+// 返回: []ofdgo.TextMatch 匹配结果, error 取消或读取错误
+func (s *Session) SearchPageContext(ctx context.Context, index int, query string, limit int) ([]ofdgo.TextMatch, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return text.Search(query), nil
+	text := s.cachedPageText(index)
+	if text == nil {
+		var err error
+		text, err = s.readPageText(ctx, index)
+		if err != nil {
+			return nil, err
+		}
+		s.cachePageText(index, text)
+	}
+	var matches []ofdgo.TextMatch
+	err := text.SearchEach(ctx, query, func(match ofdgo.TextMatch) error {
+		matches = append(matches, match)
+		if limit > 0 && len(matches) >= limit {
+			return io.EOF
+		}
+		return nil
+	})
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return matches, nil
 }
 
 // Summary 获取首屏所需信息，不解析页面图元或执行验签
@@ -1018,13 +1044,13 @@ func (s *Session) scanFontInfoBatch() bool {
 }
 
 // readPageText 复用已加载页面，否则只解析文字所需图元
-// 入参: index 页面索引
+// 入参: ctx 取消上下文, index 页面索引
 // 返回: *ofdgo.PageText 页面文字, error 错误信息
-func (s *Session) readPageText(index int) (*ofdgo.PageText, error) {
+func (s *Session) readPageText(ctx context.Context, index int) (*ofdgo.PageText, error) {
 	if page := s.pageCache[index]; page != nil {
-		return s.Renderer.PageText(page)
+		return s.Renderer.PageTextContext(ctx, page)
 	}
-	return s.Renderer.PageTextByIndex(index)
+	return s.Renderer.PageTextByIndexContext(ctx, index)
 }
 
 // pageInfos 获取全部真实页面尺寸，首屏、配置及详情共用区域缓存
@@ -1549,7 +1575,6 @@ func (e *businessEngine) finishPDF() ([]byte, error) {
 	if err != nil {
 		return nil, e.pdfError(err)
 	}
-
 	reader, err := editor.Reader(e.pdf.operation)
 	if err != nil {
 		return nil, err
@@ -3001,7 +3026,11 @@ func (e *businessEngine) searchPage(args []platformValue) (any, error) {
 	if e.currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	return e.currentSession.SearchPage(args[0].Int(), args[1].String())
+	limit := 10001
+	if len(args) > 2 {
+		limit = max(1, min(limit, args[2].Int()))
+	}
+	return e.currentSession.SearchPageContext(e.operationContext(), args[0].Int(), args[1].String(), limit)
 }
 
 // exportFormats 获取导出格式
@@ -3387,7 +3416,9 @@ func (e *businessEngine) editorObjects(index int, text *ofdgo.PageText) ([]any, 
 				}
 				if object.Type == "CompositeObject" {
 					if value, richErr := e.currentEditor.RichText(index, id); richErr == nil {
-						e.editorRichText(index, item, object, value, fontNames)
+						if local, matrix, err := e.currentEditor.RichTextFrame(index, id); err == nil {
+							e.editorRichText(item, object, value, fontNames, local, matrix)
+						}
 					}
 				}
 				objects = append(objects, item)
@@ -3974,6 +4005,11 @@ func (e *businessEngine) compositeObjects(args []platformValue) (any, error) {
 		if member.Capabilities.CropImage {
 			item["imageBounds"] = e.editorBox(box)
 			item["cropped"] = member.Cropped
+		}
+		if member.Object.Type == "CompositeObject" {
+			if value, frame, matrix, err := e.currentEditor.CompositeRichText(args[0].Int(), member); err == nil {
+				e.editorRichText(item, member.Object, value, fontNames, frame, matrix)
+			}
 		}
 		objects = append(objects, item)
 	}
@@ -4831,13 +4867,9 @@ func (e *businessEngine) styleText(args []platformValue) (any, error) {
 }
 
 // editorRichText 将富文本复合图元作为一个文本框提供给编辑器
-// 入参: page 页面索引, item 浏览器对象, object 标准复合图元, value 富文本, fonts 字体名称
-func (e *businessEngine) editorRichText(page int, item map[string]any, object ofdgo.GraphicObject, value ofdgo.RichText, fonts map[string]string) {
-	if len(value.Runs) == 0 {
-		return
-	}
-	local, matrix, err := e.currentEditor.RichTextFrame(page, object.CompositeGraphicUnit.ID)
-	if err != nil {
+// 入参: item 浏览器对象, object 标准复合图元, value 富文本, fonts 字体名称, local 局部编辑框, matrix 页面变换
+func (e *businessEngine) editorRichText(item map[string]any, object ofdgo.GraphicObject, value ofdgo.RichText, fonts map[string]string, local ofdgo.Box, matrix ofdgo.Matrix) {
+	if len(value.Runs) == 0 || object.CompositeGraphicUnit.Clips != nil {
 		return
 	}
 	width, height := local.W, local.H
@@ -4957,7 +4989,7 @@ func (e *businessEngine) readRichText(value platformValue) (ofdgo.RichText, erro
 }
 
 // saveRichText 原子保存文字、样式和新增字体，空标识创建文本框
-// 入参: args 页码、标识、富文本JSON、新建边界和可选字体集合
+// 入参: args 页码、标识、富文本JSON、新建边界、可选字体集合和父路径
 // 返回: any 文档信息及文字选区, error 错误信息
 func (e *businessEngine) saveRichText(args []platformValue) (any, error) {
 	value, err := e.readRichText(args[2])
@@ -4970,6 +5002,31 @@ func (e *businessEngine) saveRichText(args []platformValue) (any, error) {
 			if err := e.importRichTextFonts(&value, args[4]); err != nil {
 				return err
 			}
+		}
+		if len(args) > 5 && args[5].String() != "" {
+			key := args[5].String()
+			path, err := e.compositePath(key)
+			if err != nil {
+				return err
+			}
+			box := args[3]
+			if id != "" {
+				indexes, err := e.compositeIndexes(key, []string{id})
+				if err != nil {
+					return err
+				}
+				width, offset := 0.0, 0.0
+				if !box.IsNull() && !box.IsUndefined() && box.Get("frameWidth").Type() == platformTypeNumber {
+					width = box.Get("frameWidth").Float()
+					if box.Get("frameOffset").Type() == platformTypeNumber {
+						offset = box.Get("frameOffset").Float()
+					}
+				}
+				return e.currentEditor.UpdateCompositeRichText(page, path, indexes[0], value, offset, width)
+			}
+			index, err := e.currentEditor.AddCompositeRichText(page, path, ofdgo.Box{X: box.Get("x").Float(), Y: box.Get("y").Float(), W: box.Get("width").Float(), H: box.Get("height").Float()}, value)
+			id = fmt.Sprintf("%s/%d", key, index)
+			return err
 		}
 		if id != "" {
 			if err := e.currentEditor.UpdateRichText(page, id, value); err != nil {
@@ -7893,6 +7950,5 @@ func failureResult(err error) apiResult {
 	if errors.As(err, &result.MissingGlyphs) {
 		result.ReasonCode = ofdgo.EditMissingGlyphs
 	}
-
 	return result
 }

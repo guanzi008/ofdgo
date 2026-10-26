@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -313,10 +314,25 @@ func NewPDFImport(ctx context.Context, input *Input, options PDFImportOptions) (
 		return nil, fmt.Errorf("import PDF output intents: %w", err)
 	}
 	if len(outputIntents) != 0 {
-		if options.Strict {
-			return nil, &pdfgo.UnsupportedError{Feature: "PDF output intent conversion"}
+		var profile []byte
+		applicable := true
+		for _, intent := range outputIntents {
+			if intent.Subtype != "GTS_PDFA1" && intent.Subtype != "GTS_PDFX" || intent.Space == nil || len(intent.Profile) == 0 || profile != nil && !bytes.Equal(profile, intent.Profile) {
+				applicable = false
+				break
+			}
+			profile = intent.Profile
 		}
-		importer.report.Warnings = append(importer.report.Warnings, pdfgo.Diagnostic{Message: "PDF output intents preserved as metadata; not applied to rendering"})
+		if applicable {
+			if err := reader.SetDeviceColorProfile(profile); err != nil {
+				return nil, fmt.Errorf("import PDF device color profile: %w", err)
+			}
+		} else {
+			if options.Strict {
+				return nil, &pdfgo.UnsupportedError{Feature: "PDF output intent conversion"}
+			}
+			importer.report.Warnings = append(importer.report.Warnings, pdfgo.Diagnostic{Message: "PDF output intents preserved as metadata; not applied to rendering"})
+		}
 	}
 	importer.pageIndexes = make(map[pdfgo.Reference]int)
 	importer.resolveFile = options.ResolveFile
@@ -475,7 +491,6 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 			return err
 		}
 	}
-
 	p.ready[index] = true
 	return nil
 }

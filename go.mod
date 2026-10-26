@@ -11,7 +11,7 @@ require (
 	github.com/xiaoqidun/guigo v0.0.0-20261026011429-36a970cd3fb6
 	github.com/xiaoqidun/j2kgo v1.0.2
 	github.com/xiaoqidun/jbig2 v1.1.8
-	github.com/xiaoqidun/pdfgo v0.0.0-20261023171626-3473b442eed5
+	github.com/xiaoqidun/pdfgo v0.0.0-20261026125713-90454771d5d0
 	golang.org/x/crypto v0.58.0
 	golang.org/x/image v0.47.0
 	golang.org/x/sys v0.49.0
