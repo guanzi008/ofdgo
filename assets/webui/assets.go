@@ -18,10 +18,10 @@ import "embed"
 
 // FS WebUI嵌入静态文件
 //
-//go:embed index.html ofdgo.css ofdgo.ico ofdgo.js ofdgo.json ofdgo.png ofdgo.svg ofdgo_edit.js ofdgo_font.js ofdgo_host.js ofdgo_print.js ofdgo_util.js ofdgo_wasm.js ofdgo_work.js wasm_exec.js
+//go:embed index.html ofdgo.css ofdgo.ico ofdgo.js ofdgo.json ofdgo.png ofdgo.svg ofdgo_edit.js ofdgo_font.js ofdgo_host.js ofdgo_print.js ofdgo_util.js ofdgo_view.js ofdgo_wasm.js ofdgo_work.js wasm_exec.js
 var FS embed.FS
 
 // NativeFS WebView嵌入静态文件
 //
-//go:embed index.html ofdgo.css ofdgo.ico ofdgo.js ofdgo.json ofdgo.png ofdgo.svg ofdgo_edit.js ofdgo_font.js ofdgo_host.js ofdgo_print.js ofdgo_util.js
+//go:embed index.html ofdgo.css ofdgo.ico ofdgo.js ofdgo.json ofdgo.png ofdgo.svg ofdgo_edit.js ofdgo_font.js ofdgo_host.js ofdgo_print.js ofdgo_util.js ofdgo_view.js
 var NativeFS embed.FS

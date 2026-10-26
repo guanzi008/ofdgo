@@ -3,15 +3,10 @@ import { FontManager, FontPicker } from "./ofdgo_font.js";
 import { nativeHost, createEngineWorker, engineLimits, documentBytes, saveFilePicker, directoryPicker } from "./ofdgo_host.js";
 import { PrintDialog } from "./ofdgo_print.js";
 import { DocumentDialogs } from "./ofdgo_util.js";
+import { MM_TO_PX, SCROLL_SEGMENT_SIZE, createPageView } from "./ofdgo_view.js";
 
-const MM_TO_PX = 96 / 25.4;
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
 const DEFAULT_IMAGE_DPI = 300;
-const PAGE_CACHE_LIMIT = 16;
-const PAGE_CACHE_BYTES = 32 * 1024 * 1024;
-const svgFontBytes = new WeakMap();
-const PAGE_LAYOUT_GAP = 16;
-const SCROLL_SEGMENT_SIZE = 1000000;
 const OBJECT_CLIPBOARD_TYPE = "application/x-ofdgo-objects";
 const RESOURCE_KINDS = [["Font", "字体"], ["Image", "图片"], ["Audio", "音频"], ["Video", "视频"], ["Attachment", "附件"], ["ColorSpace", "色彩"], ["DrawParam", "样式"]];
 const SETTINGS_KINDS = [["bookmarks", "书签"], ["actions", "动作"], ["templates", "模板"], ["layers", "图层"], ["extensions", "扩展"]];
@@ -43,7 +38,6 @@ let remoteDownload = null;
 let wasmWorker = null;
 let wasmRequestID = 0;
 let wasmRecoveryTimer = 0;
-let textMeasure = null;
 let credentialRequest = null;
 let documentDialogs = null;
 let cancelPageTouch = null;
@@ -711,10 +705,10 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	rotation: () => state.rotation,
 	canInsert: (index) => pageCan("insert", index),
 	onPage: (index) => {
-		if (index !== state.pageIndex) setCurrentPage(index);
+		if (index !== state.pageIndex) pageView.setCurrentPage(index);
 	},
 	onSelect: (item, previous) => {
-		if (item && item.index !== state.pageIndex) setCurrentPage(item.index);
+		if (item && item.index !== state.pageIndex) pageView.setCurrentPage(item.index);
 		updateObjectControls(item);
 		const reason = objectEditReason(item), previousReason = objectEditReason(previous);
 		if (state.editing && state.doc && !document.body.hasAttribute("data-busy")
@@ -806,6 +800,19 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	},
 });
 
+const pageView = createPageView({
+	get state() { return state; },
+	get wasmWorker() { return wasmWorker; },
+	get activeTab() { return workspace.active; },
+	get tabs() { return workspace.tabs; },
+	callWASM, canvasEditor, clearRegionHighlights, documentTab, el,
+	enablePageDrag, formatSize, isDocumentSelection, isForegroundDocument, mountAnnotationNotes,
+	mountEditorObjects, mountPageLinks, nextFrame, pageCan, pageStatus,
+	releaseMediaPlayers, renderSearchHighlights, resetCompositeScope, scheduleOpenActions, selectThumbnailPage,
+	setBusy, setProgress, setStatus, showError, syncPageSelection,
+	updateControls, updateEditorTools, wasmRequests,
+});
+
 function updatePendingChanges() {
 	setDirty(state.packageDirty || state.encryptionDirty || Boolean(state.editorInfo) && (state.editorInfo.revision !== state.savedRevision
 		|| canvasEditor.textChanged() || canvasEditor.cropChanged() || canvasEditor.nudgeChanged()));
@@ -833,7 +840,7 @@ editorClick(el.selectObjectButton, () => {
 	state.selectObjects = !state.selectObjects || state.panMode || Boolean(canvasEditor.tool);
 	canvasEditor.setTool("");
 	if (state.selectObjects && state.panMode) {
-		togglePan();
+		pageView.togglePan();
 	}
 	updateEditorTools();
 });
@@ -1291,7 +1298,7 @@ el.addPageButton.addEventListener("change", async () => {
 	if (canvasEditor.crop && !await canvasEditor.commitCrop()) return;
 	if (action === "import") { openImportPanel(); return; }
 	if (action === "images") { openCreatePanel(true); return; }
-	const page = currentPageInfo();
+	const page = pageView.currentPageInfo();
 	return changeDocument("ofdgoChangePage", null, "add", state.pageIndex, page.width, page.height);
 });
 el.importCancel.addEventListener("click", () => state.importing ? cancelExport() : el.importPanel.close());
@@ -1387,7 +1394,7 @@ el.arrowTool.addEventListener("change", async () => {
 			await changeDocument("ofdgoReshapeLine", item, box.x, box.y, box.width, box.height, tool);
 			return;
 		}
-		setPan(false);
+		pageView.setPan(false);
 		state.selectObjects = true;
 		canvasEditor.setTool(tool);
 		updateControls();
@@ -1760,19 +1767,19 @@ el.localFontButton.addEventListener("click", loadLocalFonts);
 el.ofdInput.addEventListener("change", async () => { await Promise.all(Array.from(el.ofdInput.files, file => openOFD(file))); });
 el.fontInput.addEventListener("change", openSelectedFonts);
 el.fontDirectoryInput.addEventListener("change", openSelectedFonts);
-el.prevButton.addEventListener("click", () => renderPage(pageGroupStart() - state.pageLayout));
+el.prevButton.addEventListener("click", () => pageView.renderPage(pageView.pageGroupStart() - state.pageLayout));
 el.imageDPI.addEventListener("change", () => changeDisplayMode());
 el.renderVectorButton.addEventListener("click", () => changeDisplayMode("svg"));
 el.renderRasterButton.addEventListener("click", () => changeDisplayMode("raster"));
-el.nextButton.addEventListener("click", () => renderPage(pageGroupStart() + state.pageLayout));
-el.zoomOutButton.addEventListener("click", () => setScale(state.scale - 0.1));
-el.zoomInButton.addEventListener("click", () => setScale(state.scale + 0.1));
-el.fitButton.addEventListener("click", fitWidth);
-el.fitHeightButton.addEventListener("click", fitHeight);
-el.rotateButton.addEventListener("click", rotatePages);
-el.panButton.addEventListener("click", togglePan);
-el.continuousButton.addEventListener("click", toggleContinuous);
-el.pageLayoutButton.addEventListener("click", togglePageLayout);
+el.nextButton.addEventListener("click", () => pageView.renderPage(pageView.pageGroupStart() + state.pageLayout));
+el.zoomOutButton.addEventListener("click", () => pageView.setScale(state.scale - 0.1));
+el.zoomInButton.addEventListener("click", () => pageView.setScale(state.scale + 0.1));
+el.fitButton.addEventListener("click", pageView.fitWidth);
+el.fitHeightButton.addEventListener("click", pageView.fitHeight);
+el.rotateButton.addEventListener("click", pageView.rotatePages);
+el.panButton.addEventListener("click", pageView.togglePan);
+el.continuousButton.addEventListener("click", pageView.toggleContinuous);
+el.pageLayoutButton.addEventListener("click", pageView.togglePageLayout);
 el.annotationButton.addEventListener("click", toggleAnnotations);
 document.addEventListener("copy", copySelection);
 document.addEventListener("cut", copySelection);
@@ -1824,23 +1831,23 @@ el.refreshAppButton.addEventListener("click", refreshApplication);
 el.pageInput.addEventListener("change", () => {
 	const page = Number.parseInt(el.pageInput.value, 10);
 	if (Number.isFinite(page)) {
-		renderPage(page - 1);
+		pageView.renderPage(page - 1);
 	}
 });
 window.addEventListener("resize", resizeViewer);
 window.addEventListener("resize", () => {
 	for (const tabs of document.querySelectorAll(".panel-tabs, .document-tabs")) revealPanelTab(tabs);
 });
-window.addEventListener("blur", () => endPan());
+window.addEventListener("blur", () => pageView.endPan());
 COMPACT_LAYOUT.addEventListener("change", syncLayoutMode);
 el.viewerPanel.addEventListener("scroll", () => {
-	schedulePageSync();
+	pageView.schedulePageSync();
 });
 el.navigationContent.addEventListener("scroll", () => {
 	if (state.thumbnailFrame) return;
 	state.thumbnailFrame = requestAnimationFrame(() => {
 		state.thumbnailFrame = 0;
-		syncThumbnailWindow();
+		pageView.syncThumbnailWindow();
 	});
 });
 for (const [viewport, current] of [[el.viewerPanel, () => state.pageWindow], [el.navigationContent, () => el.pageList.hidden ? null : state.thumbnailWindow]]) {
@@ -1850,7 +1857,7 @@ for (const [viewport, current] of [[el.viewerPanel, () => state.pageWindow], [el
 		event.preventDefault();
 		view.relativeScroll = false;
 		const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1;
-		scrollPageWindowBy(view, event.deltaY * unit);
+		pageView.scrollPageWindowBy(view, event.deltaY * unit);
 		viewport.scrollLeft += event.deltaX * unit;
 	}, { passive: false });
 	viewport.addEventListener("pointerdown", event => {
@@ -1858,16 +1865,16 @@ for (const [viewport, current] of [[el.viewerPanel, () => state.pageWindow], [el
 		if (view) view.relativeScroll = event.pointerType === "touch" || state.editing && !!event.target.closest(".page-shell");
 	});
 }
-el.viewerPanel.addEventListener("pointerdown", startPan);
+el.viewerPanel.addEventListener("pointerdown", pageView.startPan);
 el.viewerPanel.addEventListener("pointerdown", event => {
 	if (event.button !== 0 || state.editing || document.body.hasAttribute("data-busy")) return;
 	const shell = event.target.closest(".page-shell");
-	if (shell && state.doc) setCurrentPage(Number(shell.dataset.pageIndex));
+	if (shell && state.doc) pageView.setCurrentPage(Number(shell.dataset.pageIndex));
 });
-el.viewerPanel.addEventListener("pointermove", movePan);
-el.viewerPanel.addEventListener("pointerup", endPan);
-el.viewerPanel.addEventListener("pointercancel", endPan);
-el.viewerPanel.addEventListener("lostpointercapture", endPan);
+el.viewerPanel.addEventListener("pointermove", pageView.movePan);
+el.viewerPanel.addEventListener("pointerup", pageView.endPan);
+el.viewerPanel.addEventListener("pointercancel", pageView.endPan);
+el.viewerPanel.addEventListener("lostpointercapture", pageView.endPan);
 el.viewerPanel.addEventListener("click", () => {
 	if (COMPACT_LAYOUT.matches && (state.showPages || state.showMeta)) {
 		state.showPages = false;
@@ -1953,13 +1960,13 @@ function handleKeyDown(event) {
 		if (key === "Home" || key === "End") {
 			event.preventDefault();
 			view.relativeScroll = false;
-			syncPageWindow(view, key === "Home" ? -windowInset(view) : view.total);
-			syncCurrentPageFromScroll();
+			pageView.syncPageWindow(view, key === "Home" ? -pageView.windowInset(view) : view.total);
+			pageView.syncCurrentPageFromScroll();
 			return;
 		}
 		if (delta !== undefined && !event.ctrlKey && !event.metaKey && view.total > SCROLL_SEGMENT_SIZE) {
 			event.preventDefault();
-			scrollPageWindowBy(view, delta);
+			pageView.scrollPageWindowBy(view, delta);
 			return;
 		}
 	}
@@ -2775,7 +2782,7 @@ function detachDocumentView() {
 	window.clearTimeout(wasmRecoveryTimer);
 	wasmRecoveryTimer = 0;
 	const selection = canvasEditor.selected;
-	tab.view = { anchor: state.doc ? scaleAnchor() : null, navigation: el.navigationTabs.querySelector('[data-selected="true"]'),
+	tab.view = { anchor: state.doc ? pageView.scaleAnchor() : null, navigation: el.navigationTabs.querySelector('[data-selected="true"]'),
 		navigationTop: el.navigationContent.scrollTop, metaTop: el.metaPanel.scrollTop, tool: canvasEditor.tool,
 		selection: selection ? {index: selection.index, ids: (selection.items || [selection]).map(item => item.id)} : canvasEditor.pendingSelection,
 		richClipboard: canvasEditor.richClipboard, search: el.searchInput.value };
@@ -2794,7 +2801,7 @@ function detachDocumentView() {
 	if (state.openActionFrame) cancelAnimationFrame(state.openActionFrame);
 	state.scrollFrame = state.thumbnailFrame = state.openActionFrame = 0;
 	state.openActionTask = null;
-	resetPageLoading();
+	pageView.resetPageLoading();
 	state.pageRenderRunning = state.pageRenderWorkers > 0;
 	state.pageWindow = null;
 	state.thumbnailWindow = null;
@@ -2802,7 +2809,7 @@ function detachDocumentView() {
 	state.selectedPages.clear();
 	state.documentSelection = null;
 	cancelPageTouch?.();
-	endPan();
+	pageView.endPan();
 	if (!documentDialogs) clearSecurityForms();
 	if (resourceElements.Panel.open) rememberResourceView();
 	workspace.resourceView = null;
@@ -2856,9 +2863,9 @@ function attachDocumentTab(tab) {
 	canvasEditor.pendingSelection = tab.view?.selection || null;
 	documentDialogs?.setOwner(tab);
 	workspace.resourceView = resourceElements.Panel.open ? resourceManager : null;
-	setContinuous(state.continuous);
-	updatePanControl();
-	trimWorkspaceCaches();
+	pageView.setContinuous(state.continuous);
+	pageView.updatePanControl();
+	pageView.trimWorkspaceCaches();
 	renderDocumentTabs();
 }
 
@@ -2907,7 +2914,7 @@ async function mountDocumentTab(tab) {
 	const openSeq = state.openSeq;
 	const callWASM = (name, ...args) => callTabWASM(tab, name, ...args);
 	if (tab.opening || tab.error) {
-		renderPageList();
+		pageView.renderPageList();
 		renderOutlines();
 		renderMeta();
 		setEmpty(tab.error || tab.status);
@@ -2935,13 +2942,13 @@ async function mountDocumentTab(tab) {
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
 		tab.configurePending = false;
 		tab.initialLoad = false;
-		if (view?.anchor) restoreScaleAnchor(view.anchor);
+		if (view?.anchor) pageView.restoreScaleAnchor(view.anchor);
 		showNavigation(view?.navigation || el.pagesTab);
 		el.navigationContent.scrollTop = view?.navigationTop || 0;
 		el.metaPanel.scrollTop = view?.metaTop || 0;
 		canvasEditor.setTool(view?.tool || "");
 	} else {
-		renderPageList();
+		pageView.renderPageList();
 		renderOutlines();
 		renderMeta();
 		el.zoomLabel.textContent = "100%";
@@ -3539,7 +3546,7 @@ async function toggleEditor() {
 		const current = () => !tab.closed && tab.state === state && isForegroundDocument(tab) && wasmSeq === state.wasmSeq;
 		if (!await canvasEditor.commitText() || !current()) return;
 		if (!await canvasEditor.commitCrop() || !current()) return;
-		const anchor = scaleAnchor(0);
+		const anchor = pageView.scaleAnchor(0);
 		state.editing = !state.editing;
 		renderDocumentFonts();
 		resetCompositeScope();
@@ -3548,7 +3555,7 @@ async function toggleEditor() {
 		if (state.editing) {
 			releaseMediaPlayers();
 			state.selectObjects = true;
-			setPan(false);
+			pageView.setPan(false);
 		}
 		updateControls();
 		renderOutlines(false);
@@ -3564,14 +3571,14 @@ async function toggleEditor() {
 			}
 			return;
 		}
-		renderPageList();
-		applyFit(false);
-		restoreScaleAnchor(anchor);
-		updatePageListCurrent(true);
+		pageView.renderPageList();
+		pageView.applyFit(false);
+		pageView.restoreScaleAnchor(anchor);
+		pageView.updatePageListCurrent(true);
 		return;
 	}
 	const { pageIndex, fitMode, scale } = state;
-	const anchor = scaleAnchor(0);
+	const anchor = pageView.scaleAnchor(0);
 	let openSeq = state.openSeq;
 	const source = state.ofdBytes;
 	const originalDocument = state.doc;
@@ -3609,7 +3616,7 @@ async function toggleEditor() {
 		state.styleClipboard = null;
 		canvasEditor.richClipboard = null;
 		canvasEditor.clear();
-		setPan(false);
+		pageView.setPan(false);
 		await openDocument({ doc, openSeq, skipAutoFonts: true, pageIndex, fitMode, scale,
 			keepPreview: true, preserveThumbnails: true, previewAnchor: anchor });
 	} catch (err) {
@@ -3619,7 +3626,7 @@ async function toggleEditor() {
 		setBusy(false, "", 0, "", tab);
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) {
 			updateControls();
-			if (state.editing) updatePageListCurrent(true);
+			if (state.editing) pageView.updatePageListCurrent(true);
 		}
 	}
 }
@@ -3973,7 +3980,7 @@ function resetCompositeScope() {
 	if (!scope) return;
 	state.composite = null;
 	canvasEditor.clear();
-	const page = state.pageCache.get(scope.index), surface = pageShell(scope.index)?.querySelector(".page-surface");
+	const page = state.pageCache.get(scope.index), surface = pageView.pageShell(scope.index)?.querySelector(".page-surface");
 	if (page && surface) mountEditorObjects(scope.index, page, surface);
 }
 
@@ -3988,7 +3995,7 @@ async function enterCompositeScope(index, key) {
 		canvasEditor.clear();
 		canvasEditor.setTool("");
 		state.composite = { index, key, objects };
-		const page = state.pageCache.get(index), surface = pageShell(index)?.querySelector(".page-surface");
+		const page = state.pageCache.get(index), surface = pageView.pageShell(index)?.querySelector(".page-surface");
 		if (page && surface) mountEditorObjects(index, page, surface);
 		updateControls();
 		setStatus(pageStatus(index, state.doc.pageCount));
@@ -4038,7 +4045,7 @@ async function startImageCrop(item) {
 			return image.decode();
 		}));
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq || canvasEditor.selected !== item) return;
-		const svg = parseSVG(page.svg, `crop${openSeq}-${item.id}`, images);
+		const svg = pageView.parseSVG(page.svg, `crop${openSeq}-${item.id}`, images);
 		svg.classList.add("ofd-svg");
 		canvasEditor.startCrop(item, { svg, urls });
 		mounted = true;
@@ -4214,7 +4221,7 @@ async function toggleTextTool() {
 		leftIndent: style.leftIndent || 0, rightIndent: style.rightIndent || 0, firstLineIndent: style.firstLineIndent || 0,
 		fontChoice: font && !font.disabled ? font : state.textDefaults.fontChoice };
 	state.selectObjects = true;
-	setPan(false);
+	pageView.setPan(false);
 	canvasEditor.setTool("text");
 	canvasEditor.focus();
 }
@@ -4453,7 +4460,7 @@ async function insertObject(event) {
 		setEditorInfo(doc);
 		canvasEditor.pendingSelection = item ? null : { index, ids: doc.selectedIDs };
 		state.selectObjects = true;
-		setPan(false);
+		pageView.setPan(false);
 		openSeq = advanceDocumentSequence();
 		await refreshEditorPage(doc, index, openSeq);
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) {
@@ -4613,7 +4620,7 @@ function toggleDrawingTool(tool) {
 	if (!state.editing || document.body.hasAttribute("data-busy")) return;
 	const next = canvasEditor.tool === tool ? "" : tool;
 	state.selectObjects = true;
-	setPan(false);
+	pageView.setPan(false);
 	canvasEditor.setTool(next);
 	canvasEditor.focus();
 }
@@ -4656,7 +4663,7 @@ async function changeDocument(name, item, ...args) {
 	let openSeq = state.openSeq;
 	const active = document.activeElement;
 	const toolbarFocus = el.editorTools.contains(active) ? active : null;
-	const previous = currentPageInfo() || state.doc.pages[Math.min(state.pageIndex, state.doc.pages.length - 1)] || {};
+	const previous = pageView.currentPageInfo() || state.doc.pages[Math.min(state.pageIndex, state.doc.pages.length - 1)] || {};
 	const originalDocument = state.doc;
 	const before = editorLocation(), revision = state.editorInfo.revision;
 	const restoring = name === "ofdgoUndo" || name === "ofdgoRedo";
@@ -4808,7 +4815,7 @@ async function changeDocument(name, item, ...args) {
 		if (name === "ofdgoCopyObjects" || name === "ofdgoPasteObjects" || name === "ofdgoGroupObjects" || inserting || name === "ofdgoWriteAnnotation" && !editingAnnotation) {
 			state.selectObjects = true;
 			if (name !== "ofdgoInsertInk") canvasEditor.setTool("");
-			setPan(false);
+			pageView.setPan(false);
 			canvasEditor.pendingSelection = { index: item?.index ?? args[0], ids: name === "ofdgoInsertInk" ? [] : doc.selectedIDs };
 		}
 		if (scoped && name === "ofdgoOrderObjects") canvasEditor.pendingSelection = { index: item.index, ids: doc.selectedIDs };
@@ -4906,7 +4913,7 @@ async function refreshFontBinding(doc, openSeq) {
 	state.doc = doc;
 	resetSearch();
 	state.documentSelection = null;
-	resetPageLoading();
+	pageView.resetPageLoading();
 	state.pageCache.clear();
 	canvasEditor.clear();
 	try {
@@ -4920,28 +4927,28 @@ async function refreshFontBinding(doc, openSeq) {
 		}
 		for (const index of indices) {
 			try {
-				const page = await loadPageData(index, { openSeq, priority: 0, refresh: true });
+				const page = await pageView.loadPageData(index, { openSeq, priority: 0, refresh: true });
 				if (openSeq !== state.openSeq) return;
 				if (page) {
-					mountPageSVG(index, page, openSeq);
-					updateThumbnail(index, openSeq);
+					pageView.mountPageSVG(index, page, openSeq);
+					pageView.updateThumbnail(index, openSeq);
 				}
 			} catch (err) {
 				if (openSeq !== state.openSeq) return;
-				unmountPage(index);
-				markFlowPageError(index, err);
-				markThumbnailError(index);
+				pageView.unmountPage(index);
+				pageView.markFlowPageError(index, err);
+				pageView.markThumbnailError(index);
 				showError(err, false);
 			}
 		}
 	} finally {
 		if (openSeq === state.openSeq) {
-			releasePageResources();
+			pageView.releasePageResources();
 			renderMeta(true);
 			updateControls();
 			loadDocumentDetails(openSeq);
-			for (const shell of el.svgHost.children) observeFlowPage(shell);
-			for (const button of el.pageList.children) observeThumbnail(button, Number(button.dataset.pageIndex), openSeq);
+			for (const shell of el.svgHost.children) pageView.observeFlowPage(shell);
+			for (const button of el.pageList.children) pageView.observeThumbnail(button, Number(button.dataset.pageIndex), openSeq);
 		}
 	}
 }
@@ -4950,9 +4957,9 @@ async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 	state.doc = doc;
 	resetSearch();
 	state.documentSelection = null;
-	resetPageLoading();
+	pageView.resetPageLoading();
 	try {
-		const page = await loadPageData(index, { openSeq, priority: 0, refresh: true });
+		const page = await pageView.loadPageData(index, { openSeq, priority: 0, refresh: true });
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -4961,8 +4968,8 @@ async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 			canvasEditor.clear();
 			canvasEditor.pendingSelection = pending;
 		}
-		mountPageSVG(index, page, openSeq);
-		updateThumbnail(index, openSeq);
+		pageView.mountPageSVG(index, page, openSeq);
+		pageView.updateThumbnail(index, openSeq);
 		setStatus(pageStatus(state.pageIndex, doc.pageCount));
 	} catch (err) {
 		if (openSeq === state.openSeq) {
@@ -4971,59 +4978,23 @@ async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 			} else {
 				state.pageCache.delete(index);
 				canvasEditor.clear();
-				const shell = pageShell(index);
+				const shell = pageView.pageShell(index);
 				shell.querySelector(".page-surface").replaceChildren();
 				shell.classList.remove("rendered");
-				markFlowPageError(index, err);
-				markThumbnailError(index);
+				pageView.markFlowPageError(index, err);
+				pageView.markThumbnailError(index);
 			}
 		}
 		throw err;
 	} finally {
 		if (openSeq === state.openSeq) {
-			releasePageResources();
+			pageView.releasePageResources();
 			renderMeta(true);
 			updateControls();
 			loadDocumentDetails(openSeq);
-			for (const shell of el.svgHost.children) observeFlowPage(shell);
-			for (const button of el.pageList.children) observeThumbnail(button, Number(button.dataset.pageIndex), openSeq);
+			for (const shell of el.svgHost.children) pageView.observeFlowPage(shell);
+			for (const button of el.pageList.children) pageView.observeThumbnail(button, Number(button.dataset.pageIndex), openSeq);
 		}
-	}
-}
-
-function releasePageResources(state = documentTab().state) {
-	if (state.pageInFlight.size) return;
-	const images = new Set(), fonts = new Set();
-	for (const page of state.pageCache.values()) {
-		for (const name of page.imageNames) images.add(name);
-		for (const font of page.fonts || []) fonts.add(font.name);
-	}
-	for (const [name, image] of state.svgImages) {
-		if (!images.has(name)) {
-			URL.revokeObjectURL(image.url);
-			state.svgImages.delete(name);
-		}
-	}
-	for (const [name, font] of state.svgFonts) {
-		if (!fonts.has(name)) {
-			document.fonts.delete(font);
-			state.svgFonts.delete(name);
-		}
-	}
-}
-
-function trimWorkspaceCaches() {
-	const budget = nativeHost?.cacheBytes || Math.max(PAGE_CACHE_BYTES, Math.min(256 << 20, engineLimits().memoryBytes / 4));
-	const bytes = tab => [...tab.state.pageCache.values()].reduce((sum, page) => sum + (page.cacheBytes || 0), 0)
-		+ [...tab.state.svgImages.values()].reduce((sum, image) => sum + (image.size || 0), 0)
-		+ [...tab.state.svgFonts.values()].reduce((sum, face) => sum + (svgFontBytes.get(face) || 0), 0);
-	let total = workspace.tabs.reduce((sum, tab) => sum + bytes(tab), 0);
-	for (const tab of workspace.tabs.filter(tab => tab !== workspace.active).sort((a, b) => a.touched - b.touched)) {
-		if (total <= budget) break;
-		const previous = bytes(tab);
-		tab.state.pageCache.clear();
-		releasePageResources(tab.state);
-		total -= previous - bytes(tab);
 	}
 }
 
@@ -5111,7 +5082,7 @@ function updateSidebarState() {
 	el.togglePagesButton.setAttribute("data-pressed", String(state.showPages));
 	el.toggleMetaButton.setAttribute("data-pressed", String(state.showMeta));
 	if (openingPages) {
-		updatePageListCurrent(true);
+		pageView.updatePageListCurrent(true);
 	}
 }
 
@@ -5124,10 +5095,10 @@ function syncLayoutMode(event) {
 
 function resizeViewer() {
 	if (state.doc) {
-		syncThumbnailWindow();
-		applyFit(false);
+		pageView.syncThumbnailWindow();
+		pageView.applyFit(false);
 		if (state.fitMode !== "free") {
-			scrollToPage(state.pageIndex);
+			pageView.scrollToPage(state.pageIndex);
 		}
 	}
 }
@@ -6113,19 +6084,15 @@ async function toggleAnnotations() {
 	}
 }
 
-function displayMode() {
-	return state.editing ? "svg" : state.renderMode;
-}
-
 function updateDisplayControls() {
 	const disabled = !state.ready || !state.doc || state.exporting || document.body.hasAttribute("data-busy");
 	el.renderVectorButton.disabled = el.renderRasterButton.disabled = disabled || state.editing;
-	el.renderVectorButton.setAttribute("data-pressed", String(displayMode() === "svg"));
-	el.renderRasterButton.setAttribute("data-pressed", String(displayMode() === "raster"));
+	el.renderVectorButton.setAttribute("data-pressed", String(pageView.displayMode() === "svg"));
+	el.renderRasterButton.setAttribute("data-pressed", String(pageView.displayMode() === "raster"));
 	updateDPIControl();
 }
 
-async function refreshPageDisplay(anchor = scaleAnchor(0)) {
+async function refreshPageDisplay(anchor = pageView.scaleAnchor(0)) {
 	const selection = state.editing ? { index: canvasEditor.selected?.index ?? state.pageIndex, ids: canvasEditor.items().map(item => item.id) } : null;
 	await openDocument({
 		pageIndex: state.pageIndex, fitMode: state.fitMode, scale: state.scale,
@@ -6157,7 +6124,7 @@ async function changeDisplayMode(mode = state.renderMode) {
 		state.pageCache.clear();
 		if (isForegroundDocument(tab)) {
 			el.imageDPI.value = String(previous.dpi);
-			resetPageLoading();
+			pageView.resetPageLoading();
 			updateDisplayControls();
 			showError(err, false);
 		}
@@ -6397,10 +6364,10 @@ async function openDocument(options = {}) {
 		return;
 	}
 	const openSeq = options.openSeq || advanceDocumentSequence();
-	const previewPosition = options.previewScroll && state.pageWindow ? pageWindowAnchor(state.pageWindow) : null;
+	const previewPosition = options.previewScroll && state.pageWindow ? pageView.pageWindowAnchor(state.pageWindow) : null;
 	const viewport = options.keepPreview ? el.viewerPanel.getBoundingClientRect() : null;
 	const previewIDs = viewport ? [...state.visiblePages].filter((index) => {
-		const bounds = pageShell(index)?.getBoundingClientRect();
+		const bounds = pageView.pageShell(index)?.getBoundingClientRect();
 		return bounds && bounds.bottom > viewport.top && bounds.top < viewport.bottom;
 	}).map((index) => state.doc.pages[index].id) : [];
 	const thumbnailPreviews = options.preserveThumbnails ? new Map([...state.pageCache.values()]
@@ -6454,7 +6421,7 @@ async function openDocument(options = {}) {
 		state.scale = options.scale || 1;
 		if (!options.fitMode) {
 			state.rotation = 0;
-			setContinuous(window.matchMedia("(max-width: 640px)").matches);
+			pageView.setContinuous(window.matchMedia("(max-width: 640px)").matches);
 		}
 		state.fitMode = options.fitMode || (state.pageLayout > 1 || !state.continuous && pageCount === 1 ? "height" : "width");
 		if (!options.skipAutoFonts && await autoLoadDocumentLocalFonts(openSeq)) {
@@ -6480,7 +6447,7 @@ async function openDocument(options = {}) {
 			file: state.ofdBytes, fonts, annotations: state.renderAnnotations, document: doc.documentIndex, version: doc.documentVersion
 		} : null);
 		if (options.keepPreview) {
-			resetPageLoading();
+			pageView.resetPageLoading();
 			state.pageCache.clear();
 			if (thumbnailPreviews) {
 				for (const page of doc.pages) {
@@ -6490,7 +6457,7 @@ async function openDocument(options = {}) {
 			}
 			const indices = new Set([pageIndex, ...previewIDs.map(id => pageIndexByID(doc.pages, id)).filter(index => index >= 0)]);
 			for (const index of indices) {
-				await loadPageData(index, { openSeq, priority: 0, refresh: true });
+				await pageView.loadPageData(index, { openSeq, priority: 0, refresh: true });
 				if (openSeq !== state.openSeq) {
 					return;
 				}
@@ -6498,18 +6465,18 @@ async function openDocument(options = {}) {
 		}
 		if (options.clearSelection) canvasEditor.clear();
 		if (options.selection) canvasEditor.pendingSelection = options.selection;
-		resetPageFlow(options.keepPreview || options.keepCache);
-		renderPageList();
+		pageView.resetPageFlow(options.keepPreview || options.keepCache);
+		pageView.renderPageList();
 		if (options.keepPreview || options.resetScroll || el.outlineList.childElementCount === 0) {
 			renderOutlines(!options.keepPreview && !options.restoreTab);
 		}
 		renderMeta(options.keepPreview);
-		renderPageFlow();
+		pageView.renderPageFlow();
 		if (options.keepPreview) {
 			for (const [index, page] of state.pageCache) {
-				if (!page.previewOnly) mountPageSVG(index, page, openSeq);
+				if (!page.previewOnly) pageView.mountPageSVG(index, page, openSeq);
 			}
-			releasePageResources();
+			pageView.releasePageResources();
 		}
 		if (options.resetScroll) {
 			el.viewerPanel.scrollLeft = 0;
@@ -6519,16 +6486,16 @@ async function openDocument(options = {}) {
 			el.metaPanel.scrollLeft = 0;
 			el.metaPanel.scrollTop = 0;
 		}
-		applyFit(false);
+		pageView.applyFit(false);
 		if (options.keepPreview) {
 			if (options.previewAnchor) {
-				restoreScaleAnchor(options.previewAnchor);
+				pageView.restoreScaleAnchor(options.previewAnchor);
 			} else if (options.previewScroll) {
 				Object.assign(el.viewerPanel, options.previewScroll);
-				if (previewPosition && state.pageWindow) syncPageWindow(state.pageWindow,
+				if (previewPosition && state.pageWindow) pageView.syncPageWindow(state.pageWindow,
 					state.pageWindow.offsets[previewPosition.index] + previewPosition.offset);
 			} else {
-				scrollToPage(pageIndex);
+				pageView.scrollToPage(pageIndex);
 			}
 			setStatus(pageStatus(pageIndex, pageCount));
 		}
@@ -6537,11 +6504,11 @@ async function openDocument(options = {}) {
 			return;
 		}
 		const page = options.keepPreview ? state.pageCache.get(pageIndex)
-			: await renderPage(pageIndex, { keepBusy: true, scroll: false, openSeq });
+			: await pageView.renderPage(pageIndex, { keepBusy: true, scroll: false, openSeq });
 		if (page && options.resetScroll) {
 			canvasEditor.focus();
 		}
-		queueNearbyPages(pageIndex, openSeq);
+		pageView.queueNearbyPages(pageIndex, openSeq);
 		loadDocumentDetails(openSeq);
 		if (page && options.activateActions) {
 			state.openActionEnabled = true;
@@ -6602,66 +6569,6 @@ async function loadDocumentDetails(openSeq) {
 			Object.assign(state.doc, { detailsPending: false, detailsError: err.message });
 			renderMeta();
 			showError(err, false);
-		}
-	}
-}
-
-async function renderPage(index, options = {}) {
-	const tab = documentTab(), state = tab.state;
-	if (!state.doc || (state.editorInfo && document.body.hasAttribute("data-busy") && !options.keepBusy)) {
-		return null;
-	}
-	const openSeq = options.openSeq || state.openSeq;
-	if (openSeq !== state.openSeq) {
-		return null;
-	}
-	const pageCount = state.doc.pageCount || 0;
-	if (index < 0 || index >= pageCount) {
-		return null;
-	}
-	if (options.navigation !== state.pageNavigation) state.pageNavigation = null;
-	if (!options.keepBusy && index !== state.pageIndex) {
-		if (!await canvasEditor.commitNudge() || !isForegroundDocument(tab) || openSeq !== state.openSeq) return null;
-		if (!await canvasEditor.commitText() || !isForegroundDocument(tab) || openSeq !== state.openSeq) return null;
-		if (!await canvasEditor.commitCrop() || !isForegroundDocument(tab) || openSeq !== state.openSeq) return null;
-	}
-	const pageSeq = ++state.pageSeq;
-	if (!state.exporting) {
-		if (options.keepBusy) {
-			setProgress("正在渲染页面", 76);
-		} else {
-			setBusy(true, "正在渲染页面", 35, "正在渲染页面");
-		}
-	}
-	try {
-		setCurrentPage(index);
-		if (options.fit !== false) {
-			applyFit(false);
-		}
-		if (options.scroll !== false) {
-			scrollToPage(index);
-		} else if (state.pageWindow && (!pageShell(index) || pageShell(index).style.visibility === "hidden")) {
-			scrollToPage(index);
-		}
-		const page = await renderFlowPage(index, { throwError: true, openSeq, priority: 0 });
-		if (openSeq !== state.openSeq || index !== state.pageIndex) {
-			return null;
-		}
-		if (options.scroll !== false) {
-			scrollToPage(index);
-		}
-		queueNearbyPages(index, openSeq);
-		return page;
-	} catch (err) {
-		if (openSeq === state.openSeq) {
-			showError(err, false);
-		}
-		return null;
-	} finally {
-		if (!options.keepBusy && !state.exporting && !isForegroundDocument(tab)) setBusy(false, "", 0, "", tab);
-		if (!options.keepBusy && !state.exporting && openSeq === state.openSeq && pageSeq === state.pageSeq) {
-			setBusy(false, "", 0, "", tab);
-			if (!options.openAction) scheduleOpenActions();
 		}
 	}
 }
@@ -6949,7 +6856,7 @@ async function loadDocumentSettings() {
 		if (!isForegroundDocument(tab) || sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
 		if (kind === "actions" && state.editing) {
 			if (settings.scope === "object") {
-				const page = await loadPageData(settings.page);
+				const page = await pageView.loadPageData(settings.page);
 				if (!isForegroundDocument(tab) || sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
 				data.objects = (page.objects || []).filter(item => item.type !== "Annotation" && !item.scoped);
 				if (!data.objects.some(item => item.id === settings.object)) settings.object = data.objects[0]?.id || "";
@@ -6961,7 +6868,7 @@ async function loadDocumentSettings() {
 			data.page = await callWASM("ofdgoPageSettings", settings.page, kind);
 			if (!isForegroundDocument(tab) || sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
 			if (kind === "layers" && state.editing) {
-				const page = await loadPageData(settings.page);
+				const page = await pageView.loadPageData(settings.page);
 				data.objects = (page.objects || []).filter(item => item.type !== "Annotation" && !item.scoped);
 			}
 		}
@@ -6969,7 +6876,7 @@ async function loadDocumentSettings() {
 			data.resource = settings.resource.id ? await callWASM("ofdgoStyleResource", kind, settings.resource.id) : {};
 			if (!isForegroundDocument(tab) || sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
 			if (state.editing) {
-				const page = await loadPageData(settings.page);
+				const page = await pageView.loadPageData(settings.page);
 				data.objects = (page.objects || []).filter(item => ["TextObject", "PathObject", "CompositeObject", "CompositeGraphicUnit"].includes(item.type) && !item.scoped);
 			}
 		}
@@ -7684,7 +7591,7 @@ async function loadInvoiceObjects(draft) {
 	const page = draft.page, sequence = settings.sequence;
 	const field = document.querySelector("#settingsInvoiceObject");
 	if (!field || !state.doc.pages[page]) return;
-	const data = await loadPageData(page);
+	const data = await pageView.loadPageData(page);
 	if (!isForegroundDocument(tab) || invoiceCurrent() !== draft || draft.page !== page || sequence !== settings.sequence || !field.isConnected) return;
 	const objects = (data.objects || []).filter(item => !item.scoped && item.type === "TextObject");
 	field.replaceChildren(new Option("选择", ""), ...objects.map(item => new Option(`${item.id} · ${(item.text || "文字").slice(0, 60)}`, item.id)));
@@ -8181,7 +8088,7 @@ async function loadSettingsObjects() {
 	const field = document.querySelector("#settingsTargetObject");
 	field.disabled = true;
 	try {
-		const data = await loadPageData(page);
+		const data = await pageView.loadPageData(page);
 		if (!isForegroundDocument(tab) || sequence !== settings.sequence || page !== settings.page || openSeq !== state.openSeq) return;
 		field.replaceChildren(new Option("选择", ""), ...(data.objects || []).filter(item => ["TextObject", "PathObject", "CompositeObject", "CompositeGraphicUnit"].includes(item.type) && !item.scoped).map(item => new Option(`${item.id} · ${item.text || "图元"}`, item.id)));
 	} catch (error) { if (isForegroundDocument(tab) && sequence === settings.sequence) settingsElements.Status.textContent = error.message; }
@@ -8404,7 +8311,7 @@ async function beginSettingsPick(kind) {
 	if (!state.editing || settings.busy || state.composite) return;
 	rememberSettingsDraft();
 	const page = kind === "style" ? Number(settingsValue("TargetPage")) : settings.page, sequence = state.openSeq;
-	if (!await renderPage(page, {fit: false}) || !isForegroundDocument(tab) || sequence !== state.openSeq || !settingsElements.Panel.open) return;
+	if (!await pageView.renderPage(page, {fit: false}) || !isForegroundDocument(tab) || sequence !== state.openSeq || !settingsElements.Panel.open) return;
 	suspendSettings(kind);
 }
 
@@ -8461,7 +8368,7 @@ async function pickSettingsObject(event, picking) {
 async function locateSettingsObjects(ids) {
 	const tab = documentTab(), settings = tab.settings;
 	if (settings.busy) return;
-	const sequence = settings.sequence, data = await loadPageData(settings.page);
+	const sequence = settings.sequence, data = await pageView.loadPageData(settings.page);
 	if (!isForegroundDocument(tab) || sequence !== settings.sequence || !settingsElements.Panel.open) return;
 	const objects = (data.objects || []).filter(item => ids.includes(item.id) && !item.scoped);
 	if (!objects.length) { settingsElements.Status.textContent = "暂无可见位置"; return; }
@@ -8819,7 +8726,7 @@ async function beginResourcePick() {
 	const tab = documentTab(), state = tab.state, resourceManager = tab.resources;
 	if (!state.editing || state.composite || !["Audio", "Video", "Attachment"].includes(resourceManager.selected?.kind)) return;
 	const sequence = state.openSeq;
-	if (!await renderPage(Number(resourceElements.Page.value), {fit: false})) return;
+	if (!await pageView.renderPage(Number(resourceElements.Page.value), {fit: false})) return;
 	if (!isForegroundDocument(tab) || sequence !== state.openSeq || !resourceElements.Panel.open) return;
 	resourceManager.pick = {sequence, scope: documentPanelScope(state), status: el.statusText.textContent};
 	resourceElements.Panel.close();
@@ -10152,514 +10059,6 @@ function cancelExport() {
 	tab.worker.postMessage({ type: "cancel", id: requestID });
 }
 
-function virtualIndex(offsets, top) {
-	let low = 0, high = offsets.length - 1;
-	while (low + 1 < high) {
-		const mid = (low + high) >>> 1;
-		if (offsets[mid] <= top) low = mid;
-		else high = mid;
-	}
-	return low;
-}
-
-function createPageWindow(host, viewport, overscan, create, release, observe) {
-	host.classList.add("virtual-pages");
-	return { host, viewport, overscan, create, release, observe, nodes: new Map(), offsets: new Float64Array(1), origin: 0, total: 0, gap: 0 };
-}
-
-function windowInset(view) {
-	return view.host.getBoundingClientRect().top - view.viewport.getBoundingClientRect().top
-		+ view.viewport.scrollTop - view.viewport.clientTop;
-}
-
-function pageWindowTop(view) {
-	const inset = windowInset(view);
-	if (view.total <= SCROLL_SEGMENT_SIZE) return view.viewport.scrollTop - inset;
-	const delta = view.viewport.scrollTop - view.scrollTop;
-	if (!delta) return view.logicalTop;
-	if (view.relativeScroll) return view.logicalTop + delta;
-	const max = view.viewport.scrollHeight - view.viewport.clientHeight;
-	return view.viewport.scrollTop / Math.max(1, max) * (max + view.total - SCROLL_SEGMENT_SIZE) - inset;
-}
-
-function scrollPageWindowBy(view, delta) {
-	if (view) syncPageWindow(view, pageWindowTop(view) + delta);
-}
-
-function scrollViewerBy(delta) {
-	if (state.pageWindow) scrollPageWindowBy(state.pageWindow, delta);
-	else el.viewerPanel.scrollTop += delta;
-}
-
-function syncPageWindow(view, target = null) {
-	if (!view || view.offsets.length < 2) return;
-	const { host, viewport, offsets, nodes } = view;
-	const extent = Math.min(SCROLL_SEGMENT_SIZE, view.total);
-	host.style.height = `${extent}px`;
-	const inset = windowInset(view), height = viewport.clientHeight;
-	const maxTop = Math.max(0, viewport.scrollHeight - height);
-	const logicalMax = maxTop + view.total - extent;
-	const logical = Math.max(-inset, Math.min(logicalMax - inset, target ?? pageWindowTop(view)));
-	viewport.scrollTop = logicalMax > 0 ? (logical + inset) * maxTop / logicalMax : 0;
-	view.scrollTop = viewport.scrollTop;
-	view.logicalTop = logical;
-	view.origin = logical - viewport.scrollTop + inset;
-	let first = virtualIndex(offsets, Math.max(view.origin, logical - view.overscan));
-	let last = virtualIndex(offsets, Math.min(view.origin + extent, logical + height + view.overscan));
-	if (view.columns) {
-		first -= first % view.columns;
-		last = Math.min(offsets.length - 2, last + view.columns - 1 - last % view.columns);
-	}
-	const selection = host === el.svgHost && state.documentSelection ? document.getSelection() : null;
-	const selected = selection?.rangeCount && isDocumentSelection(selection.getRangeAt(0));
-	let changed = false;
-	for (const [index, node] of nodes) {
-		if ((index < first || index > last) && view.release(node, index)) {
-			node.remove();
-			nodes.delete(index);
-			changed = true;
-		}
-	}
-	for (let index = first; index <= last; index++) {
-		if (nodes.has(index)) continue;
-		const node = view.create(state.doc.pages[index]);
-		nodes.set(index, node);
-		const next = [...host.children].find(child => Number(child.dataset.pageIndex) > index);
-		host.insertBefore(node, next || null);
-		changed = true;
-		node.style.top = `${offsets[index] - view.origin}px`;
-		view.observe(node, index);
-	}
-	for (const [index, node] of nodes) {
-		const top = offsets[index] - view.origin;
-		const itemHeight = view.heights?.[index] ?? offsets[index + 1] - offsets[index] - view.gap;
-		if (view.lefts) {
-			node.style.left = `${view.lefts[index]}px`;
-			node.style.transform = "none";
-		}
-		node.style.top = `${Math.max(-itemHeight, Math.min(extent, top))}px`;
-		node.style.visibility = top + itemHeight < 0 || top >= extent ? "hidden" : "";
-	}
-	if (selected && changed) selection.getRangeAt(0).selectNodeContents(host);
-	view.anchor = pageWindowAnchor(view);
-}
-
-function pageWindowAnchor(view) {
-	const top = pageWindowTop(view);
-	const index = virtualIndex(view.offsets, top);
-	return { index, offset: top - view.offsets[index] };
-}
-
-function releaseFlowShell(shell, index) {
-	if (shell.contains(document.activeElement) || canvasEditor.drag?.item?.index === index || canvasEditor.drag?.page?.index === index) return false;
-	unmountPage(index);
-	if (state.selectedPages.has(index)) return false;
-	state.pageObserver?.unobserve(shell);
-	state.visiblePages.delete(index);
-	return true;
-}
-
-function createFlowShell(page) {
-	const shell = document.createElement("div");
-	shell.className = "page-shell";
-	shell.dataset.pageIndex = String(page.index);
-	const surface = document.createElement("div");
-	surface.className = "page-surface";
-	const placeholder = document.createElement("div");
-	placeholder.className = "page-placeholder";
-	placeholder.textContent = `第${page.index + 1}页`;
-	shell.append(surface, placeholder);
-	layoutPageShell(shell, page);
-	return shell;
-}
-
-function renderPageFlow() {
-	el.svgHost.replaceChildren();
-	state.pageWindow = null;
-	state.visiblePages.clear();
-	el.viewerPanel.classList.remove("single-page-fits-height");
-	if (!state.doc) {
-		return;
-	}
-	if (state.pageObserver) {
-		state.pageObserver.disconnect();
-	}
-	el.emptyState.hidden = true;
-	el.pageFrame.hidden = false;
-	state.pageWindow = createPageWindow(el.svgHost, el.viewerPanel, 600, createFlowShell, releaseFlowShell, observeFlowPage);
-	layoutPages();
-}
-
-function resetPageFlow(keepCache = false) {
-	state.pageNavigation = null;
-	if (!keepCache) {
-		state.pageCache.clear();
-		releasePageResources();
-	}
-	state.selectedPages.clear();
-	state.documentSelection = null;
-	state.visiblePages.clear();
-	resetPageLoading();
-}
-
-function resetPageLoading() {
-	releaseMediaPlayers();
-	for (const [id, request] of wasmRequests) {
-		if (request.tab === documentTab() && request.name === "ofdgoRenderPage") wasmWorker?.postMessage({ type: "cancel", id });
-	}
-	for (const task of state.pageInFlight.values()) {
-		task.resolve(null);
-	}
-	state.pageRenderQueue = [];
-	state.pagePrefetchIndex = null;
-	state.pagePrefetchDirection = 1;
-	state.pageInFlight.clear();
-	resetThumbnails();
-	if (state.pageObserver) {
-		state.pageObserver.disconnect();
-		state.pageObserver = null;
-	}
-}
-
-function observeFlowPage(shell) {
-	if (!shell) return;
-	const observer = flowPageObserver();
-	if (observer) {
-		observer.observe(shell);
-	} else {
-		const index = Number(shell.dataset.pageIndex);
-		state.visiblePages.add(index);
-		renderFlowPage(index, { priority: 4 });
-	}
-}
-
-function flowPageObserver() {
-	if (!("IntersectionObserver" in window)) {
-		return null;
-	}
-	if (!state.pageObserver) {
-		const openSeq = state.openSeq;
-		state.pageObserver = new IntersectionObserver((entries) => {
-			if (openSeq !== state.openSeq) {
-				return;
-			}
-			for (const entry of entries) {
-				const index = Number.parseInt(entry.target.dataset.pageIndex, 10);
-				if (state.pageWindow && state.pageWindow.nodes.get(index) !== entry.target) continue;
-				if (!entry.isIntersecting) {
-					state.visiblePages.delete(index);
-					unmountPage(index);
-					continue;
-				}
-				state.visiblePages.add(index);
-				state.selectedPages.delete(index);
-				renderFlowPage(index, { openSeq, priority: 4 });
-			}
-			trimPageCache();
-		}, {
-			root: el.viewerPanel,
-			rootMargin: "600px 0px",
-		});
-	}
-	return state.pageObserver;
-}
-
-function unmountPage(index) {
-	const shell = pageShell(index);
-	if (!shell) return;
-	const selection = document.getSelection();
-	const range = !selection.isCollapsed && selection.rangeCount ? selection.getRangeAt(0) : null;
-	if (canvasEditor.input?.item.index === index || canvasEditor.crop?.item.index === index
-		|| range && (!state.documentSelection || !isDocumentSelection(range)) && range.intersectsNode(shell)) {
-		state.selectedPages.add(index);
-		return;
-	}
-	releaseMediaPlayers(shell.querySelector(".page-surface"));
-	shell.querySelector(".page-surface").replaceChildren();
-	shell.classList.remove("rendered");
-	state.selectedPages.delete(index);
-}
-
-async function renderFlowPage(index, options = {}) {
-	const openSeq = options.openSeq || state.openSeq;
-	if (openSeq !== state.openSeq) {
-		return null;
-	}
-	try {
-		const page = await loadPageData(index, { openSeq, priority: options.priority ?? 2,
-			refresh: state.editing && state.pageCache.get(index)?.previewOnly });
-		if (openSeq !== state.openSeq) {
-			return null;
-		}
-		if (page) {
-			const shell = pageShell(index);
-			if (shell && !shell.classList.contains("rendered") && (!state.pageObserver || state.visiblePages.has(index) || index === state.pageIndex)) {
-				mountPageSVG(index, page, openSeq);
-			}
-			updateThumbnail(index, openSeq);
-		}
-		trimPageCache();
-		return page;
-	} catch (err) {
-		if (openSeq === state.openSeq) {
-			markFlowPageError(index, err);
-		}
-		if (options.throwError && openSeq === state.openSeq) {
-			throw err;
-		}
-		return null;
-	}
-}
-
-function loadPageData(index, options = {}) {
-	const openSeq = options.openSeq || state.openSeq;
-	if (openSeq !== state.openSeq) {
-		return Promise.resolve(null);
-	}
-	const key = `${openSeq}:${index}`;
-	const priority = options.priority ?? 3;
-	const current = state.pageInFlight.get(key);
-	if (current) {
-		current.priority = Math.min(current.priority, priority);
-		if (current.preview && !options.preview) return current.promise.then(() => loadPageData(index, options));
-		return current.promise;
-	}
-	if (!options.refresh && state.pageCache.has(index) && (options.preview || !state.pageCache.get(index).previewOnly)) {
-		const page = state.pageCache.get(index);
-		state.pageCache.delete(index);
-		state.pageCache.set(index, page);
-		return Promise.resolve(page);
-	}
-	let resolve;
-	let reject;
-	const promise = new Promise((done, fail) => {
-		resolve = done;
-		reject = fail;
-	});
-	const task = { key, index, openSeq, priority, preview: !!options.preview, refresh: options.refresh, resolve, reject, promise };
-	state.pageInFlight.set(key, task);
-	state.pageRenderQueue.push(task);
-	schedulePageRender();
-	return promise;
-}
-
-function schedulePageRender() {
-	if (state.pageRenderRunning) {
-		if (state.pageRenderWorkers) {
-			while (state.pageRenderQueue.length && state.pageRenderWorkers < (nativeHost?.parallelism || wasmWorker?.parallelism || 1)) processPageRenderTasks();
-		}
-		return;
-	}
-	state.pageRenderRunning = true;
-	requestAnimationFrame(processPageRenderQueue);
-}
-
-async function processPageRenderQueue() {
-	const tab = documentTab();
-	await nextFrame();
-	if (workspace.active !== tab) return;
-	await Promise.all(Array.from({ length: nativeHost?.parallelism || wasmWorker?.parallelism || 1 }, () => processPageRenderTasks()));
-}
-
-async function processPageRenderTasks() {
-	const tab = documentTab(), state = tab.state;
-	state.pageRenderWorkers++;
-	try {
-		while (workspace.active === tab && state.pageRenderQueue.length) {
-			let next = 0;
-			for (let index = 1; index < state.pageRenderQueue.length; index++) {
-				if (comparePageRenderTask(state.pageRenderQueue[index], state.pageRenderQueue[next]) < 0) next = index;
-			}
-			const [task] = state.pageRenderQueue.splice(next, 1);
-			try {
-				if (task.openSeq !== state.openSeq) {
-					task.resolve(null);
-					continue;
-				}
-				if (!task.refresh && state.pageCache.has(task.index) && (task.preview || !state.pageCache.get(task.index).previewOnly)) {
-					task.resolve(state.pageCache.get(task.index));
-					continue;
-				}
-				const args = [task.index, state.renderBackend, state.renderDPI, displayMode() === "raster"];
-				args.push([...state.svgFonts.keys()], [...state.svgImages.keys()], task.preview);
-				const page = await callWASM("ofdgoRenderPage", ...args);
-				if (workspace.active !== tab || state.pageInFlight.get(task.key) !== task || task.openSeq !== state.openSeq) {
-					task.resolve(null);
-					continue;
-				}
-				const scope = state.composite;
-				if (scope?.index === task.index) {
-					const objects = await callWASM("ofdgoCompositeObjects", task.index, scope.key);
-					if (scope === state.composite && task.openSeq === state.openSeq) scope.objects = objects;
-				}
-				await loadSVGFonts(page.fonts, task.openSeq);
-				for (const font of page.fonts) delete font.data;
-				if (task.openSeq === state.openSeq && state.pageInFlight.get(task.key) === task) {
-					for (const image of page.images) {
-						if (!state.svgImages.has(image.name)) {
-							const blob = new Blob([image.bytes], { type: image.mime });
-							state.svgImages.set(image.name, { url: URL.createObjectURL(blob), size: blob.size });
-						}
-					}
-					page.imageNames = page.images.map((image) => image.name);
-					delete page.images;
-					if (task.refresh && state.editing) {
-						await Promise.all(page.imageNames.map(name => {
-							const image = new Image();
-							image.src = state.svgImages.get(name).url;
-							return image.decode();
-						}));
-					}
-					if (task.openSeq !== state.openSeq || state.pageInFlight.get(task.key) !== task) {
-						task.resolve(null);
-						continue;
-					}
-					page.cacheBytes = (page.svg.length + page.text.length + page.annotations.length) * 2;
-					page.text = JSON.parse(page.text);
-					page.annotations = JSON.parse(page.annotations);
-					state.pageCache.set(task.index, page);
-				}
-				task.resolve(page);
-			} catch (err) {
-				task.reject(err);
-			} finally {
-				if (state.pageInFlight.get(task.key) === task) state.pageInFlight.delete(task.key);
-			}
-		}
-	} finally {
-		if (--state.pageRenderWorkers === 0) {
-			state.pageRenderRunning = false;
-			if (workspace.active === tab && !state.pageInFlight.size) releasePageResources();
-			if (workspace.active === tab && state.pageRenderQueue.length) schedulePageRender();
-		}
-	}
-}
-
-function trimPageCache() {
-	const protectedPages = new Set([state.pageIndex, ...state.visiblePages, ...state.visibleThumbnails, ...state.selectedPages]);
-	for (const view of [state.pageWindow, state.thumbnailWindow]) {
-		for (const index of view?.nodes.keys() || []) protectedPages.add(index);
-	}
-	for (const task of state.pageInFlight.values()) {
-		protectedPages.add(task.index);
-	}
-	const references = new Map(), fontReferences = new Map();
-	let bytes = 0;
-	for (const page of state.pageCache.values()) {
-		bytes += page.cacheBytes;
-		for (const name of page.imageNames) {
-			references.set(name, (references.get(name) || 0) + 1);
-		}
-		for (const font of page.fonts || []) {
-			fontReferences.set(font.name, (fontReferences.get(font.name) || 0) + 1);
-		}
-	}
-	for (const image of state.svgImages.values()) {
-		bytes += image.size;
-	}
-	for (const face of state.svgFonts.values()) bytes += svgFontBytes.get(face) || 0;
-	const budget = nativeHost?.cacheBytes || PAGE_CACHE_BYTES;
-	for (const [index, page] of state.pageCache) {
-		if (state.pageCache.size <= PAGE_CACHE_LIMIT * Math.max(1, budget / PAGE_CACHE_BYTES) && bytes <= budget) {
-			break;
-		}
-		if (protectedPages.has(index)) {
-			continue;
-		}
-		state.pageCache.delete(index);
-		bytes -= page.cacheBytes;
-		for (const name of page.imageNames) {
-			const count = references.get(name) - 1;
-			references.set(name, count);
-			if (count === 0 && !state.pageInFlight.size) {
-				const image = state.svgImages.get(name);
-				if (image) {
-					bytes -= image.size;
-					URL.revokeObjectURL(image.url);
-					state.svgImages.delete(name);
-				}
-			}
-		}
-		for (const font of page.fonts || []) {
-			const count = fontReferences.get(font.name) - 1;
-			fontReferences.set(font.name, count);
-			if (count === 0 && !state.pageInFlight.size) {
-				const face = state.svgFonts.get(font.name);
-				if (face) {
-					bytes -= svgFontBytes.get(face) || 0;
-					document.fonts.delete(face);
-					state.svgFonts.delete(font.name);
-				}
-			}
-		}
-	}
-	if (!state.pageInFlight.size) releasePageResources();
-	trimWorkspaceCaches();
-}
-
-async function loadSVGFonts(fonts, openSeq) {
-	for (const font of fonts) {
-		if (openSeq !== state.openSeq) {
-			return;
-		}
-		if (state.svgFonts.has(font.name)) {
-			continue;
-		}
-		const key = `${openSeq}:${font.name}`;
-		let loading = state.svgFontLoads.get(key);
-		if (!loading) {
-			loading = loadSVGFont(font, openSeq);
-			state.svgFontLoads.set(key, loading);
-		}
-		try { await loading; }
-		finally { if (state.svgFontLoads.get(key) === loading) state.svgFontLoads.delete(key); }
-	}
-}
-
-async function loadSVGFont(font, openSeq) {
-	const data = font.data ? { bytes: font.data } : await callWASM("ofdgoSVGFontData", font.name);
-	if (openSeq !== state.openSeq) {
-		return;
-	}
-	const face = new FontFace(font.name, data.bytes, { weight: String(font.weight), style: font.style });
-	await face.load();
-	if (openSeq !== state.openSeq) {
-		return;
-	}
-	document.fonts.add(face);
-	svgFontBytes.set(face, data.bytes.byteLength);
-	state.svgFonts.set(font.name, face);
-}
-
-function comparePageRenderTask(a, b) {
-	return a.priority - b.priority || Math.abs(a.index - state.pageIndex) - Math.abs(b.index - state.pageIndex);
-}
-
-function mountPageSVG(index, page, openSeq = state.openSeq) {
-	if (openSeq !== state.openSeq) {
-		return;
-	}
-	const shell = pageShell(index);
-	if (!shell) {
-		return;
-	}
-	const surface = shell.querySelector(".page-surface");
-	const svg = parseSVG(page.svg, `p${openSeq}-${index}`);
-	svg.classList.add("ofd-svg");
-	surface.replaceChildren(svg);
-	surface.append(createTextLayer(page.text));
-	if (state.editorInfo && displayMode() === "svg") {
-		mountEditorObjects(index, page, surface);
-	}
-	mountAnnotationNotes(index, surface, page.annotations);
-	mountPageLinks(page, surface);
-	shell.classList.add("rendered");
-	renderSearchHighlights(index);
-	if (state.doc?.pages?.[index]) {
-		layoutPageShell(shell, state.doc.pages[index]);
-	}
-}
-
 function releaseMediaPlayers(surface) {
 	for (const [id, entry] of state.mediaPlayers || []) {
 		if (surface && (entry.surface !== surface || entry.floating)) continue;
@@ -10931,29 +10330,29 @@ async function navigateDestination(dest, openAction) {
 	const seq = state.openSeq, scale = state.scale;
 	const navigation = state.pageNavigation = { openSeq: seq, index };
 	try {
-		await renderPage(index, { fit: false, scroll: false, openAction, navigation });
+		await pageView.renderPage(index, { fit: false, scroll: false, openAction, navigation });
 		if (openAction && state.openActionTask !== openAction) return false;
 		if (seq !== state.openSeq || state.pageIndex !== index || state.pageNavigation !== navigation) return;
-		const page = state.doc.pages[index], size = pageViewSize(page), space = pageSpace();
+		const page = state.doc.pages[index], size = pageView.pageViewSize(page), space = pageView.pageSpace();
 		const width = el.viewerPanel.clientWidth - space * 2, height = el.viewerPanel.clientHeight - space * 2;
 		let left = dest.omitLeft ? 0 : (dest.left ?? 0);
 		let top = dest.omitTop ? 0 : (dest.top ?? 0);
 		if (dest.type === "Fit") {
-			fitHeight(false);
-			scrollToPage(index);
+			pageView.fitHeight(false);
+			pageView.scrollToPage(index);
 			return;
 		} else if (dest.type === "FitH") {
-			setScale(fitWidthScale(page), false);
+			pageView.setScale(pageView.fitWidthScale(page), false);
 			left = 0;
 		} else if (dest.type === "FitV") {
-			setScale(height / (size.height * MM_TO_PX), false);
+			pageView.setScale(height / (size.height * MM_TO_PX), false);
 			top = 0;
 		} else if (dest.type === "FitR") {
 			const a = destinationPoint(page, left, top), b = destinationPoint(page, dest.right, dest.bottom);
 			if (dest.right <= left || dest.bottom <= top) return;
-			setScale(Math.min(width / Math.abs(b.x - a.x), height / Math.abs(b.y - a.y)) / MM_TO_PX, false);
+			pageView.setScale(Math.min(width / Math.abs(b.x - a.x), height / Math.abs(b.y - a.y)) / MM_TO_PX, false);
 		} else {
-			setScale(!dest.omitZoom && dest.zoom > 0 ? dest.zoom : scale, false);
+			pageView.setScale(!dest.omitZoom && dest.zoom > 0 ? dest.zoom : scale, false);
 		}
 		const point = destinationPoint(page, left, top);
 		if (dest.type === "FitR") {
@@ -10961,53 +10360,16 @@ async function navigateDestination(dest, openAction) {
 			point.x = Math.min(point.x, bottom.x);
 			point.y = Math.min(point.y, bottom.y);
 		}
-		if (state.pageWindow) syncPageWindow(state.pageWindow, state.pageWindow.offsets[index]);
-		const node = pageShell(index), shell = node.getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
+		if (state.pageWindow) pageView.syncPageWindow(state.pageWindow, state.pageWindow.offsets[index]);
+		const node = pageView.pageShell(index), shell = node.getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
 		el.viewerPanel.scrollLeft += shell.left + (node.clientLeft || 0) - viewer.left - (el.viewerPanel.clientLeft || 0) + point.x * MM_TO_PX * state.scale;
-		scrollViewerBy(shell.top + (node.clientTop || 0) - viewer.top - (el.viewerPanel.clientTop || 0) + point.y * MM_TO_PX * state.scale);
+		pageView.scrollViewerBy(shell.top + (node.clientTop || 0) - viewer.top - (el.viewerPanel.clientTop || 0) + point.y * MM_TO_PX * state.scale);
 	} finally {
 		if (state.pageNavigation === navigation) {
 			if (seq !== state.openSeq || index !== state.pageIndex) state.pageNavigation = null;
-			else Object.assign(navigation, { top: state.pageWindow ? pageWindowTop(state.pageWindow) : el.viewerPanel.scrollTop, left: el.viewerPanel.scrollLeft });
+			else Object.assign(navigation, { top: state.pageWindow ? pageView.pageWindowTop(state.pageWindow) : el.viewerPanel.scrollTop, left: el.viewerPanel.scrollLeft });
 		}
 	}
-}
-
-function createTextLayer(text) {
-	const layer = document.createElement("div");
-	layer.className = "text-layer";
-	const measure = textMeasure ||= document.createElement("canvas").getContext("2d");
-	measure.font = "100px sans-serif";
-	const widths = new Map();
-	for (const run of text.runs || []) {
-		const line = document.createElement("span");
-		line.className = "text-run";
-		const chars = Array.from(run.text);
-		let end = 0;
-		for (const item of run.spans || []) {
-			const breaks = chars.slice(end, item.start).filter((char) => char === "\n").join("");
-			if (breaks) {
-				line.append(document.createTextNode(breaks));
-			}
-			const span = document.createElement("span");
-			span.textContent = chars.slice(item.start, item.end).join("");
-			let width = widths.get(span.textContent);
-			if (width === undefined) {
-				width = measure.measureText(span.textContent).width || 1;
-				widths.set(span.textContent, width);
-			}
-			const [a, b, c, d, e, f] = item.matrix.map((value) => value * MM_TO_PX);
-			span.style.transform = `matrix(${a / width}, ${b / width}, ${c / 100}, ${d / 100}, ${e}, ${f})`;
-			line.append(span);
-			end = item.end;
-		}
-		const breaks = chars.slice(end).filter((char) => char === "\n").join("");
-		if (breaks) {
-			line.append(document.createTextNode(breaks));
-		}
-		layer.append(line);
-	}
-	return layer;
 }
 
 function syncSelection() {
@@ -11019,9 +10381,9 @@ function syncSelection() {
 		}
 	}
 	for (const index of state.selectedPages) {
-		unmountPage(index);
+		pageView.unmountPage(index);
 	}
-	trimPageCache();
+	pageView.trimPageCache();
 }
 
 function isDocumentSelection(range) {
@@ -11111,7 +10473,7 @@ function copyEditorSelection(event) {
 }
 
 function visiblePageBounds(index) {
-	const page = state.doc.pages[index], surface = pageShell(index)?.querySelector(".page-surface");
+	const page = state.doc.pages[index], surface = pageView.pageShell(index)?.querySelector(".page-surface");
 	const full = { x: 0, y: 0, width: page.width, height: page.height };
 	if (!surface) return full;
 	const rect = surface.getBoundingClientRect(), view = el.viewerPanel.getBoundingClientRect();
@@ -11237,389 +10599,6 @@ function copySelection(event) {
 	event.preventDefault();
 }
 
-function markFlowPageError(index, err) {
-	const shell = pageShell(index);
-	if (!shell) {
-		return;
-	}
-	shell.classList.add("error");
-	const placeholder = shell.querySelector(".page-placeholder");
-	if (placeholder) {
-		placeholder.textContent = String(err.message || err);
-	}
-}
-
-function queueNearbyPages(index, openSeq = state.openSeq) {
-	const start = pageGroupStart(index);
-	if (state.pagePrefetchIndex !== null && start !== state.pagePrefetchIndex) state.pagePrefetchDirection = Math.sign(start - state.pagePrefetchIndex);
-	const direction = state.pagePrefetchDirection;
-	state.pagePrefetchIndex = start;
-	let bytes = 0;
-	for (const page of state.pageCache.values()) bytes += page.cacheBytes || 0;
-	for (const image of state.svgImages.values()) bytes += image.size;
-	for (const face of state.svgFonts.values()) bytes += svgFontBytes.get(face) || 0;
-	const budget = nativeHost?.cacheBytes || PAGE_CACHE_BYTES;
-	const cost = Math.max(1 << 20, bytes / Math.max(1, state.pageCache.size));
-	const count = Math.max(0, Math.min(nativeHost?.parallelism || wasmWorker?.parallelism || 1, state.pageLayout * 2, Math.floor((budget - bytes) / cost)));
-	for (let i = start; i < Math.min(state.doc?.pageCount || 1, start + state.pageLayout); i += 1) {
-		renderFlowPage(i, { openSeq, priority: 1 });
-	}
-	for (let offset = 1; offset <= count; offset += 1) {
-		const next = direction > 0 ? start + state.pageLayout + offset - 1 : start - offset;
-		if (next >= 0 && next < (state.doc?.pageCount || 1)) renderFlowPage(next, { openSeq, priority: 6 });
-	}
-}
-
-function pageShell(index) {
-	return state.pageWindow?.nodes.get(index) || null;
-}
-
-function scrollToPage(index) {
-	if (state.pageLayout > 1 && state.pageWindow) {
-		const view = state.pageWindow, start = pageGroupStart(index);
-		const size = pageGroupSize(start), gap = state.continuous ? 0 : PAGE_LAYOUT_GAP;
-		const height = size.height * MM_TO_PX * state.scale;
-		const whole = height <= el.viewerPanel.clientHeight - pageBlockSpace() * 2 + 1;
-		const space = state.fitMode === "height" && !state.continuous
-			? Math.max(pageBlockSpace(), (el.viewerPanel.clientHeight - height) / 2) : pageBlockSpace();
-		syncPageWindow(view, view.offsets[whole ? start : index] - space);
-		el.viewerPanel.scrollLeft = Math.max(0, (el.viewerPanel.scrollWidth - el.viewerPanel.clientWidth) / 2);
-		if (size.width * MM_TO_PX * state.scale + gap > el.viewerPanel.clientWidth) {
-			const shell = pageShell(index);
-			if (shell) centerPageInline(shell);
-		}
-		return;
-	}
-	if (state.pageWindow) syncPageWindow(state.pageWindow, state.pageWindow.offsets[index]);
-	const shell = pageShell(index);
-	if (shell) {
-		if (state.pageWindow) {
-			const shellRect = shell.getBoundingClientRect(), viewerRect = el.viewerPanel.getBoundingClientRect();
-			const space = state.fitMode === "height" && !state.continuous
-				? (el.viewerPanel.clientHeight - shellRect.height) / 2 : pageBlockSpace();
-			scrollViewerBy(shellRect.top - viewerRect.top - space);
-		} else if (state.fitMode === "height" && !state.continuous) {
-			shell.scrollIntoView({ block: "center", inline: "nearest" });
-		} else {
-			const viewerRect = el.viewerPanel.getBoundingClientRect();
-			const shellRect = shell.getBoundingClientRect();
-			const top = el.viewerPanel.scrollTop + shellRect.top - viewerRect.top - pageBlockSpace();
-			const maxTop = Math.max(0, el.viewerPanel.scrollHeight - el.viewerPanel.clientHeight);
-			el.viewerPanel.scrollTop = Math.min(maxTop, Math.max(0, top));
-		}
-		centerPageInline(shell);
-	}
-}
-
-function centerPageInline(shell) {
-	const viewerRect = el.viewerPanel.getBoundingClientRect();
-	const shellRect = shell.getBoundingClientRect();
-	el.viewerPanel.scrollLeft += shellRect.left + shellRect.width / 2 - viewerRect.left - el.viewerPanel.clientWidth / 2;
-}
-
-function schedulePageSync() {
-	if (state.scrollFrame || !state.doc) {
-		return;
-	}
-	state.scrollFrame = requestAnimationFrame(() => {
-		state.scrollFrame = 0;
-		syncCurrentPageFromScroll();
-	});
-}
-
-function syncCurrentPageFromScroll() {
-	if (state.openActionTask?.navigating) return;
-	syncPageWindow(state.pageWindow);
-	const navigation = state.pageNavigation;
-	const top = state.pageWindow ? pageWindowTop(state.pageWindow) : el.viewerPanel.scrollTop;
-	if (navigation?.openSeq === state.openSeq && navigation.index === state.pageIndex
-		&& (navigation.top === undefined || Math.abs(navigation.top - top) < 1 && Math.abs(navigation.left - el.viewerPanel.scrollLeft) < 1)) return;
-	state.pageNavigation = null;
-	if (canvasEditor.input || canvasEditor.drag || canvasEditor.crop) return;
-	const shell = pageShellFromView();
-	if (!shell) {
-		return;
-	}
-	const nextIndex = Number.parseInt(shell.dataset.pageIndex, 10);
-	if (Number.isFinite(nextIndex) && nextIndex !== state.pageIndex) {
-		setCurrentPage(nextIndex);
-		queueNearbyPages(nextIndex);
-		scheduleOpenActions();
-	}
-	prunePageRenderQueue();
-}
-
-function prunePageRenderQueue() {
-	state.pageRenderQueue = state.pageRenderQueue.filter(task => {
-		if (task.priority < 2 || Math.abs(task.index - state.pageIndex) <= 2
-			|| state.pageWindow?.nodes.has(task.index) || state.thumbnailWindow?.nodes.has(task.index)) return true;
-		state.pageInFlight.delete(task.key);
-		task.resolve(null);
-		return false;
-	});
-}
-
-function pageShellFromView() {
-	const rect = el.viewerPanel.getBoundingClientRect();
-	if (state.pageLayout > 1) {
-		let best = null, area = 0;
-		const current = pageShell(state.pageIndex);
-		for (const shell of [current, ...(state.pageWindow?.nodes.values() || [])]) {
-			if (!shell || shell.style.visibility === "hidden") continue;
-			const bounds = shell.getBoundingClientRect();
-			const visible = Math.max(0, Math.min(rect.right, bounds.right) - Math.max(rect.left, bounds.left))
-				* Math.max(0, Math.min(rect.bottom, bounds.bottom) - Math.max(rect.top, bounds.top));
-			const ratio = visible / Math.max(1, bounds.width * bounds.height);
-			if (ratio > area + 0.01) { best = shell; area = ratio; }
-		}
-		return best;
-	}
-	const x = rect.left + rect.width / 2;
-	if (el.viewerPanel.scrollTop + el.viewerPanel.clientHeight >= el.viewerPanel.scrollHeight - 1) {
-		const shell = pageShell(state.pageIndex);
-		const bounds = shell?.getBoundingClientRect();
-		return bounds && bounds.top >= rect.top - 1 && bounds.bottom <= rect.bottom + 1
-			? shell : el.svgHost.lastElementChild;
-	}
-	if (state.continuous) {
-		return pageShellAtPoint(x, rect.top + 1);
-	}
-	return pageShellAtPoint(x, rect.top + rect.height * 0.45)
-		|| pageShellAtPoint(x, rect.top + rect.height * 0.25)
-		|| pageShellAtPoint(x, rect.top + rect.height * 0.65);
-}
-
-function pageShellAtPoint(x, y) {
-	return document.elementFromPoint(x, y)?.closest?.(".page-shell") || null;
-}
-
-function setCurrentPage(index) {
-	if (index !== state.pageIndex && !state.openActionTask?.navigating) state.openActionTask = null;
-	if (state.composite && state.composite.index !== index) resetCompositeScope();
-	state.pageIndex = index;
-	if (state.editing) state.openActionPage = state.doc?.pages[index]?.id;
-	if (state.fitMode === "width" && state.pageLayout === 1) {
-		state.scale = fitWidthScale(currentPageInfo());
-		el.zoomLabel.textContent = `${Math.round(state.scale * 100)}%`;
-	}
-	updatePageListCurrent();
-	updateControls();
-	if (state.doc && !state.exporting) {
-		setStatus(pageStatus(index, state.doc.pageCount));
-	}
-}
-
-function updatePageListCurrent(force = false) {
-	const current = el.pageList.querySelector(".page-list-item[data-current]");
-	if (state.thumbnailWindow) {
-		if (!force && state.pageListCurrent === state.pageIndex) return;
-		state.pageListCurrent = state.pageIndex;
-		if (state.showPages && !el.pageList.hidden) revealThumbnail(state.pageIndex);
-	}
-	if (current) {
-		if (!force && Number.parseInt(current.dataset.pageIndex, 10) === state.pageIndex) {
-			return;
-		}
-		current.removeAttribute("data-current");
-	}
-	const next = el.pageList.querySelector(`.page-list-item[data-page-index="${state.pageIndex}"]`);
-	if (next) {
-		setPageItemCurrent(next, true);
-		if (state.showPages && !el.pageList.hidden && !state.thumbnailWindow) {
-			const panel = el.navigationContent.getBoundingClientRect();
-			const item = next.getBoundingClientRect();
-			if (item.top < panel.top) {
-				el.navigationContent.scrollTop += item.top - panel.top;
-			} else if (item.bottom > panel.bottom) {
-				el.navigationContent.scrollTop += Math.min(item.top - panel.top, item.bottom - panel.bottom);
-			}
-		}
-	}
-}
-
-function setPageItemCurrent(item, current) {
-	if (current) {
-		item.setAttribute("data-current", "page");
-		return;
-	}
-	item.removeAttribute("data-current");
-}
-
-function pageGroupStart(index = state.pageIndex) {
-	return Math.floor(index / state.pageLayout) * state.pageLayout;
-}
-
-function pageGroupSize(index = state.pageIndex) {
-	const start = pageGroupStart(index), widths = [0, 0];
-	let height = 0;
-	for (let offset = 0; offset < state.pageLayout; offset++) {
-		const page = state.doc.pages[start + offset];
-		if (!page) continue;
-		const size = pageViewSize(page);
-		widths[offset] = size.width;
-		height = Math.max(height, size.height);
-	}
-	if (!widths[1]) widths[1] = widths[0];
-	return { widths, width: widths[0] + widths[1], height };
-}
-
-async function togglePageLayout() {
-	if (!(state.doc?.pageCount > 1) || document.body.hasAttribute("data-busy")) return;
-	const openSeq = state.openSeq;
-	if (!await canvasEditor.commitNudge() || !await canvasEditor.commitText() || !await canvasEditor.commitCrop() || openSeq !== state.openSeq) return;
-	state.pageLayoutPreference = state.pageLayout === 1 ? 2 : 1;
-	layoutPages();
-	layoutThumbnails();
-	if (state.showPages && !el.pageList.hidden) revealThumbnail(state.pageIndex);
-	fitHeight();
-	queueNearbyPages(state.pageIndex);
-}
-
-function layoutPages() {
-	if (!state.doc) {
-		return;
-	}
-	canvasEditor.cancel();
-	const view = state.pageWindow;
-	if (!view) return;
-	const anchor = view.offsets.length > 1 ? pageWindowAnchor(view) : { index: state.pageIndex, offset: 0 };
-	const gap = state.continuous ? 0 : Math.max(state.pageLayout > 1 ? PAGE_LAYOUT_GAP : 0, Number.parseFloat(getComputedStyle(el.svgHost).rowGap) || 0);
-	if (state.pageLayout > 1) {
-		const count = state.doc.pages.length, spacing = state.continuous ? 0 : PAGE_LAYOUT_GAP;
-		view.columns = 2;
-		view.offsets = new Float64Array(count + 1);
-		view.heights = new Float64Array(count);
-		view.lefts = new Float64Array(count);
-		let top = 0, width = 0;
-		const groups = [];
-		for (let start = 0; start < count; start += state.pageLayout) {
-			const size = pageGroupSize(start), factor = MM_TO_PX * state.scale;
-			const groupWidth = size.width * factor + spacing;
-			groups.push({ start, size, width: groupWidth });
-			width = Math.max(width, groupWidth);
-			for (let column = 0; column < 2; column++) {
-				const index = start + column;
-				if (index >= count) break;
-				view.offsets[index] = top;
-				view.heights[index] = pageViewSize(state.doc.pages[index]).height * factor;
-			}
-			top += size.height * factor + gap;
-		}
-		for (const group of groups) {
-			for (let index = group.start; index < Math.min(count, group.start + state.pageLayout); index++) {
-				const column = (index - group.start) % 2, factor = MM_TO_PX * state.scale;
-				view.lefts[index] = (width - group.width) / 2
-					+ (column ? group.size.widths[0] * factor + spacing : 0)
-					+ (group.size.widths[column] - pageViewSize(state.doc.pages[index]).width) * factor / 2;
-			}
-		}
-		view.offsets[count] = top;
-		view.gap = gap;
-		view.total = Math.max(0, top - gap);
-		view.host.style.width = `${width}px`;
-		for (const [index, shell] of view.nodes) layoutPageShell(shell, state.doc.pages[index]);
-		syncPageWindow(view, view.offsets[Math.min(anchor.index, count - 1)] + anchor.offset);
-		return;
-	}
-	view.columns = 0;
-	view.heights = null;
-	view.lefts = null;
-	for (const shell of view.nodes.values()) {
-		shell.style.removeProperty("left");
-		shell.style.removeProperty("transform");
-	}
-	const offsets = new Float64Array(state.doc.pages.length + 1);
-	const fittedWidth = state.scale * pageViewSize(currentPageInfo()).width;
-	let width = 1;
-	for (let index = 0; index < state.doc.pages.length; index++) {
-		const size = pageViewSize(state.doc.pages[index]);
-		const scale = state.fitMode === "width" ? fittedWidth / size.width : state.scale;
-		offsets[index + 1] = offsets[index] + Math.max(1, size.height * MM_TO_PX) * scale + gap;
-		width = Math.max(width, Math.max(1, size.width * MM_TO_PX) * scale);
-	}
-	view.offsets = offsets;
-	view.gap = gap;
-	view.total = Math.max(0, offsets.at(-1) - gap);
-	view.host.style.width = `${width}px`;
-	for (const [index, shell] of view.nodes) layoutPageShell(shell, state.doc.pages[index]);
-	syncPageWindow(view, offsets[anchor.index] + anchor.offset);
-}
-
-function layoutPageShell(shell, page) {
-	const width = Math.max(1, page.width * MM_TO_PX);
-	const height = Math.max(1, page.height * MM_TO_PX);
-	const size = pageViewSize(page);
-	const viewWidth = Math.max(1, size.width * MM_TO_PX);
-	const viewHeight = Math.max(1, size.height * MM_TO_PX);
-	const scale = state.fitMode === "width" && state.pageLayout === 1 ? state.scale * pageViewSize(currentPageInfo()).width / size.width : state.scale;
-	shell.style.width = `${viewWidth * scale}px`;
-	shell.style.height = `${viewHeight * scale}px`;
-	const surface = shell.querySelector(".page-surface");
-	if (surface) {
-		surface.style.width = `${width}px`;
-		surface.style.height = `${height}px`;
-		const x = state.rotation === 90 || state.rotation === 180 ? viewWidth : 0;
-		const y = state.rotation >= 180 ? viewHeight : 0;
-		surface.style.transform = `scale(${scale}) translate(${x}px, ${y}px) rotate(${state.rotation}deg)`;
-		surface.style.setProperty("--surface-scale", String(scale));
-		surface.style.setProperty("--surface-rotation", `${state.rotation}deg`);
-		surface.classList.toggle("sideways", state.rotation % 180 !== 0);
-	}
-}
-
-function parseSVG(svgText, prefix = "", images = state.svgImages) {
-	const template = document.createElement("template");
-	template.innerHTML = svgText.replace(/xlink:href="(ofdgo-image-[a-f0-9]{64})"/g, (_, name) => `xlink:href="${images.get(name).url}"`);
-	const svg = document.adoptNode(template.content.firstElementChild);
-	prefixSVGIds(svg, prefix);
-	return svg;
-}
-
-function prefixSVGIds(svg, prefix) {
-	if (!prefix) {
-		return;
-	}
-	const idMap = new Map();
-	for (const node of svg.querySelectorAll("[id]")) {
-		const id = node.getAttribute("id");
-		if (!id) {
-			continue;
-		}
-		const next = `${prefix}-${id}`;
-		idMap.set(id, next);
-		node.setAttribute("id", next);
-	}
-	if (idMap.size === 0) {
-		return;
-	}
-	const replaceRef = (value) => {
-		let next = value.replace(/url\(#([^)]+)\)/g, (match, id) => {
-			const mapped = idMap.get(id);
-			return mapped ? `url(#${mapped})` : match;
-		});
-		if (next.startsWith("#")) {
-			const mapped = idMap.get(next.slice(1));
-			if (mapped) {
-				next = `#${mapped}`;
-			}
-		}
-		return next;
-	};
-	const attrs = ["clip-path", "fill", "filter", "href", "marker-end", "marker-mid", "marker-start", "mask", "stroke", "style", "xlink:href"];
-	for (const attr of attrs) {
-		for (const node of svg.querySelectorAll(`[${attr === "xlink:href" ? "*|href" : attr}*="#"]`)) {
-			const value = node.getAttribute(attr);
-			if (!value) {
-				continue;
-			}
-			const next = replaceRef(value);
-			if (next !== value) {
-				node.setAttribute(attr, next);
-			}
-		}
-	}
-}
-
 function focusSearch() {
 	if (!state.showPages) {
 		toggleSidebar("pages");
@@ -11642,7 +10621,7 @@ function showNavigation(selected) {
 	}
 	el.pageSelectionTools.hidden = !state.editing || !state.pageMultiSelect || selected !== el.pagesTab;
 	el.navigationContent.scrollTop = state.navigationScroll.get(selected) || 0;
-	if (selected === el.pagesTab) syncThumbnailWindow();
+	if (selected === el.pagesTab) pageView.syncThumbnailWindow();
 	if (selected === el.annotationsTab) loadAnnotationSummary();
 }
 
@@ -11859,7 +10838,7 @@ async function selectSearchMatch(index) {
 	const openSeq = state.openSeq;
 	clearSearchHighlights();
 	renderSearchResults();
-	if (!await renderPage(match.page, { fit: false, scroll: false })) {
+	if (!await pageView.renderPage(match.page, { fit: false, scroll: false })) {
 		return;
 	}
 	await nextFrame();
@@ -11867,25 +10846,25 @@ async function selectSearchMatch(index) {
 		return;
 	}
 	renderSearchHighlights(match.page);
-	const mark = pageShell(match.page).querySelector(".search-highlight");
+	const mark = pageView.pageShell(match.page).querySelector(".search-highlight");
 	if (mark) {
 		const box = mark.getBoundingClientRect();
 		const viewer = el.viewerPanel.getBoundingClientRect();
-		scrollViewerBy(box.top + box.height / 2 - viewer.top - el.viewerPanel.clientHeight / 2);
+		pageView.scrollViewerBy(box.top + box.height / 2 - viewer.top - el.viewerPanel.clientHeight / 2);
 		if (box.left < viewer.left) {
 			el.viewerPanel.scrollLeft += box.left - viewer.left;
 		} else if (box.right > viewer.left + el.viewerPanel.clientWidth) {
 			el.viewerPanel.scrollLeft += box.right - viewer.left - el.viewerPanel.clientWidth;
 		}
 	} else {
-		scrollToPage(match.page);
+		pageView.scrollToPage(match.page);
 	}
 	if (state.editing) {
-		const node = [...pageShell(match.page).querySelectorAll(".edit-object")].find(node => canvasEditor.nodes.get(node)?.id === match.id);
+		const node = [...pageView.pageShell(match.page).querySelectorAll(".edit-object")].find(node => canvasEditor.nodes.get(node)?.id === match.id);
 		const item = node && canvasEditor.nodes.get(node);
 		if (item?.type === "TextObject") {
 			state.selectObjects = true;
-			setPan(false);
+			pageView.setPan(false);
 			canvasEditor.setTool("");
 			canvasEditor.select(item);
 			updateControls();
@@ -11913,7 +10892,7 @@ function renderSearchHighlights(index) {
 	if (!match || match.page !== index) {
 		return;
 	}
-	const surface = pageShell(index).querySelector(".page-surface");
+	const surface = pageView.pageShell(index).querySelector(".page-surface");
 	for (const mark of surface.querySelectorAll(".search-highlight")) {
 		mark.remove();
 	}
@@ -11955,14 +10934,14 @@ async function activateOpenActions() {
 				task.seen.add(id);
 				state.openActionPage = id;
 			}
-			const page = await renderFlowPage(index, { openSeq: task.sequence, priority: 0, throwError: true });
+			const page = await pageView.renderFlowPage(index, { openSeq: task.sequence, priority: 0, throwError: true });
 			if (!page || !current()) break;
 			const links = documentOpened ? await callWASM("ofdgoOpenLinks") : await callWASM("ofdgoOpenLinks", index);
 			if (!current()) break;
 			for (const link of links) {
 				if (!current()) break;
 				const info = state.doc.pages[state.pageIndex];
-				const surface = pageShell(state.pageIndex)?.querySelector(".page-surface");
+				const surface = pageView.pageShell(state.pageIndex)?.querySelector(".page-surface");
 				const target = pageLinkTarget(link, info, surface, task);
 				if (!target) continue;
 				if ((target.external || link.attachment) && !window.confirm(link.attachment
@@ -11995,7 +10974,7 @@ async function activateOutline(path) {
 		for (const link of links) {
 			if (sequence !== state.openSeq || request !== state.outlineSeq || state.editing) break;
 			const page = state.doc?.pages[state.pageIndex];
-			const surface = pageShell(state.pageIndex)?.querySelector(".page-surface");
+			const surface = pageView.pageShell(state.pageIndex)?.querySelector(".page-surface");
 			const target = pageLinkTarget(link, page, surface);
 			if (target && await target.activate() === false) break;
 		}
@@ -12048,7 +11027,7 @@ function createOutlineList(outlines, path = []) {
 					state.outlineSelection = current;
 					for (const node of el.outlineList.querySelectorAll(".outline-link")) node.classList.toggle("selected", node === link);
 					for (const button of el.outlineList.querySelectorAll("[data-outline-action]")) button.disabled = false;
-					if (outline.page) renderPage(outline.page - 1);
+					if (outline.page) pageView.renderPage(outline.page - 1);
 					return;
 				}
 				activateOutline(current);
@@ -12147,7 +11126,7 @@ function selectThumbnailPage(event, index) {
 		updateControls();
 		if (additive || event.shiftKey) return;
 	}
-	return renderPage(index);
+	return pageView.renderPage(index);
 }
 
 el.selectAllPages.addEventListener("click", () => {
@@ -12213,7 +11192,7 @@ el.pageList.addEventListener("keydown", event => {
 			Tab: index + (event.shiftKey ? -1 : 1) }[event.key];
 		if (next >= 0 && next < state.doc.pageCount) {
 			event.preventDefault();
-			revealThumbnail(next);
+			pageView.revealThumbnail(next);
 			state.thumbnailWindow.nodes.get(next)?.focus({ preventScroll: true });
 			return;
 		}
@@ -12231,153 +11210,6 @@ el.pageList.addEventListener("keydown", event => {
 	syncPageSelection();
 	updateControls();
 });
-
-function renderPageList() {
-	el.pageList.replaceChildren();
-	state.thumbnailWindow = null;
-	state.pageListCurrent = null;
-	state.visibleThumbnails.clear();
-	if (!state.doc) {
-		el.pageList.style.height = "";
-		el.pageList.classList.remove("virtual-pages", "grouped-pages");
-		el.navigationContent.scrollTop = 0;
-		return;
-	}
-	if (state.thumbnailObserver) {
-		state.thumbnailObserver.disconnect();
-	}
-	const ids = new Set(state.doc.pages.map(page => page.id));
-	for (const id of state.pageSelection) if (!ids.has(id) || !state.editing) state.pageSelection.delete(id);
-	state.thumbnailWindow = createPageWindow(el.pageList, el.navigationContent, 180, createThumbnail, releaseThumbnail, observeThumbnail);
-	layoutThumbnails();
-	syncPageSelection();
-}
-
-function createThumbnail(page) {
-	const openSeq = state.openSeq;
-	const button = document.createElement("button");
-	button.type = "button";
-	button.className = "page-list-item";
-	button.dataset.pageIndex = String(page.index);
-	if (state.editing) button.setAttribute("data-pressed", String(state.pageSelection.has(page.id)));
-	button.title = `${formatSize(page.width)} x ${formatSize(page.height)} mm`;
-	setPageItemCurrent(button, page.index === state.pageIndex);
-	layoutThumbnail(button, page);
-
-	const thumb = document.createElement("span");
-	thumb.className = "thumb-paper";
-	setThumbnailContent(thumb, state.pageCache.get(page.index)?.svg, page.index, openSeq);
-
-	const label = document.createElement("span");
-	label.className = "thumb-label";
-	label.textContent = `第${page.index + 1}页`;
-
-	const size = document.createElement("span");
-	size.className = "thumb-size";
-	size.textContent = `${formatSize(page.width)} x ${formatSize(page.height)} mm`;
-
-	button.append(thumb, label, size);
-	if (state.editing && pageCan("move", page.index)) enablePageDrag(button, page.index);
-	button.addEventListener("click", event => selectThumbnailPage(event, page.index));
-	return button;
-}
-
-function releaseThumbnail(button, index) {
-	if (state.pageDragIndex === index || button.contains(document.activeElement)) return false;
-	state.thumbnailObserver?.unobserve(button);
-	state.visibleThumbnails.delete(index);
-	return true;
-}
-
-function layoutThumbnails() {
-	const view = state.thumbnailWindow;
-	if (!view) return;
-	const visible = !el.pageList.hidden && state.showPages;
-	const anchor = visible && view.offsets.length > 1 ? pageWindowAnchor(view) : view.anchor || { index: state.pageIndex, offset: 0 };
-	const width = el.navigationContent.clientWidth || view.width || 180;
-	view.width = width;
-	view.rotation = state.rotation;
-	view.layout = state.pageLayout;
-	view.host.classList.toggle("grouped-pages", state.pageLayout > 1);
-	const gap = Number.parseFloat(getComputedStyle(view.host).columnGap) || 0;
-	const offsets = new Float64Array(state.doc.pages.length + 1);
-	view.heights = new Float64Array(state.doc.pages.length);
-	view.lefts = state.pageLayout > 1 ? new Float64Array(state.doc.pages.length) : null;
-	view.scales = state.pageLayout > 1 ? new Float64Array(state.doc.pages.length) : null;
-	view.columns = state.pageLayout > 1 ? state.pageLayout : 0;
-	view.itemWidth = state.pageLayout > 1 ? Math.max(1, (width - gap) / 2) : width;
-	let top = 0;
-	for (let start = 0; start < state.doc.pages.length; start += state.pageLayout) {
-		if (state.pageLayout === 1) {
-			const size = pageViewSize(state.doc.pages[start]);
-			const ratio = size.width > 0 && size.height > 0 ? size.height / size.width : 1 / 0.707;
-			view.heights[start] = Math.max(1, width - 20) * ratio + 70;
-			offsets[start] = top;
-			top += view.heights[start] + gap;
-			continue;
-		}
-		const group = pageGroupSize(start), scale = Math.max(1, view.itemWidth - 20) / Math.max(...group.widths);
-		const height = group.height * scale + 70;
-		for (let column = 0; column < 2; column++) {
-			const index = start + column;
-			if (index >= state.doc.pages.length) break;
-			offsets[index] = top;
-			view.heights[index] = height;
-			view.lefts[index] = column * (view.itemWidth + gap);
-			view.scales[index] = scale;
-		}
-		top += height + gap;
-	}
-	offsets[state.doc.pages.length] = top;
-	view.offsets = offsets;
-	view.gap = gap;
-	view.total = Math.ceil(offsets.at(-1));
-	for (const [index, button] of view.nodes) {
-		layoutThumbnail(button, state.doc.pages[index]);
-	}
-	view.pendingTop = offsets[anchor.index] + anchor.offset;
-	view.host.style.height = `${Math.min(SCROLL_SEGMENT_SIZE, view.total)}px`;
-	if (visible) {
-		syncPageWindow(view, view.pendingTop);
-		view.pendingTop = null;
-	}
-}
-
-function syncThumbnailWindow() {
-	const view = state.thumbnailWindow;
-	if (!view || el.pageList.hidden || !state.showPages) return;
-	if (el.navigationContent.clientWidth && (view.width !== el.navigationContent.clientWidth || view.rotation !== state.rotation || view.layout !== state.pageLayout)) layoutThumbnails();
-	syncPageWindow(view, view.pendingTop ?? null);
-	view.pendingTop = null;
-	prunePageRenderQueue();
-}
-
-function revealThumbnail(index) {
-	syncThumbnailWindow();
-	const view = state.thumbnailWindow;
-	if (!view) return;
-	const top = pageWindowTop(view);
-	let start = view.offsets[index], end = start + view.heights[index];
-	if (start < top || end > top + el.navigationContent.clientHeight) {
-		const first = pageGroupStart(index), last = Math.min(state.doc.pageCount - 1, first + state.pageLayout - 1);
-		const groupEnd = view.offsets[last] + view.heights[last];
-		if (groupEnd - view.offsets[first] <= el.navigationContent.clientHeight) {
-			start = view.offsets[first];
-			end = groupEnd;
-		}
-		const target = start < top ? Math.floor(start) : Math.min(start, Math.ceil(end - el.navigationContent.clientHeight));
-		syncPageWindow(view, target);
-	}
-}
-
-function resetThumbnails() {
-	state.visibleThumbnails.clear();
-	state.thumbnailInFlight.clear();
-	if (state.thumbnailObserver) {
-		state.thumbnailObserver.disconnect();
-		state.thumbnailObserver = null;
-	}
-}
 
 function pageDropIndex(indexes, target, after) {
 	const position = target + Number(after);
@@ -12428,10 +11260,10 @@ function enablePageDrag(button, index) {
 				const rect = el.navigationContent.getBoundingClientRect();
 				const delta = y < rect.top + 48 ? -10 : y > rect.bottom - 48 ? 10 : 0;
 				if (delta) {
-					if (state.thumbnailWindow) scrollPageWindowBy(state.thumbnailWindow, delta);
+					if (state.thumbnailWindow) pageView.scrollPageWindowBy(state.thumbnailWindow, delta);
 					else el.navigationContent.scrollTop += delta;
 				}
-				syncThumbnailWindow();
+				pageView.syncThumbnailWindow();
 				locate();
 			}
 			frame = requestAnimationFrame(tick);
@@ -12474,154 +11306,11 @@ function enablePageDrag(button, index) {
 		if (target >= 0 && target < state.doc.pageCount && await canvasEditor.commitText() && await canvasEditor.commitCrop()) {
 			const focus = (direction < 0 ? target : target - indexes.length + 1) + indexes.indexOf(index);
 			if (await changeSelectedPages("move", direction)) {
-				revealThumbnail(focus);
+				pageView.revealThumbnail(focus);
 				el.pageList.querySelector(`[data-page-index="${focus}"]`)?.focus({ preventScroll: true });
 			}
 		}
 	});
-}
-
-function layoutThumbnail(button, page) {
-	if (page.width <= 0 || page.height <= 0) {
-		return;
-	}
-	const size = pageViewSize(page);
-	const view = state.thumbnailWindow;
-	button.style.height = `${view.heights[page.index]}px`;
-	button.style.width = `${view.itemWidth}px`;
-	if (view.scales) {
-		button.style.setProperty("--thumb-paper-width", `${size.width * view.scales[page.index]}px`);
-		button.style.setProperty("--thumb-paper-height", `${size.height * view.scales[page.index]}px`);
-	} else {
-		button.style.removeProperty("left");
-		button.style.removeProperty("transform");
-		button.style.removeProperty("--thumb-paper-width");
-		button.style.removeProperty("--thumb-paper-height");
-	}
-	button.style.setProperty("--thumb-ratio", `${size.width} / ${size.height}`);
-	button.style.setProperty("--thumb-width", `${page.width / size.width * 100}%`);
-	button.style.setProperty("--thumb-height", `${page.height / size.height * 100}%`);
-	button.style.setProperty("--thumb-rotation", `${state.rotation}deg`);
-}
-
-function setThumbnailContent(container, svgText, index, openSeq = state.openSeq) {
-	const renderKey = `${openSeq}:${index}`;
-	if (svgText && container.dataset.renderKey === renderKey) {
-		return;
-	}
-	delete container.dataset.renderKey;
-	container.replaceChildren();
-	if (!svgText) {
-		container.classList.add("pending");
-		container.textContent = String(index + 1);
-		return;
-	}
-	try {
-		const svg = parseSVG(svgText, `t${openSeq}-${index}`);
-		svg.classList.add("thumb-svg");
-		container.classList.remove("pending", "error");
-		container.append(svg);
-		container.dataset.renderKey = renderKey;
-	} catch {
-		container.classList.add("error");
-		container.textContent = String(index + 1);
-	}
-}
-
-function observeThumbnail(button, index, openSeq = state.openSeq) {
-	if (!button) return;
-	const observer = thumbnailObserver();
-	if (observer) {
-		observer.observe(button);
-	}
-	if (index === state.pageIndex || !observer) {
-		if (!observer) state.visibleThumbnails.add(index);
-		renderThumbnail(index, openSeq);
-	}
-}
-
-function thumbnailObserver() {
-	if (!("IntersectionObserver" in window)) {
-		return null;
-	}
-	if (!state.thumbnailObserver) {
-		const openSeq = state.openSeq;
-		state.thumbnailObserver = new IntersectionObserver((entries) => {
-			if (openSeq !== state.openSeq) {
-				return;
-			}
-			for (const entry of entries) {
-				const index = Number.parseInt(entry.target.dataset.pageIndex, 10);
-				if (state.thumbnailWindow && state.thumbnailWindow.nodes.get(index) !== entry.target) continue;
-				if (!entry.isIntersecting) {
-					state.visibleThumbnails.delete(index);
-					const thumb = entry.target.querySelector(".thumb-paper");
-					if (thumb.dataset.renderKey) {
-						setThumbnailContent(thumb, "", index, openSeq);
-					}
-					continue;
-				}
-				state.visibleThumbnails.add(index);
-				renderThumbnail(index, openSeq);
-			}
-			trimPageCache();
-		}, {
-			root: el.navigationContent,
-			rootMargin: "180px 0px",
-		});
-	}
-	return state.thumbnailObserver;
-}
-
-async function renderThumbnail(index, openSeq = state.openSeq) {
-	if (openSeq !== state.openSeq || !state.doc) {
-		return;
-	}
-	if (state.pageCache.has(index)) {
-		updateThumbnail(index, openSeq);
-		return;
-	}
-	const key = `${openSeq}:${index}`;
-	if (state.thumbnailInFlight.has(key)) {
-		return;
-	}
-	state.thumbnailInFlight.add(key);
-	try {
-		const page = await loadPageData(index, { openSeq, priority: 5, preview: true });
-		if (openSeq !== state.openSeq) {
-			return;
-		}
-		if (!page) {
-			return;
-		}
-		updateThumbnail(index, openSeq);
-		trimPageCache();
-	} catch {
-		if (openSeq === state.openSeq) {
-			markThumbnailError(index);
-		}
-	} finally {
-		state.thumbnailInFlight.delete(key);
-	}
-}
-
-function updateThumbnail(index, openSeq = state.openSeq) {
-	if (openSeq !== state.openSeq || (state.thumbnailObserver && !state.visibleThumbnails.has(index) && index !== state.pageIndex)) {
-		return;
-	}
-	const thumb = el.pageList.querySelector(`[data-page-index="${index}"] .thumb-paper`);
-	if (thumb) {
-		setThumbnailContent(thumb, state.pageCache.get(index)?.svg, index, openSeq);
-	}
-}
-
-function markThumbnailError(index) {
-	const thumb = el.pageList.querySelector(`[data-page-index="${index}"] .thumb-paper`);
-	if (thumb) {
-		delete thumb.dataset.renderKey;
-		thumb.classList.add("error");
-		thumb.textContent = String(index + 1);
-	}
 }
 
 function renderMeta(keepDetails = false) {
@@ -13140,7 +11829,7 @@ async function focusPageRegion(region, label, alignment = "nearest") {
 		return;
 	}
 	const openSeq = state.openSeq;
-	if (!await renderPage(pageIndex, { fit: false, scroll: false })) {
+	if (!await pageView.renderPage(pageIndex, { fit: false, scroll: false })) {
 		return;
 	}
 	await nextFrame();
@@ -13149,7 +11838,7 @@ async function focusPageRegion(region, label, alignment = "nearest") {
 	}
 	highlightPageRegion(region, alignment);
 	if (label === "注解") {
-		for (const note of pageShell(pageIndex)?.querySelectorAll(".annotation-note") || []) {
+		for (const note of pageView.pageShell(pageIndex)?.querySelectorAll(".annotation-note") || []) {
 			if (note.dataset.annotationId !== String(region.id)) continue;
 			window.clearTimeout(note.locateTimer);
 			note.classList.add("located");
@@ -13162,7 +11851,7 @@ async function focusPageRegion(region, label, alignment = "nearest") {
 function highlightPageRegion(region, alignment = "nearest") {
 	clearRegionHighlights();
 	const pageIndex = region.page - 1;
-	const shell = pageShell(pageIndex);
+	const shell = pageView.pageShell(pageIndex);
 	if (!shell || !(region.width > 0 && region.height > 0)) {
 		return;
 	}
@@ -13175,9 +11864,9 @@ function highlightPageRegion(region, alignment = "nearest") {
 	shell.querySelector(".page-surface").append(mark);
 	if (state.pageWindow) {
 		const box = mark.getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
-		if (alignment === "center") scrollViewerBy(box.top - viewer.top + (box.height - el.viewerPanel.clientHeight) / 2);
-		else if (box.top < viewer.top) scrollViewerBy(box.top - viewer.top);
-		else if (box.bottom > viewer.top + el.viewerPanel.clientHeight) scrollViewerBy(Math.min(box.top - viewer.top, box.bottom - viewer.top - el.viewerPanel.clientHeight));
+		if (alignment === "center") pageView.scrollViewerBy(box.top - viewer.top + (box.height - el.viewerPanel.clientHeight) / 2);
+		else if (box.top < viewer.top) pageView.scrollViewerBy(box.top - viewer.top);
+		else if (box.bottom > viewer.top + el.viewerPanel.clientHeight) pageView.scrollViewerBy(Math.min(box.top - viewer.top, box.bottom - viewer.top - el.viewerPanel.clientHeight));
 		if (box.left < viewer.left) el.viewerPanel.scrollLeft += box.left - viewer.left;
 		else if (box.right > viewer.left + el.viewerPanel.clientWidth) el.viewerPanel.scrollLeft += box.right - viewer.left - el.viewerPanel.clientWidth;
 	} else mark.scrollIntoView({ block: alignment, inline: "nearest" });
@@ -13409,288 +12098,6 @@ function fontMeta(font) {
 	return parts.join(" · ");
 }
 
-function setContinuous(continuous) {
-	state.continuous = continuous;
-	el.pageFrame.classList.toggle("continuous", state.continuous);
-	el.continuousButton.setAttribute("data-pressed", String(state.continuous));
-}
-
-async function toggleContinuous() {
-	if (!state.doc || document.body.hasAttribute("data-busy")) return;
-	const openSeq = state.openSeq;
-	if (!await canvasEditor.commitNudge() || !await canvasEditor.commitText() || !await canvasEditor.commitCrop() || openSeq !== state.openSeq) return;
-	const anchor = state.fitMode === "free" ? scaleAnchor() : null;
-	setContinuous(!state.continuous);
-	if (state.pageWindow) {
-		updateFitSpace();
-		layoutPages();
-	}
-	clearRegionHighlights();
-	if (state.fitMode === "free") {
-		restoreScaleAnchor(anchor);
-	} else {
-		applyFit(false);
-		scrollToPage(state.pageIndex);
-	}
-}
-
-function rotatePages() {
-	if (document.body.hasAttribute("data-busy")) {
-		return;
-	}
-	state.rotation = (state.rotation + 90) % 360;
-	clearRegionHighlights();
-	el.viewerPanel.classList.remove("single-page-fits-height");
-	layoutPages();
-	layoutThumbnails();
-	if (state.fitMode === "free") {
-		updateFitSpace();
-	} else {
-		applyFit(false);
-	}
-	scrollToPage(state.pageIndex);
-}
-
-function pageViewSize(page) {
-	return state.rotation % 180 ? { width: page.height, height: page.width } : page;
-}
-
-function togglePan() {
-	if (document.body.hasAttribute("data-busy")) {
-		return;
-	}
-	setPan(!state.panMode);
-}
-
-function updatePanControl() {
-	el.viewerPanel.classList.toggle("pan-mode", state.panMode);
-	el.panButton.setAttribute("data-pressed", String(state.panMode));
-}
-
-function setPan(enabled) {
-	endPan();
-	state.panMode = enabled;
-	updatePanControl();
-	updateEditorTools();
-}
-
-function startPan(event) {
-	if (!state.panMode || !state.doc || event.pointerType !== "mouse" || event.button !== 0 || document.body.hasAttribute("data-busy") || event.target.closest("a, button")) {
-		return;
-	}
-	const rect = el.viewerPanel.getBoundingClientRect();
-	if (event.clientX >= rect.left + el.viewerPanel.clientWidth || event.clientY >= rect.top + el.viewerPanel.clientHeight) {
-		return;
-	}
-	event.preventDefault();
-	state.pan = { id: event.pointerId, x: event.clientX + el.viewerPanel.scrollLeft,
-		y: event.clientY + (state.pageWindow ? pageWindowTop(state.pageWindow) : el.viewerPanel.scrollTop) };
-	el.viewerPanel.setPointerCapture(event.pointerId);
-	el.viewerPanel.classList.add("panning");
-	canvasEditor.focus();
-}
-
-function movePan(event) {
-	const pan = state.pan;
-	if (!pan || event.pointerId !== pan.id) {
-		return;
-	}
-	el.viewerPanel.scrollLeft = pan.x - event.clientX;
-	if (state.pageWindow) syncPageWindow(state.pageWindow, pan.y - event.clientY);
-	else el.viewerPanel.scrollTop = pan.y - event.clientY;
-}
-
-function endPan(event) {
-	const pan = state.pan;
-	if (!pan || (event && event.pointerId !== pan.id)) {
-		return;
-	}
-	state.pan = null;
-	el.viewerPanel.classList.remove("panning");
-	if (el.viewerPanel.hasPointerCapture(pan.id)) {
-		el.viewerPanel.releasePointerCapture(pan.id);
-	}
-}
-
-function fitWidth(updateStatus = true) {
-	const page = currentPageInfo();
-	if (!page) {
-		return;
-	}
-	setScale(fitWidthScale(page), updateStatus, "width");
-	if (updateStatus) {
-		scrollToPage(state.pageIndex);
-	}
-}
-
-function fitWidthScale(page) {
-	return fitPageScale(page, "width");
-}
-
-function fitPageScale(page, mode) {
-	const size = state.pageLayout > 1 ? pageGroupSize(page.index) : pageViewSize(page);
-	const width = Math.max(1, size.width * MM_TO_PX), height = Math.max(1, size.height * MM_TO_PX);
-	const space = pageSpace(), gap = state.pageLayout > 1 && !state.continuous ? PAGE_LAYOUT_GAP : 0;
-	let contentWidth = 0, contentHeight = 0, rows = 0;
-	for (let index = 0; index < state.doc.pages.length; index += state.pageLayout) {
-		const item = state.pageLayout > 1 ? pageGroupSize(index) : pageViewSize(state.doc.pages[index]);
-		const factor = mode === "width" && state.pageLayout === 1 ? size.width / item.width : 1;
-		contentWidth = Math.max(contentWidth, item.width * MM_TO_PX * factor);
-		contentHeight += item.height * MM_TO_PX * factor;
-		rows++;
-	}
-	const layoutWidth = state.pageLayout > 1 ? Math.max(width, contentWidth) : width;
-	const scrollbar = scrollbarWidth();
-	const viewport = el.viewerPanel.getBoundingClientRect();
-	let vertical = false, horizontal = false, scale = 1;
-	for (let pass = 0; pass < 3; pass++) {
-		const availableWidth = Math.max(1, viewport.width - (vertical ? scrollbar : 0));
-		const availableHeight = Math.max(1, viewport.height - (horizontal ? scrollbar : 0));
-		scale = Math.min(4, Math.max(1, availableWidth - space * 2 - gap) / layoutWidth);
-		if (mode === "height") scale = Math.min(scale, Math.max(1, availableHeight - space * 2) / height);
-		const blockSpace = state.continuous ? 0 : Math.max(space, (availableHeight - height * scale) / 2);
-		const rowGap = state.continuous ? 0 : Math.max(gap, blockSpace > space ? blockSpace + 1 : blockSpace);
-		const nextVertical = contentHeight * scale + rowGap * (rows - 1) + blockSpace * 2 > availableHeight + 0.5;
-		const nextHorizontal = contentWidth * scale + gap + space * 2 > availableWidth + 0.5;
-		if ((!nextVertical || vertical) && (!nextHorizontal || horizontal)) break;
-		vertical ||= nextVertical;
-		horizontal ||= nextHorizontal;
-	}
-	return scale;
-}
-
-function fitHeight(updateStatus = true) {
-	const page = currentPageInfo();
-	if (!page) {
-		return;
-	}
-	setScale(fitPageScale(page, "height"), updateStatus, "height");
-	if (updateStatus) {
-		scrollToPage(state.pageIndex);
-	}
-}
-
-function applyFit(updateStatus = true) {
-	if (state.fitMode === "height") {
-		fitHeight(updateStatus);
-		return;
-	}
-	if (state.fitMode === "width") {
-		fitWidth(updateStatus);
-	} else {
-		updateControls();
-	}
-}
-
-function setScale(nextScale, updateStatus = true, fitMode = "free") {
-	const anchor = updateStatus && fitMode === "free" ? scaleAnchor() : null;
-	const scale = Math.min(4, fitMode === "free" ? Math.max(0.2, nextScale) : nextScale);
-	const layoutChanged = scale !== state.scale || fitMode !== state.fitMode;
-	state.fitMode = fitMode;
-	state.scale = scale;
-	if (layoutChanged) {
-		clearRegionHighlights();
-		layoutPages();
-	}
-	updateFitSpace();
-	const gap = state.continuous ? 0 : Math.max(state.pageLayout > 1 ? PAGE_LAYOUT_GAP : 0, Number.parseFloat(getComputedStyle(el.svgHost).rowGap) || 0);
-	if (state.pageWindow && state.pageWindow.gap !== gap) layoutPages();
-	if (layoutChanged) {
-		restoreScaleAnchor(anchor);
-	}
-	el.zoomLabel.textContent = `${Math.round(state.scale * 100)}%`;
-	if (updateStatus && state.doc && !state.exporting) {
-		setStatus(`第 ${state.pageIndex + 1} / ${state.doc.pageCount} 页`);
-	}
-	updateControls();
-}
-
-function scaleAnchor(viewY = 0.45) {
-	const shell = pageShellFromView() || pageShell(state.pageIndex);
-	if (!shell) {
-		return null;
-	}
-	const viewerRect = el.viewerPanel.getBoundingClientRect();
-	const shellRect = shell.getBoundingClientRect();
-	return {
-		index: Number.parseInt(shell.dataset.pageIndex, 10),
-		viewY,
-		x: (viewerRect.left + viewerRect.width / 2 - shellRect.left) / Math.max(1, shellRect.width),
-		y: (viewerRect.top + viewerRect.height * viewY - shellRect.top) / Math.max(1, shellRect.height),
-	};
-}
-
-function restoreScaleAnchor(anchor) {
-	if (!anchor) {
-		return;
-	}
-	if (state.fitMode === "height" || (state.fitMode === "width" && anchor.y <= 0)) {
-		scrollToPage(anchor.index);
-		return;
-	}
-	if (state.pageWindow) {
-		const view = state.pageWindow;
-		const height = view.heights?.[anchor.index] ?? view.offsets[anchor.index + 1] - view.offsets[anchor.index] - view.gap;
-		syncPageWindow(view, view.offsets[anchor.index] + height * anchor.y - el.viewerPanel.clientHeight * anchor.viewY);
-	}
-	const shell = pageShell(anchor.index);
-	if (!shell) {
-		return;
-	}
-	const viewerRect = el.viewerPanel.getBoundingClientRect();
-	const shellRect = shell.getBoundingClientRect();
-	el.viewerPanel.scrollLeft += shellRect.left + shellRect.width * anchor.x - viewerRect.left - viewerRect.width / 2;
-	scrollViewerBy(shellRect.top + shellRect.height * anchor.y - viewerRect.top - viewerRect.height * anchor.viewY);
-}
-
-function currentPageInfo() {
-	return state.doc?.pages?.[state.pageIndex] || null;
-}
-
-function pageSpace() {
-	return Number.parseFloat(getComputedStyle(el.pageFrame).paddingLeft) || 0;
-}
-
-function pageBlockSpace() {
-	return Number.parseFloat(getComputedStyle(el.pageFrame).paddingTop) || pageSpace();
-}
-
-function scrollbarWidth() {
-	const probe = document.createElement("div");
-	const content = document.createElement("div");
-	probe.style.position = "absolute";
-	probe.style.width = "100px";
-	probe.style.height = "100px";
-	probe.style.overflow = "scroll";
-	probe.style.scrollbarWidth = getComputedStyle(el.viewerPanel).scrollbarWidth;
-	probe.style.left = "-9999px";
-	probe.append(content);
-	document.body.append(probe);
-	const width = 100 - Number.parseFloat(getComputedStyle(content).width);
-	probe.remove();
-	return width;
-}
-
-function updateFitSpace() {
-	const page = currentPageInfo();
-	if (!page || state.fitMode === "free") {
-		el.viewerPanel.classList.remove("single-page-fits-height");
-		el.pageFrame.style.removeProperty("--fit-space");
-		el.pageFrame.style.removeProperty("--fit-gap");
-		return;
-	}
-	const shell = pageShell(state.pageIndex);
-	const group = state.pageLayout > 1 ? pageGroupSize() : null;
-	const height = group ? group.height * MM_TO_PX * state.scale
-		: shell ? shell.getBoundingClientRect().height : Math.max(1, pageViewSize(page).height * MM_TO_PX * state.scale);
-	const base = pageSpace();
-	el.viewerPanel.classList.toggle("single-page-fits-height", state.doc.pageCount === 1 && height <= el.viewerPanel.clientHeight - base * 2);
-	const space = state.continuous ? 0 : Math.max(base, (el.viewerPanel.clientHeight - height) / 2);
-	const gap = space > base ? space + 1 : space;
-	el.pageFrame.style.setProperty("--fit-space", `${space}px`);
-	el.pageFrame.style.setProperty("--fit-gap", `${gap}px`);
-}
-
 function updateInvoiceControl(disabled) {
 	const doc = state.doc, openSeq = state.openSeq;
 	el.invoiceButton.disabled = disabled;
@@ -13745,8 +12152,8 @@ function updateControls() {
 	updateDisplayControls();
 	updateEditorTools();
 	const pageCount = state.doc ? state.doc.pageCount : 0;
-	el.prevButton.disabled = !hasDoc || pageGroupStart() === 0;
-	el.nextButton.disabled = !hasDoc || pageGroupStart() + state.pageLayout >= pageCount;
+	el.prevButton.disabled = !hasDoc || pageView.pageGroupStart() === 0;
+	el.nextButton.disabled = !hasDoc || pageView.pageGroupStart() + state.pageLayout >= pageCount;
 	el.pageInput.disabled = !hasDoc;
 	el.pageInput.max = String(pageCount || 1);
 	el.pageInput.value = String(hasDoc ? state.pageIndex + 1 : 0);
@@ -14035,7 +12442,7 @@ function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab())
 		return;
 	}
 	el.exportPanel.close();
-	endPan();
+	pageView.endPan();
 	el.progressPanel.hidden = !text;
 	setProgress(text, percent, status);
 }
@@ -14108,7 +12515,7 @@ function exportFormatUsesDPI(value) {
 }
 
 function updateDPIControl() {
-	el.imageDPI.disabled = state.exporting || !state.doc || document.body.hasAttribute("data-busy") || (displayMode() !== "raster" && !exportFormatUsesDPI(el.exportFormat.value));
+	el.imageDPI.disabled = state.exporting || !state.doc || document.body.hasAttribute("data-busy") || (pageView.displayMode() !== "raster" && !exportFormatUsesDPI(el.exportFormat.value));
 	el.imageDPI.title = `输出精度：${currentImageDPI()} DPI`;
 	el.dpiValue.textContent = String(currentImageDPI());
 	const format = exportFormatInfo(el.exportFormat.value);
