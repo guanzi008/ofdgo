@@ -45,7 +45,7 @@ self.onmessage = ({ data }) => {
 			if (engine.closed) return;
 			const opened = JSON.parse(globalThis.ofdgoEngineOpen(engineID));
 			if (!opened.ok) throw new Error(opened.error);
-			const backends = JSON.parse(await globalThis.ofdgoEngineCall(engineID, "ofdgoRenderBackends"));
+			const backends = JSON.parse(await globalThis.ofdgoEngineCall(engineID, "ofdgoRenderBackends", null));
 			if (!backends.ok) throw new Error(backends.error);
 			if (!engine.closed) self.postMessage({ engineID, type: "ready", backends: backends.data, memory: engineMemory.buffer.byteLength });
 		}).catch(error => {
@@ -141,7 +141,7 @@ async function handleBatchMessage(engine, { id, name, args }) {
 		if (name === "ofdgoConvertFile") {
 			const [file, options, fonts, destination] = args;
 			credentials = options.credentials;
-			const formats = JSON.parse(await globalThis.ofdgoEngineCall(engine.id, "ofdgoOutputFormats")).data;
+			const formats = JSON.parse(await globalThis.ofdgoEngineCall(engine.id, "ofdgoOutputFormats", null)).data;
 			const format = formats.find(item => item.value === options.format);
 			if (!format) throw new Error("不支持此格式");
 			root = destination;
@@ -178,7 +178,7 @@ async function handleBatchMessage(engine, { id, name, args }) {
 					chunks = [];
 				}
 			};
-			payload = await globalThis.ofdgoEngineCall(engine.id, "ofdgoConvertFile", read(file), file.size, options, write,
+			payload = await globalThis.ofdgoEngineCall(engine.id, "ofdgoConvertFile", done => finish(done), read(file), file.size, options, write,
 				(phase, completed, total, done) => {
 					postMessage({ id, type: "conversion", phase, completed, total, memory: engineMemory.buffer.byteLength });
 					finish(done);
@@ -188,7 +188,7 @@ async function handleBatchMessage(engine, { id, name, args }) {
 		} else {
 			const [entries, handle, compression] = args;
 			if (handle) output = await handle.createWritable();
-			payload = await globalThis.ofdgoEngineCall(engine.id, "ofdgoPackFiles", entries.map(entry => ({ name: entry.name, size: entry.file.size })),
+			payload = await globalThis.ofdgoEngineCall(engine.id, "ofdgoPackFiles", done => finish(done), entries.map(entry => ({ name: entry.name, size: entry.file.size })),
 				index => read(entries[index].file), write,
 				(completed, total, done) => { postMessage({ id, type: "conversion", phase: "pack", completed, total, memory: engineMemory.buffer.byteLength }); finish(done); },
 				done => finish(done), compression);
@@ -240,6 +240,10 @@ async function handleMessage(engine, { id, name, args }) {
 	const converting = name === "ofdgoOpenPDF";
 	const saving = name === "ofdgoSaveDocument" || name === "ofdgoSaveSnapshot" || name === "ofdgoSaveSigned";
 	const resources = ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF", "ofdgoResources", "ofdgoPrepareSave"].includes(name);
+	if (engine.pdf) {
+		const checked = JSON.parse(await globalThis.ofdgoEngineCall(engine.id, "ofdgoCheckDocument", null, name));
+		if (!checked.ok) { postMessage({id, ...checked}); operations.delete(id); return; }
+	}
 	const key = name === "ofdgoOpen" ? args[3]?.key : name === "ofdgoSaveSigned" || name === "ofdgoLoadImport" ? args[1]?.key : null;
 	const keyPassword = name === "ofdgoOpen" ? args[3]?.keyPassword : name === "ofdgoSaveSigned" || name === "ofdgoLoadImport" ? args[1]?.keyPassword : null;
 	const password = converting ? args[2] : name === "ofdgoSetEncryption" ? args[0]?.password : name === "ofdgoOpen" ? args[3]?.password : name === "ofdgoLoadImport" ? args[1]?.password : null;
@@ -339,7 +343,7 @@ async function handleMessage(engine, { id, name, args }) {
 		}
 		if (engine.pdf && name !== "ofdgoOpenPDF") {
 			channel ||= new MessageChannel();
-			const context = await globalThis.ofdgoEngineCall(engine.id, "ofdgoPDFContext", (phase, completed, total, done) => {
+			const context = await globalThis.ofdgoEngineCall(engine.id, "ofdgoPDFContext", null, (phase, completed, total, done) => {
 				postMessage({id, type: "conversion", phase, completed, total});
 				channel.port1.onmessage = () => done("", signal.aborted);
 				channel.port2.postMessage(null);
@@ -347,7 +351,11 @@ async function handleMessage(engine, { id, name, args }) {
 			engine.pdf = JSON.parse(context).data === true;
 		}
 		const started = name === "ofdgoOpen" || name === "ofdgoRenderPage" ? performance.now() : null;
-		const payload = await globalThis.ofdgoEngineCall(engine.id, name, ...args);
+		const payload = await globalThis.ofdgoEngineCall(engine.id, name, done => {
+			channel ||= new MessageChannel();
+			channel.port1.onmessage = () => done("", signal.aborted);
+			channel.port2.postMessage(null);
+		}, ...args);
 		signal?.throwIfAborted();
 		const result = typeof payload === "string" ? JSON.parse(payload) : payload;
 		if (result.ok && name === "ofdgoOpenPDF") engine.pdf = true;

@@ -311,6 +311,9 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 	if fn == nil {
 		return nativeFailure(fmt.Errorf("unknown operation: %s", name))
 	}
+	if err := e.checkDocument(name); err != nil {
+		return nativeFailure(err)
+	}
 	call := &nativeCall{engine: e, ctx: ctx, emit: emit}
 	if e.pdf != nil {
 		e.pdf.progress = platformValueOf(call.progress("conversion", "", true))

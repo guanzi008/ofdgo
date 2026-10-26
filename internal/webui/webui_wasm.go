@@ -68,32 +68,48 @@ func (w *wasmEngines) open(args []js.Value) (any, error) {
 	return nil, nil
 }
 
-// call 按会话标识分派业务命令，不提供默认会话
-// 入参: args 会话标识、命令及业务参数
+// call 按会话标识分派业务命令，统一绑定本次调用的取消上下文
+// 入参: args 会话标识、命令、取消检查点及业务参数
 // 返回: any 业务结果, error 调用错误
 func (w *wasmEngines) call(args []js.Value) (any, error) {
-	if len(args) < 2 || args[0].Type() != js.TypeString || args[1].Type() != js.TypeString {
+	if len(args) < 3 || args[0].Type() != js.TypeString || args[1].Type() != js.TypeString {
 		return nil, fmt.Errorf("missing engine ID or operation")
 	}
 	e := w.engines[args[0].String()]
 	if e == nil {
 		return nil, fmt.Errorf("unknown engine: %s", args[0].String())
 	}
-	if e.pdf != nil {
-		defer func() {
-			if e.currentSession != nil {
-				e.currentSession.Renderer.OutputContext = context.Background()
-			}
-		}()
-	}
-	fn := e.businessCommands()[args[1].String()]
+	name := args[1].String()
+	fn := e.businessCommands()[name]
 	if fn == nil {
-		return nil, fmt.Errorf("unknown operation: %s", args[1].String())
+		return nil, fmt.Errorf("unknown operation: %s", name)
 	}
-	if err := e.preparePDF(args[1].String(), args[2:]); err != nil {
+	if err := e.checkDocument(name); err != nil {
 		return nil, err
 	}
-	return fn(args[2:])
+	e.ctx = context.Background()
+	if args[2].Type() == js.TypeFunction {
+		e.ctx = e.newOutputContext(args[2])
+	}
+	ctx := e.ctx
+	if name != "ofdgoSaveSnapshot" && e.currentSession != nil {
+		e.currentSession.Renderer.OutputContext = ctx
+	}
+	defer func() {
+		if e.ctx == ctx {
+			e.ctx = nil
+		}
+		if name != "ofdgoSaveSnapshot" && e.currentSession != nil {
+			e.currentSession.Renderer.OutputContext = context.Background()
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := e.preparePDF(name, args[3:]); err != nil {
+		return nil, err
+	}
+	return fn(args[3:])
 }
 
 // close 释放会话的文档、编辑器、导入及剪贴板，不关闭共享资源

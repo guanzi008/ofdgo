@@ -397,15 +397,18 @@ func (e *Editor) sourceRGB() bool {
 }
 
 // repairSourceObjectIDs 按实际节点区分重复对象，只修复没有引用歧义的编号
-// 入参: data 页面原文, root 页面节点
+// 入参: ctx 取消上下文, data 页面原文, root 页面节点
 // 返回: []byte 编辑副本, bool 是否修复, error 错误信息
-func (e *Editor) repairSourceObjectIDs(data []byte, root *editorXML) ([]byte, bool, error) {
+func (e *Editor) repairSourceObjectIDs(ctx context.Context, data []byte, root *editorXML) ([]byte, bool, error) {
 	seen := make(map[string]bool)
 	duplicates := make(map[string]bool)
 	var nodes []*editorXML
 	var visit func(*editorXML) error
 	visit = func(parent *editorXML) error {
 		for _, node := range parent.children {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if !ofdXMLChild(parent.name, node.name) {
 				continue
 			}
@@ -440,15 +443,18 @@ func (e *Editor) repairSourceObjectIDs(data []byte, root *editorXML) ([]byte, bo
 	if len(nodes) == 0 {
 		return data, false, nil
 	}
-	if err := e.checkDuplicateObjectReferences(duplicates); err != nil {
+	if err := e.checkDuplicateObjectReferences(ctx, duplicates); err != nil {
 		return nil, false, err
 	}
-	if err := e.prepareSourceIDs(); err != nil {
+	if err := e.prepareSourceIDsContext(ctx); err != nil {
 		return nil, false, err
 	}
 	maximum := e.maxID
 	var patches []editorXMLPatch
 	for _, node := range nodes {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
 		maximum++
 		encoded, err := editorXMLAttribute(data, node, "ID", strconv.Itoa(maximum))
 		if err != nil {
@@ -461,9 +467,9 @@ func (e *Editor) repairSourceObjectIDs(data []byte, root *editorXML) ([]byte, bo
 }
 
 // checkDuplicateObjectReferences 检查编号引用的目标歧义
-// 入参: duplicates 重复编号
+// 入参: ctx 取消上下文, duplicates 重复编号
 // 返回: error 引用歧义或读取错误
-func (e *Editor) checkDuplicateObjectReferences(duplicates map[string]bool) error {
+func (e *Editor) checkDuplicateObjectReferences(ctx context.Context, duplicates map[string]bool) error {
 	reader := e.source.reader
 	for name := range reader.fileNames {
 		if !strings.EqualFold(path.Ext(name), ".xml") {
@@ -475,6 +481,10 @@ func (e *Editor) checkDuplicateObjectReferences(duplicates map[string]bool) erro
 		}
 		decoder := xml.NewDecoder(input)
 		for {
+			if err := ctx.Err(); err != nil {
+				input.Close()
+				return err
+			}
 			token, readErr := decoder.Token()
 			if readErr != nil {
 				input.Close()
@@ -500,6 +510,16 @@ func (e *Editor) checkDuplicateObjectReferences(duplicates map[string]bool) erro
 // 入参: index 页面索引
 // 返回: error 错误信息
 func (e *Editor) loadSourcePage(index int) error {
+	return e.loadSourcePageContext(context.Background(), index)
+}
+
+// loadSourcePageContext 解析原始页面，取消时不提交未完成页面
+// 入参: ctx 取消上下文, index 页面索引
+// 返回: error 读取、解析或取消错误
+func (e *Editor) loadSourcePageContext(ctx context.Context, index int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	source := e.source.pages[e.pages[index].ID]
 	if source == nil || source.original != nil {
 		return nil
@@ -507,24 +527,24 @@ func (e *Editor) loadSourcePage(index int) error {
 	loaded := *source
 	source = &loaded
 	reader := e.source.reader
-	data, err := reader.readFile(reader.ResPath(source.ref.BaseLoc))
+	data, err := reader.readFileViewContext(ctx, reader.ResPath(source.ref.BaseLoc))
 	if err != nil {
 		return err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return err
 	}
-	page, err := reader.PageContent(source.ref)
+	page, err := reader.PageContentContext(ctx, source.ref)
 	if err != nil {
 		return err
 	}
-	data, repaired, err := e.repairSourceObjectIDs(data, root)
+	data, repaired, err := e.repairSourceObjectIDs(ctx, data, root)
 	if err != nil {
 		return err
 	}
 	if repaired {
-		root, err = parseEditorXML(data)
+		root, err = parseEditorXMLContext(ctx, data)
 		if err != nil {
 			return err
 		}
@@ -547,13 +567,17 @@ func (e *Editor) loadSourcePage(index int) error {
 	}
 	source.data, source.root, source.nodes = data, root, nodes
 	source.repaired = repaired
+	origins := make(map[string]*editorObjectOrigin)
 	for i := range page.Content.Layer {
 		layer := &page.Content.Layer[i]
 		for j, object := range layer.Objects {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			id := editorObjectID(object)
 			if node := nodes[id]; node != nil {
 				origin := &editorObjectOrigin{page: source, data: data, node: node, object: object}
-				e.source.origins[id] = origin
+				origins[id] = origin
 				if editorXMLTransformable(node) {
 					resolved, err := e.resolveEditorStyle(object, layer.DrawParam)
 					if err != nil {
@@ -565,6 +589,10 @@ func (e *Editor) loadSourcePage(index int) error {
 			}
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	maps.Copy(e.source.origins, origins)
 	source.original = page
 	e.source.pages[source.ref.ID] = source
 	e.pages[index] = copyEditorPage(*page)

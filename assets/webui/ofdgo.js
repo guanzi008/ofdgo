@@ -674,7 +674,7 @@ function createPrintDialog(tab) {
 		show: panel => documentDialogs.openFor(tab, panel),
 		download: (bytes, mime, name) => nativeHost ? nativeHost.download(bytes, mime, name) : downloadBytes(bytes, mime, name),
 		cancel: tab => {
-			for (const [id, request] of wasmRequests) if (request.tab === tab && ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF"].includes(request.name)) tab.worker?.postMessage({type:"cancel", id});
+			for (const [id, request] of wasmRequests) if (request.tab === tab && ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF"].includes(request.name)) cancelOperation(id);
 		},
 	});
 }
@@ -886,7 +886,7 @@ resourceElements.Form.addEventListener("submit", event => event.preventDefault()
 resourceElements.Panel.addEventListener("close", () => {
 	rememberResourceView();
 	resourceManager.sequence++;
-	if (resourceManager.requestID) wasmWorker?.postMessage({type: "cancel", id: resourceManager.requestID});
+	if (resourceManager.requestID) cancelOperation(resourceManager.requestID);
 	releaseResourcePreview();
 });
 resourceElements.List.closest(".resource-list-container").addEventListener("scroll", renderResourceWindow, {passive: true});
@@ -2633,6 +2633,7 @@ async function closeWorkspace() {
 	if (workspace.closing) return;
 	workspace.closing = true;
 	try {
+		for (const tab of workspace.tabs) cancelDocumentPreparation(tab);
 		await Promise.all(workspace.tabs.filter(tab => tab.state.saving && tab.saveCompletion).map(tab => tab.saveCompletion));
 		if (workspace.tabs.some(tab => tab.state.saving)) { setStatus("文档正在保存，请稍后关闭"); return; }
 		if (batch.running && !window.confirm("批量转换尚未完成，是否退出？")) return;
@@ -3080,6 +3081,7 @@ async function closeFile(tab = documentTab(), keepTab = false) {
 		queueMicrotask(() => { if (workspace.closeDefault === tab) workspace.closeDefault = null; });
 	}
 	try {
+		cancelDocumentPreparation(tab);
 		if (tab.state.saving && tab.saveCompletion) await tab.saveCompletion;
 		if (tab.closed) return;
 		if (tab.opening || tab.state.exporting) {
@@ -5487,8 +5489,6 @@ async function loadWASM(tab = documentTab()) {
 			}
 			const visible = isForegroundDocument(tab);
 			if (data.type === "progress") tab.progress = {text: data.text, percent: data.percent};
-			if (data.type === "conversion") tab.progress = {text: data.phase === "convert" ? `正在转换页面 · ${data.completed} / ${data.total}` : "正在转换文档",
-				percent: data.total ? 28 + data.completed / data.total * 22 : null};
 			if (data.type === "font") {
 				try {
 					const request = wasmRequests.get(data.id);
@@ -5505,11 +5505,13 @@ async function loadWASM(tab = documentTab()) {
 			if (data.type === "progress") {
 				if (visible) setProgress(data.text, data.percent);
 			} else if (data.type === "conversion") {
-				if (visible && wasmRequests.get(data.id)?.name !== "ofdgoLoadPDF" && wasmRequests.get(data.id)?.openSeq === state.openSeq && !el.cancelExportButton.disabled) {
-					if (data.phase === "open") setProgress("正在读取文档", null);
-					else if (data.phase === "pages") setProgress(data.completed ? `正在整理页面 · ${data.completed} 页` : "正在整理页面", null);
-					else if (data.phase === "convert") setProgress(`正在转换页面 · ${data.completed} / ${data.total} 页`, data.total ? 28 + data.completed / data.total * 22 : null);
-					else setProgress("正在生成文档", null);
+				const request = wasmRequests.get(data.id);
+				if (request?.name === "ofdgoLoadPDF") {
+					for (const pending of wasmRequests.values()) if (pending.tab === tab && pending.preparing) operationProgress(pending, data);
+				} else if (request?.name === "ofdgoOpenPDF") {
+					const text = data.phase === "open" ? "正在读取文档" : data.phase === "pages" ? "正在整理页面" : "正在准备阅读";
+					tab.progress = {text, percent:null};
+					if (visible && !el.cancelExportButton.disabled) setProgress(text, null);
 				}
 			} else if (data.type === "export") {
 				if (data.id === state.saveRequestID && state.saving && !state.exporting) {
@@ -5555,6 +5557,7 @@ async function loadWASM(tab = documentTab()) {
 			} else {
 				const request = wasmRequests.get(data.id);
 				if (!request || request.tab !== tab) return;
+				if (data.code === "documentPending" && !request.canceled) { prepareOperation(data.id, request); return; }
 				wasmRequests.delete(data.id);
 				if (data.ok) {
 					request.resolve(data.data);
@@ -5563,7 +5566,7 @@ async function loadWASM(tab = documentTab()) {
 					err.code = data.code;
 					if (data.errorName) err.name = data.errorName;
 					err.missingGlyphs = data.missingGlyphs;
-					if (data.canceled) {
+					if (data.canceled || request.canceled) {
 						err.name = "AbortError";
 					}
 					request.reject(err);
@@ -6317,6 +6320,7 @@ async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, import
 			try {
 				if (pdf) {
 					state.pdfComplete = false;
+					tab.pdfTask = null;
 					return await callWASM("ofdgoOpenPDF", data, fonts, credentials?.password || null, state.renderAnnotations);
 				}
 				return importing ? await callWASM("ofdgoLoadImport", data?.nativeFile ? data : data.slice(), credentials)
@@ -6526,33 +6530,36 @@ async function openDocument(options = {}) {
 	}
 }
 
-async function completePDF(tab) {
+function completePDF(tab) {
 	const state = tab.state, source = state.ofdBytes, wasmSeq = state.wasmSeq;
-	if (tab.pdfTask?.wasmSeq === wasmSeq || state.pdfComplete || !state.sourcePDF || !source || state.editorInfo) return;
-	const task = {wasmSeq};
+	if (state.pdfComplete || !state.sourcePDF || state.editorInfo) return Promise.resolve();
+	if (tab.pdfTask?.wasmSeq === wasmSeq && tab.pdfTask.source === source) return tab.pdfTask.promise;
+	const task = {wasmSeq, source};
 	tab.pdfTask = task;
-	const current = () => !tab.closed && state.ofdBytes === source && state.wasmSeq === wasmSeq;
-	try {
+	const current = () => !tab.closed && tab.pdfTask === task && state.ofdBytes === source && state.wasmSeq === wasmSeq;
+	task.promise = (async () => {
 		while (current()) {
 			await new Promise(resolve => setTimeout(resolve, 0));
-			if (!current()) return;
+			if (!current()) break;
 			const result = await callTabWASM(tab, "ofdgoLoadPDF");
-			if (!current()) return;
+			if (!current()) break;
 			if (!result.done) continue;
 			state.pdfComplete = true;
+			tab.pdfTask = null;
 			state.conversionWarnings = JSON.parse(result.warnings || "null") || [];
 			if (!state.editorInfo) Object.assign(state.doc, result.doc);
 			if (isForegroundDocument(tab)) loadDocumentDetails(state.openSeq);
 			return;
 		}
-	} catch (err) {
-		if (current() && !err.canceled) {
+		throw new DOMException("文档已关闭", "AbortError");
+	})();
+	task.promise.catch(err => {
+		if (current() && err.name !== "AbortError") {
 			tab.status = err.message;
 			if (isForegroundDocument(tab)) showError(err, false);
 		}
-	} finally {
-		if (tab.pdfTask === task) tab.pdfTask = null;
-	}
+	});
+	return task.promise;
 }
 
 async function loadDocumentDetails(openSeq) {
@@ -10065,7 +10072,7 @@ function cancelExport() {
 	}
 	const tab = documentTab();
 	const target = tab.state;
-	const requestID = target.exportRequestID || target.saveRequestID;
+	const requestID = operationRequest(tab)?.id || target.exportRequestID || target.saveRequestID;
 	if (!requestID || el.cancelExportButton.disabled) {
 		return;
 	}
@@ -10078,7 +10085,7 @@ function cancelExport() {
 		el.importStatus.textContent = "正在取消操作";
 	}
 	setProgress("正在取消操作", null);
-	tab.worker.postMessage({ type: "cancel", id: requestID });
+	cancelOperation(requestID);
 }
 
 function releaseMediaPlayers(surface) {
@@ -10092,7 +10099,7 @@ function releaseMediaPlayer(id, entry) {
 	if (state.mediaPlayers?.get(id) !== entry) return;
 	state.mediaPlayers.delete(id);
 	for (const [requestID, request] of wasmRequests) {
-		if (request.mediaID === id) wasmWorker?.postMessage({type: "cancel", id: requestID});
+		if (request.tab === documentTab() && request.mediaID === id) cancelOperation(requestID);
 	}
 	entry.finish?.();
 	closeMediaWindow(entry);
@@ -12348,6 +12355,72 @@ async function callWASM(name, ...args) {
 	return callTabWASM(documentTab(), name, ...args);
 }
 
+function operationRequest(tab) {
+	return [...wasmRequests.values()].findLast(request => request.tab === tab && request.cancellable && !request.name.includes("Print"));
+}
+
+function operationProgress(request, progress) {
+	const text = request.name.includes("Print") ? "正在准备打印" : request.name === "ofdgoEditDocument" ? "正在准备编辑" : request.name.includes("Save") ? "正在准备保存" : request.name.includes("Export") ? "正在准备导出" : "正在准备文档";
+	const completed = progress?.phase === "convert" && progress.total > 0;
+	const label = completed ? `${text} · ${progress.completed} / ${progress.total} 页` : text;
+	if (request.name.includes("Print")) {
+		if (request.tab.print?.context) request.tab.print.status(label, true);
+	} else if (operationRequest(request.tab) === request) {
+		request.tab.progress = {text:label, percent:completed ? progress.completed / progress.total * 100 : null};
+		if (isForegroundDocument(request.tab)) setProgress(label, request.tab.progress.percent);
+	}
+}
+
+function finishOperation(request) {
+	if (request.tab.preparationBusy && !operationRequest(request.tab)) {
+		request.tab.preparationBusy = false;
+		if (!request.tab.closed) setBusy(false, "", 0, "", request.tab);
+	}
+	if (request.cancellable && isForegroundDocument(request.tab) && !operationRequest(request.tab)) {
+		el.cancelExportButton.hidden = !request.tab.state.saving && !request.tab.state.exporting;
+	}
+}
+
+function cancelDocumentPreparation(tab) {
+	if (!tab.state.sourcePDF || tab.state.pdfComplete) return;
+	for (const [id, request] of wasmRequests) if (request.tab === tab && (request.preparing || request.name === "ofdgoPrepareSave")) cancelOperation(id);
+}
+
+function cancelOperation(id) {
+	const request = wasmRequests.get(id);
+	if (!request) return;
+	request.canceled = true;
+	if (request.preparing) {
+		wasmRequests.delete(id);
+		request.reject(new DOMException("操作已取消", "AbortError"));
+	} else request.tab.worker?.postMessage({type:"cancel", id});
+}
+
+async function prepareOperation(id, request) {
+	request.preparing = true;
+	request.cancellable = true;
+	const tab = request.tab;
+	if (!request.name.includes("Print")) {
+		if (!tab.busy) tab.preparationBusy = true;
+		setBusy(true, tab.progress?.text || "正在准备文档", null, "", tab);
+		if (isForegroundDocument(tab)) {
+			el.cancelExportButton.hidden = false;
+			el.cancelExportButton.disabled = false;
+		}
+	}
+	operationProgress(request);
+	try {
+		await completePDF(tab);
+		if (wasmRequests.get(id) !== request || request.canceled || tab.closed) return;
+		request.preparing = false;
+		request.send();
+	} catch (err) {
+		if (wasmRequests.get(id) !== request) return;
+		wasmRequests.delete(id);
+		request.reject(err);
+	}
+}
+
 async function callTabWASM(tab, name, ...args) {
 	const state = tab.state;
 	const visible = isForegroundDocument(tab);
@@ -12369,7 +12442,10 @@ async function callTabWASM(tab, name, ...args) {
 			}
 		}
 		if (name === "ofdgoResources" && workspace.active === tab && resourceElements.Panel.open) resourceManager.requestID = id;
-		wasmRequests.set(id, { name, resolve, reject, openSeq: state.openSeq, tab });
+		const request = {name, openSeq:state.openSeq, tab, id, cancellable:name === "ofdgoEditDocument",
+			resolve:value => { finishOperation(request); resolve(value); }, reject:err => { finishOperation(request); reject(err); }};
+		wasmRequests.set(id, request);
+		if (request.cancellable && visible) { el.cancelExportButton.hidden = false; el.cancelExportButton.disabled = false; }
 		if (name === "ofdgoExportMedia") wasmRequests.get(id).mediaID = args[0];
 		if (name === "ofdgoOpenPDF" || state.sourcePDF && !state.editorInfo) {
 			const request = wasmRequests.get(id);
@@ -12394,10 +12470,11 @@ async function callTabWASM(tab, name, ...args) {
 			const message = {id, name, args};
 			if (name === "ofdgoLoadPDF") message.background = true;
 			if (name === "ofdgoRenderPage" && [...state.pageInFlight.values()].some(task => task.index === args[0] && pageView.pageRenderPriority(task, state) >= 6)) message.preload = true;
-			tab.worker.postMessage(message, transfer);
+			request.send = () => tab.worker.postMessage(message, transfer);
+			request.send();
 		} catch (err) {
 			wasmRequests.delete(id);
-			reject(err);
+			request.reject(err);
 		}
 	});
 }
@@ -12411,7 +12488,7 @@ function showError(err, empty = !state.doc) {
 }
 
 function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab()) {
-	busy ||= Boolean(tab.editTask);
+	busy ||= Boolean(tab.editTask || operationRequest(tab));
 	tab.busy = busy;
 	if (text) tab.progress = {text, percent};
 	if (status) tab.status = status;
@@ -12468,6 +12545,7 @@ function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab())
 	pageView.endPan();
 	el.progressPanel.hidden = !text;
 	setProgress(text, percent, status);
+	if (operationRequest(tab)) { el.cancelExportButton.hidden = false; el.cancelExportButton.disabled = false; }
 }
 
 function setProgress(text = "", percent = 0, status = "", tab = documentTab()) {

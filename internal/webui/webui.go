@@ -1591,14 +1591,31 @@ func (e *businessEngine) loadPDF(args []platformValue) (any, error) {
 	return map[string]any{"done": true, "doc": e.currentSession.Summary(), "warnings": string(warnings)}, nil
 }
 
-// preparePDF 按命令准备页面快照或完整文档，不将未完成内容交给编辑和输出
+// checkDocument 检查命令所需内容，不隐式转换或产生输出
+// 入参: name 命令名称
+// 返回: error 文档尚未完整时返回ErrIncompleteDocument
+func (e *businessEngine) checkDocument(name string) error {
+	if e.pdf == nil {
+		return nil
+	}
+	switch name {
+	case "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoPageTextString", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
+		return nil
+	default:
+		return ofdgo.ErrIncompleteDocument
+	}
+}
+
+// preparePDF 只为页面读取和后台加载绑定转换上下文，不补全其他命令
 // 入参: name 命令名称, args 命令参数
 // 返回: error 转换或取消错误
 func (e *businessEngine) preparePDF(name string, args []platformValue) error {
 	if e.pdf == nil {
 		return nil
 	}
-	if name == "ofdgoPDFContext" || name == "ofdgoOpenPDF" || name == "ofdgoOpen" {
+	switch name {
+	case "ofdgoLoadPDF", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoPageTextString", "ofdgoOpenLinks":
+	default:
 		return nil
 	}
 	e.pdf.operation, e.pdf.report = e.newEditorOperationContext(e.pdf.progress)
@@ -1619,7 +1636,7 @@ func (e *businessEngine) preparePDF(name string, args []platformValue) error {
 		}
 	}
 	switch name {
-	case "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDocumentNavigation", "ofdgoInvoices":
+	case "ofdgoLoadPDF":
 		return nil
 	case "ofdgoOpenLinks":
 		if len(args) == 0 {
@@ -1644,8 +1661,7 @@ func (e *businessEngine) preparePDF(name string, args []platformValue) error {
 		e.pdf.page = index
 		return nil
 	default:
-		_, err := e.finishPDF()
-		return err
+		return nil
 	}
 }
 
@@ -5950,7 +5966,11 @@ func (e *businessEngine) createDocument(args []platformValue) (any, error) {
 		return nil, err
 	}
 	editor.SetHistoryLimit(100)
-	return e.previewEditor(editor, args[3].Bool())
+	info, err := e.previewEditor(editor, args[3].Bool())
+	if err == nil {
+		e.clearPDF()
+	}
+	return info, err
 }
 
 // updateInfo 修改完整文档描述，按字段来源保留自定义内容的扩展属性
@@ -6044,7 +6064,7 @@ func (e *businessEngine) documentVersions(args []platformValue) (any, error) {
 			return nil, err
 		}
 	}
-	versions, err := reader.DocumentVersions()
+	versions, err := reader.DocumentVersionsContext(e.operationContext())
 	if err != nil {
 		return nil, err
 	}
@@ -6635,7 +6655,8 @@ func (e *businessEngine) editDocument(args []platformValue) (any, error) {
 		e.currentSession.editing = true
 		return e.editorSummary(), nil
 	}
-	editor, err := e.currentSession.Reader.Editor()
+	ctx := e.operationContext()
+	editor, err := e.currentSession.Reader.EditorContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -6648,11 +6669,17 @@ func (e *businessEngine) editDocument(args []platformValue) (any, error) {
 	if len(args) != 0 {
 		page = args[0].Int()
 	}
-	content, err := editor.Page(page)
+	content, err := editor.PageContext(ctx, page)
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := e.syncEditorPageIDs(page, content); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	e.currentEditor = editor
@@ -7557,7 +7584,7 @@ func (e *businessEngine) saveDocument(args []platformValue) (any, error) {
 		if e.currentSession == nil {
 			return nil, fmt.Errorf("ofd document is not opened")
 		}
-		editor, err := e.currentSession.Reader.Editor()
+		editor, err := e.currentSession.Reader.EditorContext(e.operationContext())
 		if err != nil {
 			return nil, err
 		}
@@ -7662,6 +7689,12 @@ func (c *outputContext) Err() error {
 // businessCommands 共用业务命令表
 func (e *businessEngine) businessCommands() map[string]func([]platformValue) (any, error) {
 	return map[string]func([]platformValue) (any, error){
+		"ofdgoCheckDocument": func(args []platformValue) (any, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("missing operation name")
+			}
+			return nil, e.checkDocument(args[0].String())
+		},
 		"ofdgoPreparePrint":           e.preparePrint,
 		"ofdgoLayoutPrint":            e.layoutPrint,
 		"ofdgoPrintSide":              e.printSide,
@@ -7818,6 +7851,8 @@ func (e *businessEngine) operationContext() context.Context {
 func failureResult(err error) apiResult {
 	result := apiResult{Error: err.Error()}
 	switch {
+	case errors.Is(err, ofdgo.ErrIncompleteDocument):
+		result.Code, result.Error = "documentPending", "文档尚未准备完成"
 	case errors.Is(err, ofdgo.ErrPrintDenied):
 		result.Code, result.Error = "printDenied", "文档禁止打印"
 	case errors.Is(err, ofdgo.ErrPDFPassword):

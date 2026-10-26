@@ -223,7 +223,14 @@ func (e *Editor) SetInfo(info DocInfo) {
 // 入参: index 页面索引
 // 返回: *PageContent 页面内容, error 错误信息
 func (e *Editor) Page(index int) (*PageContent, error) {
-	page, err := e.page(index)
+	return e.PageContext(context.Background(), index)
+}
+
+// PageContext 获取独立页面副本，读取、解析及整理对象时响应取消
+// 入参: ctx 取消上下文, index 页面索引
+// 返回: *PageContent 页面内容, error 读取或取消错误
+func (e *Editor) PageContext(ctx context.Context, index int) (*PageContent, error) {
+	page, err := e.pageContext(ctx, index)
 	if err != nil {
 		return nil, err
 	}
@@ -233,6 +240,9 @@ func (e *Editor) Page(index int) (*PageContent, error) {
 		layer := &result.Content.Layer[i]
 		layer.TextObject, layer.PathObject, layer.ImageObject, layer.CompositeGraphicUnit = nil, nil, nil, nil
 		for _, object := range layer.Objects {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			switch object.Type {
 			case "TextObject":
 				object.TextObject.layout = nil
@@ -820,11 +830,21 @@ func (r editorResource) definition() string {
 // 入参: index 页面索引
 // 返回: *PageContent 页面内容, error 错误信息
 func (e *Editor) page(index int) (*PageContent, error) {
+	return e.pageContext(context.Background(), index)
+}
+
+// pageContext 按索引加载内部页面并响应取消
+// 入参: ctx 取消上下文, index 页面索引
+// 返回: *PageContent 页面内容, error 读取或取消错误
+func (e *Editor) pageContext(ctx context.Context, index int) (*PageContent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if index < 0 || index >= len(e.pages) {
 		return nil, fmt.Errorf("page index %d out of range", index)
 	}
 	if e.source != nil {
-		if err := e.loadSourcePage(index); err != nil {
+		if err := e.loadSourcePageContext(ctx, index); err != nil {
 			return nil, err
 		}
 	}
