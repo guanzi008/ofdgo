@@ -49,7 +49,7 @@ export function createPageView(context) {
 				}
 				pageView.prunePageRenderQueue();
 				const page = await pageView.renderFlowPage(index, { throwError: true, openSeq, priority: 0 });
-				if (openSeq !== state.openSeq || index !== state.pageIndex) {
+				if (!page || openSeq !== state.openSeq || index !== state.pageIndex) {
 					return null;
 				}
 				if (options.scroll !== false) {
@@ -222,6 +222,7 @@ export function createPageView(context) {
 		},
 
 		resetPageLoading() {
+			context.state.pageLoadSeq++;
 			context.releaseMediaPlayers();
 			if (context.state.pagePresentFrame) cancelAnimationFrame(context.state.pagePresentFrame);
 			context.state.pagePresentFrame = 0;
@@ -306,26 +307,28 @@ export function createPageView(context) {
 
 		async renderFlowPage(index, options = {}) {
 			const openSeq = options.openSeq || context.state.openSeq;
-			if (openSeq !== context.state.openSeq) {
+			const loadSeq = context.state.pageLoadSeq;
+			const current = () => openSeq === context.state.openSeq && loadSeq === context.state.pageLoadSeq;
+			if (!current()) {
 				return null;
 			}
 			try {
 				const page = await pageView.loadPageData(index, { openSeq, priority: options.priority ?? 2, view: true,
 					refresh: context.state.editing && context.state.pageCache.get(index)?.previewOnly });
-				if (openSeq !== context.state.openSeq) {
+				if (!current()) {
 					return null;
 				}
 				if (page) {
 					await pageView.queuePagePresentation(index, page, openSeq, true);
 				}
-				if (openSeq !== context.state.openSeq) return null;
+				if (!current()) return null;
 				pageView.trimPageCache();
 				return page;
 			} catch (err) {
-				if (openSeq === context.state.openSeq) {
+				if (current()) {
 					pageView.markFlowPageError(index, err);
 				}
-				if (options.throwError && openSeq === context.state.openSeq) {
+				if (options.throwError && current()) {
 					throw err;
 				}
 				return null;
@@ -334,6 +337,7 @@ export function createPageView(context) {
 
 		loadPageData(index, options = {}) {
 			const openSeq = options.openSeq || context.state.openSeq;
+			const loadSeq = context.state.pageLoadSeq;
 			if (openSeq !== context.state.openSeq) {
 				return Promise.resolve(null);
 			}
@@ -343,7 +347,7 @@ export function createPageView(context) {
 			if (current) {
 				current.priority = Math.min(current.priority, priority);
 				current.view &&= !!options.view;
-				if (current.preview && !options.preview) return current.promise.then(page => page && openSeq === context.state.openSeq ? pageView.loadPageData(index, options) : null);
+				if (current.preview && !options.preview) return current.promise.then(page => page && openSeq === context.state.openSeq && loadSeq === context.state.pageLoadSeq ? pageView.loadPageData(index, options) : null);
 				return current.promise;
 			}
 			if (!options.refresh && context.state.pageCache.has(index) && (options.preview || !context.state.pageCache.get(index).previewOnly)) {
@@ -373,16 +377,16 @@ export function createPageView(context) {
 				return;
 			}
 			context.state.pageRenderRunning = true;
-			const tab = context.documentTab(), openSeq = tab.state.openSeq;
+			const tab = context.documentTab(), openSeq = tab.state.openSeq, loadSeq = tab.state.pageLoadSeq;
 			requestAnimationFrame(() => {
-				if (context.activeTab === tab && openSeq === tab.state.openSeq) pageView.processPageRenderQueue();
+				if (context.activeTab === tab && openSeq === tab.state.openSeq && loadSeq === tab.state.pageLoadSeq) pageView.processPageRenderQueue();
 			});
 		},
 
 		async processPageRenderQueue() {
-			const tab = context.documentTab(), openSeq = tab.state.openSeq;
+			const tab = context.documentTab(), openSeq = tab.state.openSeq, loadSeq = tab.state.pageLoadSeq;
 			await context.nextFrame();
-			if (context.activeTab !== tab || openSeq !== tab.state.openSeq) return;
+			if (context.activeTab !== tab || openSeq !== tab.state.openSeq || loadSeq !== tab.state.pageLoadSeq) return;
 			const available = (nativeHost?.parallelism || context.wasmWorker?.parallelism || 1) - tab.state.pageRenderWorkers;
 			await Promise.all(Array.from({ length: Math.max(0, available) }, () => pageView.processPageRenderTasks()));
 		},
@@ -598,10 +602,10 @@ export function createPageView(context) {
 		},
 
 		schedulePagePresentation() {
-			const tab = context.documentTab(), state = tab.state, openSeq = state.openSeq;
+			const tab = context.documentTab(), state = tab.state, openSeq = state.openSeq, loadSeq = state.pageLoadSeq;
 			if (state.pagePresentFrame || !state.pagePresentQueue.size) return;
 			state.pagePresentFrame = requestAnimationFrame(() => {
-				if (context.activeTab !== tab || openSeq !== state.openSeq) return;
+				if (context.activeTab !== tab || openSeq !== state.openSeq || loadSeq !== state.pageLoadSeq) return;
 				state.pagePresentFrame = 0;
 				const started = performance.now();
 				do {
@@ -1120,7 +1124,6 @@ export function createPageView(context) {
 
 		resetThumbnails() {
 			context.state.visibleThumbnails.clear();
-			context.state.thumbnailInFlight.clear();
 			if (context.state.thumbnailObserver) {
 				context.state.thumbnailObserver.disconnect();
 				context.state.thumbnailObserver = null;
@@ -1220,31 +1223,23 @@ export function createPageView(context) {
 		},
 
 		async renderThumbnail(index, openSeq = context.state.openSeq) {
-			if (openSeq !== context.state.openSeq || !context.state.doc) {
+			const loadSeq = context.state.pageLoadSeq;
+			const current = () => openSeq === context.state.openSeq && loadSeq === context.state.pageLoadSeq;
+			if (!current() || !context.state.doc) {
 				return;
 			}
-			const key = `${openSeq}:${index}`;
-			if (context.state.thumbnailInFlight.has(key)) {
-				return;
-			}
-			context.state.thumbnailInFlight.add(key);
 			try {
 				const page = await pageView.loadPageData(index, { openSeq, priority: 5, preview: true, view: true });
-				if (openSeq !== context.state.openSeq) {
-					return;
-				}
-				if (!page) {
+				if (!current() || !page) {
 					return;
 				}
 				await pageView.queuePagePresentation(index, page, openSeq);
-				if (openSeq !== context.state.openSeq) return;
+				if (!current()) return;
 				pageView.trimPageCache();
 			} catch {
-				if (openSeq === context.state.openSeq) {
+				if (current()) {
 					pageView.markThumbnailError(index);
 				}
-			} finally {
-				context.state.thumbnailInFlight.delete(key);
 			}
 		},
 
