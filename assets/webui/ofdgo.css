@@ -3279,6 +3279,7 @@ button.outline-link:hover {
 
 .edit-text span[data-glyph]::after {
 	content: attr(data-glyph);
+	letter-spacing: 0;
 	position: absolute;
 	left: 0;
 	top: 0;

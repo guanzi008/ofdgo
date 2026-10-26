@@ -1851,12 +1851,15 @@ export class CanvasEditor {
 				right = Math.max(right, x);
 				bottom = Math.max(bottom, y + lineHeight - baseline);
 			}
-			for (const char of run.text) {
+			const chars = [...run.text];
+			while (index < chars.length) {
+				const count = source.glyphCounts?.[glyphIndex] || 1;
+				const char = chars.slice(index, index + count).join("");
 				x = run.positions[index][0] * unit;
 				y = run.positions[index][1] * unit;
 				const span = document.createElement("span"), node = document.createTextNode(char);
 				span.append(node);
-				const glyph = source.glyphs?.[glyphIndex++];
+				const glyph = source.glyphs?.[glyphIndex];
 				if (glyph) {
 					span.dataset.glyph = glyph;
 					glyphPositions.push({ span, start: position, end: position + char.length });
@@ -1869,7 +1872,11 @@ export class CanvasEditor {
 				positions.push({ node, start: position, end: position + char.length });
 				position += char.length;
 				const advance = context.measureText(glyph || char).width;
-				if (glyph) span.style.width = `${advance}px`;
+				if (glyph) {
+					const naturalAdvance = [...char].reduce((width, value) => width + context.measureText(value).width, 0);
+					span.style.width = `${advance}px`;
+					span.style.letterSpacing = `${(advance - naturalAdvance) / count}px`;
+				}
 				for (const dx of [0, advance * scale]) {
 					for (const dy of [-baseline * vscale, (lineHeight - baseline) * vscale]) {
 						const px = x + dx * cos - dy * sin, py = y + dx * sin + dy * cos;
@@ -1880,7 +1887,8 @@ export class CanvasEditor {
 					}
 				}
 				naturalX += advance;
-				index++;
+				index += count;
+				glyphIndex += count;
 			}
 			if (!line.hasChildNodes()) {
 				const node = document.createTextNode("");

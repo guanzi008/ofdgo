@@ -4353,9 +4353,28 @@ func (e *businessEngine) previewText(args []platformValue) (any, error) {
 	} else if err := editor.RewriteTextWithFont(&text, args[2].String(), fontID); err != nil {
 		return nil, err
 	}
+	glyphs := make(map[int]string)
+	glyphCounts := make(map[int]int)
+	if fontID == "" {
+		for _, transform := range text.CGTransform {
+			if transform.CodeCount != transform.GlyphCount && transform.GlyphCount != 1 {
+				continue
+			}
+			for i, value := range strings.Fields(transform.Glyphs) {
+				glyph, err := strconv.ParseUint(value, 10, 16)
+				if err != nil {
+					return nil, err
+				}
+				glyphs[transform.CodePosition+i] = string(rune(0xF0000 + glyph))
+			}
+			if transform.GlyphCount == 1 && transform.CodeCount > 1 {
+				glyphCounts[transform.CodePosition] = transform.CodeCount
+			}
+		}
+	}
 	var runs []any
 	var x, y float64
-	value, offset := []rune(text.Text()), 0
+	value, offset, glyphOffset := []rune(text.Text()), 0, 0
 	for _, code := range text.TextCode {
 		if code.X != "" {
 			x, _ = strconv.ParseFloat(code.X, 64)
@@ -4371,10 +4390,17 @@ func (e *businessEngine) previewText(args []platformValue) (any, error) {
 		code.X, code.Y = fmt.Sprint(x), fmt.Sprint(y)
 		positioner := ofdgo.NewTextPositioner(code)
 		positions := make([][2]float64, len([]rune(content)))
+		var point ofdgo.Point
+		remaining := 0
 		for i := range positions {
-			point := positioner.Next()
+			if remaining == 0 {
+				point = positioner.Next()
+				remaining = max(1, glyphCounts[glyphOffset+i])
+			}
 			positions[i] = [2]float64{point.X, point.Y}
+			remaining--
 		}
+		glyphOffset += len(positions)
 		runs = append(runs, map[string]any{"text": content, "x": x, "y": y, "positions": positions, "line": line})
 		offset += len(positions)
 	}
@@ -4382,22 +4408,7 @@ func (e *businessEngine) previewText(args []platformValue) (any, error) {
 	if scale == 0 {
 		scale = 1
 	}
-	glyphs := make(map[int]string)
-	if fontID == "" {
-		for _, transform := range text.CGTransform {
-			if transform.CodeCount != transform.GlyphCount {
-				continue
-			}
-			for i, value := range strings.Fields(transform.Glyphs) {
-				glyph, err := strconv.ParseUint(value, 10, 16)
-				if err != nil {
-					return nil, err
-				}
-				glyphs[transform.CodePosition+i] = string(rune(0xF0000 + glyph))
-			}
-		}
-	}
-	return map[string]any{"runs": runs, "glyphs": glyphs, "scale": scale, "vscale": text.VScale, "rotation": text.CharDirection, "weight": text.Weight, "italic": text.Italic}, nil
+	return map[string]any{"runs": runs, "glyphs": glyphs, "glyphCounts": glyphCounts, "scale": scale, "vscale": text.VScale, "rotation": text.CharDirection, "weight": text.Weight, "italic": text.Italic}, nil
 }
 
 // readTextSelection 将画布路径转换为同一容器的库层文字选区
