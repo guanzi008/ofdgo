@@ -909,22 +909,7 @@ func richTextTagsFontSafe(ctx context.Context, reader *Reader, index int) (bool,
 		if root.Name != "RichText" || root.Namespace != richTextNamespace || len(root.Attributes) != 0 {
 			return false, nil
 		}
-		var meta richTextMetadata
-		decoder := json.NewDecoder(bytes.NewBufferString(root.Text))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&meta); err != nil {
-			return false, nil
-		}
-		if decoder.Decode(new(any)) != io.EOF || meta.Version != 1 {
-			return false, nil
-		}
-		for i := range meta.Value.Runs {
-			if meta.Value.Runs[i].Format.Font != "" {
-				return false, nil
-			}
-			meta.Value.Runs[i].Format.Font = "1"
-		}
-		if err := meta.Value.Validate(); err != nil {
+		if !richTextMetadataFontSafe(root.Text) {
 			return false, nil
 		}
 		for _, child := range root.Children {
@@ -934,4 +919,29 @@ func richTextTagsFontSafe(ctx context.Context, reader *Reader, index int) (bool,
 		}
 	}
 	return true, ctx.Err()
+}
+
+// richTextMetadataFontSafe 核对本库富文本元数据不包含字体资源编号或未知字段
+// 入参: value 元数据JSON
+// 返回: bool 是否可由标准图元完整统计字体引用
+func richTextMetadataFontSafe(value string) bool {
+	var meta richTextMetadata
+	decoder := json.NewDecoder(bytes.NewBufferString(value))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&meta); err != nil {
+		return false
+	}
+	if decoder.Decode(new(any)) != io.EOF || meta.Version != 1 {
+		return false
+	}
+	for i := range meta.Value.Runs {
+		if meta.Value.Runs[i].Format.Font != "" {
+			return false
+		}
+		meta.Value.Runs[i].Format.Font = "1"
+	}
+	if err := meta.Value.Validate(); err != nil {
+		return false
+	}
+	return true
 }

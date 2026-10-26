@@ -53,6 +53,7 @@ type editorReferenceScan struct {
 	stack      []string
 	fonts      []*editorFontUsage
 	text       strings.Builder
+	richText   strings.Builder
 	resource   bool
 	capture    bool
 	safe       bool
@@ -140,13 +141,38 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 	}
 	switch token := token.(type) {
 	case xml.StartElement:
-		if classifyOFDNamespace(token.Name.Space) == ofdXMLUnknown {
+		rich := token.Name.Space == richTextNamespace
+		known := classifyOFDNamespace(token.Name.Space) != ofdXMLUnknown
+		if rich {
+			known = len(s.stack) == 0 && token.Name.Local == "RichText" || len(s.stack) == 1 && s.stack[0] == "RichText" && token.Name.Local == "ObjectRef"
+		} else if len(s.stack) > 0 && s.stack[0] == "RichText" {
+			known = false
+		}
+		if len(s.stack) > 0 && s.stack[0] == "CustomTags" {
+			known = known && (len(s.stack) == 1 && token.Name.Local == "CustomTag" || len(s.stack) == 2 && s.stack[1] == "CustomTag" && (token.Name.Local == "FileLoc" || token.Name.Local == "SchemaLoc"))
+		}
+		if !known {
 			s.safe = false
 			return false
 		}
-		if token.Name.Local == "CustomTags" || token.Name.Local == "Extensions" || token.Name.Local == "ExtendData" || token.Name.Local == "Data" {
+		if token.Name.Local == "Extensions" || token.Name.Local == "ExtendData" || token.Name.Local == "Data" {
 			s.safe = false
 			return false
+		}
+		if token.Name.Local == "CustomTag" {
+			var kind, namespace string
+			for _, attr := range token.Attr {
+				if attr.Name.Space == "" && attr.Name.Local == "TypeID" {
+					kind = attr.Value
+				}
+				if attr.Name.Space == "" && attr.Name.Local == "NameSpace" {
+					namespace = attr.Value
+				}
+			}
+			if kind != richTextTagType || namespace != richTextNamespace {
+				s.safe = false
+				return false
+			}
 		}
 		if len(s.stack) == 0 {
 			if s.seen {
@@ -184,7 +210,8 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" || attr.Name.Local == "xmlns:ofd" || attr.Name.Space == XMLNamespace {
 				continue
 			}
-			if attr.Name.Space != "" {
+			custom := len(s.stack) == 0 && token.Name.Local == "CustomTags" || len(s.stack) > 0 && s.stack[0] == "CustomTags"
+			if attr.Name.Space != "" || rich && (token.Name.Local != "ObjectRef" || attr.Name.Local != "PageRef") || custom && (token.Name.Local != "CustomTag" || attr.Name.Local != "TypeID" && attr.Name.Local != "NameSpace") {
 				s.safe = false
 				return false
 			}
@@ -225,6 +252,9 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			s.capture = true
 		}
 	case xml.CharData:
+		if len(s.stack) == 1 && s.stack[0] == "RichText" {
+			s.richText.Write(token)
+		}
 		if len(s.stack) == 0 && len(bytes.Trim(token, " \t\r\n")) != 0 {
 			s.safe = false
 			return false
@@ -233,6 +263,14 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			s.text.Write(token)
 		}
 	case xml.EndElement:
+		if len(s.stack) == 3 && s.stack[0] == "CustomTags" && token.Name.Local == "SchemaLoc" && strings.TrimSpace(s.text.String()) != "" {
+			s.safe = false
+			return false
+		}
+		if len(s.stack) == 1 && s.stack[0] == "RichText" && !richTextMetadataFontSafe(s.richText.String()) {
+			s.safe = false
+			return false
+		}
 		if len(s.stack) == 0 || s.stack[len(s.stack)-1] != token.Name.Local {
 			s.safe = false
 			return false

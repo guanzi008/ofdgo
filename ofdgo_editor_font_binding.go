@@ -963,7 +963,7 @@ func pruneUnreferencedFiles(ctx context.Context, reader *Reader, candidates ...s
 			if root == "" {
 				root = node.Name.Local
 			}
-			if classifyOFDNamespace(node.Name.Space) == ofdXMLUnknown || slices.Contains([]string{"CustomTags", "Extensions", "ExtendData", "Data"}, node.Name.Local) {
+			if classifyOFDNamespace(node.Name.Space) == ofdXMLUnknown || root == "CustomTags" || slices.Contains([]string{"Extensions", "ExtendData", "Data"}, node.Name.Local) {
 				uncertain = true
 				return fmt.Errorf("unknown file dependencies in %s", name)
 			}
@@ -990,7 +990,19 @@ func pruneUnreferencedFiles(ctx context.Context, reader *Reader, candidates ...s
 				versions[name] = append(versions[name], versionEditLink{node: node, target: target})
 			}
 		}
-		if err := reader.scanDocumentFileReferences(ctx, name, true, add, record, inspect); err != nil {
+		err := reader.scanDocumentFileReferences(ctx, name, true, add, record, inspect)
+		if uncertain && (root == "CustomTags" || root == "RichText") {
+			data, readErr := reader.readFileViewContext(ctx, name)
+			if readErr != nil {
+				return readErr
+			}
+			refs := &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
+			if _, safe := refs.scanContext(ctx, bytes.NewReader(data), name); safe {
+				uncertain = false
+				err = reader.scanDocumentFileReferences(ctx, name, true, add, record, nil)
+			}
+		}
+		if err != nil {
 			var syntax *xml.SyntaxError
 			if uncertain || errors.As(err, &syntax) {
 				return ctx.Err()
