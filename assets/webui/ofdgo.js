@@ -1920,7 +1920,7 @@ function handleKeyDown(event) {
 	}
 	if (nativeHost && (event.ctrlKey || event.metaKey) && (key === "Tab" || key.toLowerCase() === "w")) {
 		event.preventDefault();
-		if (document.body.hasAttribute("data-busy") || documentDialogs?.applicationOpen() || formDialogOpen() && !documentTab().print?.context) return;
+		if (document.body.hasAttribute("data-busy") || documentDialogs?.applicationOpen() || formDialogOpen() && !documentTab().print?.context && !batchElements.Panel.open) return;
 		if (key.toLowerCase() === "w") closeTab(documentTab());
 		else {
 			const count = workspace.tabs.length, index = workspace.tabs.indexOf(documentTab());
@@ -5135,7 +5135,7 @@ function resizeViewer() {
 async function boot() {
 	documentDialogs = new DocumentDialogs({document, titlebar: el.documentTitleBar,
 		targets: () => [...document.body.children].filter(node => node !== el.documentTitleBar)});
-	for (const panel of document.querySelectorAll("dialog.form-dialog")) if (panel !== el.printPanel) documentDialogs.register(panel);
+	for (const panel of document.querySelectorAll("dialog.form-dialog")) if (panel !== el.printPanel) documentDialogs.register(panel, {persistent: panel === batchElements.Panel});
 	documentDialogs.setOwner(documentTab());
 	const openSeq = state.openSeq;
 	setBusy(true, "正在准备引擎", 8, STATUS.engine);
@@ -5749,17 +5749,20 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 	tab.state.fileName = file.name || remote?.name || STATUS.opening;
 	tab.status = STATUS.opening;
 	workspace.tabs.push(tab);
-	setBusy(true, "正在读取文档", 10, STATUS.opening, tab);
-	await activateDocumentTab(tab);
-	if (workspace.active === tab && !previous.state.doc && !previous.opening && !previous.state.dirty && !previous.error) {
-		workspace.tabs.splice(workspace.tabs.indexOf(previous), 1);
-		await releaseDocumentTab(previous);
-	}
-	renderDocumentTabs();
 	const current = () => !tab.closed && tab.opening === request;
 	let accepted = false;
 	let originalSource = null;
 	try {
+		setBusy(true, "正在读取文档", 10, STATUS.opening, tab);
+		await activateDocumentTab(tab);
+		if (!current()) return;
+		const previousIndex = workspace.tabs.indexOf(previous);
+		if (previousIndex >= 0 && workspace.active === tab && !previous.state.doc && !previous.opening && !previous.state.dirty && !previous.error) {
+			workspace.tabs.splice(previousIndex, 1);
+			await releaseDocumentTab(previous);
+		}
+		renderDocumentTabs();
+		if (!current()) return;
 		const downloaded = remote ? await downloadRemoteDocument(remote, tab, request.controller) : null;
 		if (!current()) return;
 		await ensureTabEngine(tab);
@@ -9692,6 +9695,7 @@ function startBatchWorker() {
 		const slot = { worker, error: null };
 		batch.workers.add(slot);
 		const fail = async error => {
+			slot.cancel = null;
 			slot.error = error;
 			worker.terminate();
 			reject(error);
@@ -9705,10 +9709,11 @@ function startBatchWorker() {
 				request.reject(error);
 			}
 		};
+		slot.cancel = () => fail(new DOMException("已取消转换", "AbortError"));
 		worker.onerror = event => fail(new Error(event.message || "转换引擎异常"));
 		worker.onmessageerror = () => fail(new Error("转换数据传递失败"));
 		worker.onmessage = async ({ data }) => {
-			if (data.type === "ready") { resolve(slot); return; }
+			if (data.type === "ready") { slot.cancel = null; resolve(slot); return; }
 			if (data.type === "exit") { fail(new Error(data.error)); return; }
 			if (data.type === "progress") {
 				if (!batch.canceled) batchElements.Status.textContent = { download: "正在下载", compile: "正在编译", start: "正在启动" }[data.phase] || "正在准备";
@@ -9743,7 +9748,16 @@ function cancelBatch() {
 	batchElements.Cancel.disabled = true;
 	batch.progress = null;
 	batchElements.Status.textContent = "正在取消";
-	if (batch.unlocking) finishCredentials(null);
+	const request = batch.unlocking;
+	if (request && request.tab.credentials === request) {
+		if (request === credentialRequest) finishCredentials(null);
+		else {
+			request.tab.credentials = null;
+			documentDialogs.closeFor(request.tab, el.credentialsPanel);
+			request.resolve(null);
+		}
+	}
+	for (const slot of batch.workers) slot.cancel?.();
 	for (const [id, request] of batch.requests) request.slot.worker.postMessage({ type: "cancel", id });
 }
 
@@ -9858,9 +9872,10 @@ async function runBatch() {
 							options.credentials?.keyPassword?.fill(0);
 							const unlock = batch.credentials.then(async () => {
 								if (batch.canceled) throw new DOMException("已取消转换", "AbortError");
-								batch.unlocking = true;
-								try { return await requestCredentials(code, state.openSeq, err.code === "pdfPassword"); }
-								finally { batch.unlocking = false; }
+								const credentials = requestCredentials(code, state.openSeq, err.code === "pdfPassword");
+								batch.unlocking = documentTab().credentials;
+								try { return await credentials; }
+								finally { batch.unlocking = null; }
 							});
 							batch.credentials = unlock.then(() => {}, () => {});
 							options.credentials = await unlock;

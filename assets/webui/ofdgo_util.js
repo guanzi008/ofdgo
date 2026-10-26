@@ -30,9 +30,9 @@ export class DocumentDialogs {
 		root.defaultView.addEventListener("resize", () => this.paint());
 	}
 
-	register(panel, { shared = true } = {}) {
+	register(panel, { shared = true, persistent = false } = {}) {
 		if (this.records.has(panel)) return panel;
-		const record = { show: panel.show.bind(panel), showModal: panel.showModal.bind(panel), close: panel.close.bind(panel), owner: null, application: false, shared, clicks: new WeakMap(), initial: shared ? this.snapshot(panel) : null };
+		const record = { show: panel.show.bind(panel), showModal: panel.showModal.bind(panel), close: panel.close.bind(panel), owner: null, application: false, shared, clicks: new WeakMap(), initial: shared && !persistent ? this.snapshot(panel) : null };
 		this.records.set(panel, record);
 		panel.showModal = panel.show = () => this.openFor(this.owner, panel);
 		panel.close = value => {
@@ -125,7 +125,7 @@ export class DocumentDialogs {
 			this.unpaint();
 			if (value !== undefined) panel.returnValue = String(value);
 			panel.removeAttribute("open");
-			if (this.records.get(panel).shared) entry.snapshot = this.snapshot(panel);
+			if (this.records.get(panel).initial) entry.snapshot = this.snapshot(panel);
 		}
 		const result = value === undefined ? visible ? panel.returnValue : entry.snapshot?.returnValue ?? panel.returnValue : String(value);
 		state.stack = state.stack.filter(value => value !== panel);
@@ -151,8 +151,8 @@ export class DocumentDialogs {
 		for (const [panel, entry] of this.current(tab)?.entries || []) {
 			const record = this.records.get(panel);
 			if (record.application || record.owner !== tab) continue;
-			if (record.shared) entry.snapshot = this.snapshot(panel);
-			else {
+			if (record.initial) entry.snapshot = this.snapshot(panel);
+			else if (!record.shared) {
 				entry.focus = panel.contains(this.document.activeElement) ? this.document.activeElement : null;
 				panel.remove();
 			}
@@ -172,8 +172,8 @@ export class DocumentDialogs {
 		for (const [panel, entry] of state.entries) {
 			const record = this.records.get(panel);
 			if (record.application) continue;
-			if (record.shared) this.applySnapshot(entry.snapshot, panel);
-			else this.document.body.append(panel);
+			if (record.initial) this.applySnapshot(entry.snapshot, panel);
+			else if (!record.shared) this.document.body.append(panel);
 			record.owner = tab;
 		}
 		for (const [panel, entry] of state.entries) {
@@ -205,7 +205,7 @@ export class DocumentDialogs {
 				continue;
 			}
 			if (record.application || record.owner !== tab) continue;
-			this.applySnapshot(record.initial, panel);
+			if (record.initial) this.applySnapshot(record.initial, panel);
 			record.owner = null;
 		}
 		state?.entries.clear();
