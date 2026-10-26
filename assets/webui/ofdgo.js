@@ -160,6 +160,8 @@ function createDocumentState() {
 		pagePrefetchDirection: 1,
 		pageRenderRunning: false,
 		pageRenderWorkers: 0,
+		pagePresentQueue: new Map(),
+		pagePresentFrame: 0,
 		pageObserver: null,
 		visiblePages: new Set(),
 		scrollFrame: 0,
@@ -12369,7 +12371,7 @@ async function callTabWASM(tab, name, ...args) {
 			}
 			if (name === "ofdgoLoadImport" && ArrayBuffer.isView(args[0]) && !nativeHost) transfer.push(args[0].buffer);
 			const message = {id, name, args};
-			if (name === "ofdgoRenderPage" && [...state.pageInFlight.values()].some(task => task.index === args[0] && task.priority >= 6)) message.preload = true;
+			if (name === "ofdgoRenderPage" && [...state.pageInFlight.values()].some(task => task.index === args[0] && pageView.pageRenderPriority(task, state) >= 6)) message.preload = true;
 			tab.worker.postMessage(message, transfer);
 		} catch (err) {
 			wasmRequests.delete(id);
