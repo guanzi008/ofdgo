@@ -337,9 +337,11 @@ async function handleMessage(engine, { id, name, args }) {
 				if (!saving && args.some(value => value?.mode !== undefined)) args.push(done => finish(done));
 			}
 		}
+		const started = name === "ofdgoOpen" || name === "ofdgoRenderPage" ? performance.now() : null;
 		const payload = await globalThis.ofdgoEngineCall(engine.id, name, ...args);
 		signal?.throwIfAborted();
 		const result = typeof payload === "string" ? JSON.parse(payload) : payload;
+		if (started !== null && result.ok) result.elapsed = performance.now() - started;
 		if (cancellable && !importing && !converting && !resources && result.ok) {
 			result.data.size = size;
 			if (name !== "ofdgoExportMedia") postMessage({ id, type: "export", stage: "save" });

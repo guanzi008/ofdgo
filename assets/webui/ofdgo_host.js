@@ -64,16 +64,16 @@ class BrowserScheduler {
 		if (data.id == null || data.type) return;
 		const key = requestKey(worker, data);
 		const started = worker.requests.get(key);
+		const elapsed = data.elapsed ?? (started === undefined ? 0 : performance.now() - started);
 		const operation = worker.operations.get(key), owner = this.owner(worker, data);
-		if (started !== undefined && data.ok && owner) {
-			const elapsed = performance.now() - started;
+		if (worker.primary && started !== undefined && data.ok && owner) {
 			if (operation?.name === "ofdgoOpen") owner.openTime = elapsed;
 			if (operation?.name === "ofdgoRenderPage") owner.pageTime = owner.pageTime ? owner.pageTime * 0.75 + elapsed * 0.25 : elapsed;
 		}
 		worker.requests.delete(key);
 		worker.operations.delete(key);
 		if (this.memory > this.budget) this.limit = Math.max(1, this.limit - 1);
-		else if (started !== undefined && data.ok && performance.now() - started > 100 && this.memory + Math.max(128 << 20, worker.memory) < this.budget) this.limit = Math.min(this.capacity, this.limit + 1);
+		else if (started !== undefined && data.ok && elapsed > 100 && this.memory + Math.max(128 << 20, worker.memory) < this.budget) this.limit = Math.min(this.capacity, this.limit + 1);
 	}
 
 	drain() {
@@ -300,8 +300,9 @@ class BrowserEngine {
 			const data = event.data;
 			if (data.memory) this.memory = data.memory;
 			if (this.source) this.parallelism = engineScheduler.limit;
-			if (data.id != null && !data.type) this.requests.delete(data.id);
+			const rendered = data.id != null && !data.type && this.requests.delete(data.id);
 			this.onmessage?.(event);
+			if (rendered && data.ok) this.dispatchPages();
 		};
 		this.primary.onerror = event => this.onerror?.(event);
 		this.primary.onmessageerror = event => this.onmessageerror?.(event);
@@ -407,6 +408,36 @@ class BrowserEngine {
 		});
 	}
 
+	pageSlot(data) {
+		const preferred = [...this.slots].find(slot => !slot.busy && slot.pages.has(data.args[0]));
+		const pending = [...this.requests.values()].filter(slot => slot === null).length - Number(this.requests.has(data.id));
+		if (!preferred && pending <= 0) return null;
+		let slot = preferred || [...this.slots].filter(slot => !slot.busy).sort((a,b) => Math.abs(a.lastPage-data.args[0])-Math.abs(b.lastPage-data.args[0]))[0];
+		const worthwhile = (this.primary.pageTime || 0) * pending >= Math.max(50, this.startupTime || this.primary.openTime || 0);
+		if (!slot && worthwhile && this.foreground && !this.pagesPaused && this.slots.size < this.parallelism - 1
+			&& engineScheduler.memory + Math.max(128 << 20, this.memory) <= this.budget) slot = this.createSlot(this.source);
+		return slot;
+	}
+
+	dispatchPages() {
+		if (this.closed || !this.source || !this.foreground || this.pagesPaused) return;
+		const draining = engineScheduler.draining;
+		engineScheduler.draining = true;
+		try {
+			const queued = engineScheduler.queue.filter(task => task.worker === this.primary.runtime && task.data.engineID === this.engineID).sort((a,b) => a.order-b.order);
+			for (const task of queued) {
+				if (task.data.name !== "ofdgoRenderPage") break;
+				if (this.requests.get(task.data.id) !== null) continue;
+				let slot;
+				try { slot = this.pageSlot(task.data); } catch { break; }
+				if (!slot) break;
+				engineScheduler.queue.splice(engineScheduler.queue.indexOf(task), 1);
+				this.primary.requests.delete(task.data.id);
+				this.renderSlot(slot, task.data, task.transfer);
+			}
+		} finally { engineScheduler.draining = draining; }
+	}
+
 	postMessage(data, transfer) {
 		if (this.closed) return;
 		if (!data.type && data.preload && this.pagesPaused) {
@@ -415,7 +446,7 @@ class BrowserEngine {
 		}
 		if (data.type === "cancel") {
 			const slot = this.requests.get(data.id);
-			if (slot) this.closeSlot(slot);
+			if (slot && slot !== this.primary) this.closeSlot(slot);
 			else this.primary.postMessage(data);
 			return;
 		}
@@ -430,23 +461,16 @@ class BrowserEngine {
 			"ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF", "ofdgoDiscardPrint",
 			"ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion"
 		].includes(data.name)) this.invalidatePages();
-		const preferred = data.name === "ofdgoRenderPage" ? [...this.slots].find(slot => !slot.busy && slot.pages.has(data.args[0])) : null;
-		if (data.name !== "ofdgoRenderPage" || !this.source || !preferred && ![...this.requests.values()].includes(null)) {
+		const slot = data.name === "ofdgoRenderPage" && this.source ? this.pageSlot(data) : null;
+		if (!slot) {
 			if (data.name === "ofdgoRenderPage") this.requests.set(data.id, null);
 			this.primary.postMessage(data, transfer);
 			return;
 		}
-		let slot = preferred || [...this.slots].filter(slot => !slot.busy).sort((a,b) => Math.abs(a.lastPage-data.args[0])-Math.abs(b.lastPage-data.args[0]))[0];
-		const memory = engineScheduler.memory;
-		const pending = [...this.requests.values()].filter(slot => slot === null).length;
-		const worthwhile = (this.primary.pageTime || 0) * pending >= Math.max(50, this.startupTime || this.primary.openTime || 0);
-		if (!slot && worthwhile && this.foreground && !this.pagesPaused
-			&& this.slots.size < this.parallelism - 1 && memory + Math.max(128 << 20, this.memory) <= this.budget) slot = this.createSlot(this.source);
-		if (!slot) {
-			this.requests.set(data.id, null);
-			this.primary.postMessage(data, transfer);
-			return;
-		}
+		this.renderSlot(slot, data, transfer);
+	}
+
+	renderSlot(slot, data, transfer) {
 		slot.busy = true;
 		this.requests.set(data.id, slot);
 		const revision = this.revision;
@@ -462,7 +486,7 @@ class BrowserEngine {
 			if (!this.closed && revision === this.revision && error.name !== "AbortError") {
 				this.closeSlot(slot, error);
 				this.parallelism = Math.max(1, this.slots.size + 1);
-				this.requests.set(data.id, null);
+				this.requests.set(data.id, this.primary);
 				fallback = true;
 				this.primary.postMessage(data, transfer);
 				return;
@@ -474,6 +498,7 @@ class BrowserEngine {
 			slot.worker.reservation = 0;
 			const memory = engineScheduler.memory;
 			if (memory > this.budget) { this.closeSlot(slot); this.parallelism = Math.max(1, this.slots.size + 1); }
+			this.dispatchPages();
 			engineScheduler.drain();
 		});
 	}

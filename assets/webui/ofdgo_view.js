@@ -535,6 +535,10 @@ export function createPageView(context) {
 				const results = await Promise.allSettled(fonts.slice(offset, offset + 4).map(async font => {
 					if (state.svgFonts.has(font.name)) return;
 					const key = `${openSeq}:${loadSeq}:${font.name}`;
+					while (current() && !state.svgFonts.has(font.name) && !state.svgFontLoads.has(key) && state.svgFontLoads.size >= 4) {
+						await Promise.race([...state.svgFontLoads.values()].map(loading => loading.catch(() => {})));
+					}
+					if (!current() || state.svgFonts.has(font.name)) return;
 					let loading = state.svgFontLoads.get(key);
 					if (!loading) {
 						loading = pageView.loadSVGFont(font, openSeq, loadSeq);
@@ -615,8 +619,9 @@ export function createPageView(context) {
 							if (task.shell && pageView.pageShell(task.index) === task.shell && !task.shell.classList.contains("rendered")
 								&& (!state.pageObserver || state.visiblePages.has(task.index) || task.index === state.pageIndex)) {
 								task.text ||= pageView.createTextLayerParts(task.page.text);
-								const text = task.text.next();
-								if (!text.done) continue;
+								let text;
+								do { text = task.text.next(); } while (!text.done && performance.now() - started < 6);
+								if (!text.done) break;
 								pageView.mountPageSVG(task.index, task.page, task.openSeq, text.value);
 							}
 							if (task.thumb && context.el.pageList.querySelector(`[data-page-index="${task.index}"] .thumb-paper`) === task.thumb) pageView.updateThumbnail(task.index, task.openSeq);
