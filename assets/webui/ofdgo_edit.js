@@ -1812,7 +1812,7 @@ export class CanvasEditor {
 			position += text.length + 1;
 		}
 		input.replaceChildren(fragment);
-		Object.assign(input.style, { width: "max-content", height: "auto", minWidth: `${(editing.style?.size || editing.item.size) * PX_PER_MM * sourceTextScale(editing) + 4}px` });
+		Object.assign(input.style, { width: "max-content", height: "auto", minWidth: value ? "0px" : `${(editing.style?.size || editing.item.size) * PX_PER_MM * sourceTextScale(editing) + 4}px` });
 		restoreTextSelection(positions, caret, editing.range);
 	}
 
@@ -1901,7 +1901,7 @@ export class CanvasEditor {
 		input.replaceChildren(fragment);
 		const [a, b, c, d, e, f] = frame.matrix.map((value, index) => index < 4 ? value / displayScale : value);
 		Object.assign(input.style, {
-			width: `${Math.max(size, right - left) + 4}px`,
+			width: `${right - left + 4}px`, minWidth: "0px",
 			minHeight: "0px", height: `${bottom - top + 4}px`,
 			transform: `matrix(${a},${b},${c},${d},${e * PX_PER_MM + a * left + c * top},${f * PX_PER_MM + b * left + d * top})`,
 		});
