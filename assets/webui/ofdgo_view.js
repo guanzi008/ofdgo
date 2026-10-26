@@ -529,33 +529,33 @@ export function createPageView(context) {
 		},
 
 		async loadSVGFonts(fonts, openSeq) {
-			const state = context.state;
-			for (const font of fonts) {
-				if (openSeq !== context.state.openSeq) {
-					return;
-				}
-				if (state.svgFonts.has(font.name)) {
-					continue;
-				}
-				const key = `${openSeq}:${font.name}`;
-				let loading = state.svgFontLoads.get(key);
-				if (!loading) {
-					loading = pageView.loadSVGFont(font, openSeq);
-					state.svgFontLoads.set(key, loading);
-				}
-				try { await loading; }
-				finally { if (state.svgFontLoads.get(key) === loading) state.svgFontLoads.delete(key); }
+			const state = context.state, loadSeq = state.pageLoadSeq;
+			const current = () => state === context.state && openSeq === state.openSeq && loadSeq === state.pageLoadSeq;
+			for (let offset = 0; offset < fonts.length && current(); offset += 4) {
+				const results = await Promise.allSettled(fonts.slice(offset, offset + 4).map(async font => {
+					if (state.svgFonts.has(font.name)) return;
+					const key = `${openSeq}:${loadSeq}:${font.name}`;
+					let loading = state.svgFontLoads.get(key);
+					if (!loading) {
+						loading = pageView.loadSVGFont(font, openSeq, loadSeq);
+						state.svgFontLoads.set(key, loading);
+					}
+					try { await loading; }
+					finally { if (state.svgFontLoads.get(key) === loading) state.svgFontLoads.delete(key); }
+				}));
+				const failed = results.find(result => result.status === "rejected");
+				if (failed) throw failed.reason;
 			}
 		},
 
-		async loadSVGFont(font, openSeq) {
+		async loadSVGFont(font, openSeq, loadSeq = context.state.pageLoadSeq) {
 			const data = font.data ? { bytes: font.data } : await context.callWASM("ofdgoSVGFontData", font.name);
-			if (openSeq !== context.state.openSeq) {
+			if (openSeq !== context.state.openSeq || loadSeq !== context.state.pageLoadSeq) {
 				return;
 			}
 			const face = new FontFace(font.name, data.bytes, { weight: String(font.weight), style: font.style });
 			await face.load();
-			if (openSeq !== context.state.openSeq) {
+			if (openSeq !== context.state.openSeq || loadSeq !== context.state.pageLoadSeq) {
 				return;
 			}
 			document.fonts.add(face);
@@ -610,23 +610,26 @@ export function createPageView(context) {
 				const started = performance.now();
 				do {
 					const task = [...state.pagePresentQueue.values()].sort(pageView.comparePageRenderTask)[0];
-					state.pagePresentQueue.delete(task.index);
 					try {
 						if (state.pageCache.get(task.index) === task.page) {
 							if (task.shell && pageView.pageShell(task.index) === task.shell && !task.shell.classList.contains("rendered")
 								&& (!state.pageObserver || state.visiblePages.has(task.index) || task.index === state.pageIndex)) {
-								pageView.mountPageSVG(task.index, task.page, task.openSeq);
+								task.text ||= pageView.createTextLayerParts(task.page.text);
+								const text = task.text.next();
+								if (!text.done) continue;
+								pageView.mountPageSVG(task.index, task.page, task.openSeq, text.value);
 							}
 							if (task.thumb && context.el.pageList.querySelector(`[data-page-index="${task.index}"] .thumb-paper`) === task.thumb) pageView.updateThumbnail(task.index, task.openSeq);
 						}
 						task.resolve(null);
 					} catch (err) { task.reject(err); }
+					state.pagePresentQueue.delete(task.index);
 				} while (state.pagePresentQueue.size && performance.now() - started < 6);
 				pageView.schedulePagePresentation();
 			});
 		},
 
-		mountPageSVG(index, page, openSeq = context.state.openSeq) {
+		mountPageSVG(index, page, openSeq = context.state.openSeq, textLayer = null) {
 			if (openSeq !== context.state.openSeq) {
 				return;
 			}
@@ -638,7 +641,7 @@ export function createPageView(context) {
 			const svg = pageView.parseSVG(page.svg, `p${openSeq}-${index}`);
 			svg.classList.add("ofd-svg");
 			surface.replaceChildren(svg);
-			surface.append(pageView.createTextLayer(page.text));
+			surface.append(textLayer || pageView.createTextLayer(page.text));
 			if (context.state.editorInfo && pageView.displayMode() === "svg") {
 				context.mountEditorObjects(index, page, surface);
 			}
@@ -1621,12 +1624,11 @@ export function createPageView(context) {
 				return next;
 			};
 			const attrs = ["clip-path", "fill", "filter", "href", "marker-end", "marker-mid", "marker-start", "mask", "stroke", "style", "xlink:href"];
-			for (const attr of attrs) {
-				for (const node of svg.querySelectorAll(`[${attr === "xlink:href" ? "*|href" : attr}*="#"]`)) {
+			const selector = attrs.map(attr => `[${attr === "xlink:href" ? "*|href" : attr}*="#"]`).join(",");
+			for (const node of svg.querySelectorAll(selector)) {
+				for (const attr of attrs) {
 					const value = node.getAttribute(attr);
-					if (!value) {
-						continue;
-					}
+					if (!value?.includes("#")) continue;
 					const next = replaceRef(value);
 					if (next !== value) {
 						node.setAttribute(attr, next);
@@ -1636,11 +1638,19 @@ export function createPageView(context) {
 		},
 
 		createTextLayer(text) {
+			const parts = pageView.createTextLayerParts(text);
+			let next;
+			do { next = parts.next(); } while (!next.done);
+			return next.value;
+		},
+
+		*createTextLayerParts(text) {
 			const layer = document.createElement("div");
 			layer.className = "text-layer";
 			const measure = textMeasure ||= document.createElement("canvas").getContext("2d");
 			measure.font = "100px sans-serif";
 			const widths = new Map();
+			let count = 0;
 			for (const run of text.runs || []) {
 				const line = document.createElement("span");
 				line.className = "text-run";
@@ -1658,10 +1668,11 @@ export function createPageView(context) {
 						width = measure.measureText(span.textContent).width || 1;
 						widths.set(span.textContent, width);
 					}
-					const [a, b, c, d, e, f] = item.matrix.map((value) => value * MM_TO_PX);
-					span.style.transform = `matrix(${a / width}, ${b / width}, ${c / 100}, ${d / 100}, ${e}, ${f})`;
+					const [a, b, c, d, e, f] = item.matrix;
+					span.style.transform = `matrix(${a * MM_TO_PX / width}, ${b * MM_TO_PX / width}, ${c * MM_TO_PX / 100}, ${d * MM_TO_PX / 100}, ${e * MM_TO_PX}, ${f * MM_TO_PX})`;
 					line.append(span);
 					end = item.end;
+					if (++count % 128 === 0) yield;
 				}
 				const breaks = chars.slice(end).filter((char) => char === "\n").join("");
 				if (breaks) {

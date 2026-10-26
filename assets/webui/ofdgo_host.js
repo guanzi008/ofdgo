@@ -64,6 +64,12 @@ class BrowserScheduler {
 		if (data.id == null || data.type) return;
 		const key = requestKey(worker, data);
 		const started = worker.requests.get(key);
+		const operation = worker.operations.get(key), owner = this.owner(worker, data);
+		if (started !== undefined && data.ok && owner) {
+			const elapsed = performance.now() - started;
+			if (operation?.name === "ofdgoOpen") owner.openTime = elapsed;
+			if (operation?.name === "ofdgoRenderPage") owner.pageTime = owner.pageTime ? owner.pageTime * 0.75 + elapsed * 0.25 : elapsed;
+		}
 		worker.requests.delete(key);
 		worker.operations.delete(key);
 		if (this.memory > this.budget) this.limit = Math.max(1, this.limit - 1);
@@ -343,6 +349,8 @@ class BrowserEngine {
 		this.source = null;
 		this.pageSource = null;
 		this.parallelism = 1;
+		this.startupTime = 0;
+		this.primary.pageTime = 0;
 		for (const slot of this.slots) this.closeSlot(slot);
 	}
 
@@ -355,6 +363,7 @@ class BrowserEngine {
 	}
 
 	createSlot(source) {
+		const started = performance.now();
 		const worker = createEngineWorker({page:true, url:this.workerURL});
 		worker.setForeground(this.foreground);
 		worker.pausePages(this.pagesPaused);
@@ -382,6 +391,7 @@ class BrowserEngine {
 			let opened = await this.callSlot(slot, "ofdgoOpen", [source.file, source.fonts, source.annotations]);
 			if ((source.document || 0) !== (opened.data.documentIndex || 0)) opened = await this.callSlot(slot, "ofdgoSelectDocument", [source.document]);
 			if ((source.version || "") !== (opened.data.documentVersion || "")) await this.callSlot(slot, "ofdgoSelectVersion", [source.version || ""]);
+			if (this.slots.has(slot)) this.startupTime = performance.now() - started;
 		});
 		slot.ready.catch(() => {});
 		return slot;
@@ -428,7 +438,10 @@ class BrowserEngine {
 		}
 		let slot = preferred || [...this.slots].filter(slot => !slot.busy).sort((a,b) => Math.abs(a.lastPage-data.args[0])-Math.abs(b.lastPage-data.args[0]))[0];
 		const memory = engineScheduler.memory;
-		if (!slot && this.foreground && !this.pagesPaused && this.slots.size < this.parallelism - 1 && memory + Math.max(128 << 20, this.memory) <= this.budget) slot = this.createSlot(this.source);
+		const pending = [...this.requests.values()].filter(slot => slot === null).length;
+		const worthwhile = (this.primary.pageTime || 0) * pending >= Math.max(50, this.startupTime || this.primary.openTime || 0);
+		if (!slot && worthwhile && this.foreground && !this.pagesPaused
+			&& this.slots.size < this.parallelism - 1 && memory + Math.max(128 << 20, this.memory) <= this.budget) slot = this.createSlot(this.source);
 		if (!slot) {
 			this.requests.set(data.id, null);
 			this.primary.postMessage(data, transfer);
