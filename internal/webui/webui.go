@@ -5002,37 +5002,23 @@ func (e *businessEngine) editorRichText(item map[string]any, object ofdgo.Graphi
 
 // getRichText 读取文字分段与段落选项，颜色转换为浏览器RGB格式
 // 入参: args 页码、对象标识和可选显式重排标记
-// 返回: any 富文本快照或重排模型及页面坐标框, error 错误信息
+// 返回: any 富文本快照，携带重排标记时附带局部编辑框及页面变换, error 错误信息
 func (e *businessEngine) getRichText(args []platformValue) (any, error) {
 	if e.currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
-	}
-	if len(args) > 2 && args[2].Bool() {
-		selection, err := e.readTextSelection([]string{args[1].String()})
-		if err != nil {
-			return nil, err
-		}
-		analysis, err := e.currentEditor.AnalyzeTextSelection(args[0].Int(), selection)
-		if err != nil {
-			return nil, err
-		}
-		if !analysis.Reflow {
-			return nil, fmt.Errorf("text cannot be reflowed")
-		}
-		value := analysis.RichText
-		value.Layout.AutoBidi = true
-		box := analysis.Bounds
-		return map[string]any{"model": e.browserRichText(value), "frame": map[string]any{
-			"width": box.W, "height": box.H, "matrix": e.editorMatrix(ofdgo.TranslationMatrix(box.X, box.Y)),
-		}}, nil
 	}
 	path, err := e.compositePath(args[1].String())
 	if err != nil {
 		return nil, err
 	}
-	value, err := e.currentEditor.TargetRichText(args[0].Int(), path)
+	value, frame, matrix, err := e.currentEditor.PrepareRichText(args[0].Int(), path, len(args) > 2 && args[2].Bool())
 	if err != nil {
 		return nil, err
+	}
+	if len(args) > 2 {
+		return map[string]any{"model": e.browserRichText(value), "frame": map[string]any{
+			"width": frame.W, "height": frame.H, "matrix": e.editorMatrix(matrix),
+		}}, nil
 	}
 	return e.browserRichText(value), nil
 }
@@ -5150,11 +5136,11 @@ func (e *businessEngine) saveRichText(args []platformValue) (any, error) {
 		}
 		box := args[3]
 		if !box.IsNull() && !box.IsUndefined() && box.Get("reflow").Type() == platformTypeBoolean && box.Get("reflow").Bool() {
-			selection, err := e.readTextSelection([]string{id})
+			path, err := e.compositePath(id)
 			if err != nil {
 				return err
 			}
-			return e.currentEditor.UpdateTextSelection(page, selection, ofdgo.TextSelectionEdit{Reflow: &value, Width: box.Get("width").Float()})
+			return e.currentEditor.ReflowRichText(page, path, value)
 		}
 		if len(args) > 5 && args[5].String() != "" {
 			key := args[5].String()

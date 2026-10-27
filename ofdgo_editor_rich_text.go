@@ -101,7 +101,7 @@ func (e *Editor) AddRichText(page int, box Box, value RichText) (string, error) 
 // 入参: page 页面索引, id 对象标识, value 完整富文本
 // 返回: error 识别、排版或提交错误
 func (e *Editor) UpdateRichText(page int, id string, value RichText) error {
-	return e.updateRichTextFrame(page, id, value, 0, 0)
+	return e.updateRichTextFrame(page, id, value, 0, 0, false)
 }
 
 // ResizeRichTextFrame 调整局部左边界与段落宽度并原子重排，保留页面方向和缩放
@@ -115,23 +115,19 @@ func (e *Editor) ResizeRichTextFrame(page int, id string, offset, width float64)
 	if err != nil {
 		return err
 	}
-	return e.updateRichTextFrame(page, id, value, offset, width)
+	return e.updateRichTextFrame(page, id, value, offset, width, false)
 }
 
 // updateRichTextFrame 统一提交正文或编辑框变化，width为零时保持原始宽度
-// 入参: page 页面索引, id 对象标识, value 新内容, offset 局部偏移, width 可选宽度
+// 入参: page 页面索引, id 对象标识, value 新内容, offset 局部偏移, width 可选宽度, reflow 是否显式重排原文
 // 返回: error 校验或提交错误
-func (e *Editor) updateRichTextFrame(page int, id string, value RichText, offset, width float64) error {
+func (e *Editor) updateRichTextFrame(page int, id string, value RichText, offset, width float64, reflow bool) error {
 	return e.Transaction(func(e *Editor) error {
 		old, err := e.Object(page, id)
 		if err != nil {
 			return err
 		}
-		current, err := e.RichText(page, id)
-		if err != nil {
-			return err
-		}
-		frame, matrix, err := e.RichTextFrame(page, id)
+		current, frame, matrix, err := e.PrepareRichText(page, ObjectPath{ID: id}, reflow)
 		if err != nil {
 			return err
 		}
@@ -262,19 +258,8 @@ func (e *Editor) RichTextFrame(page int, id string) (Box, Matrix, error) {
 		return Box{}, Matrix{}, err
 	}
 	if object.Type == "TextObject" {
-		if _, err := e.promoteRichText(page, object); err != nil {
-			return Box{}, Matrix{}, err
-		}
-		frame, err := object.TextObject.TextFrame()
-		if err != nil {
-			return Box{}, Matrix{}, err
-		}
-		box, _ := creationBox(object.TextObject.Boundary)
-		dx, dy, err := e.richPlainOffset(object.TextObject)
-		if err != nil {
-			return Box{}, Matrix{}, err
-		}
-		return Box{W: frame.W, H: frame.H}, TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(object.TextObject.CTM)).Multiply(TranslationMatrix(frame.X+dx, frame.Y+dy)), nil
+		_, frame, matrix, err := e.PrepareRichText(page, ObjectPath{ID: id}, false)
+		return frame, matrix, err
 	}
 	if object.Type != "CompositeObject" {
 		return Box{}, Matrix{}, ErrNotRichText
@@ -341,6 +326,13 @@ func (e *Editor) CompositeRichText(page int, member CompositeMember) (RichText, 
 // 入参: page 页面索引, path 父路径, index 成员序号, value 富文本, offset 局部横向偏移, width 新段落宽度，零值保留
 // 返回: error 校验或提交错误
 func (e *Editor) UpdateCompositeRichText(page int, path ObjectPath, index int, value RichText, offset, width float64) error {
+	return e.updateCompositeRichText(page, path, index, value, offset, width, false)
+}
+
+// updateCompositeRichText 统一处理内部文字的安全提升与显式重排
+// 入参: page 页面索引, path 父路径, index 成员序号, value 富文本, offset 局部偏移, width 可选宽度, reflow 是否显式重排
+// 返回: error 校验或提交错误
+func (e *Editor) updateCompositeRichText(page int, path ObjectPath, index int, value RichText, offset, width float64, reflow bool) error {
 	if !finite(offset) || !finite(width) || width < 0 || width == 0 && offset != 0 {
 		return fmt.Errorf("invalid rich text frame")
 	}
@@ -350,7 +342,7 @@ func (e *Editor) UpdateCompositeRichText(page int, path ObjectPath, index int, v
 			return err
 		}
 		if member.Object.Type == "TextObject" {
-			return e.updateCompositePlainRichText(page, path, index, value, offset, width)
+			return e.updateCompositePlainRichText(page, path, index, value, offset, width, reflow)
 		}
 		var metadata richTextMetadata
 		entryIndex := -1
@@ -677,8 +669,12 @@ func (e *Editor) promoteRichText(page int, object GraphicObject) (RichText, erro
 	if err != nil {
 		return RichText{}, err
 	}
-	if origin := e.objectOrigin(object.TextObject.ID); layer.DrawParam != "" || origin != nil && !editorXMLSupported(origin.node) {
+	if origin := e.objectOrigin(object.TextObject.ID); origin != nil && !editorXMLSupported(origin.node) {
 		return RichText{}, &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("text cannot be safely promoted to rich text")}
+	}
+	object, err = e.resolveEditorStyle(object, layer.DrawParam)
+	if err != nil {
+		return RichText{}, err
 	}
 	return e.promoteTextValue(object.TextObject)
 }
@@ -693,11 +689,7 @@ func (e *Editor) promoteTextValue(t TextObject) (RichText, error) {
 	if t.DrawParam != "" || t.Clips != nil || len(t.Actions) != 0 || t.Alpha != nil && *t.Alpha != 255 || t.Visible != nil && !*t.Visible || t.Stroke != nil && *t.Stroke || t.Fill != nil && !*t.Fill || t.Decoration != "" || t.VScale != 0 || t.HScale != 0 && t.HScale != 1 || t.ReadDirection != 0 || t.CharDirection != 0 || t.Weight != 0 && t.Weight != 400 && t.Weight != 700 {
 		return unsupported()
 	}
-	frame, err := t.TextFrame()
-	if err != nil {
-		return unsupported()
-	}
-	if frame.X != 0 || frame.Y != 0 || t.CTM != "" && NewMatrix(t.CTM) != (IdentityMatrix) {
+	if _, err := t.TextFrame(); err != nil {
 		return unsupported()
 	}
 	value, layout := t.TextLayout()
@@ -713,7 +705,7 @@ func (e *Editor) promoteTextValue(t TextObject) (RichText, error) {
 		if actual.Index != "" || len(textCodeRunes(actual.Value)) != len(textCodeRunes(expected.Value)) {
 			return unsupported()
 		}
-		if actual.DeltaX != "" && !reflect.DeepEqual(parseFloatsWithG(actual.DeltaX), parseFloatsWithG(expected.DeltaX)) {
+		if !reflect.DeepEqual(parseFloatsWithG(actual.DeltaX), parseFloatsWithG(expected.DeltaX)) {
 			return unsupported()
 		}
 		for _, dy := range parseFloatsWithG(actual.DeltaY) {
@@ -745,18 +737,16 @@ func (e *Editor) promoteTextValue(t TextObject) (RichText, error) {
 	return result, result.Validate()
 }
 
-// richPlainOffset 保存可提升单行原文的基线偏移，不推断复杂定位布局
+// richPlainOffset 计算原首行相对标准排版的位移，保留既有段落和组合内基线
 // 入参: text 已校验的普通文字
 // 返回: float64 横向偏移, float64 基线偏移, error 无效坐标
 func (e *Editor) richPlainOffset(text TextObject) (float64, float64, error) {
-	if text.layout != nil {
-		return 0, 0, nil
+	if len(text.TextCode) == 0 {
+		return 0, 0, fmt.Errorf("text codes are empty")
 	}
-	if len(text.TextCode) != 1 {
-		return 0, 0, fmt.Errorf("positioned text requires explicit layout")
-	}
+	value, layout := text.TextLayout()
 	check := text
-	if err := e.LayoutText(&check, text.Text(), TextLayout{}); err != nil {
+	if err := e.LayoutText(&check, value, layout); err != nil {
 		return 0, 0, err
 	}
 	x, err := strconv.ParseFloat(text.TextCode[0].X, 64)
@@ -771,7 +761,11 @@ func (e *Editor) richPlainOffset(text TextObject) (float64, float64, error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	return x, y - baseline, nil
+	origin, err := strconv.ParseFloat(check.TextCode[0].X, 64)
+	if err != nil {
+		return 0, 0, err
+	}
+	return x - origin, y - baseline, nil
 }
 
 // copyRichTextMetadata 迁移选区及其组合、注解内部的编辑标引，复用标准内容中的字体引用
@@ -1078,49 +1072,34 @@ func (e *Editor) formatCompositeText(page int, path ObjectPath, index int, patch
 }
 
 // updateCompositePlainRichText 将可验证布局的内部文字提升为富文本并保留实例坐标
-// 入参: page 页面索引, path 父路径, index 成员序号, value 富文本内容, offset 局部偏移, width 可选宽度
+// 入参: page 页面索引, path 父路径, index 成员序号, value 富文本内容, offset 局部偏移, width 可选宽度, reflow 是否显式重排
 // 返回: error 校验或提交错误
-func (e *Editor) updateCompositePlainRichText(page int, path ObjectPath, index int, value RichText, offset, width float64) error {
+func (e *Editor) updateCompositePlainRichText(page int, path ObjectPath, index int, value RichText, offset, width float64, reflow bool) error {
+	target := ObjectPath{ID: path.ID, Annotation: path.Annotation, Children: append(slices.Clone(path.Children), index)}
+	_, frame, matrix, err := e.PrepareRichText(page, target, reflow)
+	if err != nil {
+		return err
+	}
+	matrix = matrix.Multiply(TranslationMatrix(offset, 0))
+	if width > 0 {
+		frame.W = width
+	}
 	var metadata richTextMetadata
 	if err := e.editCompositeObjects(page, path, []int{index}, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
-		node, text := nodes[0], members[0].Object.TextObject
+		node := nodes[0]
 		if node.object.Type != "TextObject" || !editorXMLSupported(node.span) {
 			return ErrNotRichText
 		}
-		text.CTM = ""
-		_, err := e.promoteTextValue(text)
-		if err != nil {
-			return err
-		}
-		if err := value.Validate(); err != nil {
-			return err
-		}
-		frame, err := text.TextFrame()
-		if err != nil {
-			return err
-		}
-		dx, dy, err := e.richPlainOffset(text)
-		if err != nil {
-			return err
-		}
-		object := node.object
-		if !node.boundaryInCTM {
-			object = compositeBoundary(object, node.parent, true)
-		}
-		box, err := creationBox(object.TextObject.Boundary)
-		if err != nil {
-			return err
-		}
-		matrix := TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(object.TextObject.CTM)).Multiply(TranslationMatrix(dx+offset, dy))
-		if width > 0 {
-			frame.W = width
+		inverse, ok := node.parent.Invert()
+		if !ok {
+			return fmt.Errorf("invalid composite parent transform")
 		}
 		next, meta, err := e.prepareRichText(Box{W: frame.W, H: frame.H}, value)
 		if err != nil {
 			return err
 		}
-		unit := richTextPlacement(meta, matrix)
-		unit.ID, unit.ResourceID = object.TextObject.ID, next.CompositeGraphicUnit.ResourceID
+		unit := richTextPlacement(meta, inverse.Multiply(matrix))
+		unit.ID, unit.ResourceID = node.object.TextObject.ID, next.CompositeGraphicUnit.ResourceID
 		next.CompositeGraphicUnit = unit
 		if !node.boundaryInCTM {
 			next = compositeBoundary(next, node.parent, false)
@@ -1141,23 +1120,91 @@ func (e *Editor) updateCompositePlainRichText(page int, path ObjectPath, index i
 // 入参: page 页面索引, path 完整对象路径
 // 返回: RichText 独立模型, error 路径或不安全提升错误
 func (e *Editor) TargetRichText(page int, path ObjectPath) (RichText, error) {
+	value, _, _, err := e.PrepareRichText(page, path, false)
+	return value, err
+}
+
+// PrepareRichText 读取独立富文本模型和局部编辑框，显式重排时保留原首行起点及页面变换
+// 入参: page 页面索引, path 完整对象路径, reflow 是否允许重排普通文字
+// 返回: RichText 内容, Box 局部编辑框, Matrix 页面变换, error 路径、外观或排版错误
+func (e *Editor) PrepareRichText(page int, path ObjectPath, reflow bool) (RichText, Box, Matrix, error) {
+	var text TextObject
+	var matrix Matrix
 	if len(path.Children) == 0 {
 		if path.Annotation != "" {
-			return RichText{}, ErrNotRichText
+			return RichText{}, Box{}, Matrix{}, ErrNotRichText
 		}
-		return e.RichText(page, path.ID)
+		object, err := e.Object(page, path.ID)
+		if err != nil {
+			return RichText{}, Box{}, Matrix{}, err
+		}
+		if object.Type != "TextObject" {
+			value, err := e.RichText(page, path.ID)
+			if err != nil {
+				return RichText{}, Box{}, Matrix{}, err
+			}
+			frame, matrix, err := e.RichTextFrame(page, path.ID)
+			return value, frame, matrix, err
+		}
+		if origin := e.objectOrigin(path.ID); origin != nil && !editorXMLSupported(origin.node) {
+			return RichText{}, Box{}, Matrix{}, ErrNotRichText
+		}
+		layer, _, err := e.findObject(page, path.ID)
+		if err != nil {
+			return RichText{}, Box{}, Matrix{}, err
+		}
+		object, err = e.resolveEditorStyle(object, layer.DrawParam)
+		if err != nil {
+			return RichText{}, Box{}, Matrix{}, err
+		}
+		text = object.TextObject
+		box, err := creationBox(text.Boundary)
+		if err != nil {
+			return RichText{}, Box{}, Matrix{}, err
+		}
+		matrix = TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(text.CTM))
+	} else {
+		index := path.Children[len(path.Children)-1]
+		path.Children = path.Children[:len(path.Children)-1]
+		member, err := e.CompositeObject(page, path, index)
+		if err != nil {
+			return RichText{}, Box{}, Matrix{}, err
+		}
+		if member.Object.Type != "TextObject" {
+			return e.CompositeRichText(page, member)
+		}
+		text, matrix = member.Object.TextObject, member.Matrix
+	}
+	frame, err := text.TextFrame()
+	if err != nil {
+		return RichText{}, Box{}, Matrix{}, err
+	}
+	dx, dy, err := e.richPlainOffset(text)
+	if err != nil {
+		return RichText{}, Box{}, Matrix{}, err
+	}
+	if reflow {
+		value, layout := text.TextLayout()
+		layout.AutoBidi = true
+		if err := e.LayoutText(&text, value, layout); err != nil {
+			return RichText{}, Box{}, Matrix{}, err
+		}
+	}
+	value, err := e.promoteTextValue(text)
+	return value, Box{W: frame.W, H: frame.H}, matrix.Multiply(TranslationMatrix(dx, dy)), err
+}
+
+// ReflowRichText 原子重排完整路径文字，保留局部宽度、页面变换及共享实例隔离
+// 入参: page 页面索引, path 完整对象路径, value 新的富文本内容
+// 返回: error 路径、排版或提交错误
+func (e *Editor) ReflowRichText(page int, path ObjectPath, value RichText) error {
+	if len(path.Children) == 0 {
+		if path.Annotation != "" {
+			return ErrNotRichText
+		}
+		return e.updateRichTextFrame(page, path.ID, value, 0, 0, true)
 	}
 	index := path.Children[len(path.Children)-1]
 	path.Children = path.Children[:len(path.Children)-1]
-	member, err := e.CompositeObject(page, path, index)
-	if err != nil {
-		return RichText{}, err
-	}
-	if member.Object.Type == "TextObject" {
-		text := member.Object.TextObject
-		text.CTM = ""
-		return e.promoteTextValue(text)
-	}
-	value, _, _, err := e.CompositeRichText(page, member)
-	return value, err
+	return e.updateCompositeRichText(page, path, index, value, 0, 0, true)
 }

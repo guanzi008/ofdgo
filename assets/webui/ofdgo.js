@@ -4142,8 +4142,8 @@ async function loadRichText(item, firstFace, tab = documentTab(), firstData = nu
 		if (tab.closed || wasmSeq !== tab.state.wasmSeq) throw new Error("文档已更改");
 		return callTabWASM(tab, name, ...args);
 	};
-	const prepared = reflow ? await callWASM("ofdgoGetRichText", item.index, item.id, true) : null;
-	const model = prepared?.model || item.richText || await callWASM("ofdgoGetRichText", item.index, item.id);
+	const prepared = item.richText ? { model: item.richText, frame: item.textFrame } : await callWASM("ofdgoGetRichText", item.index, item.id, reflow);
+	const model = prepared.model;
 	const remaining = firstData ? { ...model, runs: model.runs.filter(run => run.format.font !== item.font) } : model;
 	const fontData = remaining.runs.length ? await callWASM("ofdgoRichTextFonts", JSON.stringify(remaining)) : [];
 	const resources = new Map(fontData.map(font => [font.key, font.data]));
@@ -4155,7 +4155,7 @@ async function loadRichText(item, firstFace, tab = documentTab(), firstData = nu
 		if (tab.closed || wasmSeq !== tab.state.wasmSeq) throw new Error("文档已更改");
 		faces.set(id, face);
 	}
-	return { model, faces, resources, frame: prepared?.frame };
+	return { model, faces, resources, frame: prepared.frame, reflow };
 }
 
 async function ensureRichInput(reflow = false) {
@@ -4256,7 +4256,7 @@ async function validateRichText(item, model, width, fonts = []) {
 async function saveRichText(item, model, fonts = [], box = item) {
 	const tab = documentTab(), openSeq = state.openSeq, wasmSeq = state.wasmSeq;
 	const boundary = { x: box.x, y: box.y, width: box.width, height: box.height };
-	if (item.richReflow) { boundary.reflow = true; boundary.width = item.textFrame.width; }
+	if (item.richReflow) boundary.reflow = true;
 	if (box.frameWidth !== undefined) Object.assign(boundary, { frameWidth: box.frameWidth, frameOffset: box.frameOffset || 0 });
 	fonts = await validateRichText(item, model, box.frameWidth ?? item.textFrame?.width ?? item.width, fonts);
 	if (tab.closed || !isForegroundDocument(tab) || tab.state.openSeq !== openSeq || tab.state.wasmSeq !== wasmSeq) return false;

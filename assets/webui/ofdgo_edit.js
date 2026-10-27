@@ -1958,12 +1958,10 @@ export class CanvasEditor {
 		const value = editTextValue(editing.input);
 		const session = new RichTextSession(this, rich.model, rich.faces, rich.fonts, rich.resources);
 		const base = { ...session.typing }, fonts = new Map();
-		const scale = rich.frame ? sourceTextScale(editing) : 1;
 		const current = { value, style: editing.style, face: editing.face, fontData: editing.fontData, fontChoice: editing.fontChoice, caret };
 		const values = editing.history ? editing.history.entries.slice(0, editing.history.index + 1) : [{ value: editing.item.text }];
 		for (const entry of [...values, current]) {
 			const format = { ...base, ...entry.style };
-			if (entry.style?.size) format.size *= scale;
 			if (entry.fontData) {
 				let key = fonts.get(entry.fontData);
 				if (!key) {
@@ -1982,7 +1980,7 @@ export class CanvasEditor {
 		}
 		if (rich.frame) {
 			editing.frame = rich.frame;
-			editing.item = { ...editing.item, richReflow: true, textFrame: rich.frame };
+			editing.item = { ...editing.item, richReflow: rich.reflow, textFrame: rich.frame };
 			Object.assign(editing.input.style, { whiteSpace: rich.model.layout.wrap ? "pre-wrap" : "pre", textIndent: "0px", letterSpacing: "0px" });
 		}
 		editing.rich = session;
