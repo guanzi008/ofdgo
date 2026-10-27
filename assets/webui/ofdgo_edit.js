@@ -1929,13 +1929,7 @@ export class CanvasEditor {
 		const { input, frame, item, rich } = editing;
 		const layout = rich?.model.layout || item;
 		const width = Math.max(0, frame.width - (layout.leftIndent || 0) - (layout.rightIndent || 0)) * PX_PER_MM + 4;
-		const autoWidth = (!layout.align || layout.align === "left") && !rich?.model.paragraphs?.some(paragraph => paragraph.align && paragraph.align !== "left");
-		Object.assign(input.style, {
-			width: autoWidth ? "max-content" : `${width}px`,
-			maxWidth: layout.wrap ? `${width}px` : "none",
-			minWidth: `${Math.min(width, (rich?.typing.size || editing.style?.size || item.size) * PX_PER_MM + 4)}px`,
-			minHeight: "0px", height: "auto",
-		});
+		Object.assign(input.style, { width: `${width}px`, minHeight: "0px", height: "auto" });
 	}
 
 	setTextError(error) {
