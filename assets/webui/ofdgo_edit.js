@@ -390,7 +390,10 @@ export class RichTextSession {
 	}
 	render() {
 		this.rendering = true;
-		const input = this.editing.input, lines = [[]], positions = [];
+		const input = this.editing.input, layout = this.model.layout, lines = [[]], positions = [];
+		Object.assign(input.style, { whiteSpace: layout.wrap ? "pre-wrap" : "pre",
+			lineHeight: layout.lineHeight ? `${layout.lineHeight * PX_PER_MM}px` : "normal",
+			textIndent: `${(layout.firstLineIndent || 0) * PX_PER_MM}px`, letterSpacing: `${(layout.letterSpacing || 0) * PX_PER_MM}px` });
 		for (const run of this.model.runs) {
 			const pieces = run.text.split("\n");
 			for (let i = 0; i < pieces.length; i++) {
@@ -405,7 +408,7 @@ export class RichTextSession {
 		this.renderedLines = lines.map((parts, index) => {
 			const align = this.model.paragraphs?.[index]?.align || this.model.layout.align || "left";
 			const distribute = align === "distributed" && !CSS.supports("text-justify", "inter-character");
-			const key = JSON.stringify([parts.map(part => [part.text, part.format, this.faces.get(part.format.font)?.family]), align, distribute ? input.offsetWidth : null]);
+			const key = JSON.stringify([parts.map(part => [part.text, part.format, this.faces.get(part.format.font)?.family]), align, layout, distribute ? input.offsetWidth : null]);
 			let paragraph = previous[index]?.key === key && previous[index].node.parentNode === input ? previous[index].node : null;
 			if (!paragraph) {
 				paragraph = document.createElement("div");
@@ -422,7 +425,7 @@ export class RichTextSession {
 					paragraph.style.fontSize = paragraph.firstElementChild.style.fontSize;
 					paragraph.append(document.createElement("br"));
 				}
-				Object.assign(paragraph.style, { textAlign: distribute ? "left" : align === "distributed" ? "justify" : align,
+				Object.assign(paragraph.style, { minWidth: layout.wrap ? "" : "max-content", textAlign: distribute ? "left" : align === "distributed" ? "justify" : align,
 					textAlignLast: !distribute && align === "distributed" ? "justify" : "auto", textJustify: align === "distributed" ? "inter-character" : "auto" });
 				if (distribute) distributeParagraph(input, paragraph);
 			}
@@ -1793,7 +1796,6 @@ export class CanvasEditor {
 			editing.selectionListener = () => this.paintSourceSelection();
 			document.addEventListener("selectionchange", editing.selectionListener);
 		}
-		if (rich && !rich.model.layout.lineHeight) input.style.lineHeight = "normal";
 		if (source) editing.history = { entries: [{ value: item.text, face, fontChoice: item.fontChoice }], index: 0 };
 		item.artwork?.classList.add("edit-text-source");
 		item.node.classList.add("edit-text-source");
@@ -1981,7 +1983,6 @@ export class CanvasEditor {
 		if (rich.frame) {
 			editing.frame = rich.frame;
 			editing.item = { ...editing.item, richReflow: rich.reflow, textFrame: rich.frame };
-			Object.assign(editing.input.style, { whiteSpace: rich.model.layout.wrap ? "pre-wrap" : "pre", textIndent: "0px", letterSpacing: "0px" });
 		}
 		editing.rich = session;
 		editing.source = false;
@@ -1990,7 +1991,6 @@ export class CanvasEditor {
 		editing.range = null;
 		const [a, b, c, d, e, f] = editing.frame.matrix, left = rich.model.layout.leftIndent || 0;
 		editing.input.style.transform = `matrix(${a},${b},${c},${d},${(e + a * left) * PX_PER_MM},${(f + b * left) * PX_PER_MM})`;
-		if (!rich.model.layout.lineHeight) editing.input.style.lineHeight = "normal";
 		session.render();
 		session.preview();
 		this.options.onTextChange();
