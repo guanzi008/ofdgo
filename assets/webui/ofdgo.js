@@ -4314,7 +4314,7 @@ async function beginCanvasText(index, box, surface, page) {
 		const node = document.createElement("div");
 		const item = { ...state.textDefaults, ...box, wrap: state.textDefaults.wrapOverride ?? box.wrap ?? state.textDefaults.wrap,
 			index, page, surface, node, text: "", draft: true, fontData: data };
-		const model = richTextModel(item);
+		const model = { ...richTextModel(item), autoWidth: !box.wrap };
 		const key = `temp-font-${crypto.randomUUID()}`;
 		model.runs[0].format.font = key;
 		canvasEditor.editText(item, face, null, { model, faces: new Map([[key, face]]), fonts: [{ key, data }] });

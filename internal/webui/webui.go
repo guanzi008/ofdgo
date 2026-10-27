@@ -5071,7 +5071,7 @@ func (e *businessEngine) browserRichText(value ofdgo.RichText) map[string]any {
 		paragraphs[i] = map[string]any{"align": paragraph.Align}
 	}
 	layout := value.Layout
-	return map[string]any{"runs": runs, "paragraphs": paragraphs, "layout": map[string]any{
+	return map[string]any{"autoWidth": value.AutoWidth, "runs": runs, "paragraphs": paragraphs, "layout": map[string]any{
 		"autoBidi": layout.AutoBidi, "shape": layout.Shape,
 		"shaping": map[string]any{
 			"Bidi": layout.Shaping.Bidi, "Direction": layout.Shaping.Direction,

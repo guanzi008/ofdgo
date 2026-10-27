@@ -134,6 +134,9 @@ func (e *Editor) updateRichTextFrame(page int, id string, value RichText, offset
 		if err := value.Validate(); err != nil {
 			return err
 		}
+		if width > 0 {
+			value.AutoWidth = false
+		}
 		if old.Type == "CompositeObject" && offset == 0 && (width == 0 || width == frame.W) && reflect.DeepEqual(normalizeRichText(current), normalizeRichText(value)) {
 			return nil
 		}
@@ -356,6 +359,9 @@ func (e *Editor) updateCompositeRichText(page int, path ObjectPath, index int, v
 			if err := value.Validate(); err != nil {
 				return err
 			}
+			if width > 0 {
+				value.AutoWidth = false
+			}
 			if offset == 0 && (width == 0 || width == frame.W) && reflect.DeepEqual(normalizeRichText(current), normalizeRichText(value)) {
 				return nil
 			}
@@ -459,6 +465,10 @@ func (e *Editor) prepareRichText(box Box, value RichText) (GraphicObject, richTe
 	result, err := e.layoutRichText(value, box.W)
 	if err != nil {
 		return GraphicObject{}, richTextMetadata{}, err
+	}
+	box.W = result.width
+	if value.AutoWidth && !value.Layout.Wrap {
+		box.H = result.bounds.Y + result.bounds.H
 	}
 	padX, padY := -min(0, result.bounds.X), -min(0, result.bounds.Y)
 	extent := Box{W: max(box.W, result.bounds.X+result.bounds.W) + padX, H: max(box.H, result.bounds.Y+result.bounds.H) + padY}

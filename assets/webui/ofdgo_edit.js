@@ -390,7 +390,8 @@ export class RichTextSession {
 	}
 	render() {
 		this.rendering = true;
-		const input = this.editing.input, layout = this.model.layout, lines = [[]], positions = [];
+		const input = this.editing.input, layout = this.model.layout, lines = [[]], positions = [], distributed = [];
+		const autoWidth = this.model.autoWidth && !layout.wrap;
 		Object.assign(input.style, { whiteSpace: layout.wrap ? "pre-wrap" : "pre",
 			lineHeight: layout.lineHeight ? `${layout.lineHeight * PX_PER_MM}px` : "normal",
 			textIndent: `${(layout.firstLineIndent || 0) * PX_PER_MM}px`, letterSpacing: `${(layout.letterSpacing || 0) * PX_PER_MM}px` });
@@ -409,7 +410,7 @@ export class RichTextSession {
 			const align = this.model.paragraphs?.[index]?.align || this.model.layout.align || "left";
 			const distribute = align === "distributed" && !CSS.supports("text-justify", "inter-character");
 			const key = JSON.stringify([parts.map(part => [part.text, part.format, this.faces.get(part.format.font)?.family]), align, layout, distribute ? input.offsetWidth : null]);
-			let paragraph = previous[index]?.key === key && previous[index].node.parentNode === input ? previous[index].node : null;
+			let paragraph = (!autoWidth || !distribute) && previous[index]?.key === key && previous[index].node.parentNode === input ? previous[index].node : null;
 			if (!paragraph) {
 				paragraph = document.createElement("div");
 				for (const {text, format} of parts) {
@@ -427,9 +428,15 @@ export class RichTextSession {
 				}
 				Object.assign(paragraph.style, { minWidth: layout.wrap ? "" : "max-content", textAlign: distribute ? "left" : align === "distributed" ? "justify" : align,
 					textAlignLast: !distribute && align === "distributed" ? "justify" : "auto", textJustify: align === "distributed" ? "inter-character" : "auto" });
-				if (distribute) distributeParagraph(input, paragraph);
 			}
+			if (distribute && (autoWidth || previous[index]?.node !== paragraph)) distributed.push(paragraph);
 			if (input.childNodes[index] !== paragraph) input.insertBefore(paragraph, input.childNodes[index] || null);
+			return { key, node: paragraph };
+		});
+		while (input.childNodes.length > lines.length) input.lastChild.remove();
+		if (autoWidth) input.style.width = getComputedStyle(input).width;
+		for (const paragraph of distributed) distributeParagraph(input, paragraph);
+		for (const [index, paragraph] of [...input.children].entries()) {
 			if (index) offset++;
 			const walker = document.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT);
 			let node;
@@ -437,9 +444,7 @@ export class RichTextSession {
 				positions.push({ node, start: offset, end: offset + node.textContent.length });
 				offset += node.textContent.length;
 			}
-			return { key, node: paragraph };
-		});
-		while (input.childNodes.length > lines.length) input.lastChild.remove();
+		}
 		input.style.fontSize = this.model.runs.length ? "0px" : `${this.typing.size * PX_PER_MM}px`;
 		input.style.caretColor = this.typing.color || "#000000";
 		this.editing.range = null;
@@ -1929,7 +1934,7 @@ export class CanvasEditor {
 		const { input, frame, item, rich } = editing;
 		const layout = rich?.model.layout || item;
 		const width = Math.max(0, frame.width - (layout.leftIndent || 0) - (layout.rightIndent || 0)) * PX_PER_MM + 4;
-		Object.assign(input.style, { width: `${width}px`, minHeight: "0px", height: "auto" });
+		Object.assign(input.style, { width: rich?.model.autoWidth && !layout.wrap ? "max-content" : `${width}px`, minWidth: "4px", minHeight: "0px", height: "auto" });
 	}
 
 	setTextError(error) {

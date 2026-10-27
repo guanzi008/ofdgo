@@ -31,6 +31,7 @@ import (
 
 // richLayout 保存局部标准对象、含墨迹的边界及各片段的字体锚点序号
 type richLayout struct {
+	width   float64
 	objects []GraphicObject
 	bounds  Box
 	anchors []int
@@ -124,6 +125,38 @@ func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, erro
 	}
 	chars := []rune(value.Text())
 	var face *typefont.Face
+	if value.AutoWidth && !options.Wrap {
+		width = max(1, options.LeftIndent+options.RightIndent+max(0, options.FirstLineIndent)+1)
+		for start := 0; start <= len(chars); {
+			end := start
+			for end < len(chars) && chars[end] != '\n' {
+				end++
+			}
+			paragraph := chars[start:end]
+			local := richParagraphOptions(paragraph, options)
+			if local.Shaping.Bidi && face == nil && len(paragraph) > 0 {
+				face, err = typefont.ParseTTF(bytes.NewReader(metrics[owners[start]].font.Write()))
+				if err != nil {
+					return richLayout{}, err
+				}
+			}
+			_, advances, err := richShapeLine(paragraph, owners[start:end], value, metrics, local, face)
+			if err != nil {
+				return richLayout{}, err
+			}
+			length := 0.0
+			for _, advance := range advances {
+				length += advance
+			}
+			width = max(width, local.LeftIndent+local.RightIndent+local.FirstLineIndent+length)
+			if end == len(chars) {
+				break
+			}
+			start = end + 1
+		}
+		available = width - options.LeftIndent - options.RightIndent
+	}
+	result.width = width
 	var underlays []GraphicObject
 	var shadows []GraphicObject
 	var y float64

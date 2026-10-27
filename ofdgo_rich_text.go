@@ -30,7 +30,9 @@ var ErrNotRichText = errors.New("object is not rich text")
 
 // RichText 保存有序文字片段及段落选项，长度和范围使用Unicode码点而非字节
 // Paragraphs为空时所有段落沿用Layout，否则数量必须与LF分隔的段落一致
+// AutoWidth在不折行时按各段自然宽度确定文本框，指定宽度调整后关闭
 type RichText struct {
+	AutoWidth  bool                `json:"autoWidth,omitempty"`
 	Runs       []RichTextRun       `json:"runs"`
 	Layout     TextLayout          `json:"layout"`
 	Paragraphs []RichTextParagraph `json:"paragraphs,omitempty"`
