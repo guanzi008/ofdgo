@@ -705,7 +705,7 @@ el.editorTools.addEventListener("scroll", () => fontPicker.position());
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	textControls: [el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.saveAsButton, el.fontInput, document.querySelector("#textReflow")],
 	keepTextFocus: () => fontPicker.open || el.closePanel.open || canvasEditor.input?.fontDialog,
-	textClipboardScope: () => `${documentTab().id}:${state.wasmSeq}:${state.fileName}:${state.doc?.documents?.[state.doc.documentIndex || 0]?.root}:${state.doc?.documentIndex || 0}:${state.doc?.documentVersion || ""}:${state.editorInfo?.revision ?? ""}`,
+	textClipboardScope: () => `${documentTab().id}:${documentContentKey(state)}:${state.editorInfo?.revision ?? ""}`,
 	getTextClipboard: () => workspace.textClipboard,
 	setTextClipboard: clipboard => { workspace.textClipboard = clipboard; },
 	scrollBy: (x, y) => { el.viewerPanel.scrollLeft += x; pageView.scrollViewerBy(y); },
@@ -3384,6 +3384,11 @@ function managedDocumentIndex() {
 
 function documentEntryKey(entry) {
 	return JSON.stringify([entry?.root, entry?.id]);
+}
+
+function documentContentKey(state) {
+	const index = state.doc?.documentIndex || 0;
+	return JSON.stringify([state.wasmSeq, index, documentEntryKey(state.doc?.documents?.[index]), state.doc?.documentVersion || ""]);
 }
 
 async function openDocumentManagement() {
@@ -8512,7 +8517,7 @@ async function resumeDocumentPanels(tab) {
 }
 
 function documentPanelScope(state) {
-	return JSON.stringify([state.doc?.documentIndex || 0, state.doc?.documentVersion || "", state.editorInfo?.revision ?? null]);
+	return JSON.stringify([documentContentKey(state), state.editorInfo?.revision ?? null]);
 }
 
 function renderResourceTabs() {
@@ -8578,7 +8583,7 @@ async function loadManagedResources(tab = documentTab()) {
 	const state = tab.state, resourceManager = tab.resources;
 	const sequence = state.openSeq;
 	const manager = resourceManager;
-	const scope = JSON.stringify([tab.id, state.doc.documentIndex || 0, state.doc.documentVersion || "", state.editing]);
+	const scope = JSON.stringify([tab.id, documentContentKey(state), state.editing]);
 	if (resourceManager.scope === scope) {
 		if (isForegroundDocument(tab)) rememberResourceView();
 	}
@@ -10515,7 +10520,7 @@ function copyEditorSelection(event) {
 		return true;
 	}
 	const index = items[0].index, ids = items.map(item => item.id);
-	const clipboard = { tab, token: crypto.randomUUID(), source: `${tab.id}:${state.wasmSeq}:${state.doc.documentIndex || 0}:${state.doc.documentVersion || ""}`, page: state.doc.pages[index].id, bounds: selectionBounds(items), x: 0, y: 0, cut };
+	const clipboard = { tab, token: crypto.randomUUID(), source: `${tab.id}:${documentContentKey(state)}`, page: state.doc.pages[index].id, bounds: selectionBounds(items), x: 0, y: 0, cut };
 	if (canvasEditor.nudge) {
 		clipboard.bounds.x += canvasEditor.nudge.x;
 		clipboard.bounds.y += canvasEditor.nudge.y;
@@ -10531,7 +10536,7 @@ function copyEditorSelection(event) {
 	}).catch(() => {});
 	const capture = () => {
 		if (tab.closed || !state.editing || workspace.objectClipboard !== clipboard || state.objectClipboardToken !== clipboard.token
-			|| clipboard.source !== `${tab.id}:${state.wasmSeq}:${state.doc.documentIndex || 0}:${state.doc.documentVersion || ""}`
+			|| clipboard.source !== `${tab.id}:${documentContentKey(state)}`
 			|| state.doc.pages[index]?.id !== clipboard.page) return false;
 		const openSeq = state.openSeq, revision = state.editorInfo.revision;
 		return callTabWASM(tab, "ofdgoCaptureObjects", index, ids, clipboard.token).then(async () => {
@@ -10596,14 +10601,14 @@ async function pasteEditorContent(event) {
 			setStatus("复制内容已失效，请重新复制");
 			return;
 		}
-		const openSeq = state.openSeq, identity = `${state.wasmSeq}:${state.doc.documentIndex || 0}:${state.doc.documentVersion || ""}`;
+		const openSeq = state.openSeq, identity = documentContentKey(state);
 		const local = state.objectClipboardToken === clipboard.token;
 		if (!await (local ? clipboard.ready : prepareObjectClipboard(clipboard, tab)) || !isForegroundDocument(tab) || openSeq !== state.openSeq || index !== state.pageIndex || workspace.objectClipboard !== clipboard) return;
-		if (identity !== `${state.wasmSeq}:${state.doc.documentIndex || 0}:${state.doc.documentVersion || ""}` || local && state.objectClipboardToken !== clipboard.token) return;
+		if (identity !== documentContentKey(state) || local && state.objectClipboardToken !== clipboard.token) return;
 		if (!state.editing || formDialogOpen() || document.body.hasAttribute("data-busy") || canvasEditor.input || canvasEditor.crop || canvasEditor.drag || canvasEditor.nudge || canvasEditor.nudgeCommit) return;
 		if (!pageCan("insert")) return;
 		const visible = visiblePageBounds(index), bounds = clipboard.bounds;
-		const target = `${tab.id}:${state.wasmSeq}:${state.doc.documentIndex || 0}:${state.doc.documentVersion || ""}`;
+		const target = `${tab.id}:${documentContentKey(state)}`;
 		const offset = (clipboard.target || clipboard.source) === target && (clipboard.targetPage || clipboard.page) === page.id ? { x: clipboard.x + (clipboard.cut ? 0 : 3), y: clipboard.y + (clipboard.cut ? 0 : 3) } : { x: 0, y: 0 };
 		for (const [axis, size] of [["x", "width"], ["y", "height"]]) {
 			const position = bounds[axis] + offset[axis];
