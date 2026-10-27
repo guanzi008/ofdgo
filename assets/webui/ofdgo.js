@@ -42,7 +42,7 @@ let credentialRequest = null;
 let documentDialogs = null;
 let cancelPageTouch = null;
 
-const workspace = { tabs: [], active: null, sequence: 0, nextID: 0, switching: false, closing: false, objectClipboard: null };
+const workspace = { tabs: [], active: null, sequence: 0, nextID: 0, switching: false, closing: false, objectClipboard: null, textClipboard: null };
 
 function createResourceManager() {
 	return { kind: "Font", scope: "", views: new Map(), items: [], filteredItems: [], start: -1, end: -1, selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
@@ -125,6 +125,8 @@ function createDocumentState() {
 		searchMatches: [],
 		searchIndex: -1,
 		searchRunning: false,
+		searchNext: 0,
+		searchPaused: false,
 		searchTruncated: false,
 		navigationScroll: new Map(),
 		fontSyncPending: false,
@@ -703,7 +705,10 @@ el.editorTools.addEventListener("scroll", () => fontPicker.position());
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	textControls: [el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.saveAsButton, el.fontInput, document.querySelector("#textReflow")],
 	keepTextFocus: () => fontPicker.open || el.closePanel.open || canvasEditor.input?.fontDialog,
-	textClipboardScope: () => `${state.wasmSeq}:${state.fileName}:${state.doc?.documents?.[state.doc.documentIndex || 0]?.root}:${state.doc?.documentIndex || 0}:${state.doc?.documentVersion || ""}`,
+	textClipboardScope: () => `${documentTab().id}:${state.wasmSeq}:${state.fileName}:${state.doc?.documents?.[state.doc.documentIndex || 0]?.root}:${state.doc?.documentIndex || 0}:${state.doc?.documentVersion || ""}`,
+	getTextClipboard: () => workspace.textClipboard,
+	setTextClipboard: clipboard => { workspace.textClipboard = clipboard; },
+	scrollBy: (x, y) => { el.viewerPanel.scrollLeft += x; pageView.scrollViewerBy(y); },
 	busy: () => document.body.hasAttribute("data-busy"),
 	rotation: () => state.rotation,
 	canInsert: (index) => pageCan("insert", index),
@@ -2782,10 +2787,10 @@ function detachDocumentView() {
 	tab.view = { anchor: state.doc ? pageView.scaleAnchor() : null, navigation: el.navigationTabs.querySelector('[data-selected="true"]'),
 		navigationTop: el.navigationContent.scrollTop, metaTop: el.metaPanel.scrollTop, tool: canvasEditor.tool,
 		selection: selection ? {index: selection.index, ids: (selection.items || [selection]).map(item => item.id)} : canvasEditor.pendingSelection,
-		richClipboard: canvasEditor.richClipboard, search: el.searchInput.value };
+		search: el.searchInput.value };
 	tab.view.searchStatus = state.searchRunning ? "搜索已暂停" : el.searchStatus.textContent;
 	if (state.searchRunning) {
-		state.searchQuery = "";
+		state.searchPaused = true;
 		state.searchSeq++;
 		state.searchRunning = false;
 	}
@@ -2855,7 +2860,6 @@ function attachDocumentTab(tab) {
 	el.searchResults.replaceChildren();
 	renderSearchResults();
 	el.ofdInput.value = "";
-	canvasEditor.richClipboard = tab.view?.richClipboard || null;
 	canvasEditor.pendingSelection = tab.view?.selection || null;
 	documentDialogs?.setOwner(tab);
 	workspace.resourceView = resourceElements.Panel.open ? resourceManager : null;
@@ -2904,6 +2908,15 @@ async function activateDocumentTab(tab, closing = false) {
 	}
 }
 
+async function refreshDocumentTab(tab) {
+	tab.refreshPending = true;
+	updateWorkspaceDirty();
+	if (isForegroundDocument(tab)) {
+		advanceDocumentSequence();
+		await mountDocumentTab(tab);
+	}
+}
+
 async function mountDocumentTab(tab) {
 	if (!isForegroundDocument(tab)) return;
 	const state = tab.state;
@@ -2933,11 +2946,19 @@ async function mountDocumentTab(tab) {
 			tab.configurePending = false;
 		}
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
+		if (tab.refreshPending) {
+			state.objectClipboardToken = state.styleClipboard = null;
+			state.pageSelection.clear();
+			state.pageSelectionAnchor = null;
+			state.documentSelection = null;
+			canvasEditor.pendingSelection = null;
+		}
 		await openDocument({ doc: state.wasmExited ? undefined : state.doc, pageIndex: state.pageIndex, fitMode: state.fitMode || "free", scale: state.scale,
-			skipAutoFonts: !tab.initialLoad, keepSearch: true, keepCache: true, restoreTab: !tab.initialLoad, resetScroll: Boolean(tab.initialLoad), openSeq });
+			skipAutoFonts: !tab.initialLoad, keepSearch: !tab.refreshPending, keepCache: !tab.refreshPending, restoreTab: !tab.initialLoad, resetScroll: Boolean(tab.initialLoad), openSeq });
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
 		tab.configurePending = false;
 		tab.initialLoad = false;
+		tab.refreshPending = false;
 		if (view?.anchor) pageView.restoreScaleAnchor(view.anchor);
 		showNavigation(view?.navigation || el.pagesTab);
 		el.navigationContent.scrollTop = view?.navigationTop || 0;
@@ -2957,6 +2978,7 @@ async function mountDocumentTab(tab) {
 	setStatus(tab.status);
 	setBusy(Boolean(tab.opening || tab.editTask || tab.state.exporting), tab.progress?.text || "", tab.progress?.percent ?? null, tab.status, tab);
 	if (documentDialogs) await resumeDocumentPanels(tab);
+	if (isForegroundDocument(tab) && state.searchPaused && !tab.busy) searchDocument();
 }
 
 async function releaseDocumentTab(tab) {
@@ -3266,11 +3288,9 @@ async function switchReadingVersion(id) {
 			state.pageCache.clear();
 			state.pageIndex = 0;
 			tab.view = null;
-			tab.refreshPending = true;
-			updateWorkspaceDirty();
+			await refreshDocumentTab(tab);
 			return true;
 		}
-		canvasEditor.richClipboard = null;
 		canvasEditor.clear();
 		canvasEditor.setTool("");
 		updateTextFonts(null, true);
@@ -3490,12 +3510,10 @@ async function switchDocument(index) {
 			state.pageCache.clear();
 			state.pageIndex = 0;
 			tab.view = null;
-			tab.refreshPending = true;
-			updateWorkspaceDirty();
+			await refreshDocumentTab(tab);
 			if (nativeHost) await nativeHost.release(source);
 			return;
 		}
-		canvasEditor.richClipboard = null;
 		canvasEditor.clear();
 		canvasEditor.setTool("");
 		updateTextFonts(null, true);
@@ -3598,7 +3616,7 @@ async function toggleEditor() {
 			state.conversionWarnings = [];
 			state.objectClipboardToken = state.styleClipboard = null;
 			state.pageCache.clear();
-			tab.refreshPending = true;
+			await refreshDocumentTab(tab);
 			return;
 		}
 		openSeq = advanceDocumentSequence();
@@ -3610,7 +3628,6 @@ async function toggleEditor() {
 		state.conversionWarnings = [];
 		state.objectClipboardToken = null;
 		state.styleClipboard = null;
-		canvasEditor.richClipboard = null;
 		canvasEditor.clear();
 		pageView.setPan(false);
 		await openDocument({ doc, openSeq, skipAutoFonts: true, pageIndex, fitMode, scale,
@@ -3943,9 +3960,9 @@ async function editCanvasObject(item, point = null) {
 		await face.load();
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
 		let rich = null;
-		if (item.richText) rich = await loadRichText(item, face, tab);
+		if (item.richText) rich = await loadRichText(item, face, tab, data.bytes);
 		else if (!item.scoped && layoutKnown) {
-			try { rich = await loadRichText(item, face, tab); } catch {}
+			try { rich = await loadRichText(item, face, tab, data.bytes); } catch {}
 		}
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
 		const source = rich || layoutKnown ? null : await callWASM("ofdgoPreviewText", item.index, item.id, item.text);
@@ -4112,21 +4129,25 @@ function currentTextStyle() {
 	return canvasEditor.input?.style ? { ...text, ...canvasEditor.input.style } : text;
 }
 
-async function loadRichText(item, firstFace, tab = documentTab()) {
+async function loadRichText(item, firstFace, tab = documentTab(), firstData = null) {
 	const wasmSeq = tab.state.wasmSeq;
 	const callWASM = (name, ...args) => {
 		if (tab.closed || wasmSeq !== tab.state.wasmSeq) throw new Error("文档已更改");
 		return callTabWASM(tab, name, ...args);
 	};
 	const model = item.richText || await callWASM("ofdgoGetRichText", item.index, item.id);
+	const remaining = firstData ? { ...model, runs: model.runs.filter(run => run.format.font !== item.font) } : model;
+	const fontData = remaining.runs.length ? await callWASM("ofdgoRichTextFonts", JSON.stringify(remaining)) : [];
+	const resources = new Map(fontData.map(font => [font.key, font.data]));
+	if (firstData) resources.set(item.font, firstData);
 	const faces = new Map();
 	for (const id of new Set(model.runs.map(run => run.format.font))) {
-		const data = id === item.font && firstFace ? null : (await callWASM("ofdgoEditorFont", id)).bytes;
-		const face = data ? await new FontFace(`ofdgo-rich-${id}`, data, fontFaceStyle(data)).load() : firstFace;
+		const data = id === item.font && firstFace ? null : resources.get(id);
+		const face = data ? await new FontFace(`ofdgo-rich-${crypto.randomUUID()}`, data, fontFaceStyle(data)).load() : firstFace;
 		if (tab.closed || wasmSeq !== tab.state.wasmSeq) throw new Error("文档已更改");
 		faces.set(id, face);
 	}
-	return { model, faces };
+	return { model, faces, resources };
 }
 
 async function ensureRichInput() {
@@ -4482,8 +4503,7 @@ async function insertObject(event) {
 				pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
 			state.dirty = state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision;
 			state.pageCache.clear();
-			tab.refreshPending = true;
-			updateWorkspaceDirty();
+			await refreshDocumentTab(tab);
 			return;
 		}
 		el.insertPanel.close();
@@ -4701,7 +4721,6 @@ async function changeDocument(name, item, ...args) {
 	const originalDocument = state.doc;
 	const before = editorLocation(), revision = state.editorInfo.revision;
 	const restoring = name === "ofdgoUndo" || name === "ofdgoRedo";
-	if (restoring) canvasEditor.richClipboard = null;
 	const { scrollLeft, scrollTop } = el.viewerPanel;
 	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages" || name === "ofdgoImportDocuments";
 	const changingFont = name === "ofdgoChangeFontBinding";
@@ -4755,8 +4774,7 @@ async function changeDocument(name, item, ...args) {
 					pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
 				tab.state.dirty = state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision;
 				tab.state.pageCache.clear();
-				tab.refreshPending = true;
-				updateWorkspaceDirty();
+				await refreshDocumentTab(tab);
 			}
 			return;
 		}
@@ -4789,7 +4807,6 @@ async function changeDocument(name, item, ...args) {
 				state.documentManagement.key = documentEntryKey(nextDocument);
 			}
 			state.objectClipboardToken = state.styleClipboard = null;
-			canvasEditor.richClipboard = null;
 			state.pageSelection.clear();
 			state.pageSelectionAnchor = null;
 			state.pageMultiSelect = false;
@@ -10813,6 +10830,8 @@ function resetSearch(clearInput = true) {
 	for (const [id, request] of wasmRequests) if (request.tab === documentTab() && request.name === "ofdgoSearchPage") cancelOperation(id);
 	state.searchTruncated = false;
 	state.searchRunning = false;
+	state.searchNext = 0;
+	state.searchPaused = false;
 	state.searchSeq += 1;
 	state.searchQuery = "";
 	state.searchMatches = [];
@@ -10868,11 +10887,11 @@ async function searchDocument() {
 		return;
 	}
 	const query = el.searchInput.value.trim();
-	if (query && query === state.searchQuery) {
+	if (query && query === state.searchQuery && (state.searchRunning || state.searchTruncated || state.searchNext >= state.doc.pageCount)) {
 		await selectSearchMatch(state.searchIndex + 1);
 		return;
 	}
-	resetSearch(false);
+	if (query !== state.searchQuery) resetSearch(false);
 	if (!query) {
 		return;
 	}
@@ -10882,13 +10901,15 @@ async function searchDocument() {
 	const pageCount = state.doc.pageCount;
 	const target = state;
 	target.searchRunning = true;
+	target.searchPaused = false;
 	try {
-		for (let page = 0; page < pageCount; page += 1) {
+		for (let page = target.searchNext; page < pageCount; page += 1) {
 			const matches = await callWASM("ofdgoSearchPage", page, query, SEARCH_MATCH_LIMIT - target.searchMatches.length + 1);
 			if (target !== state || seq !== target.searchSeq || openSeq !== target.openSeq) {
 				return;
 			}
 			el.searchStatus.textContent = `正在搜索文字 · ${page + 1} / ${pageCount} 页`;
+			target.searchNext = page + 1;
 			if (!matches?.length) {
 				continue;
 			}
@@ -10905,7 +10926,6 @@ async function searchDocument() {
 		}
 	} catch (err) {
 		if (target === state && seq === target.searchSeq && openSeq === target.openSeq) {
-			state.searchQuery = "";
 			el.searchStatus.textContent = "搜索失败";
 			showError(err, false);
 		}

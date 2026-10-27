@@ -5018,6 +5018,32 @@ func (e *businessEngine) getRichText(args []platformValue) (any, error) {
 	return e.browserRichText(value), nil
 }
 
+// richTextFonts 提供跨文档文字复制所需的独立字体数据
+// 入参: args 富文本JSON
+// 返回: any 字体集合, error 读取错误
+func (e *businessEngine) richTextFonts(args []platformValue) (any, error) {
+	if e.currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	value, err := e.readRichText(args[0])
+	if err != nil {
+		return nil, err
+	}
+	fonts, err := e.currentEditor.RichTextFonts(value)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]any, 0, len(fonts))
+	for key, data := range fonts {
+		_, data, _, _, err = ofdgo.FixFontDataAggressive(data, false, false)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, map[string]any{"key": key, "data": bytesToJS(data)})
+	}
+	return successResult(result), nil
+}
+
 // browserRichText 提供独立富文本快照和浏览器颜色，不改变库层样式
 // 入参: value 库层富文本
 // 返回: map[string]any 文字分段和段落选项
@@ -5159,35 +5185,24 @@ func (e *businessEngine) importRichTextFonts(value *ofdgo.RichText, fonts platfo
 	if fonts.IsNull() || fonts.IsUndefined() {
 		return nil
 	}
-	registered := make(map[string]string)
+	data := make(map[string][]byte)
 	for i := 0; i < fonts.Length(); i++ {
 		entry := fonts.Index(i)
 		key := entry.Get("key").String()
-		if key == "" || registered[key] != "" {
+		if key == "" || data[key] != nil {
 			return fmt.Errorf("invalid rich text font key")
 		}
-		used := false
-		for _, run := range value.Runs {
-			used = used || run.Format.Font == key
-		}
-		if !used {
-			continue
-		}
-		data, err := e.bytesFromJS(entry.Get("data"))
+		bytes, err := e.bytesFromJS(entry.Get("data"))
 		if err != nil {
 			return err
 		}
-		font, err := e.currentEditor.AddFont(FontFile{Data: data}, 0)
-		if err != nil {
-			return err
-		}
-		registered[key] = font
+		data[key] = bytes
 	}
-	for i := range value.Runs {
-		if font := registered[value.Runs[i].Format.Font]; font != "" {
-			value.Runs[i].Format.Font = font
-		}
+	imported, err := e.currentEditor.ImportRichText(*value, data)
+	if err != nil {
+		return err
 	}
+	*value = imported
 	return nil
 }
 
@@ -7992,6 +8007,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoStyleText":              e.styleText,
 		"ofdgoFormatText":             e.formatText,
 		"ofdgoGetRichText":            e.getRichText,
+		"ofdgoRichTextFonts":          e.richTextFonts,
 		"ofdgoSaveRichText":           e.saveRichText,
 		"ofdgoPreviewRichText":        e.previewRichText,
 		"ofdgoCheckTextFont":          e.checkTextFont,

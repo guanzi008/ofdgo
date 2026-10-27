@@ -17,6 +17,8 @@ package ofdgo
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -62,6 +64,59 @@ type TextFormatPatch struct {
 	Strikeout  *bool    `json:"strikeout,omitempty"`
 	Shadow     *bool    `json:"shadow,omitempty"`
 	Background *string  `json:"background,omitempty"`
+}
+
+// RichTextFonts 提取富文本实际引用的独立字体数据，供跨文档保存和复制使用
+// 入参: value 富文本内容
+// 返回: map[string][]byte 字体标识及数据, error 字体读取错误
+func (e *Editor) RichTextFonts(value RichText) (map[string][]byte, error) {
+	fonts := make(map[string][]byte)
+	for _, run := range value.Runs {
+		if run.Text == "" || fonts[run.Format.Font] != nil {
+			continue
+		}
+		data, err := e.FontData(run.Format.Font)
+		if err != nil {
+			return nil, err
+		}
+		fonts[run.Format.Font] = data
+	}
+	return fonts, nil
+}
+
+// ImportRichText 注册富文本引用的外来字体并返回独立内容，失败时不保留新增资源
+// 未提供数据的字体标识保留为当前文档引用，调用方可在外层事务中同时创建或更新对象
+// 入参: value 富文本内容, fonts 外来字体标识及数据
+// 返回: RichText 已映射字体标识的内容, error 字体注册错误
+func (e *Editor) ImportRichText(value RichText, fonts map[string][]byte) (RichText, error) {
+	value = cloneEditorData(value)
+	used := make(map[string]bool)
+	for _, run := range value.Runs {
+		used[run.Format.Font] = true
+	}
+	err := e.Transaction(func(editor *Editor) error {
+		registered := make(map[string]string)
+		for _, key := range slices.Sorted(maps.Keys(fonts)) {
+			if !used[key] {
+				continue
+			}
+			id, err := editor.AddFont(FontFile{Data: fonts[key]}, 0)
+			if err != nil {
+				return err
+			}
+			registered[key] = id
+		}
+		for i := range value.Runs {
+			if id := registered[value.Runs[i].Format.Font]; id != "" {
+				value.Runs[i].Format.Font = id
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return RichText{}, err
+	}
+	return value, nil
 }
 
 // Text 返回包含显式换行的原文，不包含排版产生的软换行
