@@ -21,8 +21,10 @@ import (
 	"crypto"
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"path"
 	"slices"
 	"strconv"
@@ -39,6 +41,256 @@ const (
 
 // SignatureWriteMode 签署方式
 type SignatureWriteMode uint8
+
+// ErrSignatureDependency 表示移除操作会改变保留签名或其他版本使用的入口和保护文件
+var ErrSignatureDependency = errors.New("signature dependency conflict")
+
+// RemoveSignature 移除当前文档版本的指定签名及外观，支持撤销重做
+// 仅清理无其他引用的签名文件，依赖冲突时不修改文档
+// 入参: id 签名标识
+// 返回: error 标识、依赖或读取错误
+func (e *Editor) RemoveSignature(id string) error {
+	return e.RemoveSignatureContext(context.Background(), id)
+}
+
+// RemoveSignatureContext 移除指定签名，取消或失败时不改变文档和历史
+// 入参: ctx 取消上下文, id 签名标识
+// 返回: error 标识、依赖、读取或取消错误
+func (e *Editor) RemoveSignatureContext(ctx context.Context, id string) error {
+	if id == "" {
+		return fmt.Errorf("empty signature ID")
+	}
+	return e.removeSignatures(ctx, id)
+}
+
+// ClearSignatures 清空当前文档版本的签名及外观，保留其他文档和版本的引用
+// 无签名时不产生历史记录，依赖冲突时不修改文档
+// 返回: error 依赖或读取错误
+func (e *Editor) ClearSignatures() error {
+	return e.ClearSignaturesContext(context.Background())
+}
+
+// ClearSignaturesContext 清空当前签名，取消或失败时不改变文档和历史
+// 入参: ctx 取消上下文
+// 返回: error 依赖、读取或取消错误
+func (e *Editor) ClearSignaturesContext(ctx context.Context) error {
+	return e.removeSignatures(ctx, "")
+}
+
+// removeSignatures 在独立快照中移除签名入口，校验保留依赖后提交历史
+// 入参: ctx 取消上下文, id 签名标识，空值清空
+// 返回: error 标识、依赖、结构或取消错误
+func (e *Editor) removeSignatures(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	reader, err := e.readerContext(ctx, nil)
+	if err != nil {
+		return err
+	}
+	doc, err := reader.DocContext(ctx)
+	if err != nil {
+		return err
+	}
+	if doc.Signatures == "" {
+		if id != "" {
+			return fmt.Errorf("signature not found: %s", id)
+		}
+		return nil
+	}
+	name := reader.ResPath(doc.Signatures)
+	data, err := reader.readFileViewContext(ctx, name)
+	if err != nil {
+		return err
+	}
+	root, err := parseEditorXMLContext(ctx, data)
+	if err != nil {
+		return err
+	}
+	removed := make(map[string]bool)
+	candidates := make(map[string]bool)
+	var patches []editorXMLPatch
+	remaining := 0
+	for _, node := range root.children {
+		if !node.matchesOFD("Signature") {
+			continue
+		}
+		if id != "" && node.attr("ID") != id {
+			remaining++
+			continue
+		}
+		location := signatureRefPath(name, node.attr("BaseLoc"))
+		files, _, err := reader.signatureRemovalFiles(ctx, location)
+		if err != nil {
+			return err
+		}
+		maps.Copy(candidates, files)
+		removed[node.attr("ID")] = true
+		patches = append(patches, editorXMLPatch{start: node.start, end: node.end})
+	}
+	if id != "" && !removed[id] {
+		return fmt.Errorf("signature not found: %s", id)
+	}
+	protected, references, err := reader.signatureRemovalProtected(ctx, name, removed)
+	if err != nil {
+		return err
+	}
+	parts := make(map[string][]byte)
+	if reader.versionInfo != nil {
+		if remaining != 0 {
+			return fmt.Errorf("%w: version shares signature list %s", ErrSignatureDependency, name)
+		}
+		candidates[name] = true
+		used, err := reader.versionFileDependencies(ctx, reader.documentRoot, nil, nil)
+		if err != nil {
+			return err
+		}
+		removedFiles := maps.Clone(candidates)
+		for file := range used {
+			delete(removedFiles, file)
+		}
+		shared, err := reader.versionSharedFiles(ctx)
+		if err != nil {
+			return err
+		}
+		if err := reader.versionManifest(ctx, parts, nil, used, shared, removedFiles); err != nil {
+			return err
+		}
+	} else {
+		for file := range candidates {
+			if references[file] {
+				return fmt.Errorf("%w: retained signature protects %s", ErrSignatureDependency, file)
+			}
+		}
+		versions, err := reader.DocumentVersionsContext(ctx)
+		if err != nil {
+			return err
+		}
+		for _, version := range versions {
+			for _, file := range version.Files {
+				if file.Location == name {
+					return fmt.Errorf("%w: version %s uses %s", ErrSignatureDependency, version.ID, name)
+				}
+			}
+		}
+		entry, err := reader.readFileViewContext(ctx, "OFD.xml")
+		if err != nil {
+			return err
+		}
+		ofd, err := parseEditorXMLContext(ctx, entry)
+		if err != nil {
+			return err
+		}
+		node := ofd.childAt("DocBody", reader.documentIndex).child("Signatures")
+		if remaining == 0 {
+			parts["OFD.xml"] = editorPatchXML(entry, []editorXMLPatch{{start: node.start, end: node.end}})
+			candidates[name] = true
+		} else {
+			if references[name] {
+				return fmt.Errorf("%w: retained signature protects %s", ErrSignatureDependency, name)
+			}
+			target := name
+			shared := false
+			for index, body := range reader.OFD.DocBody {
+				shared = shared || index != reader.documentIndex && body.Signatures != "" && signatureRefPath("OFD.xml", body.Signatures) == name
+			}
+			if shared {
+				target = packageAvailableName(reader, parts, name)
+				parts["OFD.xml"] = editorPatchXML(entry, []editorXMLPatch{editorXMLContent(entry, node, editorFontXMLText("/"+target))})
+			}
+			parts[target] = editorPatchXML(data, patches)
+		}
+	}
+	for file, updated := range parts {
+		if !protected[file] {
+			continue
+		}
+		same, err := packageDataEqual(ctx, reader, file, updated)
+		if err != nil {
+			return err
+		}
+		if !same {
+			return fmt.Errorf("%w: protected file %s", ErrSignatureDependency, file)
+		}
+	}
+	for file, data := range reader.files {
+		if _, changed := parts[file]; !changed {
+			parts[file] = data
+		}
+	}
+	reader.files = parts
+	for file := range protected {
+		delete(candidates, file)
+	}
+	if err := reader.retireVersionFiles(ctx, candidates); err != nil {
+		return err
+	}
+	return e.commitResourceSnapshot(ctx, reader)
+}
+
+// signatureRemovalFiles 区分签名自有文件和摘要保护内容，正文不作为删除候选
+// 入参: ctx 取消上下文, name 签名描述路径
+// 返回: map[string]bool 自有文件, map[string]bool 保护文件, error 读取或解析错误
+func (r *Reader) signatureRemovalFiles(ctx context.Context, name string) (map[string]bool, map[string]bool, error) {
+	data, err := r.readFileViewContext(ctx, name)
+	if err != nil {
+		return nil, nil, err
+	}
+	var signature SignatureFile
+	if err := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx}).Decode(&signature); err != nil {
+		return nil, nil, err
+	}
+	owned := map[string]bool{name: true}
+	for _, location := range []string{signature.SignedValue, signature.SignedInfo.Seal.BaseLoc} {
+		if location != "" {
+			owned[signatureRefPath(name, location)] = true
+		}
+	}
+	protected := make(map[string]bool)
+	for _, reference := range signature.SignedInfo.References.Reference {
+		protected[signatureRefPath(name, reference.FileRef)] = true
+	}
+	return owned, protected, ctx.Err()
+}
+
+// signatureRemovalProtected 汇总保留签名的原文及其他文档的签名入口，不要求证书或私钥
+// 入参: ctx 取消上下文, selected 当前签名列表, removed 待移除标识
+// 返回: map[string]bool 保留路径, map[string]bool 摘要保护路径, error 读取、结构或取消错误
+func (r *Reader) signatureRemovalProtected(ctx context.Context, selected string, removed map[string]bool) (map[string]bool, map[string]bool, error) {
+	protected := make(map[string]bool)
+	references := make(map[string]bool)
+	for index, body := range r.OFD.DocBody {
+		if body.Signatures == "" {
+			continue
+		}
+		name := signatureRefPath("OFD.xml", body.Signatures)
+		current := index == r.documentIndex && r.versionInfo == nil
+		if !current {
+			protected[name] = true
+		}
+		data, err := r.readFileViewContext(ctx, name)
+		if err != nil {
+			return nil, nil, err
+		}
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, node := range root.children {
+			if !node.matchesOFD("Signature") || current && name == selected && removed[node.attr("ID")] {
+				continue
+			}
+			owned, refs, err := r.signatureRemovalFiles(ctx, signatureRefPath(name, node.attr("BaseLoc")))
+			if err != nil {
+				return nil, nil, err
+			}
+			maps.Copy(protected, owned)
+			maps.Copy(protected, refs)
+			maps.Copy(references, refs)
+		}
+	}
+	return protected, references, ctx.Err()
+}
 
 // SignatureWriteOptions 最终包签署选项，不修改Editor或调用方的原件
 // SM2数字签名使用GB/T35275-2017消息结构；RSA/ECDSA使用裸签名，验签需WithSignatureCert

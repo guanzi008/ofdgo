@@ -638,6 +638,7 @@ const el = {
 	structureStatus: document.querySelector("#structureStatus"),
 	structureSubmit: document.querySelector("#structureSubmit"),
 	signatureSummary: document.querySelector("#signatureSummary"),
+	signatureClear: document.querySelector("#signatureClear"),
 	signatureList: document.querySelector("#signatureList"),
 	annotationNote: document.querySelector("#annotationNote"),
 	annotationNoteTitle: document.querySelector("#annotationNoteTitle"),
@@ -1476,6 +1477,7 @@ el.objectStyleForm.addEventListener("submit", async event => {
 });
 el.outlineCancel.addEventListener("click", () => el.outlinePanel.close());
 el.structureManage.addEventListener("click", openStructureDialog);
+el.signatureClear.addEventListener("click", () => changeDocument("ofdgoChangeSignature", null, "clear", ""));
 document.querySelector("#structureCancel").addEventListener("click", () => el.structureDialog.close());
 el.structureEntry.addEventListener("change", refreshStructureNodes);
 el.structureNodeSelect.addEventListener("change", refreshStructureFields);
@@ -9190,6 +9192,10 @@ function renderSecurity() {
 	el.encryptSaveButton.disabled = !state.doc || !state.ready || state.exporting || state.saving || document.body.hasAttribute("data-busy");
 	el.verifyButton.disabled = el.encryptSaveButton.disabled;
 	el.signButton.disabled = el.encryptSaveButton.disabled;
+	el.signatureClear.hidden = !state.editing;
+	el.signatureClear.disabled = el.encryptSaveButton.disabled || !state.editing || !!state.doc?.detailsPending || !state.doc?.signatures?.length;
+	if (!state.doc?.detailsPending) renderMetaContent(el.signatureList, [documentTab().id, documentContentKey(state), state.doc?.signatures, state.doc?.signatureError, state.editing], renderSignatures);
+	for (const button of el.signatureList.querySelectorAll(".signature-remove")) button.disabled = el.signatureClear.disabled;
 }
 
 function cancelSigning() {
@@ -11540,7 +11546,6 @@ function renderMeta(keepDetails = false) {
 	el.pageTotal.textContent = String(doc.pageCount || 0);
 	if (keepDetails && doc.detailsPending) return;
 	el.metaSignatures.textContent = doc.detailsPending ? "正在检查签名" : doc.detailsError ? "读取失败" : String(doc.signatureCount || 0);
-	renderMetaContent(el.signatureList, [doc.signatures, doc.signatureError], renderSignatures);
 	updateStructureControls();
 	renderMetaContent(el.docFontList, doc.fonts || [], renderDocumentFonts);
 	refreshEditorFonts();
@@ -11811,6 +11816,18 @@ function renderSignatures() {
 		badges.className = "signature-badges";
 		badges.append(fontBadge(signature.trustedValid ? "可信" : signature.status === "valid" ? "完整" : signature.status === "invalid" ? "异常" : "未验", signature.status));
 
+		if (state.editing) {
+			const tab = documentTab(), key = documentContentKey(state);
+			const remove = document.createElement("button");
+			remove.className = "small-button signature-remove";
+			remove.type = "button";
+			remove.textContent = "移除";
+			remove.disabled = el.signatureClear.disabled;
+			remove.addEventListener("click", () => {
+				if (isForegroundDocument(tab) && documentContentKey(state) === key) changeDocument("ofdgoChangeSignature", null, "remove", signature.id);
+			});
+			badges.append(remove);
+		}
 		head.append(badges, name);
 		row.append(head);
 		appendInfoLine(row, "签署人", signature.signer);

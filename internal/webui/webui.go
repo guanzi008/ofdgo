@@ -6746,6 +6746,25 @@ func (e *businessEngine) changeAttachment(args []platformValue) (any, error) {
 	})
 }
 
+// changeSignature 移除当前文档签名，使用库层依赖检查和撤销历史
+// 入参: args 操作及签名标识
+// 返回: any 编辑状态, error 移除错误
+func (e *businessEngine) changeSignature(args []platformValue) (any, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("签名参数无效")
+	}
+	return e.changeAtomicObjects(func() error {
+		switch args[0].String() {
+		case "remove":
+			return e.currentEditor.RemoveSignatureContext(e.operationContext(), args[1].String())
+		case "clear":
+			return e.currentEditor.ClearSignaturesContext(e.operationContext())
+		default:
+			return fmt.Errorf("签名操作无效")
+		}
+	})
+}
+
 // changeFontBinding 调用库层字体资源操作，统一更新预览与撤销状态
 // 入参: args 字体标识、保存方式及可选字体数据
 // 返回: any 编辑状态, error 字体处理错误
@@ -7980,6 +7999,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoEditDocument":           e.editDocument,
 		"ofdgoUpdateInfo":             e.updateInfo,
 		"ofdgoChangeAttachment":       e.changeAttachment,
+		"ofdgoChangeSignature":        e.changeSignature,
 		"ofdgoChangePage":             e.changePage,
 		"ofdgoBatchPages":             e.batchPages,
 		"ofdgoChangeOutline":          e.changeOutline,
@@ -8068,6 +8088,8 @@ func (e *businessEngine) operationContext() context.Context {
 func failureResult(err error) apiResult {
 	result := apiResult{Error: err.Error()}
 	switch {
+	case errors.Is(err, ofdgo.ErrSignatureDependency):
+		result.Code, result.Error = "signatureDependency", "存在签名或版本依赖，无法移除"
 	case errors.Is(err, ofdgo.ErrIncompleteDocument):
 		result.Code, result.Error = "documentPending", "文档尚未准备完成"
 	case errors.Is(err, ofdgo.ErrPrintDenied):
