@@ -3230,6 +3230,10 @@ button.outline-link:hover {
 	pointer-events: none;
 }
 
+.edit-object.edit-parent {
+	outline: 1px dashed var(--line);
+}
+
 .edit-text-source {
 	visibility: hidden;
 }

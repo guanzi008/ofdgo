@@ -15,18 +15,26 @@
 package ofdgo
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"slices"
 )
 
-// ObjectSelection 保存正文与注解的独立快照，共享当前编辑器的不可变资源
+// ObjectSelection 保存正文、注解及组合成员的独立快照，共享当前编辑器的不可变资源
 // 来源修改、删除或撤销不改变快照，不用于跨文档传输
 type ObjectSelection struct {
 	editor      *Editor
 	document    editorDocumentIdentity
 	objects     []GraphicObject
 	annotations *AnnotationSelection
+	parts       []editorSelectionPart
+}
+
+// editorSelectionPart 保存按绘制顺序排列的顶层或内部对象快照
+type editorSelectionPart struct {
+	objects   []GraphicObject
+	composite *CompositeSelection
 }
 
 // SelectionBounds 获取正文与注解混合选区的实际范围，复用同一次度量的资源缓存
@@ -400,6 +408,18 @@ func (e *Editor) PasteSelection(page int, selection *ObjectSelection, dx, dy flo
 		if err == nil && selection.annotations != nil {
 			annotations, err = edit.PasteAnnotations(page, selection.annotations, dx, dy)
 		}
+		for _, part := range selection.parts {
+			if err != nil {
+				return err
+			}
+			var ids []string
+			if part.composite != nil {
+				ids, err = edit.PasteCompositeSelection(page, part.composite, dx, dy)
+			} else {
+				ids, err = edit.CopyObjects(page, part.objects, dx, dy)
+			}
+			objects = append(objects, ids...)
+		}
 		return err
 	})
 	if err != nil {
@@ -418,5 +438,437 @@ func (e *Editor) PasteSelectionToComposite(page int, path ObjectPath, selection 
 	if selection.annotations != nil {
 		return nil, fmt.Errorf("annotations cannot be nested in a page object")
 	}
-	return e.CopyObjectsToComposite(page, path, selection.objects, dx, dy)
+	var indexes []int
+	err := e.Transaction(func(edit *Editor) error {
+		var err error
+		indexes, err = edit.CopyObjectsToComposite(page, path, selection.objects, dx, dy)
+		for _, part := range selection.parts {
+			if err != nil {
+				return err
+			}
+			var next []int
+			if part.composite != nil {
+				next, err = edit.PasteCompositeObjects(page, path, part.composite, dx, dy)
+			} else {
+				next, err = edit.CopyObjectsToComposite(page, path, part.objects, dx, dy)
+			}
+			indexes = append(indexes, next...)
+		}
+		return err
+	})
+	return indexes, err
+}
+
+// editorTargetGroup 保存同一父路径的直接成员，结构操作按逆序处理父路径
+type editorTargetGroup struct {
+	path    ObjectPath
+	indexes []int
+}
+
+// editorTargetGroups 分离顶层与内部选区，拒绝重复或相互包含的路径
+// 入参: paths 完整对象路径
+// 返回: []string 正文标识, []string 注解标识, []editorTargetGroup 内部成员, error 路径错误
+func editorTargetGroups(paths []ObjectPath) ([]string, []string, []editorTargetGroup, error) {
+	var objects, annotations []string
+	var groups []editorTargetGroup
+	for i, path := range paths {
+		if (path.ID == "") == (path.Annotation == "") || slices.ContainsFunc(path.Children, func(index int) bool { return index < 0 }) {
+			return nil, nil, nil, fmt.Errorf("invalid object path")
+		}
+		for _, other := range paths[:i] {
+			length := min(len(path.Children), len(other.Children))
+			if path.ID == other.ID && path.Annotation == other.Annotation && slices.Equal(path.Children[:length], other.Children[:length]) {
+				return nil, nil, nil, fmt.Errorf("selection paths overlap")
+			}
+		}
+		if len(path.Children) == 0 {
+			if path.Annotation != "" {
+				annotations = append(annotations, path.Annotation)
+			} else {
+				objects = append(objects, path.ID)
+			}
+			continue
+		}
+		index := path.Children[len(path.Children)-1]
+		path.Children = slices.Clone(path.Children[:len(path.Children)-1])
+		group := slices.IndexFunc(groups, func(group editorTargetGroup) bool {
+			return path.ID == group.path.ID && path.Annotation == group.path.Annotation && slices.Equal(path.Children, group.path.Children)
+		})
+		if group < 0 {
+			groups = append(groups, editorTargetGroup{path: path, indexes: []int{index}})
+		} else {
+			groups[group].indexes = append(groups[group].indexes, index)
+		}
+	}
+	slices.SortFunc(groups, func(a, b editorTargetGroup) int {
+		if order := cmp.Compare(a.path.ID, b.path.ID); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(a.path.Annotation, b.path.Annotation); order != 0 {
+			return order
+		}
+		return -slices.Compare(a.path.Children, b.path.Children)
+	})
+	return objects, annotations, groups, nil
+}
+
+// editTargets 原子处理跨容器选区，结构变化从后向前避免路径位移
+// 入参: paths 完整对象路径, root 顶层处理, member 内部处理
+// 返回: error 路径或编辑错误
+func (e *Editor) editTargets(paths []ObjectPath, root func([]string, []string) error, member func(ObjectPath, []int) error) error {
+	objects, annotations, groups, err := editorTargetGroups(paths)
+	if err != nil {
+		return err
+	}
+	return e.Transaction(func(*Editor) error {
+		for _, group := range groups {
+			if err := member(group.path, group.indexes); err != nil {
+				return err
+			}
+		}
+		if len(objects)+len(annotations) != 0 {
+			return root(objects, annotations)
+		}
+		return nil
+	})
+}
+
+// CaptureTargets 捕获跨容器选区，内部快照保留源变换与裁剪，源删除不影响粘贴
+// 入参: page 页面索引, paths 完整对象路径
+// 返回: *ObjectSelection 独立快照, error 路径或资源错误
+func (e *Editor) CaptureTargets(page int, paths []ObjectPath) (*ObjectSelection, error) {
+	objects, annotations, groups, err := editorTargetGroups(paths)
+	if err != nil {
+		return nil, err
+	}
+	if len(groups) == 0 {
+		return e.CaptureSelection(page, objects, annotations)
+	}
+	selection, err := e.CaptureSelection(page, nil, annotations)
+	if err != nil {
+		return nil, err
+	}
+	content, err := e.page(page)
+	if err != nil {
+		return nil, err
+	}
+	positions := e.objectPositions(content)
+	paths = slices.Clone(paths)
+	slices.SortStableFunc(paths, func(a, b ObjectPath) int {
+		if a.ID != b.ID {
+			if a.ID == "" {
+				return 1
+			}
+			if b.ID == "" {
+				return -1
+			}
+			return compareEditorPosition(positions[a.ID], positions[b.ID])
+		}
+		if a.Annotation != b.Annotation {
+			return cmp.Compare(a.Annotation, b.Annotation)
+		}
+		return slices.Compare(a.Children, b.Children)
+	})
+	for _, path := range paths {
+		if len(path.Children) == 0 {
+			if path.Annotation != "" {
+				continue
+			}
+			items, err := e.Objects(page, []string{path.ID})
+			if err != nil {
+				return nil, err
+			}
+			selection.parts = append(selection.parts, editorSelectionPart{objects: items})
+		} else {
+			index := path.Children[len(path.Children)-1]
+			path.Children = path.Children[:len(path.Children)-1]
+			composite, err := e.CaptureCompositeObjects(page, path, []int{index})
+			if err != nil {
+				return nil, err
+			}
+			selection.parts = append(selection.parts, editorSelectionPart{composite: composite})
+		}
+	}
+	return selection, nil
+}
+
+// TransformTargets 按页面坐标原子变换跨容器选区，保留组合结构
+// 入参: page 页面索引, paths 完整对象路径, matrix 有限可逆变换
+// 返回: error 路径、变换或编辑错误
+func (e *Editor) TransformTargets(page int, paths []ObjectPath, matrix Matrix) error {
+	if _, ok := matrix.Invert(); !ok {
+		return fmt.Errorf("selection transform must be finite and invertible")
+	}
+	return e.editTargets(paths, func(objects, annotations []string) error {
+		return e.TransformSelection(page, objects, annotations, matrix)
+	}, func(path ObjectPath, indexes []int) error {
+		return e.changeCompositeObjects(page, path, indexes, func(Box) Matrix { return matrix })
+	})
+}
+
+// DeleteTargets 原子删除跨容器选区，一次撤销恢复全部
+// 入参: page 页面索引, paths 完整对象路径
+// 返回: error 路径或编辑错误
+func (e *Editor) DeleteTargets(page int, paths []ObjectPath) error {
+	return e.editTargets(paths, func(objects, annotations []string) error {
+		return e.DeleteSelection(page, objects, annotations)
+	}, func(path ObjectPath, indexes []int) error {
+		return e.DeleteCompositeObjects(page, path, indexes)
+	})
+}
+
+// StyleTargets 原子设置跨容器选区样式，一次撤销恢复全部
+// 入参: page 页面索引, paths 完整对象路径, style 样式增量
+// 返回: error 路径或编辑错误
+func (e *Editor) StyleTargets(page int, paths []ObjectPath, style ObjectStyle) error {
+	return e.editTargets(paths, func(objects, annotations []string) error {
+		return e.StyleSelection(page, objects, annotations, style)
+	}, func(path ObjectPath, indexes []int) error {
+		return e.StyleCompositeObjects(page, path, indexes, style)
+	})
+}
+
+// EraseTargets 按页面矩形原子擦除跨容器选区，一次撤销恢复全部
+// 入参: page 页面索引, paths 完整对象路径, box 页面毫米范围
+// 返回: error 路径或编辑错误
+func (e *Editor) EraseTargets(page int, paths []ObjectPath, box Box) error {
+	return e.editTargets(paths, func(objects, annotations []string) error {
+		return e.EraseSelection(page, objects, annotations, box)
+	}, func(path ObjectPath, indexes []int) error {
+		return e.EraseCompositeObjects(page, path, indexes, box)
+	})
+}
+
+// EraseTargetsPath 按页面多边形原子擦除跨容器选区，一次撤销恢复全部
+// 入参: page 页面索引, paths 完整对象路径, points 页面毫米多边形
+// 返回: error 路径或编辑错误
+func (e *Editor) EraseTargetsPath(page int, paths []ObjectPath, points []Point) error {
+	return e.editTargets(paths, func(objects, annotations []string) error {
+		return e.EraseSelectionPath(page, objects, annotations, points)
+	}, func(path ObjectPath, indexes []int) error {
+		return e.EraseCompositeObjectsPath(page, path, indexes, points)
+	})
+}
+
+// CopyTargetsStyle 原子复制样式至跨容器选区，保留各对象内容及位置
+// 入参: page 页面索引, paths 完整对象路径, source 样式来源
+// 返回: error 路径或样式错误
+func (e *Editor) CopyTargetsStyle(page int, paths []ObjectPath, source GraphicObject) error {
+	return e.editTargets(paths, func(objects, annotations []string) error {
+		if err := e.CopyStyle(page, objects, source); err != nil {
+			return err
+		}
+		return e.editSelectionAnnotations(page, annotations, func(path ObjectPath, indexes []int) error {
+			return e.CopyCompositeStyle(page, path, indexes, source)
+		})
+	}, func(path ObjectPath, indexes []int) error {
+		return e.CopyCompositeStyle(page, path, indexes, source)
+	})
+}
+
+// targetGeometry 度量跨容器选区，保留输入顺序及独立宽高能力
+// 入参: page 页面索引, paths 完整对象路径
+// 返回: []Box 对象范围, bool 可独立缩放宽高, Box 页面范围, error 度量错误
+func (e *Editor) targetGeometry(page int, paths []ObjectPath) ([]Box, bool, Box, error) {
+	if _, _, _, err := editorTargetGroups(paths); err != nil {
+		return nil, false, Box{}, err
+	}
+	_, _, paper, err := e.selectionGeometry(page, nil, nil)
+	if err != nil {
+		return nil, false, Box{}, err
+	}
+	boxes := make([]Box, len(paths))
+	stretch := true
+	for i, path := range paths {
+		if len(path.Children) != 0 {
+			index := path.Children[len(path.Children)-1]
+			path.Children = path.Children[:len(path.Children)-1]
+			member, err := e.CompositeObject(page, path, index)
+			if err != nil {
+				return nil, false, Box{}, err
+			}
+			boxes[i] = member.Bounds
+			stretch = stretch && member.Capabilities.Stretch
+		} else {
+			var objects, annotations []string
+			if path.Annotation != "" {
+				annotations = []string{path.Annotation}
+			} else {
+				objects = []string{path.ID}
+				capability, err := e.ObjectCapabilities(page, path.ID)
+				if err != nil {
+					return nil, false, Box{}, err
+				}
+				stretch = stretch && capability.Stretch
+			}
+			boxes[i], err = e.SelectionBounds(page, objects, annotations)
+			if err != nil {
+				return nil, false, Box{}, err
+			}
+		}
+	}
+	return boxes, stretch, paper, nil
+}
+
+// TargetsBounds 获取跨容器选区的共同可见范围
+// 入参: page 页面索引, paths 完整对象路径
+// 返回: Box 页面毫米范围, error 路径或度量错误
+func (e *Editor) TargetsBounds(page int, paths []ObjectPath) (Box, error) {
+	objects, annotations, groups, err := editorTargetGroups(paths)
+	if err != nil {
+		return Box{}, err
+	}
+	if len(groups) == 0 {
+		return e.SelectionBounds(page, objects, annotations)
+	}
+	boxes, _, _, err := e.targetGeometry(page, paths)
+	if err != nil {
+		return Box{}, err
+	}
+	var bounds Box
+	for _, box := range boxes {
+		bounds = unionTextBox(bounds, box)
+	}
+	if bounds.W <= 0 || bounds.H <= 0 {
+		return Box{}, fmt.Errorf("selection has no visible bounds")
+	}
+	return bounds, nil
+}
+
+// orientTargets 绕跨容器选区中心应用旋转或镜像
+// 入参: page 页面索引, paths 完整对象路径, matrix 方向变换
+// 返回: error 路径或变换错误
+func (e *Editor) orientTargets(page int, paths []ObjectPath, matrix Matrix) error {
+	bounds, err := e.TargetsBounds(page, paths)
+	if err != nil {
+		return err
+	}
+	x, y := bounds.X+bounds.W/2, bounds.Y+bounds.H/2
+	return e.TransformTargets(page, paths, TranslationMatrix(x, y).Multiply(matrix).Multiply(TranslationMatrix(-x, -y)))
+}
+
+// RotateTargets 绕共同中心旋转跨容器选区
+// 入参: page 页面索引, paths 完整对象路径, degrees 顺时针直角角度
+// 返回: error 路径或变换错误
+func (e *Editor) RotateTargets(page int, paths []ObjectPath, degrees int) error {
+	matrix, err := editorRotation(degrees)
+	if err != nil {
+		return err
+	}
+	return e.orientTargets(page, paths, matrix)
+}
+
+// FlipTargets 绕共同中心镜像跨容器选区
+// 入参: page 页面索引, paths 完整对象路径, axis 为horizontal或vertical
+// 返回: error 路径或变换错误
+func (e *Editor) FlipTargets(page int, paths []ObjectPath, axis string) error {
+	matrix, err := editorFlip(axis)
+	if err != nil {
+		return err
+	}
+	return e.orientTargets(page, paths, matrix)
+}
+
+// ResizeTargets 按共同范围调整跨容器选区，不重排文字
+// 入参: page 页面索引, paths 完整对象路径, box 页面毫米目标范围
+// 返回: error 路径、范围或编辑错误
+func (e *Editor) ResizeTargets(page int, paths []ObjectPath, box Box) error {
+	objects, annotations, groups, err := editorTargetGroups(paths)
+	if err != nil {
+		return err
+	}
+	if len(groups) == 0 {
+		return e.ResizeSelection(page, objects, annotations, box)
+	}
+	if err := validateCreationBox(box); err != nil {
+		return err
+	}
+	boxes, stretch, _, err := e.targetGeometry(page, paths)
+	if err != nil {
+		return err
+	}
+	var bounds Box
+	for _, member := range boxes {
+		bounds = unionTextBox(bounds, member)
+	}
+	if bounds.W <= 0 || bounds.H <= 0 {
+		return fmt.Errorf("selection has no visible bounds")
+	}
+	sx, sy := box.W/bounds.W, box.H/bounds.H
+	if math.Abs(sx-sy) > 1e-9*math.Max(sx, sy) {
+		if !stretch {
+			return fmt.Errorf("nonuniform resizing requires images or image-only groups")
+		}
+	} else {
+		sy = sx
+	}
+	return e.TransformTargets(page, paths, Matrix{a: sx, d: sy, e: box.X - bounds.X*sx, f: box.Y - bounds.Y*sy})
+}
+
+// ArrangeTargets 对齐或等距分布跨容器选区，单选对齐页面
+// 入参: page 页面索引, paths 按绘制顺序排列的完整路径, distribute 是否分布, direction 对齐方向或分布轴
+// 返回: error 路径、方向或编辑错误
+func (e *Editor) ArrangeTargets(page int, paths []ObjectPath, distribute bool, direction string) error {
+	objects, annotations, groups, err := editorTargetGroups(paths)
+	if err != nil {
+		return err
+	}
+	if len(groups) == 0 {
+		if distribute {
+			return e.DistributeSelection(page, objects, annotations, direction)
+		}
+		return e.AlignSelection(page, objects, annotations, direction)
+	}
+	if distribute && direction != "horizontal" && direction != "vertical" || !distribute && !slices.Contains([]string{"left", "center", "right", "top", "middle", "bottom"}, direction) {
+		return fmt.Errorf("invalid arrangement direction %q", direction)
+	}
+	boxes, _, target, err := e.targetGeometry(page, paths)
+	if err != nil {
+		return err
+	}
+	matrices := make([]Matrix, len(paths))
+	if distribute {
+		positions := make([]editorObjectPosition, len(paths))
+		for i := range positions {
+			positions[i].index = i
+		}
+		matrices, err = editorDistribution(boxes, positions, direction)
+		if err != nil {
+			return err
+		}
+	} else {
+		if len(paths) > 1 {
+			target = Box{}
+			for _, box := range boxes {
+				target = unionTextBox(target, box)
+			}
+		}
+		for i, box := range boxes {
+			matrices[i] = editorAlignment(box, target, direction)
+		}
+	}
+	return e.Transaction(func(edit *Editor) error {
+		for i, matrix := range matrices {
+			if matrix != IdentityMatrix {
+				if err := edit.TransformTargets(page, paths[i:i+1], matrix); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// StyleTargetsText 原子修改跨容器文字样式，保留各自定位及组合结构
+// 入参: page 页面索引, paths 完整文字路径, style 字体、字号或颜色增量
+// 返回: error 路径、文字或样式错误
+func (e *Editor) StyleTargetsText(page int, paths []ObjectPath, style TextStyle) error {
+	return e.editTargets(paths, func(objects, annotations []string) error {
+		if len(annotations) != 0 {
+			return fmt.Errorf("annotation is not a text object")
+		}
+		return e.StyleText(page, objects, style)
+	}, func(path ObjectPath, indexes []int) error {
+		return e.StyleCompositeText(page, path, indexes, style)
+	})
 }

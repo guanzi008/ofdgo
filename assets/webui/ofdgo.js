@@ -59,7 +59,6 @@ function createInvoicePanel() {
 function createDocumentState() {
 	return {
 		conversionWarnings: [],
-		composite: null,
 		annotationEdit: null,
 		annotationCreate: null,
 		ready: false,
@@ -285,7 +284,6 @@ const el = {
 	selectObjectButton: document.querySelector("#selectObjectButton"),
 	deleteObjectButton: document.querySelector("#deleteObjectButton"),
 	editObjectButton: document.querySelector("#editObjectButton"),
-	compositeBackButton: document.querySelector("#compositeBackButton"),
 	copyObjectButton: document.querySelector("#copyObjectButton"),
 	objectOrder: document.querySelector("#objectOrder"),
 	objectAlign: document.querySelector("#objectAlign"),
@@ -743,18 +741,13 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onErase: (items, box, points) => {
 		const blocked = items.find(item => !canEditObject(item, box ? "arrange" : "delete"));
 		if (blocked) { setStatus(objectEditReason(blocked) || "对象暂不可擦除"); return false; }
-		const item = { index: items[0].index, id: items.map(item => item.id), scoped: items.every(item => item.scoped) };
+		const item = { index: items[0].index, id: items.map(item => item.id), items };
 		if (points) return changeDocument("ofdgoEraseObjectsPath", item, points);
 		return box ? changeDocument("ofdgoEraseObjects", item, box.x, box.y, box.width, box.height)
 			: changeDocument("ofdgoDeleteObjects", item);
 	},
 	onEdit: editCanvasObject,
 	onPick: openObjectPicker,
-	onExitScope: () => {
-		if (!state.composite) return false;
-		exitCompositeScope();
-		return true;
-	},
 	drawStyle: shapeStyle,
 	onTool: () => {
 		updateDrawingControls();
@@ -813,7 +806,7 @@ const pageView = createPageView({
 	callWASM, canvasEditor, clearRegionHighlights, documentTab, el,
 	enablePageDrag, formatSize, isDocumentSelection, isForegroundDocument, mountAnnotationNotes,
 	mountEditorObjects, mountPageLinks, nextFrame, pageCan, pageStatus,
-	releaseMediaPlayers, renderSearchHighlights, resetCompositeScope, scheduleOpenActions, selectThumbnailPage,
+	releaseMediaPlayers, renderSearchHighlights, loadEditorMembers, scheduleOpenActions, selectThumbnailPage,
 	setBusy, setProgress, setStatus, showError, syncPageSelection,
 	updateControls, updateEditorTools, wasmRequests,
 });
@@ -858,7 +851,6 @@ editorClick(el.multiSelectButton, () => {
 	canvasEditor.multiple = !canvasEditor.multiple;
 	el.multiSelectButton.setAttribute("data-pressed", String(canvasEditor.multiple));
 });
-editorClick(el.compositeBackButton, exitCompositeScope);
 editorClick(el.editObjectButton, () => {
 	if (canvasEditor.selected) {
 		editCanvasObject(canvasEditor.selected);
@@ -1092,9 +1084,9 @@ el.annotationTool.addEventListener("change", async () => {
 	el.annotationTool.value = "";
 	if (kind === "objects") { openObjectPicker(); return; }
 	let selected = canvasEditor.selected;
-	if (state.composite?.key.startsWith("annotation:")) {
-		const id = state.composite.key.split("/")[0];
-		selected = { ...state.pageCache.get(state.composite.index)?.objects.find(item => item.id === id), index: state.composite.index, id, type: "Annotation" };
+	if (selected?.parent?.startsWith("annotation:")) {
+		const id = selected.parent.split("/")[0];
+		selected = { ...state.pageCache.get(selected.index)?.objects.find(item => item.id === id), index: selected.index, id, type: "Annotation" };
 	}
 	if (kind === "details" || kind === "replace") {
 		if (selected?.type !== "Annotation") { setStatus("请先选择注解"); return; }
@@ -1111,7 +1103,6 @@ el.annotationTool.addEventListener("change", async () => {
 			openAnnotationCreate(kind, selected.index, selected, selected, info);
 		} catch (error) { showError(error, false); }
 	} else {
-		resetCompositeScope();
 		updateControls();
 		if (kind === "watermark") openAnnotationCreate(kind, state.pageIndex);
 		else {
@@ -1411,7 +1402,7 @@ el.copyStyleButton.addEventListener("click", async () => {
 	if (!canCopyStyle(item)) return;
 	setBusy(true, "", 0, "", tab);
 	try {
-		await callTabWASM(tab, "ofdgoCaptureStyle", item.index, item.id, state.composite?.key || "");
+		await callTabWASM(tab, "ofdgoCaptureStyle", item.index, item.id, objectParent(item));
 		if (!tab.closed) state.styleClipboard = item.type;
 		if (isForegroundDocument(tab) && seq === state.openSeq) el.objectStylePanel.close();
 	} catch (err) { if (isForegroundDocument(tab) && seq === state.openSeq) el.objectStyleStatus.textContent = err.message; }
@@ -3257,7 +3248,6 @@ async function switchReadingVersion(id) {
 		if (tab.closed || tab.state !== state || state.doc !== originalDocument || openSeq !== state.openSeq && view === tab.view) return;
 		openSeq = state.openSeq = workspace.sequence = Math.max(workspace.sequence, state.openSeq) + 1;
 		state.objectClipboard = state.styleClipboard = null;
-		state.composite = null;
 		delete state.textDefaults.fontChoice;
 		if (state.editorInfo) {
 			if (!dirty) state.savedRevision = doc.revision;
@@ -3275,7 +3265,6 @@ async function switchReadingVersion(id) {
 			return true;
 		}
 		canvasEditor.richClipboard = null;
-		resetCompositeScope();
 		canvasEditor.clear();
 		canvasEditor.setTool("");
 		updateTextFonts(null, true);
@@ -3492,7 +3481,6 @@ async function switchDocument(index) {
 		state.dirty = state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision;
 		state.doc = doc;
 		if (!isForegroundDocument(tab)) {
-			state.composite = null;
 			state.pageCache.clear();
 			state.pageIndex = 0;
 			tab.view = null;
@@ -3502,7 +3490,6 @@ async function switchDocument(index) {
 			return;
 		}
 		canvasEditor.richClipboard = null;
-		resetCompositeScope();
 		canvasEditor.clear();
 		canvasEditor.setTool("");
 		updateTextFonts(null, true);
@@ -3527,14 +3514,14 @@ async function switchDocument(index) {
 function editorLocation() {
 	const pending = canvasEditor.pendingSelection;
 	const index = pending?.index ?? canvasEditor.selected?.index ?? state.pageIndex;
-	return { page: state.doc.pages[index].id, scope: state.composite?.key || "", ids: pending?.ids || canvasEditor.items().map(item => item.id) };
+	return { page: state.doc.pages[index].id, ids: pending?.ids || canvasEditor.items().map(item => item.id) };
 }
 
-function rememberEditorView(before, revision, reindex = false) {
+function rememberEditorView(before, revision) {
 	for (const key of state.editorViews.keys()) {
 		if (key > revision) state.editorViews.delete(key);
 	}
-	state.editorViews.set(state.editorInfo.revision, { before, after: editorLocation(), reindex });
+	state.editorViews.set(state.editorInfo.revision, { before, after: editorLocation() });
 	if (state.editorViews.size > 100) state.editorViews.delete(state.editorViews.keys().next().value);
 }
 
@@ -3555,7 +3542,6 @@ async function toggleEditor() {
 		const anchor = pageView.scaleAnchor(0);
 		state.editing = !state.editing;
 		renderDocumentFonts();
-		resetCompositeScope();
 		canvasEditor.clear();
 		canvasEditor.setTool("");
 		if (state.editing) {
@@ -3602,7 +3588,6 @@ async function toggleEditor() {
 				pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
 			state.editing = true;
 			state.ofdBytes = null;
-			state.composite = null;
 			state.selectObjects = true;
 			state.conversionWarnings = [];
 			state.objectClipboard = state.styleClipboard = null;
@@ -3614,7 +3599,6 @@ async function toggleEditor() {
 		setEditorInfo(doc);
 		state.editing = true;
 		releaseMediaPlayers();
-		state.composite = null;
 		state.selectObjects = true;
 		state.ofdBytes = null;
 		state.conversionWarnings = [];
@@ -3897,7 +3881,7 @@ function updateAnnotationFields() {
 	}
 }
 
-async function editCanvasObject(item) {
+async function editCanvasObject(item, point = null) {
 	const tab = documentTab(), state = tab.state;
 	const callWASM = (name, ...args) => callTabWASM(tab, name, ...args);
 	if (!state.editing || document.body.hasAttribute("data-busy") || canvasEditor.input) return;
@@ -3927,7 +3911,7 @@ async function editCanvasObject(item) {
 		}
 		return;
 	}
-	if (!item.richText && canEditObject(item, "enter")) return enterCompositeScope(item.index, item.id);
+	if (!item.richText && canEditObject(item, "children")) return selectCompositeContent(item, point);
 	if (item.type === "Annotation") {
 		editAnnotationDetails(item);
 		return;
@@ -3972,56 +3956,87 @@ async function editCanvasObject(item) {
 	}
 }
 
+function objectParent(item) {
+	const ids = item?.items?.map(member => member.id) || (Array.isArray(item?.id) ? item.id : item ? [item.id] : []);
+	const parents = ids.map(id => id.includes("/") ? id.slice(0, id.lastIndexOf("/")) : "");
+	return parents.every(parent => parent === parents[0]) ? parents[0] || "" : null;
+}
+
 function mountEditorObjects(index, page, surface) {
-	const scope = state.composite?.index === index ? state.composite : null;
-	canvasEditor.mount(index, { ...page, objects: scope ? scope.objects : page.objects.filter(item => state.renderAnnotations || item.type !== "Annotation") }, surface);
+	const objects = [];
+	const append = members => {
+		for (const item of members) {
+			if (!state.renderAnnotations && item.type === "Annotation") continue;
+			objects.push(item);
+			const children = page.members?.get(item.id);
+			if (children) append(children);
+		}
+	};
+	append(page.objects);
+	canvasEditor.mount(index, { ...page, objects }, surface);
 }
 
 function changeAnnotations(item, action, ...args) {
 	return changeDocument("ofdgoChangeAnnotations", { ...item, id: item.items ? item.id : [item.id] }, action, ...args);
 }
 
-function resetCompositeScope() {
-	const scope = state.composite;
-	if (!scope) return;
-	state.composite = null;
-	canvasEditor.clear();
-	const page = state.pageCache.get(scope.index), surface = pageView.pageShell(scope.index)?.querySelector(".page-surface");
-	if (page && surface) mountEditorObjects(scope.index, page, surface);
+async function loadEditorMembers(tab, page, index) {
+	const state = tab.state, openSeq = state.openSeq;
+	const pending = canvasEditor.pendingSelection;
+	const ids = pending?.index === index ? pending.ids || [] : canvasEditor.items().filter(item => item.index === index).map(item => item.id);
+	page.members ||= new Map();
+	const paths = new Set();
+	for (const id of ids) {
+		const parts = id.split("/");
+		for (let i = 1; i < parts.length; i++) paths.add(parts.slice(0, i).join("/"));
+	}
+	for (const key of [...paths].sort((a, b) => a.split("/").length - b.split("/").length)) {
+		if (page.members.has(key)) continue;
+		const parent = key.includes("/") ? page.members.get(key.slice(0, key.lastIndexOf("/"))) : page.objects;
+		if (!parent?.some(item => item.id === key && canEditObject(item, "children"))) continue;
+		const members = await callTabWASM(tab, "ofdgoCompositeObjects", index, key);
+		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
+		page.members.set(key, members);
+	}
 }
 
-async function enterCompositeScope(index, key) {
-	const tab = documentTab(), state = tab.state;
-	const openSeq = state.openSeq;
+async function selectCompositeContent(item, point) {
+	const tab = documentTab(), state = tab.state, openSeq = state.openSeq;
+	const page = state.pageCache.get(item.index), surface = item.surface;
+	if (!page) return;
+	const original = canvasEditor.selected;
 	tab.editTask = true;
 	setBusy(true, "", 0, "", tab);
+	let target = item;
 	try {
-		const objects = await callTabWASM(tab, "ofdgoCompositeObjects", index, key);
-		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
-		canvasEditor.clear();
-		canvasEditor.setTool("");
-		state.composite = { index, key, objects };
-		const page = state.pageCache.get(index), surface = pageView.pageShell(index)?.querySelector(".page-surface");
-		if (page && surface) mountEditorObjects(index, page, surface);
-		updateControls();
-		setStatus(pageStatus(index, state.doc.pageCount));
+		page.members ||= new Map();
+		while (canEditObject(target, "children") && !target.richText) {
+			const key = target.id;
+			let members = page.members.get(key);
+			if (!members) {
+				members = await callTabWASM(tab, "ofdgoCompositeObjects", item.index, key);
+				if (!isForegroundDocument(tab) || openSeq !== state.openSeq || canvasEditor.selected !== original || !surface.isConnected) return;
+				page.members.set(key, members);
+			}
+			const next = point ? [...members].reverse().find(member => member.type === "TextObject" || canEditObject(member, "children")
+				? point.x >= member.x && point.x <= member.x + member.width && point.y >= member.y && point.y <= member.y + member.height
+				: canvasEditor.contains(member, point, 3 * page.width / surface.getBoundingClientRect().width)) : members[0];
+			if (!next) break;
+			target = next;
+		}
+		if (target.id === item.id) return;
+		mountEditorObjects(item.index, page, surface);
+		target = canvasEditor.pageItems(item.index).find(member => member.id === target.id);
+		canvasEditor.select(target);
 		canvasEditor.focus();
 	} catch (err) {
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) showError(err, false);
+		return;
 	} finally {
 		tab.editTask = false;
 		setBusy(false, "", 0, "", tab);
 	}
-}
-
-async function exitCompositeScope() {
-	const scope = state.composite;
-	if (!scope) return;
-	const split = scope.key.lastIndexOf("/");
-	if (split >= 0) return enterCompositeScope(scope.index, scope.key.slice(0, split));
-	resetCompositeScope();
-	updateControls();
-	canvasEditor.focus();
+	if (target && target.id !== item.id && !canEditObject(target, "children") && isForegroundDocument(tab) && openSeq === state.openSeq) return editCanvasObject(target);
 }
 
 async function startImageCrop(item) {
@@ -4429,7 +4444,7 @@ async function insertObject(event) {
 	const item = state.insertObject;
 	const before = editorLocation(), revision = state.editorInfo.revision;
 	const originalDocument = state.doc;
-	const file = el.insertImage.files[0], fit = el.insertFit.value, scope = state.composite?.key || "";
+	const file = el.insertImage.files[0], fit = el.insertFit.value;
 	const index = item?.index ?? state.pageIndex;
 	const page = state.doc.pages[index];
 	const x = Math.min(20, page.width / 10);
@@ -4443,9 +4458,9 @@ async function insertObject(event) {
 			return;
 		}
 		const doc = item?.scoped
-			? await callWASM("ofdgoChangeCompositeObjects", item.index, scope, [item.id], "image", data)
+			? await callWASM("ofdgoChangeCompositeObjects", item.index, objectParent(item), [item.id], "image", data)
 			: item ? await callWASM("ofdgoReplaceImage", item.index, item.id, data, fit)
-			: await callWASM("ofdgoInsertImage", index, data, x, y, page.width - x * 2, scope);
+			: await callWASM("ofdgoInsertImage", index, data, x, y, page.width - x * 2);
 		if (tab.closed || state.doc !== originalDocument || state.editorInfo?.revision !== revision) return;
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) {
 			state.doc = doc;
@@ -4470,7 +4485,7 @@ async function insertObject(event) {
 		openSeq = advanceDocumentSequence();
 		await refreshEditorPage(doc, index, openSeq);
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) {
-			rememberEditorView(before, revision, !item && !!state.composite);
+			rememberEditorView(before, revision);
 			canvasEditor.focus();
 		}
 	} catch (err) {
@@ -4548,7 +4563,7 @@ async function changeTextStyle(color) {
 		updateObjectControls(canvasEditor.selected, true);
 		return;
 	}
-	if (state.composite && color) {
+	if (item?.scoped && color) {
 		if (color && fill !== null && canEditObject(item, "paint")) {
 			await changeDocument("ofdgoCompositeTextColor", item, fill);
 		}
@@ -4693,26 +4708,30 @@ async function changeDocument(name, item, ...args) {
 		if (tab.closed) {
 			return;
 		}
-		const scope = state.composite;
+		const scope = objectParent(item);
 		const operation = { ofdgoTransformObject: "transform", ofdgoTransformObjects: "transform", ofdgoRotateObjects: "rotate", ofdgoFlipObjects: "flip", ofdgoResizeObjects: "resize",
 			ofdgoAlignObject: "align", ofdgoAlignObjects: "align", ofdgoDistributeObjects: "distribute", ofdgoStyleObjects: "style", ofdgoUpdatePathStyle: "paint", ofdgoCompositeTextColor: "textColor",
 			ofdgoUpdateText: "text", ofdgoStyleText: "textStyle", ofdgoCropImage: "crop", ofdgoLayoutText: "layout", ofdgoFitImage: "fit", ofdgoResetCompositeCrop: "resetCrop",
 			ofdgoReshapeObject: "reshape", ofdgoReshapeLine: "line", ofdgoEraseObjects: "erase", ofdgoEraseObjectsPath: "erasePath", ofdgoPasteStyle: "pasteStyle",
 			ofdgoDeleteObject: "delete", ofdgoDeleteObjects: "delete", ofdgoCopyObjects: "copy", ofdgoOrderObjects: "order", ofdgoGroupObjects: "group" }[name];
 		const members = item?.items || (item ? [item] : []);
-		const scoped = scope && members.length && members.every(member => member.scoped);
+		const scoped = members.some(member => member.scoped);
 		const ids = item ? Array.isArray(item.id) ? item.id : members.map(member => member.id) : [];
 		const annotated = !scoped && ids.some(id => id.startsWith("annotation:"));
 		const inserting = ["ofdgoInsertShape", "ofdgoInsertText", "ofdgoInsertImage", "ofdgoInsertInk"].includes(name) || name === "ofdgoSaveRichText" && !item;
 		const editingAnnotation = name === "ofdgoWriteAnnotation" && Boolean(state.annotationCreate?.item);
 		const scopedRichText = scoped && name === "ofdgoSaveRichText";
-		if (scope && (inserting || scopedRichText)) args.push(scope.key);
+		if (scopedRichText) args.push(scope);
 		const textSelection = name === "ofdgoUpdateTextSelection";
 		if (scoped && !operation && !textSelection && !scopedRichText) throw new Error("内部对象暂不支持此操作");
-		const doc = textSelection
+		const doc = name === "ofdgoStyleText"
+			? await callWASM(name, item.index, ids, ...args)
+			: textSelection
 			? await callWASM(name, item.index, item.selectionIDs, ...args)
+			: scoped && scope === null && operation
+			? await callWASM("ofdgoChangeSelection", item.index, ids, operation, ...args)
 			: scoped && !scopedRichText
-			? await callWASM("ofdgoChangeCompositeObjects", item.index, scope.key, Array.isArray(item.id) ? item.id : members.map(member => member.id), operation, ...args)
+			? await callWASM("ofdgoChangeCompositeObjects", item.index, scope, Array.isArray(item.id) ? item.id : members.map(member => member.id), operation, ...args)
 			: annotated && operation ? await callWASM("ofdgoChangeSelection", item.index, ids, operation, ...args)
 			: await callWASM(name, ...(item ? [item.index, item.id] : []), ...args);
 		if (tab.closed || state.doc !== originalDocument || state.editorInfo?.revision !== revision) return;
@@ -4756,7 +4775,6 @@ async function changeDocument(name, item, ...args) {
 			if (state.documentManagement && (name === "ofdgoImportDocuments" || name === "ofdgoChangeDocument" && args[0] === "add")) {
 				state.documentManagement.key = documentEntryKey(nextDocument);
 			}
-			resetCompositeScope();
 			state.objectClipboard = state.styleClipboard = null;
 			canvasEditor.richClipboard = null;
 			state.pageSelection.clear();
@@ -4782,18 +4800,8 @@ async function changeDocument(name, item, ...args) {
 			return;
 		}
 		const view = restoredView;
-		const reindex = !!scope && (scoped && ["ofdgoDeleteObject", "ofdgoDeleteObjects", "ofdgoCopyObjects", "ofdgoOrderObjects", "ofdgoEraseObjects", "ofdgoEraseObjectsPath", "ofdgoGroupObjects"].includes(name)
-			|| textSelection || inserting || name === "ofdgoPasteObjects" && !!args[4]);
-		const reindexed = restoring ? view?.reindex && view.before : reindex && before;
-		const clipboard = state.objectClipboard;
-		if (reindexed && clipboard?.scope?.startsWith(reindexed.scope + "/") && clipboard.page === reindexed.page) state.objectClipboard = null;
 		const location = name === "ofdgoUndo" ? view?.before : view?.after;
 		const restoredIndex = location ? pageIndexByID(doc.pages, location.page) : -1;
-		if (restoredIndex >= 0) {
-			state.composite = location.scope ? { index: restoredIndex, key: location.scope, objects: [] } : null;
-		} else if (!item && !inserting && !editingAnnotation && !(name === "ofdgoPasteObjects" && args[4])) {
-			resetCompositeScope();
-		}
 		if (restoring && JSON.stringify(doc.outlines) !== JSON.stringify(state.doc.outlines)) {
 			state.outlineSelection = null;
 			state.outlineExpanded.clear();
@@ -4845,7 +4853,7 @@ async function changeDocument(name, item, ...args) {
 				previewScroll: keepScroll ? { scrollLeft, scrollTop } : null });
 		}
 		if (openSeq === state.openSeq) {
-			if (!restoring) rememberEditorView(before, revision, reindex);
+			if (!restoring) rememberEditorView(before, revision);
 			if (el.annotationsTab.getAttribute("data-selected") === "true") await loadAnnotationSummary();
 			if (!toolbarFocus && !changingFont) canvasEditor.focus();
 			return true;
@@ -8218,7 +8226,7 @@ function renderLayerSettings() {
 		objects.multiple = true;
 		objects.size = Math.min(4, Math.max(2, objects.options.length));
 		for (const option of objects.options) option.selected = canvasEditor.items().some(item => item.index === settings.page && item.id === option.value && !item.scoped);
-		settingsButton("选取", () => beginSettingsPick("layer"), Boolean(state.composite), "PickLayer", binding.actions);
+		settingsButton("选取", () => beginSettingsPick("layer"), false, "PickLayer", binding.actions);
 		const move = settingsButton("移入", () => write("objects", 0, [...objects.selectedOptions].map(option => option.value)), !objects.selectedOptions.length, "MoveObjects", binding.actions);
 		objects.addEventListener("change", () => { move.disabled = !objects.selectedOptions.length; });
 		binding.section.append(binding.actions);
@@ -8337,12 +8345,12 @@ function settingsPickControl(field, kind) {
 	wrapper.className = "form-unit settings-pick";
 	field.replaceWith(wrapper);
 	wrapper.append(field);
-	settingsButton("选取", () => beginSettingsPick(kind), Boolean(state.composite), "PickObject", wrapper);
+	settingsButton("选取", () => beginSettingsPick(kind), false, "PickObject", wrapper);
 }
 
 async function beginSettingsPick(kind) {
 	const tab = documentTab(), state = tab.state, settings = tab.settings;
-	if (!state.editing || settings.busy || state.composite) return;
+	if (!state.editing || settings.busy) return;
 	rememberSettingsDraft();
 	const page = kind === "style" ? Number(settingsValue("TargetPage")) : settings.page, sequence = state.openSeq;
 	if (!await pageView.renderPage(page, {fit: false}) || !isForegroundDocument(tab) || sequence !== state.openSeq || !settingsElements.Panel.open) return;
@@ -8688,7 +8696,7 @@ function updateResourceControls() {
 	const actions = resourceElements.Binding.hidden ? resourceElements.Actions : resourceElements.BindingActions;
 	if (resourceElements.Close.parentElement !== actions) actions.append(resourceElements.Close);
 	const target = resourceManager.targets.find(target => target.id === resourceElements.Object.value);
-	resourceElements.Pick.disabled = disabled || !editing || !actionable || Boolean(state.composite);
+	resourceElements.Pick.disabled = disabled || !editing || !actionable;
 	resourceElements.Bind.disabled = disabled || !actionable || !target || target.bound;
 	resourceElements.Unbind.disabled = disabled || !actionable || !target?.bound;
 }
@@ -8758,7 +8766,7 @@ function resourceChoices(items, label, choose, title = "选择对象") {
 
 async function beginResourcePick() {
 	const tab = documentTab(), state = tab.state, resourceManager = tab.resources;
-	if (!state.editing || state.composite || !["Audio", "Video", "Attachment"].includes(resourceManager.selected?.kind)) return;
+	if (!state.editing || !["Audio", "Video", "Attachment"].includes(resourceManager.selected?.kind)) return;
 	const sequence = state.openSeq;
 	if (!await pageView.renderPage(Number(resourceElements.Page.value), {fit: false})) return;
 	if (!isForegroundDocument(tab) || sequence !== state.openSeq || !resourceElements.Panel.open) return;
@@ -10464,23 +10472,18 @@ async function selectDocumentText() {
 }
 
 function copyEditorSelection(event) {
+	const tab = documentTab(), state = tab.state;
 	if (!state.editing || !canvasEditor.enabled || !canvasEditor.selected || !el.viewerPanel.contains(event.target)
 		|| canvasEditor.input || canvasEditor.crop || canvasEditor.drag || document.body.hasAttribute("data-busy")) return false;
 	const items = canvasEditor.items().slice().sort((a, b) => a.order - b.order);
 	const cut = event.type === "cut";
-	if (state.composite && items.some(item => item.container !== items[0].container)) {
-		event.preventDefault();
-		setStatus("请选择同一组内的对象");
-		return true;
-	}
 	if (!canEditObject(canvasEditor.selected, "copy") || cut && !canEditObject(canvasEditor.selected, "delete")) {
 		event.preventDefault();
 		setStatus(cut ? "对象不可剪切" : "对象不可复制");
 		return true;
 	}
 	const index = items[0].index, ids = items.map(item => item.id);
-	const clipboard = { token: crypto.randomUUID(), page: state.doc.pages[index].id, scope: state.composite?.key || "", bounds: selectionBounds(items), x: 0, y: 0, cut,
-		compound: items.some(item => item.type === "CompositeObject" || item.type === "CompositeGraphicUnit") };
+	const clipboard = { token: crypto.randomUUID(), page: state.doc.pages[index].id, bounds: selectionBounds(items), x: 0, y: 0, cut };
 	if (canvasEditor.nudge) {
 		clipboard.bounds.x += canvasEditor.nudge.x;
 		clipboard.bounds.y += canvasEditor.nudge.y;
@@ -10491,14 +10494,14 @@ function copyEditorSelection(event) {
 	state.objectClipboard = clipboard;
 	const capture = () => {
 		const openSeq = state.openSeq, revision = state.editorInfo.revision;
-		return callWASM("ofdgoCaptureObjects", index, ids, clipboard.token, clipboard.scope).then(async () => {
+		return callTabWASM(tab, "ofdgoCaptureObjects", index, ids, clipboard.token).then(async () => {
 			clipboard.cut = false;
-			if (cut && openSeq === state.openSeq && revision === state.editorInfo?.revision && index === state.pageIndex && state.objectClipboard === clipboard && clipboard.scope === (state.composite?.key || "")) {
+			if (cut && isForegroundDocument(tab) && openSeq === state.openSeq && revision === state.editorInfo?.revision && index === state.pageIndex && state.objectClipboard === clipboard) {
 				clipboard.cut = Boolean(await changeDocument("ofdgoDeleteObjects", { index, id: ids, items }));
 			}
 			return true;
 		}, err => {
-			if (state.objectClipboard === clipboard) showError(err, false);
+			if (isForegroundDocument(tab) && state.objectClipboard === clipboard) showError(err, false);
 			return false;
 		});
 	};
@@ -10535,11 +10538,6 @@ async function pasteEditorContent(event) {
 		}
 		const openSeq = state.openSeq;
 		if (!await clipboard.ready || openSeq !== state.openSeq || index !== state.pageIndex || state.objectClipboard !== clipboard) return;
-		const scope = state.composite?.key || "";
-		if (clipboard.compound && (scope || clipboard.scope) && (scope !== clipboard.scope || page.id !== clipboard.page)) {
-			setStatus("复合对象请在原范围粘贴");
-			return;
-		}
 		if (!pageCan("insert")) return;
 		const visible = visiblePageBounds(index), bounds = clipboard.bounds;
 		const offset = (clipboard.targetPage || clipboard.page) === page.id ? { x: clipboard.x + (clipboard.cut ? 0 : 3), y: clipboard.y + (clipboard.cut ? 0 : 3) } : { x: 0, y: 0 };
@@ -10550,7 +10548,7 @@ async function pasteEditorContent(event) {
 				offset[axis] = Math.max(visible[axis] + margin, Math.min(position, visible[axis] + visible[size] - margin - bounds[size])) - bounds[axis];
 			}
 		}
-		if (await changeDocument("ofdgoPasteObjects", null, index, token, offset.x, offset.y, state.composite?.key || "")) {
+		if (await changeDocument("ofdgoPasteObjects", null, index, token, offset.x, offset.y)) {
 			clipboard.targetPage = page.id;
 			clipboard.x = offset.x;
 			clipboard.y = offset.y;
@@ -12302,18 +12300,15 @@ function updateEditorTools() {
 }
 
 function updateObjectControls(item, reset = false) {
-	el.compositeBackButton.hidden = !state.composite;
-	el.compositeBackButton.disabled = !state.ready || state.exporting;
-	el.selectObjectButton.hidden = Boolean(state.composite);
 	const members = item?.items || (item ? [item] : []);
 	const disabled = !item || Boolean(item.draft) || !state.ready || state.exporting;
 	el.deleteObjectButton.disabled = disabled || !canEditObject(item, "delete");
-	el.copyObjectButton.disabled = disabled || !canEditObject(item, "copy") || Boolean(state.composite && members.some(member => member.container !== members[0].container));
+	el.copyObjectButton.disabled = disabled || !canEditObject(item, "copy");
 	el.objectStyleButton.disabled = disabled || !canEditObject(item, "transform");
 	const cropping = Boolean(canvasEditor.crop);
 	el.objectBoundsButton.disabled = disabled || cropping || !canEditObject(item, "transform");
 	el.objectAlign.disabled = disabled || cropping || !canEditObject(item, "arrange");
-	el.objectRotate.disabled = el.objectFlip.disabled = disabled || cropping || !canEditObject(item, state.composite ? "transform" : "arrange");
+	el.objectRotate.disabled = el.objectFlip.disabled = disabled || cropping || !canEditObject(item, members.some(member => member.scoped) ? "transform" : "arrange");
 	el.cropImageButton.disabled = disabled || item.type !== "ImageObject" || !canEditObject(item, "cropImage");
 	el.saveImageButton.disabled = disabled || !item.imageResource;
 	el.imageFit.disabled = el.cropImageButton.disabled || cropping || Boolean(item.scoped && !canEditObject(item, "fitImage"));
@@ -12323,9 +12318,9 @@ function updateObjectControls(item, reset = false) {
 	el.resetCropButton.disabled = canEditObject(item, "resetCrop") ? disabled : el.cropImageButton.disabled || !cropping && (item.scoped ? !item.cropped : !item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
 	el.objectDistribute.disabled = el.objectAlign.disabled || !item.items || item.items.length < 3;
 	el.editObjectButton.disabled = disabled || (item.items ? !item.items.every(member => member.type === "TextObject" && !member.richText)
-		: !canEditObject(item, "enter") && (item.type === "PathObject"
+		: !canEditObject(item, "children") && (item.type === "PathObject"
 		|| !(item.type === "TextObject" && canEditObject(item, "rewriteText")) && !canEditObject(item, item.type === "TextObject" ? "textContent" : item.type === "ImageObject" ? "replaceImage" : "update")));
-	el.editObjectButton.textContent = canEditObject(item, "enter") ? "进入" : item?.type === "ImageObject" ? "替换" : "修改";
+	el.editObjectButton.textContent = item?.type === "ImageObject" ? "替换" : "修改";
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const selection = selectedText(item);
 	const text = selection ? currentTextStyle() : state.textDefaults;

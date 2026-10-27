@@ -563,7 +563,7 @@ export class CanvasEditor {
 			if (!event.altKey && this.enabled && item && !item.items && !this.input && !this.options.busy()
 				&& target && (!target.dataset.corner || item.type === "TextObject")
 				&& this.targetAt({ target, clientX: event.clientX, clientY: event.clientY }) === item) {
-				this.options.onEdit(item);
+				this.options.onEdit(item, canEditObject(item, "children") ? pagePoint(event.clientX, event.clientY, item.surface.getBoundingClientRect(), item.page, this.options.rotation()) : null);
 			}
 		});
 		viewer.addEventListener("scroll", () => this.scroll());
@@ -607,14 +607,15 @@ export class CanvasEditor {
 		const layer = document.createElement("div");
 		layer.className = "edit-layer";
 		const artwork = new Map([...surface.querySelectorAll("[data-ofd-object], [data-ofd-child]")].map((node, order) => [node.getAttribute("data-ofd-object") || node.getAttribute("data-ofd-child"), { node, order }]));
-		const objects = [...page.objects].sort((a, b) => (artwork.get(a.id)?.order ?? 0) - (artwork.get(b.id)?.order ?? 0));
-		for (const object of objects) {
+		const paintOrder = object => artwork.get(object.id)?.order ?? artwork.get(object.id.split("/")[0])?.order ?? 0;
+		const objects = [...page.objects].sort((a, b) => paintOrder(a) - paintOrder(b));
+		for (const [order, object] of objects.entries()) {
 			const node = document.createElement("div");
 			node.className = "edit-object";
 			node.classList.toggle("read-only", !canEditObject(object, "move"));
 			node.title = objectEditReason(object);
 			node.tabIndex = 0;
-			const item = { ...object, index, page: { width: page.width, height: page.height }, node, surface };
+			const item = { ...object, order, index, page: { width: page.width, height: page.height }, node, surface };
 			item.artwork = artwork.get(object.id)?.node;
 			if (object.note) {
 				const icon = document.createElement("span");
@@ -760,6 +761,7 @@ export class CanvasEditor {
 	}
 
 	setSelection(items) {
+		items = items.filter(item => !items.some(parent => parent !== item && item.id.startsWith(parent.id + "/")));
 		this.cancelNudge();
 		const previous = this.selected;
 		if (this.crop && (items.length !== 1 || items[0] !== this.crop.item)) this.closeCrop();
@@ -805,6 +807,10 @@ export class CanvasEditor {
 			item.node.classList.toggle("multi-selected", items.length > 1);
 			item.node.setAttribute("data-pressed", "true");
 		}
+		for (const node of this.viewer.querySelectorAll(".edit-parent")) node.classList.remove("edit-parent");
+		for (const item of items) {
+			if (item.parent) this.pageItems(item.index).find(parent => parent.id === item.parent)?.node.classList.add("edit-parent");
+		}
 		this.options.onSelect(this.selected, previous);
 	}
 
@@ -815,6 +821,16 @@ export class CanvasEditor {
 		}
 		const items = this.items();
 		this.setSelection(items.includes(item) ? items.filter(member => member !== item) : [...items, item]);
+	}
+
+	selectParent() {
+		const item = this.selected;
+		if (!item?.parent) return false;
+		const parent = this.pageItems(item.index).find(parent => parent.id === item.parent);
+		if (!parent) return false;
+		this.select(parent);
+		this.focus();
+		return true;
 	}
 
 	clear() {
@@ -902,7 +918,7 @@ export class CanvasEditor {
 		if (!this.drag.corner) {
 			const selected = this.items();
 			this.drag.targets = [...item.surface.querySelectorAll(".edit-object")]
-				.map(node => this.nodes.get(node)).filter(member => !selected.includes(member));
+				.map(node => this.nodes.get(node)).filter(member => !selected.some(item => item === member || item.id.startsWith(member.id + "/") || member.id.startsWith(item.id + "/")));
 			this.drag.targets.push({ x: 0, y: 0, ...item.page });
 		}
 		if (lineShape(item.shape) && this.drag.corner) {
@@ -930,7 +946,7 @@ export class CanvasEditor {
 			event = { target, clientX: event.clientX, clientY: event.clientY };
 		}
 		const direct = this.nodes.get(event.target.closest(".edit-object, .edit-selection"));
-		return event.target.dataset.corner || direct && !direct.contours ? direct : this.itemsAt(event)[0];
+		return event.target.dataset.corner || direct && !direct.contours && (!direct.parent || this.items().some(selected => selected.id.startsWith(direct.parent + "/"))) ? direct : this.itemsAt(event)[0];
 	}
 
 	itemsAt(event) {
@@ -940,7 +956,7 @@ export class CanvasEditor {
 		const rect = surface.getBoundingClientRect(), rotation = this.options.rotation();
 		const point = pagePoint(event.clientX, event.clientY, rect, page, rotation);
 		const tolerance = 3 * page.width / (rotation % 180 ? rect.height : rect.width);
-		return [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)).reverse().filter(item => item.type === "TextObject"
+		return [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)).reverse().filter(item => !item.parent || this.items().some(selected => selected.id.startsWith(item.parent + "/"))).filter(item => item.type === "TextObject"
 			? point.x >= item.x - tolerance && point.x <= item.x + item.width + tolerance
 				&& point.y >= item.y - tolerance && point.y <= item.y + item.height + tolerance
 			: this.contains(item, point, tolerance));
@@ -1256,7 +1272,7 @@ export class CanvasEditor {
 		if (!page) return;
 		event.preventDefault();
 		this.focus();
-		this.drag = { erase: this.tool, page, surface, items: [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)),
+		this.drag = { erase: this.tool, page, surface, items: [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)).filter(item => !item.parent),
 			erased: new Set(), shape: "rectangle", pointerID: event.pointerId, clientX: event.clientX, clientY: event.clientY,
 			rect: surface.getBoundingClientRect(), rotation: this.options.rotation() };
 		if (this.tool === "erase-region") Object.assign(this.drag, this.createPreview(surface, page, "rectangle",
@@ -1315,7 +1331,7 @@ export class CanvasEditor {
 		const items = [...drag.base];
 		for (const node of drag.surface.querySelectorAll(".edit-object")) {
 			const item = this.nodes.get(node);
-			if (!items.includes(item) && item.x >= box.x && item.x+item.width <= box.x+box.width && item.y >= box.y && item.y+item.height <= box.y+box.height) {
+			if (!item.parent && !items.includes(item) && item.x >= box.x && item.x+item.width <= box.x+box.width && item.y >= box.y && item.y+item.height <= box.y+box.height) {
 				items.push(item);
 			}
 		}
@@ -1458,7 +1474,7 @@ export class CanvasEditor {
 			this.setTool("");
 			return;
 		}
-		if (event.key === "Escape" && !this.input && this.enabled && !this.options.busy() && !this.nudge && this.options.onExitScope?.()) {
+		if (event.key === "Escape" && !this.input && this.enabled && !this.options.busy() && !this.nudge && this.selectParent()) {
 			event.preventDefault();
 			event.stopPropagation();
 			return;

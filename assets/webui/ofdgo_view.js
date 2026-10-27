@@ -417,10 +417,10 @@ export function createPageView(context) {
 							task.resolve(null);
 							continue;
 						}
-						const scope = state.composite;
-						if (scope?.index === task.index) {
-							const objects = await context.callWASM("ofdgoCompositeObjects", task.index, scope.key);
-							if (scope === state.composite && task.openSeq === state.openSeq) scope.objects = objects;
+						if (state.editing) await context.loadEditorMembers(tab, page, task.index);
+						if (context.activeTab !== tab || state.pageInFlight.get(task.key) !== task || task.openSeq !== state.openSeq) {
+							task.resolve(null);
+							continue;
 						}
 						await pageView.loadSVGFonts(page.fonts, task.openSeq);
 						for (const font of page.fonts) delete font.data;
@@ -817,7 +817,6 @@ export function createPageView(context) {
 
 		setCurrentPage(index) {
 			if (index !== context.state.pageIndex && !context.state.openActionTask?.navigating) context.state.openActionTask = null;
-			if (context.state.composite && context.state.composite.index !== index) context.resetCompositeScope();
 			context.state.pageIndex = index;
 			pageView.prunePageRenderQueue();
 			if (context.state.editing) context.state.openActionPage = context.state.doc?.pages[index]?.id;

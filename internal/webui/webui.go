@@ -359,7 +359,6 @@ type apiResult struct {
 type editorClipboard struct {
 	token     string
 	selection *ofdgo.ObjectSelection
-	composite *ofdgo.CompositeSelection
 }
 
 // editorInfo 编辑文档信息与操作状态
@@ -3430,9 +3429,9 @@ func (e *businessEngine) editorObjects(index int, text *ofdgo.PageText) ([]any, 
 			continue
 		}
 		box, contours, err := e.currentSession.Renderer.AnnotationGeometry(annotation)
-		capabilities := map[string]any{"update": true, "transform": true, "arrange": true, "copy": true, "delete": true, "enter": len(annotation.Appearance.Objects) != 0}
+		capabilities := map[string]any{"update": true, "transform": true, "arrange": true, "copy": true, "delete": true, "children": len(annotation.Appearance.Objects) != 0}
 		if err != nil {
-			capabilities["transform"], capabilities["arrange"], capabilities["enter"] = false, false, false
+			capabilities["transform"], capabilities["arrange"], capabilities["children"] = false, false, false
 			capabilities["reason"], capabilities["reasonCode"] = err.Error(), "invalidObject"
 		}
 		if box.W <= 0 || box.H <= 0 {
@@ -3711,19 +3710,22 @@ func (e *businessEngine) splitEditorSelection(ids []string) ([]string, []string)
 	return objects, annotations
 }
 
-// changeSelection 原子处理正文和注解混选，保持绘制顺序及统一历史
+// changeSelection 原子处理正文、注解及内部对象混选，保持统一历史
 // 入参: args 页面索引、标识列表、操作与参数
 // 返回: any 文档与新选区, error 错误信息
 func (e *businessEngine) changeSelection(args []platformValue) (any, error) {
 	var selected []string
 	result, err := e.changeAtomicObjects(func() error {
 		page, operation := args[0].Int(), args[2].String()
-		objects, annotations := e.splitEditorSelection(e.stringsFromJS(args[1]))
+		paths, err := e.editorTargetPaths(e.stringsFromJS(args[1]))
+		if err != nil {
+			return err
+		}
 		switch operation {
 		case "align", "distribute":
 			return e.arrangeEditorSelection(page, e.stringsFromJS(args[1]), operation, args[3].String())
 		case "delete":
-			return e.currentEditor.DeleteSelection(page, objects, annotations)
+			return e.currentEditor.DeleteTargets(page, paths)
 		case "copy":
 			clipboard, err := e.captureEditorSelection(page, e.stringsFromJS(args[1]))
 			if err != nil {
@@ -3731,20 +3733,31 @@ func (e *businessEngine) changeSelection(args []platformValue) (any, error) {
 			}
 			selected, err = e.pasteEditorSelection(page, clipboard, args[3].Float(), args[4].Float())
 			return err
+		case "pasteStyle":
+			if e.copiedStyle == nil {
+				return fmt.Errorf("style clipboard is empty")
+			}
+			return e.currentEditor.CopyTargetsStyle(page, paths, *e.copiedStyle)
+		case "paint", "textColor":
+			style, err := e.editorPaintStyle(operation, args[3:])
+			if err != nil {
+				return err
+			}
+			return e.currentEditor.StyleTargets(page, paths, style)
 		case "style":
-			return e.currentEditor.StyleSelection(page, objects, annotations, e.objectStyle(args[3]))
+			return e.currentEditor.StyleTargets(page, paths, e.objectStyle(args[3]))
 		case "erase":
-			return e.currentEditor.EraseSelection(page, objects, annotations, ofdgo.Box{
+			return e.currentEditor.EraseTargets(page, paths, ofdgo.Box{
 				X: args[3].Float(), Y: args[4].Float(), W: args[5].Float(), H: args[6].Float(),
 			})
 		case "erasePath":
-			return e.currentEditor.EraseSelectionPath(page, objects, annotations, e.pointsFromJS(args[3]))
+			return e.currentEditor.EraseTargetsPath(page, paths, e.pointsFromJS(args[3]))
 		case "rotate":
-			return e.currentEditor.RotateSelection(page, objects, annotations, args[3].Int())
+			return e.currentEditor.RotateTargets(page, paths, args[3].Int())
 		case "flip":
-			return e.currentEditor.FlipSelection(page, objects, annotations, args[3].String())
+			return e.currentEditor.FlipTargets(page, paths, args[3].String())
 		case "resize":
-			return e.currentEditor.ResizeSelection(page, objects, annotations, ofdgo.Box{
+			return e.currentEditor.ResizeTargets(page, paths, ofdgo.Box{
 				X: args[3].Float(), Y: args[4].Float(), W: args[5].Float(), H: args[6].Float(),
 			})
 		case "transform":
@@ -3753,7 +3766,7 @@ func (e *businessEngine) changeSelection(args []platformValue) (any, error) {
 				return fmt.Errorf("scale must be positive")
 			}
 			matrix := ofdgo.NewMatrix(fmt.Sprintf("%g 0 0 %g %g %g", scale, scale, dx, dy))
-			return e.currentEditor.TransformSelection(page, objects, annotations, matrix)
+			return e.currentEditor.TransformTargets(page, paths, matrix)
 		default:
 			return fmt.Errorf("unsupported mixed selection operation %q", operation)
 		}
@@ -3764,30 +3777,42 @@ func (e *businessEngine) changeSelection(args []platformValue) (any, error) {
 	return editorSelectionInfo{editorInfo: result.(editorInfo), SelectedIDs: selected}, nil
 }
 
-// arrangeEditorSelection 对正文和注解统一对齐或分布，不改变各自绘制层级
+// arrangeEditorSelection 对跨容器选区统一对齐或分布，不改变各自绘制层级
 // 入参: page 页面, ids 标识, operation 操作, direction 方向
 // 返回: error 错误信息
 func (e *businessEngine) arrangeEditorSelection(page int, ids []string, operation, direction string) error {
-	objects, annotations := e.splitEditorSelection(ids)
-	switch operation {
-	case "align":
-		return e.currentEditor.AlignSelection(page, objects, annotations, direction)
-	case "distribute":
-		return e.currentEditor.DistributeSelection(page, objects, annotations, direction)
-	default:
-		return fmt.Errorf("invalid arrangement operation %q", operation)
+	paths, err := e.editorTargetPaths(ids)
+	if err != nil {
+		return err
 	}
+	return e.currentEditor.ArrangeTargets(page, paths, operation == "distribute", direction)
 }
 
-// captureEditorSelection 捕获正文与注解的独立副本
+// editorTargetPaths 将画布标识解析为完整对象路径
+// 入参: ids 画布标识
+// 返回: []ofdgo.ObjectPath 对象路径, error 路径错误
+func (e *businessEngine) editorTargetPaths(ids []string) ([]ofdgo.ObjectPath, error) {
+	paths := make([]ofdgo.ObjectPath, len(ids))
+	for i, id := range ids {
+		path, err := e.compositePath(id)
+		if err != nil {
+			return nil, err
+		}
+		paths[i] = path
+	}
+	return paths, nil
+}
+
+// captureEditorSelection 捕获正文、注解及内部对象的独立副本
 // 入参: page 页面索引, ids 画布标识
 // 返回: *editorClipboard 快照, error 错误信息
 func (e *businessEngine) captureEditorSelection(page int, ids []string) (*editorClipboard, error) {
-	objects, annotations := e.splitEditorSelection(ids)
-	result := &editorClipboard{}
-	var err error
-	result.selection, err = e.currentEditor.CaptureSelection(page, objects, annotations)
-	return result, err
+	paths, err := e.editorTargetPaths(ids)
+	if err != nil {
+		return nil, err
+	}
+	selection, err := e.currentEditor.CaptureTargets(page, paths)
+	return &editorClipboard{selection: selection}, err
 }
 
 // pasteEditorSelection 原子粘贴正文和注解，共享字体与图片数据
@@ -3806,7 +3831,7 @@ func (e *businessEngine) pasteEditorSelection(page int, clipboard *editorClipboa
 // 返回: map[string]any 前端能力
 func (e *businessEngine) editorCapabilities(capability ofdgo.ObjectCapabilities, kind string) map[string]any {
 	result := map[string]any{"update": capability.Update, "paint": capability.Paint, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason, "reasonCode": string(capability.ReasonCode),
-		"replaceImage": capability.ReplaceImage, "cropImage": capability.CropImage, "fitImage": capability.FitImage, "resetCrop": capability.ResetCrop, "ungroup": capability.Ungroup, "stretch": capability.Stretch, "enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
+		"replaceImage": capability.ReplaceImage, "cropImage": capability.CropImage, "fitImage": capability.FitImage, "resetCrop": capability.ResetCrop, "ungroup": capability.Ungroup, "stretch": capability.Stretch, "children": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
 	result["textContent"] = capability.TextContent
 	result["rewriteText"] = capability.RewriteText
 	if missing := capability.MissingGlyphs; missing != nil {
@@ -3963,7 +3988,7 @@ func (e *businessEngine) compositeObjects(args []platformValue) (any, error) {
 		if box.W <= 0 || box.H <= 0 {
 			continue
 		}
-		item := map[string]any{"id": fmt.Sprintf("%s/%d", key, i), "type": member.Object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": i, "position": member.Position.Index, "count": member.Position.Count, "container": key + ":" + member.Position.Container, "scoped": true, "contours": member.Contours,
+		item := map[string]any{"id": fmt.Sprintf("%s/%d", key, i), "type": member.Object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": i, "position": member.Position.Index, "count": member.Position.Count, "container": key + ":" + member.Position.Container, "scoped": true, "parent": key, "contours": member.Contours,
 			"capabilities": e.editorCapabilities(member.Capabilities, member.Object.Type)}
 		e.editorAppearance(item, member.Object, member.Capabilities.Paint, member.StrokeScale)
 		if member.Object.Type == "ImageObject" {
@@ -4128,35 +4153,9 @@ func (e *businessEngine) changeCompositeObjects(args []platformValue) (any, erro
 		case "style":
 			return e.currentEditor.StyleCompositeObjects(page, path, indexes, e.objectStyle(args[4]))
 		case "paint", "textColor":
-			style := ofdgo.ObjectStyle{}
-			if operation == "textColor" {
-				style.FillColor = &ofdgo.FillColor{}
-				if err := e.setEditorColor(style.FillColor, args[4].String()); err != nil {
-					return err
-				}
-			} else {
-				if !args[4].IsNull() {
-					value := args[4].Bool()
-					style.Fill = &value
-				}
-				if !args[6].IsNull() {
-					value := args[6].Bool()
-					style.Stroke = &value
-				}
-				var colors [2]*ofdgo.FillColor
-				for i := range colors {
-					if !args[5+i*2].IsNull() {
-						colors[i] = &ofdgo.FillColor{}
-						if err := e.setEditorColor(colors[i], args[5+i*2].String()); err != nil {
-							return err
-						}
-					}
-				}
-				style.FillColor, style.StrokeColor = colors[0], (*ofdgo.StrokeColor)(colors[1])
-				if !args[8].IsNull() {
-					value := args[8].Float()
-					style.LineWidth = &value
-				}
+			style, err := e.editorPaintStyle(operation, args[4:])
+			if err != nil {
+				return err
 			}
 			return e.currentEditor.StyleCompositeObjects(page, path, indexes, style)
 		default:
@@ -4174,6 +4173,43 @@ func (e *businessEngine) changeCompositeObjects(args []platformValue) (any, erro
 		doc.SelectedIDs = append(doc.SelectedIDs, fmt.Sprintf("%s/%d", args[1].String(), index))
 	}
 	return doc, nil
+}
+
+// editorPaintStyle 解析绘制颜色与描边增量，供顶层和内部选区共用
+// 入参: operation 操作, args 绘制参数
+// 返回: ofdgo.ObjectStyle 样式增量, error 颜色错误
+func (e *businessEngine) editorPaintStyle(operation string, args []platformValue) (ofdgo.ObjectStyle, error) {
+	style := ofdgo.ObjectStyle{}
+	if operation == "textColor" {
+		style.FillColor = &ofdgo.FillColor{}
+		if err := e.setEditorColor(style.FillColor, args[0].String()); err != nil {
+			return style, err
+		}
+	} else {
+		if !args[0].IsNull() {
+			value := args[0].Bool()
+			style.Fill = &value
+		}
+		if !args[2].IsNull() {
+			value := args[2].Bool()
+			style.Stroke = &value
+		}
+		var colors [2]*ofdgo.FillColor
+		for i := range colors {
+			if !args[1+i*2].IsNull() {
+				colors[i] = &ofdgo.FillColor{}
+				if err := e.setEditorColor(colors[i], args[1+i*2].String()); err != nil {
+					return style, err
+				}
+			}
+		}
+		style.FillColor, style.StrokeColor = colors[0], (*ofdgo.StrokeColor)(colors[1])
+		if !args[4].IsNull() {
+			value := args[4].Float()
+			style.LineWidth = &value
+		}
+	}
+	return style, nil
 }
 
 // compositeIndexes 将画布成员路径转换为同一范围的序号
@@ -4849,7 +4885,7 @@ func (e *businessEngine) styleText(args []platformValue) (any, error) {
 			}
 			var value strings.Builder
 			for _, id := range ids {
-				object, err := e.currentEditor.Object(page, id)
+				object, err := e.editorObjectAt(page, id)
 				if err != nil {
 					return err
 				}
@@ -4873,7 +4909,11 @@ func (e *businessEngine) styleText(args []platformValue) (any, error) {
 			}
 			style.Color = color.Value
 		}
-		return e.currentEditor.StyleText(page, ids, style)
+		paths, err := e.editorTargetPaths(ids)
+		if err != nil {
+			return err
+		}
+		return e.currentEditor.StyleTargetsText(page, paths, style)
 	})
 }
 
@@ -4911,7 +4951,7 @@ func (e *businessEngine) editorRichText(item map[string]any, object ofdgo.Graphi
 	for _, key := range []string{"textContent", "rewriteText", "replaceFont", "reflow", "layoutKnown", "paint"} {
 		capabilities[key] = true
 	}
-	capabilities["enter"], capabilities["ungroup"] = false, false
+	capabilities["children"], capabilities["ungroup"] = false, false
 	capabilities["stretch"] = false
 	if capabilities["reasonCode"] == string(ofdgo.EditUnsupportedObject) && capabilities["transform"] == true && capabilities["copy"] == true && object.CompositeGraphicUnit.Clips == nil {
 		delete(capabilities, "reason")
@@ -5353,78 +5393,29 @@ func (e *businessEngine) copyObjects(args []platformValue) (any, error) {
 }
 
 // captureObjects 保存独立选区快照，不修改文档或历史
-// 入参: args 页面索引、对象标识数组、剪贴板标识和可选父路径
+// 入参: args 页面索引、对象路径数组和剪贴板标识
 // 返回: any 空结果, error 错误信息
 func (e *businessEngine) captureObjects(args []platformValue) (any, error) {
 	if e.currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
 	}
-	clipboard := &editorClipboard{token: args[2].String()}
-	var err error
-	if len(args) > 3 && args[3].String() != "" {
-		key := args[3].String()
-		path, pathErr := e.compositePath(key)
-		if pathErr != nil {
-			return nil, pathErr
-		}
-		indexes, indexErr := e.compositeIndexes(key, e.stringsFromJS(args[1]))
-		if indexErr != nil {
-			return nil, indexErr
-		}
-		clipboard.composite, err = e.currentEditor.CaptureCompositeObjects(args[0].Int(), path, indexes)
-	} else {
-		clipboard, err = e.captureEditorSelection(args[0].Int(), e.stringsFromJS(args[1]))
-		clipboard.token = args[2].String()
-	}
+	clipboard, err := e.captureEditorSelection(args[0].Int(), e.stringsFromJS(args[1]))
 	if err != nil {
 		return nil, err
 	}
+	clipboard.token = args[2].String()
 	e.copiedObjects = clipboard
 	return nil, nil
 }
 
 // pasteObjects 将当前文档的对象快照粘贴到目标页
-// 入参: args 目标页、剪贴板标识、横纵位移和可选父路径
+// 入参: args 目标页、剪贴板标识和横纵位移
 // 返回: any 文档信息及新选区, error 错误信息
 func (e *businessEngine) pasteObjects(args []platformValue) (any, error) {
 	if e.currentEditor == nil || e.copiedObjects == nil || e.copiedObjects.token != args[1].String() {
 		return nil, fmt.Errorf("object clipboard is no longer available")
 	}
-	key := ""
-	if len(args) > 4 {
-		key = args[4].String()
-	}
-	page, dx, dy := args[0].Int(), args[2].Float(), args[3].Float()
-	if key != "" {
-		path, err := e.compositePath(key)
-		if err != nil {
-			return nil, err
-		}
-		var indexes []int
-		if e.copiedObjects.composite != nil {
-			indexes, err = e.currentEditor.PasteCompositeObjects(page, path, e.copiedObjects.composite, dx, dy)
-		} else {
-			indexes, err = e.currentEditor.PasteSelectionToComposite(page, path, e.copiedObjects.selection, dx, dy)
-		}
-		if err != nil {
-			return nil, err
-		}
-		info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
-		result := editorSelectionInfo{editorInfo: info}
-		for _, index := range indexes {
-			result.SelectedIDs = append(result.SelectedIDs, fmt.Sprintf("%s/%d", key, index))
-		}
-		return result, err
-	}
-	if e.copiedObjects.composite != nil {
-		ids, err := e.currentEditor.PasteCompositeSelection(page, e.copiedObjects.composite, dx, dy)
-		if err != nil {
-			return nil, err
-		}
-		info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
-		return editorSelectionInfo{info, ids}, err
-	}
-	ids, err := e.pasteEditorSelection(page, e.copiedObjects, dx, dy)
+	ids, err := e.pasteEditorSelection(args[0].Int(), e.copiedObjects, args[2].Float(), args[3].Float())
 	if err != nil {
 		return nil, err
 	}
