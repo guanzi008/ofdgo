@@ -5061,8 +5061,12 @@ func (e *businessEngine) browserRichText(value ofdgo.RichText) map[string]any {
 			"strikeout": format.Strikeout, "shadow": format.Shadow, "background": background,
 		}}
 	}
+	paragraphs := make([]any, len(value.Paragraphs))
+	for i, paragraph := range value.Paragraphs {
+		paragraphs[i] = map[string]any{"align": paragraph.Align}
+	}
 	layout := value.Layout
-	return map[string]any{"runs": runs, "layout": map[string]any{
+	return map[string]any{"runs": runs, "paragraphs": paragraphs, "layout": map[string]any{
 		"autoBidi": layout.AutoBidi, "shape": layout.Shape,
 		"shaping": map[string]any{
 			"Bidi": layout.Shaping.Bidi, "Direction": layout.Shaping.Direction,

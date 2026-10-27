@@ -63,7 +63,7 @@ func LayoutText(obj *TextObject, value string, options TextLayout, metrics FontM
 	if !finite(options.LeftIndent) || !finite(options.RightIndent) || !finite(options.FirstLineIndent) {
 		return fmt.Errorf("paragraph indents must be finite")
 	}
-	if !slices.Contains([]string{"", "left", "center", "right", "justify"}, options.Align) {
+	if !slices.Contains([]string{"", "left", "center", "right", "justify", "distributed"}, options.Align) {
 		return fmt.Errorf("invalid text alignment %q", options.Align)
 	}
 	var width float64
@@ -129,7 +129,7 @@ func LayoutText(obj *TextObject, value string, options TextLayout, metrics FontM
 			if i == 0 {
 				indent = options.FirstLineIndent
 			}
-			x, deltas := alignTextLine(runes[line[0]:line[1]], advances[line[0]:line[1]], width-indent, options.Align, i+1 < len(lines), options.LetterSpacing)
+			x, deltas := alignTextLine(runes[line[0]:line[1]], advances[line[0]:line[1]], width-indent, options.Align, i+1 < len(lines), options.LetterSpacing, nil)
 			x += options.LeftIndent + indent
 			y := float64(ascender)*unit + float64(len(codes))*lineHeight
 			if !finite(x) || !finite(y) {
@@ -220,7 +220,14 @@ func layoutShapedText(obj *TextObject, value string, options TextLayout, metrics
 				}
 			}
 			chars := runes[line[0]:line[1]]
-			x, delta := alignTextLine(chars, lineAdvances, available, options.Align, i+1 < len(lines), options.LetterSpacing)
+			var clusters map[int]bool
+			if options.Align == "distributed" {
+				clusters = make(map[int]bool)
+				for _, glyph := range glyphs {
+					clusters[glyph.Cluster] = true
+				}
+			}
+			x, delta := alignTextLine(chars, lineAdvances, available, options.Align, i+1 < len(lines), options.LetterSpacing, clusters)
 			if options.Shaping.Direction == "rtl" {
 				for j := len(chars) - 1; j >= 0 && chars[j] == ' '; j-- {
 					x -= lineAdvances[j]

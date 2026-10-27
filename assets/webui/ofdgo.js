@@ -1,4 +1,4 @@
-import { SVG_NAMESPACE, CanvasEditor, canEditObject, editTextValue, richTextModel, fontFaceStyle, missingGlyphMessage, objectEditReason, selectedText, lineShape, selectionBounds, pagePoint } from "./ofdgo_edit.js";
+import { SVG_NAMESPACE, CanvasEditor, canEditObject, editTextValue, richTextModel, richTextAlignment, fontFaceStyle, missingGlyphMessage, objectEditReason, selectedText, lineShape, selectionBounds, pagePoint } from "./ofdgo_edit.js";
 import { FontManager, FontPicker } from "./ofdgo_font.js";
 import { nativeHost, createEngineWorker, engineLimits, documentBytes, saveFilePicker, directoryPicker } from "./ofdgo_host.js";
 import { PrintDialog } from "./ofdgo_print.js";
@@ -704,7 +704,7 @@ const annotationFields = Object.fromEntries(["CreateForm", "CreateCancel", "Cont
 el.editorTools.addEventListener("scroll", () => fontPicker.position());
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
-	textControls: [el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.saveAsButton, el.fontInput, document.querySelector("#textReflow")],
+	textControls: [el.textAlign, el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.saveAsButton, el.fontInput, document.querySelector("#textReflow")],
 	keepTextFocus: () => fontPicker.open || el.closePanel.open || canvasEditor.input?.fontDialog,
 	textClipboardScope: () => `${documentTab().id}:${documentContentKey(state)}:${state.editorInfo?.revision ?? ""}`,
 	getTextClipboard: () => workspace.textClipboard,
@@ -867,7 +867,7 @@ el.textColor.addEventListener("change", () => changeTextStyle(true));
 for (const button of textFormatButtons) button.addEventListener("click", () => changeRangeFormat(button.dataset.textFormat));
 textBackground.addEventListener("change", () => changeRangeFormat("background", textBackground.value));
 editorClick(el.textWrap, () => changeParagraph(!currentTextStyle().wrap));
-el.textAlign.addEventListener("change", () => changeParagraph());
+el.textAlign.addEventListener("change", () => changeTextAlignment());
 el.textLineHeight.addEventListener("change", () => changeParagraph());
 editorClick(el.paragraphButton, () => {
 	const item = currentTextStyle();
@@ -4253,9 +4253,11 @@ async function validateRichText(item, model, width, fonts = []) {
 }
 
 async function saveRichText(item, model, fonts = [], box = item) {
+	const tab = documentTab(), openSeq = state.openSeq, wasmSeq = state.wasmSeq;
 	const boundary = { x: box.x, y: box.y, width: box.width, height: box.height };
 	if (box.frameWidth !== undefined) Object.assign(boundary, { frameWidth: box.frameWidth, frameOffset: box.frameOffset || 0 });
 	fonts = await validateRichText(item, model, box.frameWidth ?? item.textFrame?.width ?? item.width, fonts);
+	if (tab.closed || !isForegroundDocument(tab) || tab.state.openSeq !== openSeq || tab.state.wasmSeq !== wasmSeq) return false;
 	return changeDocument("ofdgoSaveRichText", item.draft ? null : item,
 		...(item.draft ? [item.index, ""] : []), JSON.stringify(model), boundary, fonts);
 }
@@ -4552,6 +4554,25 @@ function inputMillimeters(input, original) {
 	return points === displayPoints(original) ? original : points * 25.4 / 72;
 }
 
+async function changeTextAlignment() {
+	const align = el.textAlign.value, editing = canvasEditor.input, tab = documentTab();
+	if (!state.ready || state.exporting || document.body.hasAttribute("data-busy") || editing?.composing || editing?.saving || !align) return;
+	try {
+		if (editing) {
+			if (!editing.rich && !editing.item.draft && !confirmTextReflow(editing.item)) return;
+			if (!await ensureRichInput() || !isForegroundDocument(tab) || canvasEditor.input !== editing) return;
+			editing.rich.align(align);
+		} else if (canvasEditor.selected?.richText) {
+			const item = canvasEditor.selected;
+			await saveRichText(item, { ...item.richText, paragraphs: undefined, layout: { ...item.richText.layout, align } });
+		} else await changeParagraph();
+	} catch (error) {
+		if (isForegroundDocument(tab) && canvasEditor.input === editing) showError(error, false);
+	} finally {
+		if (isForegroundDocument(tab)) updateObjectControls(canvasEditor.selected, true);
+	}
+}
+
 async function changeParagraph(wrap) {
 	const item = currentTextStyle();
 	const explicitWrap = wrap !== undefined;
@@ -4577,7 +4598,7 @@ async function changeParagraph(wrap) {
 		updateObjectControls(item, true);
 		return;
 	}
-	if (item.richText) await saveRichText(item, { ...item.richText, layout: { ...item.richText.layout, wrap: Boolean(wrap), align: el.textAlign.value, lineHeight: height, letterSpacing: spacing } });
+	if (item.richText) await saveRichText(item, { ...item.richText, layout: { ...item.richText.layout, wrap: Boolean(wrap), lineHeight: height, letterSpacing: spacing } });
 	else await changeDocument("ofdgoLayoutText", item, null, null, Boolean(wrap), el.textAlign.value, height, spacing, ...textIndents(item));
 	updateObjectControls(canvasEditor.selected, true);
 }
@@ -12466,14 +12487,18 @@ function updateObjectControls(item, reset = false) {
 		el.undoButton.disabled = !state.editorInfo?.canUndo || !state.ready || state.exporting;
 		el.redoButton.disabled = !state.editorInfo?.canRedo || !state.ready || state.exporting;
 	}
-	el.textAlign.disabled = el.textWrap.disabled = el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled || Boolean(item?.items || item?.draft) || Boolean(canvasEditor.input);
+	el.textWrap.disabled = el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled || Boolean(item?.items || item?.draft) || Boolean(canvasEditor.input);
 	const reflow = document.querySelector("#textReflow"), positioned = canvasEditor.input?.source && (item?.selectionIDs || !canEditObject(item, "layoutKnown"));
 	reflow.hidden = !positioned;
 	el.textWrap.hidden = !!positioned;
 	reflow.disabled = textDisabled || !canEditObject(item, "reflow") || !!canvasEditor.input?.reflow;
-	el.paragraphButton.disabled = el.textAlign.disabled;
+	el.paragraphButton.disabled = el.textWrap.disabled;
+	el.textAlign.disabled = el.textSize.disabled || Boolean(item?.items || item?.selectionIDs);
 	const layoutKnown = text === state.textDefaults || Boolean(item?.draft) || canEditObject(item, "layoutKnown");
-	el.textAlign.value = layoutKnown ? text.align || "left" : "";
+	const rich = canvasEditor.input?.rich;
+	const alignment = rich ? richTextAlignment(rich.model, ...rich.selection()) : item?.richText ? richTextAlignment(item.richText) : layoutKnown ? text.align || "left" : "";
+	el.textAlign.options[0].textContent = rich || item?.richText ? "混合" : "原文";
+	el.textAlign.value = alignment;
 	el.textLineHeight.placeholder = layoutKnown ? "自动" : "原文";
 	el.textSpacing.placeholder = layoutKnown ? "0" : "原文";
 	el.textWrap.setAttribute("data-pressed", String(Boolean(text.wrap)));

@@ -35,7 +35,7 @@ type MissingGlyphError struct {
 // TextLayout 本地横向段落选项
 // Shape显式启用FontShaper，保存为标准TextCode和CGTransform，不改变阅读时的原文定位
 // Shaping提供可比较的塑形选项，非零值也会启用塑形，并随会话内文字编辑保留
-// Wrap按CTM变换前的边界宽度折行，Align为left、center、right或justify
+// Wrap按CTM变换前的边界宽度折行，Align为left、center、right、justify或distributed
 // LineHeight为毫米单位的基线间距，0使用字体度量；LetterSpacing为字素间的附加毫米间距，可为负
 // LeftIndent和RightIndent为左右缩进，FirstLineIndent为每段首行相对左缩进的偏移，单位为毫米
 // AutoBidi自动识别双向文字并启用塑形，零值保持显式换行和左对齐
@@ -633,9 +633,9 @@ func breakTextLines(runes []rune, advances []float64, width float64, wrap bool, 
 }
 
 // alignTextLine 将段落对齐转换为标准X和DeltaX，两端对齐保留段落末行左对齐
-// 入参: runes 行内字符, advances 含字距的字符步进, width 本地排版宽度, alignment 对齐方式, justify 是否允许本行两端对齐, spacing 附加字距
+// 入参: runes 行内字符, advances 含字距的字符步进, width 本地排版宽度, alignment 对齐方式, justify 是否允许本行两端对齐, spacing 附加字距, clusters 可选塑形簇起点
 // 返回: float64 行首X坐标, string 字符间的DeltaX序列
-func alignTextLine(runes []rune, advances []float64, width float64, alignment string, justify bool, spacing float64) (float64, string) {
+func alignTextLine(runes []rune, advances []float64, width float64, alignment string, justify bool, spacing float64, clusters map[int]bool) (float64, string) {
 	end := len(runes)
 	for end > 0 && runes[end-1] == ' ' {
 		end--
@@ -661,6 +661,17 @@ func alignTextLine(runes []rune, advances []float64, width float64, alignment st
 			line := it.Line()
 			at := line.Offset + len(line.Text)
 			if at < end {
+				gaps[at-1] = true
+			}
+		}
+	}
+	if alignment == "distributed" && extra > 0 {
+		var seg segmenter.Segmenter
+		seg.Init(runes[:end])
+		for it := seg.GraphemeIterator(); it.Next(); {
+			cluster := it.Grapheme()
+			at := cluster.Offset + len(cluster.Text)
+			if at < end && (clusters == nil || clusters[at]) {
 				gaps[at-1] = true
 			}
 		}

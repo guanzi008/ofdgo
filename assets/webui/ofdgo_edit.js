@@ -42,6 +42,76 @@ export function richTextModel(item) {
 			firstLineIndent: item.firstLineIndent || 0, autoBidi: true } };
 }
 
+function paragraphRange(text, start, end) {
+	const first = text.slice(0, start).split("\n").length - 1;
+	return [first, end > start ? text.slice(0, end - 1).split("\n").length - 1 : first];
+}
+
+export function richTextAlignment(model, start = 0, end = model.runs.reduce((n, run) => n + run.text.length, 0)) {
+	const text = model.runs.map(run => run.text).join("");
+	const [first, last] = paragraphRange(text, start, end);
+	const align = model.paragraphs?.[first]?.align || model.layout.align || "left";
+	for (let i = first + 1; i <= last; i++) if ((model.paragraphs?.[i]?.align || model.layout.align || "left") !== align) return "";
+	return align;
+}
+
+function replaceParagraphs(model, text, start, end, inserted, paragraphs) {
+	if (!model.paragraphs?.length && !paragraphs?.length) return;
+	const first = text.slice(0, start).split("\n").length - 1, last = text.slice(0, end).split("\n").length - 1;
+	const current = model.paragraphs?.length ? model.paragraphs : text.split("\n").map(() => ({ align: "" }));
+	model.paragraphs = [...current.slice(0, first),
+		...inserted.split("\n").map((_, i) => ({ ...(paragraphs?.[i] || current[first]) })), ...current.slice(last + 1)];
+}
+
+function distributeParagraph(input, paragraph) {
+	const probe = input.cloneNode(false), copy = paragraph.cloneNode(true);
+	Object.assign(probe.style, { position: "fixed", transform: "none", visibility: "hidden", pointerEvents: "none", width: `${input.offsetWidth}px` });
+	probe.contentEditable = "false";
+	probe.append(copy);
+	document.body.append(probe);
+	try {
+		const lines = [], range = document.createRange(), width = copy.clientWidth;
+		const spacing = parseFloat(getComputedStyle(probe).letterSpacing) || 0;
+		const indent = parseFloat(getComputedStyle(copy).textIndent) || 0;
+		for (const span of copy.children) {
+			const node = span.firstChild;
+			if (node?.nodeType !== 3) continue;
+			for (const part of graphemes.segment(node.textContent)) {
+				range.setStart(node, part.index); range.setEnd(node, part.index + part.segment.length);
+				const rect = range.getBoundingClientRect();
+				let line = lines.at(-1);
+				if (!line || rect.top >= line.bottom - 0.5 || rect.bottom <= line.top + 0.5) {
+					line = { top: rect.top, bottom: rect.bottom, parts: [] }; lines.push(line);
+				}
+				line.parts.push({ text: part.segment, width: rect.width, style: span.style.cssText });
+			}
+		}
+		if (!lines.length) return;
+		paragraph.replaceChildren();
+		for (const [index, line] of lines.entries()) {
+			if (index) { const wrap = document.createElement("br"); wrap.dataset.textWrap = "true"; paragraph.append(wrap); }
+			const row = document.createElement("span");
+			row.style.whiteSpace = "pre";
+			let end = line.parts.length;
+			while (end && line.parts[end - 1].text === " ") end--;
+			const length = line.parts.slice(0, end).reduce((sum, part) => sum + part.width, 0) - (end ? spacing : 0);
+			const extra = end > 1 ? Math.max(0, width - (index ? 0 : indent) - length) / (end - 1) : 0;
+			let previous;
+			for (const [i, part] of line.parts.entries()) {
+				const tracking = i < end - 1 ? spacing + extra : i === end - 1 ? 0 : spacing;
+				const key = `${part.style}:${tracking}`;
+				if (previous?.key === key) previous.node.firstChild.appendData(part.text);
+				else {
+					const span = document.createElement("span"); span.style.cssText = part.style;
+					span.style.letterSpacing = `${tracking}px`; span.textContent = part.text; row.append(span);
+					previous = {key, node:span};
+				}
+			}
+			paragraph.append(row);
+		}
+	} finally { probe.remove(); }
+}
+
 function normalizeRuns(runs) {
 	const result = [];
 	for (const run of runs) {
@@ -104,6 +174,7 @@ export class RichTextSession {
 		this.model = structuredClone(model);
 		this.model.runs = normalizeRuns(model.runs);
 		this.initial = JSON.stringify(this.model);
+		this.recordedParagraphs = this.model.paragraphs;
 		this.faces = faces;
 		for (const face of faces.values()) document.fonts.add(face);
 		this.imports = new Map(imports.map(font => [font.key, font.data]));
@@ -156,11 +227,19 @@ export class RichTextSession {
 	record(before) {
 		const change = textChange(before, this.model.runs);
 		const entry = { change, typing: { ...this.typing }, caret: [...this.caret] }, old = this.entries[this.index];
+		const beforeText = before.map(run => run.text).join("");
+		if (beforeText !== this.text && this.model.paragraphs === this.recordedParagraphs) {
+			const removed = change.before.map(run => run.text).join(""), inserted = change.after.map(run => run.text).join("");
+			replaceParagraphs(this.model, beforeText, change.start, change.start + removed.length, inserted);
+		}
+		const paragraphsChanged = JSON.stringify(this.recordedParagraphs) !== JSON.stringify(this.model.paragraphs);
+		if (paragraphsChanged) entry.paragraphs = { before: this.recordedParagraphs, after: this.model.paragraphs };
+		this.recordedParagraphs = this.model.paragraphs;
 		const changed = change.before.length || change.after.length;
-		if (!changed && JSON.stringify(entry.typing) === JSON.stringify(old.typing)) return;
+		if (!changed && !paragraphsChanged && JSON.stringify(entry.typing) === JSON.stringify(old.typing)) return;
 		if (!changed) entry.change = null;
 		this.entries.splice(++this.index, Infinity, entry);
-		if (changed) this.preview();
+		if (changed || paragraphsChanged) this.preview();
 	}
 	undo(direction) {
 		if (this.editing.composing || this.editing.saving) return;
@@ -172,6 +251,9 @@ export class RichTextSession {
 			const end = change.start + removed.reduce((length, run) => length + run.text.length, 0);
 			this.model.runs = normalizeRuns([...sliceRuns(this.model.runs, 0, change.start), ...added, ...sliceRuns(this.model.runs, end, this.text.length)]);
 		}
+		const paragraphs = (direction < 0 ? this.entries[this.index] : entry).paragraphs;
+		if (paragraphs) this.model.paragraphs = direction < 0 ? paragraphs.before : paragraphs.after;
+		this.recordedParagraphs = this.model.paragraphs;
 		this.index += direction;
 		this.typing = { ...entry.typing };
 		this.caret = [...entry.caret];
@@ -187,6 +269,7 @@ export class RichTextSession {
 			const editing = this.editing;
 			if (this.editor.input !== editing || editing.composing || editing.saving) return;
 			const current = () => this.editor.input === editing && this.previewSequence === sequence && !editing.composing && !editing.saving;
+			if (!this.model.runs.length) { this.editor.setTextError(null); return; }
 			try {
 				await this.editor.options.onPreviewRichText(editing.item, this.model, editing.frame.width, this.fonts);
 				if (!current()) return;
@@ -213,10 +296,20 @@ export class RichTextSession {
 		this.render();
 		this.editor.options.onTextChange();
 	}
-	replace(runs) {
+	align(value) {
+		if (this.editing.composing || this.editing.saving) return;
 		this.remember();
-		const [start, end] = this.selection();
+		const [start, end] = this.selection(), [first, last] = paragraphRange(this.text, start, end);
+		this.model.paragraphs = this.text.split("\n").map((_, i) => ({ align: i >= first && i <= last ? value : this.model.paragraphs?.[i]?.align || "" }));
+		this.record(this.model.runs);
+		this.render();
+		this.editor.options.onTextChange();
+	}
+	replace(runs, paragraphs, range) {
+		this.remember();
+		const [start, end] = range || this.selection();
 		const before = this.model.runs;
+		if (paragraphs) replaceParagraphs(this.model, this.text, start, end, runs.map(run => run.text).join(""), paragraphs);
 		this.model.runs = normalizeRuns([...sliceRuns(this.model.runs, 0, start), ...runs, ...sliceRuns(this.model.runs, end, this.text.length)]);
 		this.caret = [start + runs.reduce((length, run) => length + run.text.length, 0)];
 		this.caret.push(this.caret[0]);
@@ -256,7 +349,9 @@ export class RichTextSession {
 		const runs = sliceRuns(this.model.runs, start, end), text = runs.map(run => run.text).join("");
 		const keys = new Set(runs.map(run => run.format.font));
 		const fonts = new Map([...keys].map(key => [key, this.imports.get(key) || this.resources.get(key)]).filter(([, data]) => data));
-		const clipboard = { token: crypto.randomUUID(), runs, text, scope: this.editor.options.textClipboardScope?.(),
+		const first = this.text.slice(0, start).split("\n").length - 1;
+		const paragraphs = text.split("\n").map((_, i) => ({ align: this.model.paragraphs?.[first + i]?.align || this.model.layout.align || "left" }));
+		const clipboard = { token: crypto.randomUUID(), runs, text, paragraphs, scope: this.editor.options.textClipboardScope?.(),
 			fonts, faces: new Map([...this.faces].filter(([key]) => keys.has(key))), choices: new Map([...this.choices].filter(([key]) => keys.has(key))) };
 		if (this.editor.options.setTextClipboard) this.editor.options.setTextClipboard(clipboard);
 		else this.editor.richClipboard = clipboard;
@@ -278,17 +373,17 @@ export class RichTextSession {
 			const keys = new Map(copy.runs.map(run => [run.format.font, sameScope ? run.format.font : `temp-font-${crypto.randomUUID()}`]));
 			let faces = copy.faces;
 			if (!sameScope) {
-				const original = this.model.runs, caret = this.selection();
+				const original = this.model.runs, paragraphs = this.model.paragraphs, caret = this.selection();
 				faces = new Map(await Promise.all([...copy.fonts].map(async ([key, data]) =>
 					[key, await new FontFace(`ofdgo-paste-${keys.get(key)}`, data, fontFaceStyle(data)).load()])));
-				if (this.editor.input !== this.editing || this.editing.composing || this.editing.saving || this.model.runs !== original || this.selection().join() !== caret.join()) return;
+				if (this.editor.input !== this.editing || this.editing.composing || this.editing.saving || this.model.runs !== original || this.model.paragraphs !== paragraphs || this.selection().join() !== caret.join()) return;
 			}
 			for (const [key, data] of copy.fonts) this.imports.set(keys.get(key), data);
 			for (const [key, face] of faces) if (!this.faces.has(keys.get(key))) { this.faces.set(keys.get(key), face); document.fonts.add(face); }
 			for (const [key, choice] of copy.choices) this.choices.set(keys.get(key), choice);
 			runs = copy.runs.map(run => ({ text: run.text, format: { ...run.format, font: keys.get(run.format.font) } }));
 		}
-		this.replace(runs || [{ text, format: { ...this.typing } }]);
+		this.replace(runs || [{ text, format: { ...this.typing } }], internal ? copy.paragraphs : null);
 	}
 	setFont(face, data, key) {
 		key ||= `temp-font-${crypto.randomUUID()}`;
@@ -308,10 +403,13 @@ export class RichTextSession {
 			}
 		}
 		if (!lines[0].length) lines[0].push({ text: "", format: this.typing });
+		this.editor.fitTextInput();
 		const previous = this.renderedLines || [];
 		let offset = 0;
 		this.renderedLines = lines.map((parts, index) => {
-			const key = JSON.stringify(parts.map(part => [part.text, part.format, this.faces.get(part.format.font)?.family]));
+			const align = this.model.paragraphs?.[index]?.align || this.model.layout.align || "left";
+			const distribute = align === "distributed" && !CSS.supports("text-justify", "inter-character");
+			const key = JSON.stringify([parts.map(part => [part.text, part.format, this.faces.get(part.format.font)?.family]), align, distribute ? input.offsetWidth : null]);
 			let paragraph = previous[index]?.key === key && previous[index].node.parentNode === input ? previous[index].node : null;
 			if (!paragraph) {
 				paragraph = document.createElement("div");
@@ -328,12 +426,15 @@ export class RichTextSession {
 					paragraph.style.fontSize = paragraph.firstElementChild.style.fontSize;
 					paragraph.append(document.createElement("br"));
 				}
+				Object.assign(paragraph.style, { textAlign: distribute ? "left" : align === "distributed" ? "justify" : align,
+					textAlignLast: !distribute && align === "distributed" ? "justify" : "auto", textJustify: align === "distributed" ? "inter-character" : "auto" });
+				if (distribute) distributeParagraph(input, paragraph);
 			}
 			if (input.childNodes[index] !== paragraph) input.insertBefore(paragraph, input.childNodes[index] || null);
 			if (index) offset++;
-			for (const span of paragraph.children) {
-				if (span.nodeName !== "SPAN") continue;
-				const node = span.firstChild;
+			const walker = document.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT);
+			let node;
+			while ((node = walker.nextNode())) {
 				positions.push({ node, start: offset, end: offset + node.textContent.length });
 				offset += node.textContent.length;
 			}
@@ -342,7 +443,6 @@ export class RichTextSession {
 		while (input.childNodes.length > lines.length) input.lastChild.remove();
 		input.style.fontSize = this.model.runs.length ? "0px" : `${this.typing.size * PX_PER_MM}px`;
 		input.style.caretColor = this.typing.color || "#000000";
-		this.editor.fitTextInput();
 		this.editing.range = null;
 		input.focus({ preventScroll: true });
 		restoreTextSelection(positions, this.caret);
@@ -358,6 +458,7 @@ export class RichTextSession {
 export function editTextValue(input) {
 	let text = "", previous;
 	for (const node of input.childNodes) {
+		if (node.nodeName === "BR" && node.dataset.textWrap) continue;
 		const block = node.nodeName === "DIV" || node.nodeName === "P";
 		if (previous && (block || previous.nodeName === "DIV" || previous.nodeName === "P") && previous.nodeName !== "BR") text += "\n";
 		text += node.nodeType === 3 ? node.textContent : node.nodeName === "BR" ? (node.nextSibling ? "\n" : "") : editTextValue(node);
@@ -1743,6 +1844,16 @@ export class CanvasEditor {
 				if (event.inputType === "historyUndo" || event.inputType === "historyRedo") {
 					event.preventDefault(); editing.rich.undo(event.inputType === "historyUndo" ? -1 : 1); return;
 				}
+				if (!editing.composing && ["deleteContentBackward", "deleteContentForward"].includes(event.inputType) && input.querySelector("br[data-text-wrap]")) {
+					event.preventDefault();
+					const rich = editing.rich, range = rich.selection();
+					if (range[0] === range[1]) {
+						const bounds = [0, ...Array.from(graphemes.segment(rich.text), part => part.index + part.segment.length)];
+						if (event.inputType === "deleteContentBackward") range[0] = bounds.findLast(at => at < range[0]) ?? 0;
+						else range[1] = bounds.find(at => at > range[1]) ?? rich.text.length;
+					}
+					rich.replace([], null, range); return;
+				}
 				if (!editing.composing) { editing.rich.remember(); editing.rich.beforeCaret = editing.rich.selection(); }
 			}
 			if (editing.source && (event.inputType === "historyUndo" || event.inputType === "historyRedo")) {
@@ -1816,7 +1927,7 @@ export class CanvasEditor {
 		const { input, frame, item, rich } = editing;
 		const layout = rich?.model.layout || item;
 		const width = Math.max(0, frame.width - (layout.leftIndent || 0) - (layout.rightIndent || 0)) * PX_PER_MM + 4;
-		const autoWidth = !layout.align || layout.align === "left";
+		const autoWidth = (!layout.align || layout.align === "left") && !rich?.model.paragraphs?.some(paragraph => paragraph.align && paragraph.align !== "left");
 		Object.assign(input.style, {
 			width: autoWidth ? "max-content" : `${width}px`,
 			maxWidth: layout.wrap ? `${width}px` : "none",

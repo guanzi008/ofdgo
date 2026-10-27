@@ -127,13 +127,17 @@ func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, erro
 	var underlays []GraphicObject
 	var shadows []GraphicObject
 	var y float64
-	for start := 0; start <= len(chars); {
+	for start, paragraphIndex := 0, 0; start <= len(chars); paragraphIndex++ {
 		end := start
 		for end < len(chars) && chars[end] != '\n' {
 			end++
 		}
 		paragraph := chars[start:end]
-		local := richParagraphOptions(paragraph, options)
+		local := options
+		if len(value.Paragraphs) > 0 && value.Paragraphs[paragraphIndex].Align != "" {
+			local.Align = value.Paragraphs[paragraphIndex].Align
+		}
+		local = richParagraphOptions(paragraph, local)
 		if local.Shaping.Bidi && face == nil && len(paragraph) > 0 {
 			face, err = typefont.ParseTTF(bytes.NewReader(metrics[owners[start]].font.Write()))
 			if err != nil {
@@ -194,7 +198,16 @@ func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, erro
 				ascent, descent, height = max(ascent, m.ascent), max(descent, m.descent), max(height, m.height)
 			}
 			height = max(height, ascent+descent)
-			x, delta := alignTextLine(chars[from:to], steps, available-indent, local.Align, lineIndex+1 < len(lines), local.LetterSpacing)
+			var clusters map[int]bool
+			if local.Align == "distributed" {
+				clusters = make(map[int]bool)
+				for _, span := range spans {
+					for _, glyph := range span.glyphs {
+						clusters[span.start+glyph.Cluster] = true
+					}
+				}
+			}
+			x, delta := alignTextLine(chars[from:to], steps, available-indent, local.Align, lineIndex+1 < len(lines), local.LetterSpacing, clusters)
 			copy(steps, parseFloats(delta))
 			if local.Shaping.Direction == "rtl" {
 				for j := to - from - 1; j >= 0 && chars[from+j] == ' '; j-- {
