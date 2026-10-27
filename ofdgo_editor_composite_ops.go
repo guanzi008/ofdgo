@@ -17,7 +17,6 @@ package ofdgo
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -46,7 +45,7 @@ func (e *Editor) CopyCompositeObjects(page int, path ObjectPath, indexes []int, 
 		return nil, fmt.Errorf("copy requires finite offsets")
 	}
 	var result []int
-	metadata := make(map[int]richTextMetadata)
+	metadata := make(map[int]*richTextSnapshot)
 	err := e.Transaction(func(e *Editor) error {
 		err := e.editCompositeObjects(page, path, indexes, func(renderer *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
 			container := nodes[0].span.parent
@@ -57,13 +56,12 @@ func (e *Editor) CopyCompositeObjects(page int, path ObjectPath, indexes []int, 
 			}
 			slices.SortFunc(nodes, func(a, b *editorCompositeNode) int { return a.index - b.index })
 			for i, node := range nodes {
-				if node.object.Type == "CompositeObject" {
-					entry, err := e.richTextEntry(page, editorObjectID(node.object))
-					if err == nil {
-						metadata[i] = entry.metadata
-					} else if !errors.Is(err, ErrNotRichText) {
-						return err
-					}
+				snapshot, err := e.captureRichTextSnapshot(page, node.object)
+				if err != nil {
+					return err
+				}
+				if snapshot != nil {
+					metadata[i] = snapshot
 				}
 			}
 			data, states, err := e.copyCompositeNodes(renderer, nodes, dx, dy)

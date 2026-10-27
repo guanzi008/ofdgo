@@ -17,7 +17,6 @@ package ofdgo
 import (
 	"bytes"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -37,7 +36,7 @@ type CompositeSelection struct {
 	containers []int
 	nodes      []*editorCompositeNode
 	source     *editorSourcePage
-	richText   map[int]richTextMetadata
+	richText   map[int]*richTextSnapshot
 }
 
 // PasteCompositeSelection 将内部对象快照粘贴到页面顶层，保持嵌套结构、源继承外观和裁剪
@@ -75,7 +74,7 @@ func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []in
 	slices.Sort(indexes)
 	var owner *editorCompositeNode
 	var container *editorXML
-	selection := &CompositeSelection{richText: make(map[int]richTextMetadata), editor: e, document: e.documentIdentity(), page: e.pages[page].ID, path: ObjectPath{ID: path.ID, Annotation: path.Annotation, Children: slices.Clone(path.Children)}}
+	selection := &CompositeSelection{richText: make(map[int]*richTextSnapshot), editor: e, document: e.documentIdentity(), page: e.pages[page].ID, path: ObjectPath{ID: path.ID, Annotation: path.Annotation, Children: slices.Clone(path.Children)}}
 	if path.Annotation == "" {
 		if origin := e.objectOrigin(path.ID); origin != nil {
 			selection.source = origin.page
@@ -99,10 +98,12 @@ func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []in
 		copy := *node
 		copy.owner, copy.span = nil, nil
 		selection.nodes = append(selection.nodes, &copy)
-		if entry, err := e.richTextEntry(page, editorObjectID(node.object)); err == nil {
-			selection.richText[j] = cloneEditorData(entry.metadata)
-		} else if !errors.Is(err, ErrNotRichText) {
+		snapshot, err := e.captureRichTextSnapshot(page, node.object)
+		if err != nil {
 			return nil, err
+		}
+		if snapshot != nil {
+			selection.richText[j] = snapshot
 		}
 	}
 	scope := root.loadedScope(path.Children)
@@ -344,14 +345,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 			copy.object.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
 		}
 		object.origin = &editorObjectOrigin{editor: e, document: e.documentIdentity(), page: selection.source, data: copy.data, node: copy.node, object: copy.object}
-		if meta, ok := selection.richText[i]; ok {
-			unit, err := e.compositeDefinition(object.CompositeGraphicUnit.ResourceID)
-			if err != nil {
-				return err
-			}
-			meta.Digest = richTextDigest(unit.object.CompositeGraphicUnit.Objects)
-			object.richText = &meta
-		}
+		object.richText = selection.richText[i]
 		objects = append(objects, object)
 		remaps = append(remaps, copy.remaps...)
 	}

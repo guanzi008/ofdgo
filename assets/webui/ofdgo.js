@@ -10505,7 +10505,9 @@ function copyEditorSelection(event) {
 		return callTabWASM(tab, "ofdgoCaptureObjects", index, ids, clipboard.token).then(async result => {
 			clipboard.data = result.bytes;
 			clipboard.cut = false;
-			if (cut && isForegroundDocument(tab) && openSeq === state.openSeq && revision === state.editorInfo?.revision && index === state.pageIndex && state.objectClipboardToken === clipboard.token && workspace.objectClipboard === clipboard) {
+			if (cut && isForegroundDocument(tab) && openSeq === state.openSeq && revision === state.editorInfo?.revision && index === state.pageIndex
+				&& state.objectClipboardToken === clipboard.token && workspace.objectClipboard === clipboard
+				&& state.editing && !formDialogOpen() && !canvasEditor.input && !canvasEditor.crop && !canvasEditor.drag && !canvasEditor.nudge && !canvasEditor.nudgeCommit) {
 				clipboard.cut = Boolean(await changeDocument("ofdgoDeleteObjects", { index, id: ids, items }));
 			}
 			return true;
@@ -10548,6 +10550,7 @@ async function pasteEditorContent(event) {
 		}
 		const openSeq = state.openSeq;
 		if (!await clipboard.ready || !isForegroundDocument(tab) || openSeq !== state.openSeq || index !== state.pageIndex || workspace.objectClipboard !== clipboard) return;
+		if (!state.editing || formDialogOpen() || document.body.hasAttribute("data-busy") || canvasEditor.input || canvasEditor.crop || canvasEditor.drag || canvasEditor.nudge || canvasEditor.nudgeCommit) return;
 		if (!pageCan("insert")) return;
 		const visible = visiblePageBounds(index), bounds = clipboard.bounds;
 		const target = `${tab.id}:${state.wasmSeq}:${state.doc.documentIndex || 0}:${state.doc.documentVersion || ""}`;

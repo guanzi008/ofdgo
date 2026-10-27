@@ -46,6 +46,12 @@ type richTextMetadata struct {
 	Digest  string     `json:"digest"`
 }
 
+// richTextSnapshot 保存对象及嵌套成员的不可变编辑语义，成员按绘制顺序定位
+type richTextSnapshot struct {
+	metadata *richTextMetadata
+	children map[int]*richTextSnapshot
+}
+
 // richTextEntry 保存标引入口及延迟报告的损坏诊断
 type richTextEntry struct {
 	index    int
@@ -424,12 +430,12 @@ func (e *Editor) putCompositeRichTextMetadata(page int, object GraphicObject, me
 // putCompositeRichTextCopies 一次读取复制后的选区，按对象顺序恢复富文本标引
 // 入参: page 页面索引, path 父路径, indexes 新成员序号, metadata 选区位置对应的编辑语义
 // 返回: error 读取或提交错误
-func (e *Editor) putCompositeRichTextCopies(page int, path ObjectPath, indexes []int, metadata map[int]richTextMetadata) error {
+func (e *Editor) putCompositeRichTextCopies(page int, path ObjectPath, indexes []int, metadata map[int]*richTextSnapshot) error {
 	if len(metadata) == 0 {
 		return nil
 	}
 	selected := make([]int, 0, len(metadata))
-	values := make([]richTextMetadata, 0, len(metadata))
+	values := make([]*richTextSnapshot, 0, len(metadata))
 	for i, index := range indexes {
 		if meta, ok := metadata[i]; ok {
 			selected = append(selected, index)
@@ -441,7 +447,7 @@ func (e *Editor) putCompositeRichTextCopies(page int, path ObjectPath, indexes [
 		return err
 	}
 	for i, member := range members {
-		if err := e.putCompositeRichTextMetadata(page, member.Object, values[i], -1); err != nil {
+		if err := e.putRichTextSnapshot(page, member.Object, values[i]); err != nil {
 			return err
 		}
 	}
@@ -779,52 +785,18 @@ func (e *Editor) copyRichTextMetadata(ctx context.Context, source *Editor, sourc
 	if metadata.err != nil || len(metadata.entries) == 0 {
 		return metadata.err
 	}
-	seen := make(map[string]bool)
-	var copyObject func(GraphicObject, GraphicObject) error
-	copyObject = func(before, after GraphicObject) error {
+	copyObject := func(before, after GraphicObject) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if before.Type != "CompositeObject" && before.Type != "CompositeGraphicUnit" {
-			return nil
-		}
-		id := editorObjectID(after)
-		if id != "" {
-			if seen[id] {
-				return nil
-			}
-			seen[id] = true
-		}
-		entry, err := source.richTextEntry(sourcePage, editorObjectID(before))
-		if err == nil {
-			if _, err := source.richTextObject(sourcePage, before); err != nil {
-				return err
-			}
-			return e.putCompositeRichTextMetadata(page, after, entry.metadata, -1)
-		}
-		if !errors.Is(err, ErrNotRichText) {
+		snapshot, err := source.captureRichTextSnapshot(sourcePage, before)
+		if err != nil || snapshot == nil {
 			return err
 		}
-		units := []CompositeGraphicUnit{before.CompositeGraphicUnit, after.CompositeGraphicUnit}
-		for i, owner := range []*Editor{source, e} {
-			if units[i].ResourceID != "" {
-				definition, err := owner.compositeDefinition(units[i].ResourceID)
-				if err != nil {
-					return err
-				}
-				units[i] = definition.object.CompositeGraphicUnit
-			}
+		if err := e.putRichTextSnapshot(page, after, snapshot); err != nil {
+			return err
 		}
-		original, target := slices.Collect(units[0].objects()), slices.Collect(units[1].objects())
-		if len(original) != len(target) {
-			return fmt.Errorf("imported composite structure differs")
-		}
-		for i := range original {
-			if err := copyObject(original[i], target[i]); err != nil {
-				return err
-			}
-		}
-		return nil
+		return ctx.Err()
 	}
 	for i, id := range ids {
 		before, err := source.Object(sourcePage, id)
@@ -887,25 +859,18 @@ func (e *Editor) richTextColors(object *GraphicObject) error {
 
 // copiedRichTextMetadata 检查当前文档对象快照的标引，不将外部同号对象误认成本地对象
 // 入参: objects 待复制快照
-// 返回: map[int]richTextMetadata 需要复制的语义, error 损坏诊断
-func (e *Editor) copiedRichTextMetadata(objects []GraphicObject) (map[int]richTextMetadata, error) {
-	result := make(map[int]richTextMetadata)
+// 返回: map[int]*richTextSnapshot 需要复制的语义, error 损坏诊断
+func (e *Editor) copiedRichTextMetadata(objects []GraphicObject) (map[int]*richTextSnapshot, error) {
+	result := make(map[int]*richTextSnapshot)
 	for i, object := range objects {
-		if object.Type != "CompositeObject" {
+		if object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
 			continue
 		}
 		if object.origin != nil && e.snapshotOrigin(object) == nil {
 			continue
 		}
 		if object.richText != nil {
-			unit, err := e.compositeDefinition(object.CompositeGraphicUnit.ResourceID)
-			if err != nil {
-				return nil, err
-			}
-			if richTextDigest(unit.object.CompositeGraphicUnit.Objects) != object.richText.Digest {
-				return nil, fmt.Errorf("rich text snapshot resource has changed")
-			}
-			result[i] = cloneEditorData(*object.richText)
+			result[i] = object.richText
 			continue
 		}
 		index := e.richTextMetadataIndex()
@@ -915,45 +880,125 @@ func (e *Editor) copiedRichTextMetadata(objects []GraphicObject) (map[int]richTe
 		if len(index.entries) == 0 {
 			continue
 		}
-		id := editorObjectID(object)
 		for page := range e.pages {
-			entry, err := e.richTextEntry(page, id)
-			if errors.Is(err, ErrNotRichText) {
-				continue
-			}
+			snapshot, err := e.captureRichTextSnapshot(page, object)
 			if err != nil {
 				return nil, err
 			}
-			current, err := e.Object(page, id)
-			if err != nil {
-				continue
+			if snapshot != nil {
+				result[i] = snapshot
+				break
 			}
-			if current.CompositeGraphicUnit.ResourceID != object.CompositeGraphicUnit.ResourceID {
-				continue
-			}
-			if _, err := e.RichText(page, id); err != nil {
-				return nil, err
-			}
-			result[i] = entry.metadata
-			break
 		}
 	}
 	return result, nil
 }
 
-// attachRichTextSnapshot 为普通对象快照附加不可变编辑语义，复制后不依赖原对象继续存在
+// attachRichTextSnapshot 为对象快照附加嵌套编辑语义，来源删除后仍可跨页粘贴
 // 入参: page 页面索引, object 对象快照
-func (e *Editor) attachRichTextSnapshot(page int, object *GraphicObject) {
-	object.richText = nil
-	if object.Type != "CompositeObject" {
-		return
+// 返回: error 标引或资源错误
+func (e *Editor) attachRichTextSnapshot(page int, object *GraphicObject) error {
+	snapshot, err := e.captureRichTextSnapshot(page, *object)
+	object.richText = snapshot
+	return err
+}
+
+// captureRichTextSnapshot 捕获组合树内的富文本标引，不复制共享二进制资源
+// 入参: page 页面索引, object 根对象
+// 返回: *richTextSnapshot 不可变快照，无标引时为空, error 标引或资源错误
+func (e *Editor) captureRichTextSnapshot(page int, object GraphicObject) (*richTextSnapshot, error) {
+	if object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
+		return nil, nil
 	}
-	entry, err := e.richTextEntry(page, editorObjectID(*object))
-	if err != nil {
-		return
+	index := e.richTextMetadataIndex()
+	if index.err != nil || len(index.entries) == 0 {
+		return nil, index.err
 	}
-	meta := cloneEditorData(entry.metadata)
-	object.richText = &meta
+	active := make(map[string]bool)
+	var capture func(GraphicObject) (*richTextSnapshot, error)
+	capture = func(object GraphicObject) (*richTextSnapshot, error) {
+		if object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
+			return nil, nil
+		}
+		entry, err := e.richTextEntry(page, editorObjectID(object))
+		if err == nil {
+			if _, err := e.richTextObject(page, object); err != nil {
+				return nil, err
+			}
+			meta := cloneEditorData(entry.metadata)
+			return &richTextSnapshot{metadata: &meta}, nil
+		}
+		if !errors.Is(err, ErrNotRichText) {
+			return nil, err
+		}
+		unit := object.CompositeGraphicUnit
+		if unit.ResourceID != "" {
+			if active[unit.ResourceID] {
+				return nil, fmt.Errorf("cyclic composite resource")
+			}
+			active[unit.ResourceID] = true
+			defer delete(active, unit.ResourceID)
+			definition, err := e.compositeDefinition(unit.ResourceID)
+			if err != nil {
+				return nil, err
+			}
+			unit = definition.object.CompositeGraphicUnit
+		}
+		var snapshot *richTextSnapshot
+		i := 0
+		for child := range unit.objects() {
+			value, err := capture(child)
+			if err != nil {
+				return nil, err
+			}
+			if value != nil {
+				if snapshot == nil {
+					snapshot = &richTextSnapshot{children: make(map[int]*richTextSnapshot)}
+				}
+				snapshot.children[i] = value
+			}
+			i++
+		}
+		return snapshot, nil
+	}
+	return capture(object)
+}
+
+// putRichTextSnapshot 恢复复制后的嵌套标引，按目标标准内容更新摘要和字体映射
+// 入参: page 目标页, object 复制后的对象, snapshot 来源不可变语义
+// 返回: error 结构或标引错误
+func (e *Editor) putRichTextSnapshot(page int, object GraphicObject, snapshot *richTextSnapshot) error {
+	if snapshot.metadata != nil {
+		index := -1
+		if entry, err := e.richTextEntry(page, editorObjectID(object)); err == nil {
+			index = entry.index
+		} else if !errors.Is(err, ErrNotRichText) {
+			return err
+		}
+		return e.putCompositeRichTextMetadata(page, object, *snapshot.metadata, index)
+	}
+	unit := object.CompositeGraphicUnit
+	if unit.ResourceID != "" {
+		definition, err := e.compositeDefinition(unit.ResourceID)
+		if err != nil {
+			return err
+		}
+		unit = definition.object.CompositeGraphicUnit
+	}
+	i, count := 0, 0
+	for child := range unit.objects() {
+		if value := snapshot.children[i]; value != nil {
+			if err := e.putRichTextSnapshot(page, child, value); err != nil {
+				return err
+			}
+			count++
+		}
+		i++
+	}
+	if count != len(snapshot.children) {
+		return fmt.Errorf("copied composite structure differs")
+	}
+	return nil
 }
 
 // richTextTagsFontSafe 仅允许完整识别且不含资源编号的本库标引通过字体重绑定检查

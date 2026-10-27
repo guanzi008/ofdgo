@@ -631,7 +631,9 @@ func (e *Editor) Object(page int, id string) (GraphicObject, error) {
 	}
 	object, err := cloneEditorObject(layer.Objects[index])
 	object.origin = e.objectOrigin(id)
-	e.attachRichTextSnapshot(page, &object)
+	if err := e.attachRichTextSnapshot(page, &object); err != nil {
+		return GraphicObject{}, err
+	}
 	return object, err
 }
 

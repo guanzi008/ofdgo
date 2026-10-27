@@ -96,7 +96,9 @@ func (e *Editor) Objects(page int, ids []string) ([]GraphicObject, error) {
 			return nil, err
 		}
 		objects[i].origin = e.objectOrigin(editorObjectID(object))
-		e.attachRichTextSnapshot(page, &objects[i])
+		if err := e.attachRichTextSnapshot(page, &objects[i]); err != nil {
+			return nil, err
+		}
 	}
 	return objects, nil
 }
@@ -135,7 +137,11 @@ func (e *Editor) CopyObjectsContext(ctx context.Context, page int, objects []Gra
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				if err := e.putRichTextMetadata(page, ids[i], meta, -1); err != nil {
+				object, err := e.Object(page, ids[i])
+				if err != nil {
+					return err
+				}
+				if err := e.putRichTextSnapshot(page, object, meta); err != nil {
 					return err
 				}
 			}

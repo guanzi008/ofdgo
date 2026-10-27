@@ -32,6 +32,7 @@ type AnnotationSelection struct {
 	data      [][]byte
 	resources []string
 	states    map[string]map[string]editorCompositeState
+	richText  map[int]*richTextSnapshot
 }
 
 // Annotations 获取指定页面的注解信息，包含不可见注解，返回值与编辑器相互独立
@@ -317,7 +318,7 @@ func (e *Editor) CaptureAnnotations(page int, ids []string) (*AnnotationSelectio
 	if err != nil {
 		return nil, err
 	}
-	selection := &AnnotationSelection{editor: e, document: e.documentIdentity(), states: make(map[string]map[string]editorCompositeState)}
+	selection := &AnnotationSelection{editor: e, document: e.documentIdentity(), states: make(map[string]map[string]editorCompositeState), richText: make(map[int]*richTextSnapshot)}
 	seen := make(map[string]bool)
 	for _, id := range ids {
 		key := editorResourceID(id)
@@ -335,6 +336,17 @@ func (e *Editor) CaptureAnnotations(page int, ids []string) (*AnnotationSelectio
 		}
 		if !editorXMLCopyable(root) {
 			return nil, fmt.Errorf("annotation contains unsupported identifiers")
+		}
+		annotation, err := e.Annotation(page, id)
+		if err != nil {
+			return nil, err
+		}
+		snapshot, err := e.captureRichTextSnapshot(page, GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: CompositeGraphicUnit{Objects: annotation.Appearance.Objects}})
+		if err != nil {
+			return nil, err
+		}
+		if snapshot != nil {
+			selection.richText[len(selection.data)] = snapshot
 		}
 		selection.data = append(selection.data, data)
 		selection.states[key] = maps.Clone(e.source.annotationStates[e.pages[page].ID+"/"+key])
@@ -452,7 +464,20 @@ func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, 
 						break
 					}
 				}
-				return edit.commitAnnotationParts(edit.source, map[string][]byte{name: editorPatchXML(data, []editorXMLPatch{{position, position, added}})})
+				if err := edit.commitAnnotationParts(edit.source, map[string][]byte{name: editorPatchXML(data, []editorXMLPatch{{position, position, added}})}); err != nil {
+					return err
+				}
+			}
+		}
+		for i, id := range result {
+			if snapshot := selection.richText[i]; snapshot != nil {
+				annotation, err := edit.Annotation(page, id)
+				if err != nil {
+					return err
+				}
+				if err := edit.putRichTextSnapshot(page, GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: CompositeGraphicUnit{Objects: annotation.Appearance.Objects}}, snapshot); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
