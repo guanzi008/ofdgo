@@ -9194,8 +9194,15 @@ function renderSecurity() {
 	el.signButton.disabled = el.encryptSaveButton.disabled;
 	el.signatureClear.hidden = !state.editing;
 	el.signatureClear.disabled = el.encryptSaveButton.disabled || !state.editing || !!state.doc?.detailsPending || !state.doc?.signatures?.length;
-	if (!state.doc?.detailsPending) renderMetaContent(el.signatureList, [documentTab().id, documentContentKey(state), state.doc?.signatures, state.doc?.signatureError, state.editing], renderSignatures);
-	for (const button of el.signatureList.querySelectorAll(".signature-remove")) button.disabled = el.signatureClear.disabled;
+	const scope = JSON.stringify([documentTab().id, documentContentKey(state)]);
+	if (!state.doc?.detailsPending || metaContents.get(el.signaturePanel) !== scope) {
+		renderMetaContent(el.signatureList, [scope, state.doc?.signatures, state.doc?.signatureError, state.editing], renderSignatures);
+		metaContents.set(el.signaturePanel, scope);
+	}
+	for (const button of el.signatureList.querySelectorAll(".signature-remove")) {
+		button.hidden = !state.editing;
+		button.disabled = el.signatureClear.disabled;
+	}
 }
 
 function cancelSigning() {
@@ -11930,7 +11937,7 @@ function signatureSummary(signatures) {
 }
 
 function signatureNameNode(signature) {
-	const stamps = signature.docIndex ? [] : signature.stamps || [];
+	const stamps = (signature.docIndex || 0) === (state.doc?.documentIndex || 0) ? signature.stamps || [] : [];
 	const name = document.createElement("div");
 	name.className = "signature-name";
 	if (!stamps.length) {

@@ -131,7 +131,7 @@ func (e *Editor) removeSignatures(ctx context.Context, id string) error {
 	if id != "" && !removed[id] {
 		return fmt.Errorf("signature not found: %s", id)
 	}
-	protected, references, err := reader.signatureRemovalProtected(ctx, name, removed)
+	protected, dependencies, err := reader.signatureRemovalProtected(ctx, name, removed)
 	if err != nil {
 		return err
 	}
@@ -157,8 +157,11 @@ func (e *Editor) removeSignatures(ctx context.Context, id string) error {
 			return err
 		}
 	} else {
+		if dependencies[name] {
+			return fmt.Errorf("%w: retained signature protects %s", ErrSignatureDependency, name)
+		}
 		for file := range candidates {
-			if references[file] {
+			if dependencies[file] {
 				return fmt.Errorf("%w: retained signature protects %s", ErrSignatureDependency, file)
 			}
 		}
@@ -186,9 +189,6 @@ func (e *Editor) removeSignatures(ctx context.Context, id string) error {
 			parts["OFD.xml"] = editorPatchXML(entry, []editorXMLPatch{{start: node.start, end: node.end}})
 			candidates[name] = true
 		} else {
-			if references[name] {
-				return fmt.Errorf("%w: retained signature protects %s", ErrSignatureDependency, name)
-			}
 			target := name
 			shared := false
 			for index, body := range reader.OFD.DocBody {
@@ -255,10 +255,11 @@ func (r *Reader) signatureRemovalFiles(ctx context.Context, name string) (map[st
 
 // signatureRemovalProtected 汇总保留签名的原文及其他文档的签名入口，不要求证书或私钥
 // 入参: ctx 取消上下文, selected 当前签名列表, removed 待移除标识
-// 返回: map[string]bool 保留路径, map[string]bool 摘要保护路径, error 读取、结构或取消错误
+// 返回: map[string]bool 保留路径, map[string]bool 非共享的摘要保护路径, error 读取、结构或取消错误
 func (r *Reader) signatureRemovalProtected(ctx context.Context, selected string, removed map[string]bool) (map[string]bool, map[string]bool, error) {
 	protected := make(map[string]bool)
-	references := make(map[string]bool)
+	dependencies := make(map[string]bool)
+	retained := make(map[string]bool)
 	for index, body := range r.OFD.DocBody {
 		if body.Signatures == "" {
 			continue
@@ -285,11 +286,15 @@ func (r *Reader) signatureRemovalProtected(ctx context.Context, selected string,
 				return nil, nil, err
 			}
 			maps.Copy(protected, owned)
+			maps.Copy(retained, owned)
 			maps.Copy(protected, refs)
-			maps.Copy(references, refs)
+			maps.Copy(dependencies, refs)
 		}
 	}
-	return protected, references, ctx.Err()
+	for name := range retained {
+		delete(dependencies, name)
+	}
+	return protected, dependencies, ctx.Err()
 }
 
 // SignatureWriteOptions 最终包签署选项，不修改Editor或调用方的原件
