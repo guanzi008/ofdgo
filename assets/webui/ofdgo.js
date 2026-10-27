@@ -4010,6 +4010,8 @@ async function selectCompositeContent(item, point) {
 	let target = item;
 	try {
 		page.members ||= new Map();
+		const rect = point && surface.getBoundingClientRect();
+		const tolerance = point ? 3 * page.width / (state.rotation % 180 ? rect.height : rect.width) : 0;
 		while (canEditObject(target, "children") && !target.richText) {
 			const key = target.id;
 			let members = page.members.get(key);
@@ -4020,7 +4022,7 @@ async function selectCompositeContent(item, point) {
 			}
 			const next = point ? [...members].reverse().find(member => member.type === "TextObject" || canEditObject(member, "children")
 				? point.x >= member.x && point.x <= member.x + member.width && point.y >= member.y && point.y <= member.y + member.height
-				: canvasEditor.contains(member, point, 3 * page.width / surface.getBoundingClientRect().width)) : members[0];
+				: canvasEditor.contains(member, point, tolerance)) : members[0];
 			if (!next) break;
 			target = next;
 		}
@@ -4714,9 +4716,9 @@ async function changeDocument(name, item, ...args) {
 			ofdgoUpdateText: "text", ofdgoStyleText: "textStyle", ofdgoCropImage: "crop", ofdgoLayoutText: "layout", ofdgoFitImage: "fit", ofdgoResetCompositeCrop: "resetCrop",
 			ofdgoReshapeObject: "reshape", ofdgoReshapeLine: "line", ofdgoEraseObjects: "erase", ofdgoEraseObjectsPath: "erasePath", ofdgoPasteStyle: "pasteStyle",
 			ofdgoDeleteObject: "delete", ofdgoDeleteObjects: "delete", ofdgoCopyObjects: "copy", ofdgoOrderObjects: "order", ofdgoGroupObjects: "group" }[name];
-		const members = item?.items || (item ? [item] : []);
+		const members = item?.items ? [...item.items].sort((a, b) => a.order - b.order) : item ? [item] : [];
 		const scoped = members.some(member => member.scoped);
-		const ids = item ? Array.isArray(item.id) ? item.id : members.map(member => member.id) : [];
+		const ids = item ? Array.isArray(item.id) && !item.items ? item.id : members.map(member => member.id) : [];
 		const annotated = !scoped && ids.some(id => id.startsWith("annotation:"));
 		const inserting = ["ofdgoInsertShape", "ofdgoInsertText", "ofdgoInsertImage", "ofdgoInsertInk"].includes(name) || name === "ofdgoSaveRichText" && !item;
 		const editingAnnotation = name === "ofdgoWriteAnnotation" && Boolean(state.annotationCreate?.item);
@@ -4728,10 +4730,10 @@ async function changeDocument(name, item, ...args) {
 			? await callWASM(name, item.index, ids, ...args)
 			: textSelection
 			? await callWASM(name, item.index, item.selectionIDs, ...args)
-			: scoped && scope === null && operation
+			: scoped && operation && (scope === null || operation === "copy" && members.some(member => member.container !== members[0].container))
 			? await callWASM("ofdgoChangeSelection", item.index, ids, operation, ...args)
 			: scoped && !scopedRichText
-			? await callWASM("ofdgoChangeCompositeObjects", item.index, scope, Array.isArray(item.id) ? item.id : members.map(member => member.id), operation, ...args)
+			? await callWASM("ofdgoChangeCompositeObjects", item.index, scope, ids, operation, ...args)
 			: annotated && operation ? await callWASM("ofdgoChangeSelection", item.index, ids, operation, ...args)
 			: await callWASM(name, ...(item ? [item.index, item.id] : []), ...args);
 		if (tab.closed || state.doc !== originalDocument || state.editorInfo?.revision !== revision) return;
@@ -10522,13 +10524,14 @@ function visiblePageBounds(index) {
 }
 
 async function pasteEditorContent(event) {
+	const tab = documentTab(), state = tab.state;
 	if (!state.editing || event.target.closest?.("input, textarea, select, [contenteditable]") || formDialogOpen()) return;
 	event.preventDefault();
 	const token = event.clipboardData.getData(OBJECT_CLIPBOARD_TYPE);
 	const files = Array.from(event.clipboardData.files);
 	const value = event.clipboardData.getData("text/plain").replace(/\t/g, "    ");
 	if ((canvasEditor.nudge || canvasEditor.nudgeCommit) && !await canvasEditor.commitNudge()) return;
-	if (document.body.hasAttribute("data-busy") || canvasEditor.input || canvasEditor.crop || canvasEditor.drag) return;
+	if (!isForegroundDocument(tab) || document.body.hasAttribute("data-busy") || canvasEditor.input || canvasEditor.crop || canvasEditor.drag) return;
 	const index = state.pageIndex, page = state.doc.pages[index];
 	if (token) {
 		const clipboard = state.objectClipboard;
@@ -10537,7 +10540,7 @@ async function pasteEditorContent(event) {
 			return;
 		}
 		const openSeq = state.openSeq;
-		if (!await clipboard.ready || openSeq !== state.openSeq || index !== state.pageIndex || state.objectClipboard !== clipboard) return;
+		if (!await clipboard.ready || !isForegroundDocument(tab) || openSeq !== state.openSeq || index !== state.pageIndex || state.objectClipboard !== clipboard) return;
 		if (!pageCan("insert")) return;
 		const visible = visiblePageBounds(index), bounds = clipboard.bounds;
 		const offset = (clipboard.targetPage || clipboard.page) === page.id ? { x: clipboard.x + (clipboard.cut ? 0 : 3), y: clipboard.y + (clipboard.cut ? 0 : 3) } : { x: 0, y: 0 };
