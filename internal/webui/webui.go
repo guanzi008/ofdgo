@@ -4686,7 +4686,7 @@ func (e *businessEngine) readTextSelectionEdit(args []platformValue, analysis of
 		if err := value.Replace(start, end, replacement); err != nil {
 			return edit, err
 		}
-		value.Layout.AutoBidi, value.Layout.Wrap = true, true
+		value.Layout.AutoBidi = true
 		edit.Reflow = &value
 	}
 	return edit, nil
@@ -5001,11 +5001,30 @@ func (e *businessEngine) editorRichText(item map[string]any, object ofdgo.Graphi
 }
 
 // getRichText 读取文字分段与段落选项，颜色转换为浏览器RGB格式
-// 入参: args 页码和对象标识
-// 返回: any 富文本快照, error 错误信息
+// 入参: args 页码、对象标识和可选显式重排标记
+// 返回: any 富文本快照或重排模型及页面坐标框, error 错误信息
 func (e *businessEngine) getRichText(args []platformValue) (any, error) {
 	if e.currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
+	}
+	if len(args) > 2 && args[2].Bool() {
+		selection, err := e.readTextSelection([]string{args[1].String()})
+		if err != nil {
+			return nil, err
+		}
+		analysis, err := e.currentEditor.AnalyzeTextSelection(args[0].Int(), selection)
+		if err != nil {
+			return nil, err
+		}
+		if !analysis.Reflow {
+			return nil, fmt.Errorf("text cannot be reflowed")
+		}
+		value := analysis.RichText
+		value.Layout.AutoBidi = true
+		box := analysis.Bounds
+		return map[string]any{"model": e.browserRichText(value), "frame": map[string]any{
+			"width": box.W, "height": box.H, "matrix": e.editorMatrix(ofdgo.TranslationMatrix(box.X, box.Y)),
+		}}, nil
 	}
 	path, err := e.compositePath(args[1].String())
 	if err != nil {
@@ -5115,7 +5134,7 @@ func (e *businessEngine) readRichText(value platformValue) (ofdgo.RichText, erro
 }
 
 // saveRichText 原子保存文字、样式和新增字体，空标识创建文本框
-// 入参: args 页码、标识、富文本JSON、新建边界、可选字体集合和父路径
+// 入参: args 页码、标识、富文本JSON、边界及重排标记、可选字体集合和父路径
 // 返回: any 文档信息及文字选区, error 错误信息
 func (e *businessEngine) saveRichText(args []platformValue) (any, error) {
 	value, err := e.readRichText(args[2])
@@ -5129,13 +5148,20 @@ func (e *businessEngine) saveRichText(args []platformValue) (any, error) {
 				return err
 			}
 		}
+		box := args[3]
+		if !box.IsNull() && !box.IsUndefined() && box.Get("reflow").Type() == platformTypeBoolean && box.Get("reflow").Bool() {
+			selection, err := e.readTextSelection([]string{id})
+			if err != nil {
+				return err
+			}
+			return e.currentEditor.UpdateTextSelection(page, selection, ofdgo.TextSelectionEdit{Reflow: &value, Width: box.Get("width").Float()})
+		}
 		if len(args) > 5 && args[5].String() != "" {
 			key := args[5].String()
 			path, err := e.compositePath(key)
 			if err != nil {
 				return err
 			}
-			box := args[3]
 			if id != "" {
 				indexes, err := e.compositeIndexes(key, []string{id})
 				if err != nil {
@@ -5158,7 +5184,6 @@ func (e *businessEngine) saveRichText(args []platformValue) (any, error) {
 			if err := e.currentEditor.UpdateRichText(page, id, value); err != nil {
 				return err
 			}
-			box := args[3]
 			if !box.IsNull() && !box.IsUndefined() && box.Get("frameWidth").Type() == platformTypeNumber {
 				offset := 0.0
 				if box.Get("frameOffset").Type() == platformTypeNumber {
@@ -5168,7 +5193,6 @@ func (e *businessEngine) saveRichText(args []platformValue) (any, error) {
 			}
 			return nil
 		}
-		box := args[3]
 		id, err = e.currentEditor.AddRichText(page, ofdgo.Box{X: box.Get("x").Float(), Y: box.Get("y").Float(), W: box.Get("width").Float(), H: box.Get("height").Float()}, value)
 		return err
 	})

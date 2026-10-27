@@ -817,7 +817,7 @@ func (e *Editor) reflowTextSelection(page int, selection TextSelection, edit Tex
 		}
 		return e.putRichTextMetadata(page, first.ID, meta, -1)
 	}
-	return e.editCompositeObjects(page, *selection.Root, selection.Indexes, func(_ *Renderer, nodes []*editorCompositeNode, _ []CompositeMember) error {
+	if err := e.editCompositeObjects(page, *selection.Root, selection.Indexes, func(_ *Renderer, nodes []*editorCompositeNode, _ []CompositeMember) error {
 		for i, node := range nodes {
 			if selection.Indexes[i] != first.Index {
 				node.owner.patches = append(node.owner.patches, editorXMLPatch{node.span.start, node.span.end, nil})
@@ -838,5 +838,18 @@ func (e *Editor) reflowTextSelection(page int, selection TextSelection, edit Tex
 			node.setState(editorCompositeState{})
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	index := first.Index
+	for _, part := range preview.analysis.Parts[1:] {
+		if part.Index < first.Index {
+			index--
+		}
+	}
+	member, err := e.CompositeObject(page, *selection.Root, index)
+	if err != nil {
+		return err
+	}
+	return e.putCompositeRichTextMetadata(page, member.Object, meta, -1)
 }

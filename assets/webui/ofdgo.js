@@ -4136,13 +4136,14 @@ function currentTextStyle() {
 	return canvasEditor.input?.style ? { ...text, ...canvasEditor.input.style } : text;
 }
 
-async function loadRichText(item, firstFace, tab = documentTab(), firstData = null) {
+async function loadRichText(item, firstFace, tab = documentTab(), firstData = null, reflow = false) {
 	const wasmSeq = tab.state.wasmSeq;
 	const callWASM = (name, ...args) => {
 		if (tab.closed || wasmSeq !== tab.state.wasmSeq) throw new Error("文档已更改");
 		return callTabWASM(tab, name, ...args);
 	};
-	const model = item.richText || await callWASM("ofdgoGetRichText", item.index, item.id);
+	const prepared = reflow ? await callWASM("ofdgoGetRichText", item.index, item.id, true) : null;
+	const model = prepared?.model || item.richText || await callWASM("ofdgoGetRichText", item.index, item.id);
 	const remaining = firstData ? { ...model, runs: model.runs.filter(run => run.format.font !== item.font) } : model;
 	const fontData = remaining.runs.length ? await callWASM("ofdgoRichTextFonts", JSON.stringify(remaining)) : [];
 	const resources = new Map(fontData.map(font => [font.key, font.data]));
@@ -4154,10 +4155,10 @@ async function loadRichText(item, firstFace, tab = documentTab(), firstData = nu
 		if (tab.closed || wasmSeq !== tab.state.wasmSeq) throw new Error("文档已更改");
 		faces.set(id, face);
 	}
-	return { model, faces, resources };
+	return { model, faces, resources, frame: prepared?.frame };
 }
 
-async function ensureRichInput() {
+async function ensureRichInput(reflow = false) {
 	let editing = canvasEditor.input;
 	if (!editing) {
 		const item = canvasEditor.selected;
@@ -4169,9 +4170,9 @@ async function ensureRichInput() {
 	if (editing.item.selectionIDs) return false;
 	if (editing.rich) return true;
 	if (editing.composing || editing.saving) return false;
-	const rich = await loadRichText(editing.item, editing.face);
+	const rich = await loadRichText(editing.item, editing.face, documentTab(), null, reflow);
 	if (canvasEditor.input !== editing) return false;
-	return canvasEditor.promoteText(rich);
+	return Boolean(editing.rich) || canvasEditor.promoteText(rich);
 }
 
 async function reflowCanvasText() {
@@ -4255,6 +4256,7 @@ async function validateRichText(item, model, width, fonts = []) {
 async function saveRichText(item, model, fonts = [], box = item) {
 	const tab = documentTab(), openSeq = state.openSeq, wasmSeq = state.wasmSeq;
 	const boundary = { x: box.x, y: box.y, width: box.width, height: box.height };
+	if (item.richReflow) { boundary.reflow = true; boundary.width = item.textFrame.width; }
 	if (box.frameWidth !== undefined) Object.assign(boundary, { frameWidth: box.frameWidth, frameOffset: box.frameOffset || 0 });
 	fonts = await validateRichText(item, model, box.frameWidth ?? item.textFrame?.width ?? item.width, fonts);
 	if (tab.closed || !isForegroundDocument(tab) || tab.state.openSeq !== openSeq || tab.state.wasmSeq !== wasmSeq) return false;
@@ -4557,17 +4559,18 @@ function inputMillimeters(input, original) {
 async function changeTextAlignment() {
 	const align = el.textAlign.value, editing = canvasEditor.input, tab = documentTab();
 	if (!state.ready || state.exporting || document.body.hasAttribute("data-busy") || editing?.composing || editing?.saving || !align) return;
+	const sequence = editing ? editing.alignSequence = (editing.alignSequence || 0) + 1 : 0;
 	try {
 		if (editing) {
 			if (!editing.rich && !editing.item.draft && !confirmTextReflow(editing.item)) return;
-			if (!await ensureRichInput() || !isForegroundDocument(tab) || canvasEditor.input !== editing) return;
+			if (!await ensureRichInput(!canEditObject(editing.item, "layoutKnown")) || !isForegroundDocument(tab) || canvasEditor.input !== editing || editing.alignSequence !== sequence) return;
 			editing.rich.align(align);
 		} else if (canvasEditor.selected?.richText) {
 			const item = canvasEditor.selected;
 			await saveRichText(item, { ...item.richText, paragraphs: undefined, layout: { ...item.richText.layout, align } });
 		} else await changeParagraph();
 	} catch (error) {
-		if (isForegroundDocument(tab) && canvasEditor.input === editing) showError(error, false);
+		if (isForegroundDocument(tab) && canvasEditor.input === editing && (!editing || editing.alignSequence === sequence)) showError(error, false);
 	} finally {
 		if (isForegroundDocument(tab)) updateObjectControls(canvasEditor.selected, true);
 	}

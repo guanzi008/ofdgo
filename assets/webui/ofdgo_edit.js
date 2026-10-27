@@ -227,11 +227,6 @@ export class RichTextSession {
 	record(before) {
 		const change = textChange(before, this.model.runs);
 		const entry = { change, typing: { ...this.typing }, caret: [...this.caret] }, old = this.entries[this.index];
-		const beforeText = before.map(run => run.text).join("");
-		if (beforeText !== this.text && this.model.paragraphs === this.recordedParagraphs) {
-			const removed = change.before.map(run => run.text).join(""), inserted = change.after.map(run => run.text).join("");
-			replaceParagraphs(this.model, beforeText, change.start, change.start + removed.length, inserted);
-		}
 		const paragraphsChanged = JSON.stringify(this.recordedParagraphs) !== JSON.stringify(this.model.paragraphs);
 		if (paragraphsChanged) entry.paragraphs = { before: this.recordedParagraphs, after: this.model.paragraphs };
 		this.recordedParagraphs = this.model.paragraphs;
@@ -309,7 +304,7 @@ export class RichTextSession {
 		this.remember();
 		const [start, end] = range || this.selection();
 		const before = this.model.runs;
-		if (paragraphs) replaceParagraphs(this.model, this.text, start, end, runs.map(run => run.text).join(""), paragraphs);
+		replaceParagraphs(this.model, this.text, start, end, runs.map(run => run.text).join(""), paragraphs);
 		this.model.runs = normalizeRuns([...sliceRuns(this.model.runs, 0, start), ...runs, ...sliceRuns(this.model.runs, end, this.text.length)]);
 		this.caret = [start + runs.reduce((length, run) => length + run.text.length, 0)];
 		this.caret.push(this.caret[0]);
@@ -335,6 +330,7 @@ export class RichTextSession {
 			if (end < previous.length && /[\uDC00-\uDFFF]/.test(previous[end])) { end++; nextEnd++; }
 		}
 		const runs = this.model.runs;
+		replaceParagraphs(this.model, previous, start, end, value.slice(start, nextEnd));
 		this.model.runs = normalizeRuns([...sliceRuns(this.model.runs, 0, start),
 			{ text: value.slice(start, nextEnd), format: { ...this.typing } }, ...sliceRuns(this.model.runs, end, previous.length)]);
 		this.caret = caret;
@@ -1854,7 +1850,11 @@ export class CanvasEditor {
 					}
 					rich.replace([], null, range); return;
 				}
-				if (!editing.composing) { editing.rich.remember(); editing.rich.beforeCaret = editing.rich.selection(); }
+				if (!editing.composing) {
+					editing.rich.remember();
+					const range = event.getTargetRanges()[0];
+					editing.rich.beforeCaret = range ? editTextSelection(input, range) : editing.rich.selection();
+				}
 			}
 			if (editing.source && (event.inputType === "historyUndo" || event.inputType === "historyRedo")) {
 				event.preventDefault();
@@ -1957,33 +1957,40 @@ export class CanvasEditor {
 		const caret = editTextSelection(editing.input, editing.range) || [0, 0];
 		const value = editTextValue(editing.input);
 		const session = new RichTextSession(this, rich.model, rich.faces, rich.fonts, rich.resources);
-		const format = { ...session.typing, ...editing.style };
-		if (editing.fontData) {
-			const key = `temp-font-${crypto.randomUUID()}`;
-			format.font = key;
-			session.imports.set(key, editing.fontData);
-			session.faces.set(key, editing.face);
-			if (editing.fontChoice) session.choices.set(key, editing.fontChoice);
-		}
-		const history = editing.history;
-		const values = history ? history.entries.slice(0, history.index + 1) : [{ value: editing.item.text }, { value }];
-		for (const entry of values) {
+		const base = { ...session.typing }, fonts = new Map();
+		const scale = rich.frame ? sourceTextScale(editing) : 1;
+		const current = { value, style: editing.style, face: editing.face, fontData: editing.fontData, fontChoice: editing.fontChoice, caret };
+		const values = editing.history ? editing.history.entries.slice(0, editing.history.index + 1) : [{ value: editing.item.text }];
+		for (const entry of [...values, current]) {
+			const format = { ...base, ...entry.style };
+			if (entry.style?.size) format.size *= scale;
+			if (entry.fontData) {
+				let key = fonts.get(entry.fontData);
+				if (!key) {
+					key = `temp-font-${crypto.randomUUID()}`; fonts.set(entry.fontData, key);
+					session.imports.set(key, entry.fontData); session.faces.set(key, entry.face);
+					document.fonts.add(entry.face);
+					if (entry.fontChoice) session.choices.set(key, entry.fontChoice);
+				}
+				format.font = key;
+			}
 			const before = session.model.runs;
 			session.model.runs = normalizeRuns([{ text: entry.value, format }]);
-			session.typing = { ...format };
+			session.typing = format;
 			session.caret = entry.caret || caret;
 			session.record(before);
 		}
-		const before = session.model.runs;
-		session.model.runs = normalizeRuns([{ text: value, format }]);
-		session.caret = caret;
-		session.record(before);
+		if (rich.frame) {
+			editing.frame = rich.frame;
+			editing.item = { ...editing.item, richReflow: true, textFrame: rich.frame };
+			Object.assign(editing.input.style, { whiteSpace: rich.model.layout.wrap ? "pre-wrap" : "pre", textIndent: "0px", letterSpacing: "0px" });
+		}
 		editing.rich = session;
 		editing.source = false;
 		document.removeEventListener("selectionchange", editing.selectionListener);
 		editing.history = null;
 		editing.range = null;
-		const [a, b, c, d, e, f] = editing.frame.matrix, left = editing.item.leftIndent || 0;
+		const [a, b, c, d, e, f] = editing.frame.matrix, left = rich.model.layout.leftIndent || 0;
 		editing.input.style.transform = `matrix(${a},${b},${c},${d},${(e + a * left) * PX_PER_MM},${(f + b * left) * PX_PER_MM})`;
 		if (!rich.model.layout.lineHeight) editing.input.style.lineHeight = "normal";
 		session.render();
