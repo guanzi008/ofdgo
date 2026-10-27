@@ -10711,6 +10711,15 @@ function focusSearch() {
 }
 
 function showNavigation(selected) {
+	if (selected !== el.annotationsTab) {
+		const tab = documentTab();
+		for (const [id, request] of wasmRequests) {
+			if (request.tab === tab && request.name === "ofdgoAnnotationInfos") {
+				state.annotationSummary = null;
+				cancelOperation(id);
+			}
+		}
+	}
 	const scrollTop = el.navigationContent.scrollTop;
 	for (const [tab, panel] of [[el.pagesTab, el.pageList], [el.outlinesTab, el.outlineList], [el.annotationsTab, el.annotationsPanel], [el.searchTab, el.searchPanel]]) {
 		if (tab.getAttribute("data-selected") === "true") {
@@ -10728,27 +10737,24 @@ function showNavigation(selected) {
 }
 
 async function loadAnnotationSummary() {
+	const tab = documentTab(), state = tab.state;
 	if (!state.doc || !state.ready) return;
 	const seq = state.openSeq;
-	if (state.annotationSummary?.seq === seq) { renderAnnotationSummary(); return; }
+	if (state.annotationSummary?.seq === seq) { renderAnnotationSummary(true); return; }
 	const summary = {seq, items: [], loading: true};
 	state.annotationSummary = summary;
 	el.annotationsList.replaceChildren();
 	el.annotationsStatus.textContent = "正在读取注解";
 	try {
-		const items = await callWASM("ofdgoAnnotationInfos");
-		if (seq !== state.openSeq || state.annotationSummary !== summary) return;
+		const items = await callTabWASM(tab, "ofdgoAnnotationInfos");
+		if (tab.closed || seq !== state.openSeq || state.annotationSummary !== summary) return;
 		summary.items = items || [];
-		const labels = {Path: "批注", Highlight: "高亮", Stamp: "印章", Watermark: "水印", Link: "链接"};
-		const kind = el.annotationsKind.value;
-		el.annotationsKind.replaceChildren(new Option("全部", ""), ...[...new Set(summary.items.map(annotationKind))].map(type => new Option(labels[type] || type, type)));
-		el.annotationsKind.value = [...el.annotationsKind.options].some(option => option.value === kind) ? kind : "";
 		summary.loading = false;
-		renderAnnotationSummary();
+		if (isForegroundDocument(tab)) renderAnnotationSummary(true);
 	} catch (error) {
 		if (seq === state.openSeq && state.annotationSummary === summary) {
 			state.annotationSummary = null;
-			el.annotationsStatus.textContent = error.message;
+			if (isForegroundDocument(tab)) el.annotationsStatus.textContent = error.name === "AbortError" ? "" : error.message;
 		}
 	}
 }
@@ -10757,12 +10763,17 @@ function annotationKind(annotation) {
 	return annotation.type === "Path" && annotation.subtype === "Link" ? "Link" : annotation.type;
 }
 
-function renderAnnotationSummary() {
+function renderAnnotationSummary(reset = false) {
 	const summary = state.annotationSummary;
 	if (!summary || summary.loading || summary.seq !== state.openSeq) return;
+	const labels = {Path: "批注", Highlight: "高亮", Stamp: "印章", Watermark: "水印", Link: "链接"};
+	if (reset) {
+		const previousKind = el.annotationsKind.value;
+		el.annotationsKind.replaceChildren(new Option("全部", ""), ...[...new Set(summary.items.map(annotationKind))].map(type => new Option(labels[type] || type, type)));
+		el.annotationsKind.value = [...el.annotationsKind.options].some(option => option.value === previousKind) ? previousKind : "";
+	}
 	const query = el.annotationsFilter.value.trim().toLocaleLowerCase();
 	const kind = el.annotationsKind.value;
-	const labels = {Path: "批注", Highlight: "高亮", Stamp: "印章", Watermark: "水印", Link: "链接"};
 	const items = summary.items.filter(item => (!kind || annotationKind(item) === kind) && `${item.remark || ""}\n${item.creator || ""}\n${item.id}`.toLocaleLowerCase().includes(query));
 	el.annotationsStatus.textContent = summary.items.length ? `${items.length} / ${summary.items.length}` : "";
 	el.annotationsList.replaceChildren(...items.map(item => {
@@ -12666,7 +12677,8 @@ function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab())
 	el.outlineForm.inert = busy;
 	el.structureForm.inert = busy;
 	el.outlineList.inert = busy;
-	el.navigationTabs.inert = busy;
+	const operation = operationRequest(tab);
+	el.navigationTabs.inert = busy && !(tab.preparationBusy && operation?.preparing && operation.name === "ofdgoAnnotationInfos");
 	el.pageList.inert = busy;
 	el.editorTools.inert = busy || Boolean(sealPreview || resourceManager.pick);
 	el.fontList.inert = busy;
