@@ -705,7 +705,7 @@ el.editorTools.addEventListener("scroll", () => fontPicker.position());
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	textControls: [el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.saveAsButton, el.fontInput, document.querySelector("#textReflow")],
 	keepTextFocus: () => fontPicker.open || el.closePanel.open || canvasEditor.input?.fontDialog,
-	textClipboardScope: () => `${documentTab().id}:${state.wasmSeq}:${state.fileName}:${state.doc?.documents?.[state.doc.documentIndex || 0]?.root}:${state.doc?.documentIndex || 0}:${state.doc?.documentVersion || ""}`,
+	textClipboardScope: () => `${documentTab().id}:${state.wasmSeq}:${state.fileName}:${state.doc?.documents?.[state.doc.documentIndex || 0]?.root}:${state.doc?.documentIndex || 0}:${state.doc?.documentVersion || ""}:${state.editorInfo?.revision ?? ""}`,
 	getTextClipboard: () => workspace.textClipboard,
 	setTextClipboard: clipboard => { workspace.textClipboard = clipboard; },
 	scrollBy: (x, y) => { el.viewerPanel.scrollLeft += x; pageView.scrollViewerBy(y); },
@@ -10848,11 +10848,19 @@ function resetSearch(clearInput = true) {
 async function refreshSearchPages(pages, openSeq) {
 	const tab = documentTab(), target = tab.state, query = target.searchQuery;
 	if (!query || target.searchRunning || target.searchTruncated) { resetSearch(false); return; }
-	const seq = ++target.searchSeq;
+	pages = pages.filter(page => page < target.searchNext);
+	if (!pages.length) return;
+	const seq = ++target.searchSeq, next = target.searchNext;
 	target.searchRunning = true;
-	const selected = target.searchMatches[target.searchIndex];
+	const previous = target.searchMatches, selected = previous[target.searchIndex];
+	target.searchNext = Math.min(...pages);
+	target.searchMatches = previous.filter(match => match.page < target.searchNext);
+	target.searchIndex = target.searchMatches.indexOf(selected);
+	el.searchResults.replaceChildren();
+	clearSearchHighlights();
+	renderSearchResults();
 	try {
-		const matches = target.searchMatches.filter(match => !pages.includes(match.page));
+		const matches = previous.filter(match => !pages.includes(match.page));
 		for (const page of pages) {
 			const result = await callTabWASM(tab, "ofdgoSearchPage", page, query, SEARCH_MATCH_LIMIT - matches.length + 1);
 			if (tab.closed || target.openSeq !== openSeq || target.searchSeq !== seq) return;
@@ -10864,6 +10872,8 @@ async function refreshSearchPages(pages, openSeq) {
 		}
 		matches.sort((a,b) => a.page - b.page);
 		target.searchMatches = matches;
+		target.searchNext = next;
+		target.searchPaused = false;
 		target.searchIndex = selected ? matches.indexOf(selected) : -1;
 		if (isForegroundDocument(tab)) {
 			el.searchResults.replaceChildren();
@@ -10874,8 +10884,7 @@ async function refreshSearchPages(pages, openSeq) {
 		}
 	} catch (err) {
 		if (target.openSeq === openSeq && target.searchSeq === seq) {
-			target.searchQuery = "";
-			if (isForegroundDocument(tab)) { resetSearch(false); showError(err, false); }
+			if (isForegroundDocument(tab)) { el.searchStatus.textContent = "搜索失败"; showError(err, false); }
 		}
 	} finally {
 		if (target.searchSeq === seq) target.searchRunning = false;
@@ -12616,6 +12625,7 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab()) {
 	busy ||= Boolean(tab.editTask || operationRequest(tab));
+	const resumeSearch = tab.busy && !busy && tab.state.searchPaused;
 	tab.busy = busy;
 	if (text) tab.progress = {text, percent};
 	if (status) tab.status = status;
@@ -12657,6 +12667,9 @@ function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab())
 	el.fontList.inert = busy;
 	el.docFontList.inert = busy;
 	if (!busy) {
+		if (resumeSearch) queueMicrotask(() => {
+			if (isForegroundDocument(tab) && !tab.busy && !tab.refreshPending && tab.state.searchPaused) searchDocument();
+		});
 		el.progressPanel.hidden = !state.saving;
 		if (state.saving) {
 			el.cancelExportButton.hidden = false;

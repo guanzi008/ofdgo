@@ -71,6 +71,32 @@ function sliceRuns(runs, start, end) {
 	});
 }
 
+function textChange(before, after) {
+	const sameFormat = (a, b) => a && b && FORMAT_KEYS.every(key => a.format[key] === b.format[key]);
+	let first = 0, lastBefore = before.length - 1, lastAfter = after.length - 1, start = 0;
+	let endBefore = before.reduce((length, run) => length + run.text.length, 0);
+	let endAfter = after.reduce((length, run) => length + run.text.length, 0);
+	while (sameFormat(before[first], after[first]) && before[first].text === after[first].text) start += before[first++].text.length;
+	while (lastBefore >= first && lastAfter >= first && sameFormat(before[lastBefore], after[lastAfter]) && before[lastBefore].text === after[lastAfter].text) {
+		endBefore -= before[lastBefore--].text.length;
+		endAfter -= after[lastAfter--].text.length;
+	}
+	if (first <= lastBefore && first <= lastAfter && sameFormat(before[first], after[first])) {
+		const left = before[first].text, right = after[first].text;
+		let count = 0;
+		while (count < left.length && count < right.length && left[count] === right[count]) count++;
+		start += count;
+	}
+	if (first <= lastBefore && first <= lastAfter && sameFormat(before[lastBefore], after[lastAfter])) {
+		const left = before[lastBefore].text, right = after[lastAfter].text;
+		let count = 0;
+		while (count < Math.min(left.length, right.length, endBefore - start, endAfter - start) && left[left.length - count - 1] === right[right.length - count - 1]) count++;
+		endBefore -= count;
+		endAfter -= count;
+	}
+	return { start, before: sliceRuns(before, start, endBefore), after: sliceRuns(after, start, endAfter) };
+}
+
 export class RichTextSession {
 	constructor(editor, model, faces = new Map(), imports = [], resources = new Map()) {
 		this.editor = editor;
@@ -127,9 +153,10 @@ export class RichTextSession {
 		this.selection();
 		this.entries[this.index].caret = [...this.caret];
 	}
-	record(change) {
+	record(before) {
+		const change = textChange(before, this.model.runs);
 		const entry = { change, typing: { ...this.typing }, caret: [...this.caret] }, old = this.entries[this.index];
-		const changed = change && JSON.stringify(change.before) !== JSON.stringify(change.after);
+		const changed = change.before.length || change.after.length;
 		if (!changed && JSON.stringify(entry.typing) === JSON.stringify(old.typing)) return;
 		if (!changed) entry.change = null;
 		this.entries.splice(++this.index, Infinity, entry);
@@ -174,7 +201,7 @@ export class RichTextSession {
 		if (this.editing.composing || this.editing.saving) return;
 		this.remember();
 		const [start, end] = this.selection();
-		const before = sliceRuns(this.model.runs, start, end);
+		const before = this.model.runs;
 		this.caret = this.caret[0] > this.caret[1] ? [end, start] : [start, end];
 		if (start !== end) this.model.runs = normalizeRuns([
 			...sliceRuns(this.model.runs, 0, start),
@@ -182,19 +209,19 @@ export class RichTextSession {
 			...sliceRuns(this.model.runs, end, this.text.length),
 		]);
 		this.typing = { ...this.typing, ...values };
-		this.record({ start, before, after: sliceRuns(this.model.runs, start, end) });
+		this.record(before);
 		this.render();
 		this.editor.options.onTextChange();
 	}
 	replace(runs) {
 		this.remember();
 		const [start, end] = this.selection();
-		const before = sliceRuns(this.model.runs, start, end);
+		const before = this.model.runs;
 		this.model.runs = normalizeRuns([...sliceRuns(this.model.runs, 0, start), ...runs, ...sliceRuns(this.model.runs, end, this.text.length)]);
 		this.caret = [start + runs.reduce((length, run) => length + run.text.length, 0)];
 		this.caret.push(this.caret[0]);
 		if (runs.length) this.typing = { ...runs.at(-1).format };
-		this.record({ start, before, after: sliceRuns(this.model.runs, start, this.caret[0]) });
+		this.record(before);
 		this.render();
 		this.editor.options.onTextChange();
 	}
@@ -214,12 +241,12 @@ export class RichTextSession {
 			while (end > start && nextEnd > start && previous[end - 1] === value[nextEnd - 1]) { end--; nextEnd--; }
 			if (end < previous.length && /[\uDC00-\uDFFF]/.test(previous[end])) { end++; nextEnd++; }
 		}
-		const removed = sliceRuns(this.model.runs, start, end);
+		const runs = this.model.runs;
 		this.model.runs = normalizeRuns([...sliceRuns(this.model.runs, 0, start),
 			{ text: value.slice(start, nextEnd), format: { ...this.typing } }, ...sliceRuns(this.model.runs, end, previous.length)]);
 		this.caret = caret;
 		this.beforeCaret = null;
-		this.record({ start, before: removed, after: sliceRuns(this.model.runs, start, nextEnd) });
+		this.record(runs);
 		this.render();
 	}
 	copy(event, cut = false) {
@@ -257,7 +284,7 @@ export class RichTextSession {
 				if (this.editor.input !== this.editing || this.editing.composing || this.editing.saving || this.model.runs !== original || this.selection().join() !== caret.join()) return;
 			}
 			for (const [key, data] of copy.fonts) this.imports.set(keys.get(key), data);
-			for (const [key, face] of faces) { this.faces.set(keys.get(key), face); document.fonts.add(face); }
+			for (const [key, face] of faces) if (!this.faces.has(keys.get(key))) { this.faces.set(keys.get(key), face); document.fonts.add(face); }
 			for (const [key, choice] of copy.choices) this.choices.set(keys.get(key), choice);
 			runs = copy.runs.map(run => ({ text: run.text, format: { ...run.format, font: keys.get(run.format.font) } }));
 		}
@@ -1834,12 +1861,12 @@ export class CanvasEditor {
 			session.model.runs = normalizeRuns([{ text: entry.value, format }]);
 			session.typing = { ...format };
 			session.caret = entry.caret || caret;
-			session.record({ start: 0, before, after: session.model.runs });
+			session.record(before);
 		}
 		const before = session.model.runs;
 		session.model.runs = normalizeRuns([{ text: value, format }]);
 		session.caret = caret;
-		session.record({ start: 0, before, after: session.model.runs });
+		session.record(before);
 		editing.rich = session;
 		editing.source = false;
 		document.removeEventListener("selectionchange", editing.selectionListener);
