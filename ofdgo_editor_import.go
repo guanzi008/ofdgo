@@ -112,63 +112,107 @@ func (e *Editor) ImportObjects(source *Editor, sourcePage int, ids []string, pag
 // 入参: ctx 取消上下文, source 来源编辑器, sourcePage 来源页, ids 对象标识, page 目标页, options 迁移选项
 // 返回: []string 新对象标识, error 校验、迁移或取消错误
 func (e *Editor) ImportObjectsContext(ctx context.Context, source *Editor, sourcePage int, ids []string, page int, options ObjectImportOptions) ([]string, error) {
+	objects, _, err := e.importSelection(ctx, source, sourcePage, ids, nil, page, options, true)
+	return objects, err
+}
+
+// ImportSelection 导入独立单页选区包，重映射对象和资源标识，一次撤销恢复全部
+// 入参: ctx 取消上下文, source 单页选区阅读器, page 目标页, options 位移及导入配置
+// 返回: []string 正文标识, []string 注解标识, error 校验或迁移错误
+func (e *Editor) ImportSelection(ctx context.Context, source *Reader, page int, options ObjectImportOptions) ([]string, []string, error) {
+	doc, err := source.DocContext(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(doc.Pages.Page) != 1 {
+		return nil, nil, fmt.Errorf("selection requires exactly one page")
+	}
+	origin, err := source.EditorContext(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	content, err := origin.page(0)
+	if err != nil {
+		return nil, nil, err
+	}
+	var objects, annotations []string
+	for _, layer := range content.Content.Layer {
+		for _, object := range layer.Objects {
+			objects = append(objects, editorObjectID(object))
+		}
+	}
+	notes, err := origin.Annotations(0)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, note := range notes {
+		annotations = append(annotations, note.ID)
+	}
+	return e.importSelection(ctx, origin, 0, objects, annotations, page, options, true)
+}
+
+// importSelection 迁移正文与注解，共用资源映射并保持来源绘制顺序
+// 入参: ctx 取消上下文, source 来源编辑器, sourcePage 来源页, ids 正文标识, annotations 注解标识, page 目标页, options 导入配置, strictLinks 拒绝跨页链接
+// 返回: []string 正文标识, []string 注解标识, error 迁移或提交错误
+func (e *Editor) importSelection(ctx context.Context, source *Editor, sourcePage int, ids, annotations []string, page int, options ObjectImportOptions, strictLinks bool) ([]string, []string, error) {
 	progress := editorProgress(options.OnProgress).withContext(ctx)
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !finite(options.DX) || !finite(options.DY) {
-		return nil, fmt.Errorf("import requires finite offsets")
+		return nil, nil, fmt.Errorf("import requires finite offsets")
 	}
 	if source.encryption != nil && e.encryption == nil && !options.AllowDecrypted {
-		return nil, ErrEncryptionPolicyRequired
+		return nil, nil, ErrEncryptionPolicyRequired
 	}
 	objects, err := source.Objects(sourcePage, ids)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	target, err := e.page(page)
-	if err != nil || len(objects) == 0 {
-		return nil, err
+	if err != nil || len(objects) == 0 && len(annotations) == 0 {
+		return nil, nil, err
 	}
 	if source == e {
 		if err := progress.report("commit", 0, 0); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return e.CopyObjectsContext(ctx, page, objects, options.DX, options.DY)
+		copied, err := e.CopyObjectsContext(ctx, page, objects, options.DX, options.DY)
+		return copied, nil, err
 	}
 	reader, err := source.readerContext(ctx, progress)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer reader.Close()
 	doc, err := reader.Doc()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ref := doc.Pages.Page[sourcePage]
 	base, migration, err := e.prepareImport(ctx, reader, doc, map[string]bool{ref.ID: true}, false, progress)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	migration.ids[editorImportKey(ref.ID)], migration.strictLinks = target.ID, true
+	migration.ids[editorImportKey(ref.ID)], migration.strictLinks = target.ID, strictLinks
 	pageName := reader.ResPath(ref.BaseLoc)
 	content, err := reader.PageContentByIndex(sourcePage)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, value := range content.PageRes {
 		name, err := migration.resolve(pageName, "", value)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := migration.resourceIndex(name); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	layers := make([][]byte, len(objects))
 	for i, object := range objects {
 		if err := progress.report("objects", i, len(objects)); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		var data []byte
 		var attrs ofdAttrs
@@ -187,32 +231,48 @@ func (e *Editor) ImportObjectsContext(ctx context.Context, source *Editor, sourc
 			data, err = editorObjectXML(object)
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		data, err = editorXMLContainer("Layer", attrs, data)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		root, err := parseEditorXMLContext(ctx, data)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		layers[i], err = migration.encode(editorImportEntry{name: pageName, data: data}, root)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
+	notes := &AnnotationSelection{editor: e, document: e.documentIdentity()}
+	for _, id := range annotations {
+		data, err := source.annotationXML(sourcePage, id)
+		if err != nil {
+			return nil, nil, err
+		}
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			return nil, nil, err
+		}
+		data, err = migration.encode(editorImportEntry{name: pageName, data: data}, root)
+		if err != nil {
+			return nil, nil, err
+		}
+		notes.data = append(notes.data, data)
+	}
 	if err := migration.encodeResources(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, resource := range e.resources {
 		delete(migration.files, resource.name)
 	}
 	next, err := migration.merge(base, nil, nil, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var copied []string
+	var copied, copiedNotes []string
 	err = e.Transaction(func(editor *Editor) error {
 		if err := progress.report("commit", 0, 0); err != nil {
 			return err
@@ -236,13 +296,13 @@ func (e *Editor) ImportObjectsContext(ctx context.Context, source *Editor, sourc
 				return err
 			}
 			object := layer.Objects[0]
+			object.TextObject.layout = objects[i].TextObject.layout
+			object.state = objects[i].state
+			object.CompositeGraphicUnit.states = remapCompositeStates(objects[i].CompositeGraphicUnit.states, migration.ids)
 			imported[i], err = editor.copiedObjectStyle(object, layer.DrawParam)
 			if err != nil {
 				return err
 			}
-			imported[i].TextObject.layout = objects[i].TextObject.layout
-			imported[i].state = objects[i].state
-			imported[i].CompositeGraphicUnit.states = remapCompositeStates(objects[i].CompositeGraphicUnit.states, migration.ids)
 			imported[i].origin = &editorObjectOrigin{editor: editor, document: editor.documentIdentity(), data: data, node: root.child("Layer").children[0], object: object}
 		}
 		copied, err = editor.CopyObjectsContext(ctx, page, imported, options.DX, options.DY)
@@ -253,12 +313,17 @@ func (e *Editor) ImportObjectsContext(ctx context.Context, source *Editor, sourc
 		for i, object := range objects {
 			orderedIDs[i] = editorObjectID(object)
 		}
-		return editor.copyRichTextMetadata(source, sourcePage, orderedIDs, page, copied)
+		notes.document = editor.documentIdentity()
+		copiedNotes, err = editor.PasteAnnotations(page, notes, options.DX, options.DY)
+		if err != nil {
+			return err
+		}
+		return editor.copyRichTextMetadata(ctx, source, sourcePage, orderedIDs, annotations, page, copied, copiedNotes)
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return copied, err
+	return copied, copiedNotes, err
 }
 
 // ImportPages 将来源当前文档中的指定页面插入目标位置，保持输入顺序并作为一次撤销操作

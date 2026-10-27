@@ -372,9 +372,12 @@ function arrowPath(shape, box) {
 }
 
 export function selectionBounds(items) {
-	const x = Math.min(...items.map(item => item.x)), y = Math.min(...items.map(item => item.y));
-	return { x, y, width: Math.max(...items.map(item => item.x + item.width)) - x,
-		height: Math.max(...items.map(item => item.y + item.height)) - y };
+	let x = Infinity, y = Infinity, right = -Infinity, bottom = -Infinity;
+	for (const item of items) {
+		x = Math.min(x, item.x); y = Math.min(y, item.y);
+		right = Math.max(right, item.x + item.width); bottom = Math.max(bottom, item.y + item.height);
+	}
+	return { x, y, width: right - x, height: bottom - y };
 }
 
 function resizeCorner(node, event) {
@@ -523,11 +526,40 @@ export function selectedText(item) {
 	if (!item?.items) return item?.type === "TextObject" ? item : null;
 	if (!item.items.every(member => member.type === "TextObject")) return null;
 	const text = { ...item, type: "TextObject" };
-	for (const key of ["font", "fontName", "size", "color"]) {
-		const value = item.items[0][key];
-		text[key] = item.items.every(member => member[key] === value) ? value : undefined;
+	const formats = item.items.flatMap(member => member.richText ? member.richText.runs.map(run => run.format) : [{ ...member, ...richTextModel(member).runs[0].format }]);
+	for (const key of ["font", "fontName", "size", "color", "bold", "italic", "underline", "strikeout", "shadow", "background"]) {
+		const value = formats[0][key];
+		text[key] = formats.every(format => format[key] === value) ? value : undefined;
 	}
 	return text;
+}
+
+export class ObjectIndex {
+	constructor(items) {
+		const build = items => {
+			if (!items.length) return null;
+			const bounds = selectionBounds(items);
+			if (items.length <= 16) return { ...bounds, items };
+			const axis = bounds.width >= bounds.height ? "x" : "y";
+			items.sort((a, b) => a[axis] - b[axis]);
+			const middle = items.length >> 1;
+			return { ...bounds, left: build(items.slice(0, middle)), right: build(items.slice(middle)) };
+		};
+		this.root = build([...items]);
+	}
+
+	query(point, tolerance = 0) {
+		const result = [];
+		const contains = box => point.x >= box.x - tolerance && point.x <= box.x + box.width + tolerance
+			&& point.y >= box.y - tolerance && point.y <= box.y + box.height + tolerance;
+		const visit = node => {
+			if (!node || !contains(node)) return;
+			if (node.items) result.push(...node.items.filter(contains));
+			else { visit(node.left); visit(node.right); }
+		};
+		visit(this.root);
+		return result.sort((a, b) => b.order - a.order);
+	}
 }
 
 export class CanvasEditor {
@@ -602,8 +634,7 @@ export class CanvasEditor {
 		const pending = this.pendingSelection?.index === index;
 		const selected = new Set(pending ? this.pendingSelection.ids || page.objects.slice(-1).map(item => item.id)
 			: this.items().filter(item => item.index === index).map(item => item.id));
-		const selection = [];
-		this.pages.set(surface, { index, width: page.width, height: page.height });
+		const selection = [], items = [];
 		const layer = document.createElement("div");
 		layer.className = "edit-layer";
 		const artwork = new Map([...surface.querySelectorAll("[data-ofd-object], [data-ofd-child]")].map((node, order) => [node.getAttribute("data-ofd-object") || node.getAttribute("data-ofd-child"), { node, order }]));
@@ -645,6 +676,7 @@ export class CanvasEditor {
 				item.contour = { svg, path: contour };
 			}
 			this.nodes.set(node, item);
+			items.push(item);
 			node.addEventListener("focus", () => {
 				if (this.input) this.selectAfterText(item);
 				else this.select(item);
@@ -655,6 +687,7 @@ export class CanvasEditor {
 				selection.push(item);
 			}
 		}
+		this.pages.set(surface, { index, width: page.width, height: page.height, hitIndex: new ObjectIndex(items) });
 		surface.append(layer);
 		if (pending || selected.size) this.setSelection(selection);
 		if (pending) this.pendingSelection = null;
@@ -956,7 +989,7 @@ export class CanvasEditor {
 		const rect = surface.getBoundingClientRect(), rotation = this.options.rotation();
 		const point = pagePoint(event.clientX, event.clientY, rect, page, rotation);
 		const tolerance = 3 * page.width / (rotation % 180 ? rect.height : rect.width);
-		return [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)).reverse().filter(item => !item.parent || this.items().some(selected => selected.id.startsWith(item.parent + "/"))).filter(item => item.type === "TextObject"
+		return page.hitIndex.query(point, tolerance).filter(item => !item.parent || this.items().some(selected => selected.id.startsWith(item.parent + "/"))).filter(item => item.type === "TextObject"
 			? point.x >= item.x - tolerance && point.x <= item.x + item.width + tolerance
 				&& point.y >= item.y - tolerance && point.y <= item.y + item.height + tolerance
 			: this.contains(item, point, tolerance));

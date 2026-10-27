@@ -42,7 +42,7 @@ let credentialRequest = null;
 let documentDialogs = null;
 let cancelPageTouch = null;
 
-const workspace = { tabs: [], active: null, sequence: 0, nextID: 0, switching: false, closing: false };
+const workspace = { tabs: [], active: null, sequence: 0, nextID: 0, switching: false, closing: false, objectClipboard: null };
 
 function createResourceManager() {
 	return { kind: "Font", scope: "", views: new Map(), items: [], filteredItems: [], start: -1, end: -1, selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
@@ -108,7 +108,7 @@ function createDocumentState() {
 		openActionFrame: 0,
 		outlineAction: "add",
 		styleOriginal: null,
-		objectClipboard: null,
+		objectClipboardToken: null,
 		styleClipboard: null,
 		outlineExpanded: new Map(),
 		textFonts: [],
@@ -3247,7 +3247,7 @@ async function switchReadingVersion(id) {
 		const doc = await callTabWASM(tab, "ofdgoSelectVersion", id);
 		if (tab.closed || tab.state !== state || state.doc !== originalDocument || openSeq !== state.openSeq && view === tab.view) return;
 		openSeq = state.openSeq = workspace.sequence = Math.max(workspace.sequence, state.openSeq) + 1;
-		state.objectClipboard = state.styleClipboard = null;
+		state.objectClipboardToken = state.styleClipboard = null;
 		delete state.textDefaults.fontChoice;
 		if (state.editorInfo) {
 			if (!dirty) state.savedRevision = doc.revision;
@@ -3473,7 +3473,7 @@ async function switchDocument(index) {
 		state.packageDirty ||= state.dirty;
 		state.savedRevision = doc.revision;
 		state.editorViews.clear();
-		state.objectClipboard = state.styleClipboard = null;
+		state.objectClipboardToken = state.styleClipboard = null;
 		delete state.textDefaults.fontChoice;
 		state.ofdBytes = null;
 		state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
@@ -3590,7 +3590,7 @@ async function toggleEditor() {
 			state.ofdBytes = null;
 			state.selectObjects = true;
 			state.conversionWarnings = [];
-			state.objectClipboard = state.styleClipboard = null;
+			state.objectClipboardToken = state.styleClipboard = null;
 			state.pageCache.clear();
 			tab.refreshPending = true;
 			return;
@@ -3602,7 +3602,7 @@ async function toggleEditor() {
 		state.selectObjects = true;
 		state.ofdBytes = null;
 		state.conversionWarnings = [];
-		state.objectClipboard = null;
+		state.objectClipboardToken = null;
 		state.styleClipboard = null;
 		canvasEditor.richClipboard = null;
 		canvasEditor.clear();
@@ -4127,7 +4127,7 @@ async function ensureRichInput() {
 	let editing = canvasEditor.input;
 	if (!editing) {
 		const item = canvasEditor.selected;
-		if (!item || item.items || item.scoped || item.type !== "TextObject") return false;
+		if (!item || item.items || item.type !== "TextObject") return false;
 		await editCanvasObject(item);
 		editing = canvasEditor.input;
 	}
@@ -4156,6 +4156,13 @@ async function changeRangeFormat(key, value) {
 		if (!canvasEditor.selected && !canvasEditor.input) {
 			state.textDefaults[key] = value ?? (key === "background" ? state.textDefaults.background ? "" : textBackground.value : !state.textDefaults[key]);
 			updateObjectControls(null); return;
+		}
+		const item = canvasEditor.selected;
+		if (!canvasEditor.input && (item?.items || item?.scoped)) {
+			const current = currentTextStyle()[key];
+			const patch = { [key]: value ?? (key === "background" ? current ? "" : textBackground.value : current !== true) };
+			await changeDocument("ofdgoFormatText", { ...item, id: (item.items || [item]).map(member => member.id) }, JSON.stringify(patch));
+			return;
 		}
 		if (!await ensureRichInput()) return;
 		const rich = canvasEditor.input.rich, current = rich.state()[key];
@@ -4425,7 +4432,6 @@ async function changeTextFont() {
 			setBusy(false, "", 0, "", tab);
 		}
 	} else if (item?.type === "TextObject") {
-		if (item.items?.some(member => member.richText)) return;
 		if (canEditObject(item, "replaceFont") && (!font.embedded || item.font !== font.id.slice(9))) {
 			const changed = await changeDocument("ofdgoStyleText", { ...item, id: (item.items || [item]).map(member => member.id) }, readTextFont(font, tab), 0, null);
 			if (isForegroundDocument(tab) && (changed || openSeq === state.openSeq)) updateTextFonts(canvasEditor.selected, true);
@@ -4573,7 +4579,6 @@ async function changeTextStyle(color) {
 		return;
 	}
 	if (item.items) {
-		if (item.items.some(member => member.richText)) return;
 		if (color ? !canEditObject(item, "paint") : !canEditObject(item, "layoutKnown") || !canEditObject(item, "reflow")) return;
 		if (!color && !el.textSize.value) return;
 		if (size !== item.size || fill !== null) {
@@ -4713,7 +4718,7 @@ async function changeDocument(name, item, ...args) {
 		const scope = objectParent(item);
 		const operation = { ofdgoTransformObject: "transform", ofdgoTransformObjects: "transform", ofdgoRotateObjects: "rotate", ofdgoFlipObjects: "flip", ofdgoResizeObjects: "resize",
 			ofdgoAlignObject: "align", ofdgoAlignObjects: "align", ofdgoDistributeObjects: "distribute", ofdgoStyleObjects: "style", ofdgoUpdatePathStyle: "paint", ofdgoCompositeTextColor: "textColor",
-			ofdgoUpdateText: "text", ofdgoStyleText: "textStyle", ofdgoCropImage: "crop", ofdgoLayoutText: "layout", ofdgoFitImage: "fit", ofdgoResetCompositeCrop: "resetCrop",
+			ofdgoUpdateText: "text", ofdgoStyleText: "textStyle", ofdgoFormatText: "formatText", ofdgoCropImage: "crop", ofdgoLayoutText: "layout", ofdgoFitImage: "fit", ofdgoResetCompositeCrop: "resetCrop",
 			ofdgoReshapeObject: "reshape", ofdgoReshapeLine: "line", ofdgoEraseObjects: "erase", ofdgoEraseObjectsPath: "erasePath", ofdgoPasteStyle: "pasteStyle",
 			ofdgoDeleteObject: "delete", ofdgoDeleteObjects: "delete", ofdgoCopyObjects: "copy", ofdgoOrderObjects: "order", ofdgoGroupObjects: "group" }[name];
 		const members = item?.items ? [...item.items].sort((a, b) => a.order - b.order) : item ? [item] : [];
@@ -4726,7 +4731,7 @@ async function changeDocument(name, item, ...args) {
 		if (scopedRichText) args.push(scope);
 		const textSelection = name === "ofdgoUpdateTextSelection";
 		if (scoped && !operation && !textSelection && !scopedRichText) throw new Error("内部对象暂不支持此操作");
-		const doc = name === "ofdgoStyleText"
+		const doc = ["ofdgoStyleText", "ofdgoFormatText"].includes(name)
 			? await callWASM(name, item.index, ids, ...args)
 			: textSelection
 			? await callWASM(name, item.index, item.selectionIDs, ...args)
@@ -4777,7 +4782,7 @@ async function changeDocument(name, item, ...args) {
 			if (state.documentManagement && (name === "ofdgoImportDocuments" || name === "ofdgoChangeDocument" && args[0] === "add")) {
 				state.documentManagement.key = documentEntryKey(nextDocument);
 			}
-			state.objectClipboard = state.styleClipboard = null;
+			state.objectClipboardToken = state.styleClipboard = null;
 			canvasEditor.richClipboard = null;
 			state.pageSelection.clear();
 			state.pageSelectionAnchor = null;
@@ -4828,7 +4833,7 @@ async function changeDocument(name, item, ...args) {
 		}
 		const clearSelection = !item && !editingAnnotation || name === "ofdgoChangeAnnotations" && args[0] === "delete"
 			|| ["ofdgoDeleteObject", "ofdgoDeleteObjects", "ofdgoEraseObjects", "ofdgoEraseObjectsPath"].includes(name);
-		if (name === "ofdgoCopyObjects" || name === "ofdgoPasteObjects" || name === "ofdgoGroupObjects" || inserting || name === "ofdgoWriteAnnotation" && !editingAnnotation) {
+		if (name === "ofdgoCopyObjects" || ["ofdgoPasteObjects", "ofdgoImportObjects"].includes(name) || name === "ofdgoGroupObjects" || inserting || name === "ofdgoWriteAnnotation" && !editingAnnotation) {
 			state.selectObjects = true;
 			if (name !== "ofdgoInsertInk") canvasEditor.setTool("");
 			pageView.setPan(false);
@@ -4842,7 +4847,7 @@ async function changeDocument(name, item, ...args) {
 		} else if (restoring && !doc.changes?.all && doc.changes?.pages?.length === 1 && doc.changes.pages[0] === state.pageIndex && (restoredIndex < 0 || restoredIndex === state.pageIndex)) {
 			if (location) canvasEditor.pendingSelection = {index:state.pageIndex, ids:location.ids};
 			await refreshEditorPage(doc, state.pageIndex, openSeq, clearSelection);
-		} else if (item || name === "ofdgoPasteObjects" || inserting || editingAnnotation) {
+		} else if (item || ["ofdgoPasteObjects", "ofdgoImportObjects"].includes(name) || inserting || editingAnnotation) {
 			await refreshEditorPage(doc, item ? item.index : args[0], openSeq, clearSelection);
 		} else {
 			const samePage = pageIndexByID(doc.pages, previous.id);
@@ -10485,7 +10490,7 @@ function copyEditorSelection(event) {
 		return true;
 	}
 	const index = items[0].index, ids = items.map(item => item.id);
-	const clipboard = { token: crypto.randomUUID(), page: state.doc.pages[index].id, bounds: selectionBounds(items), x: 0, y: 0, cut };
+	const clipboard = { token: crypto.randomUUID(), source: `${tab.id}:${state.wasmSeq}:${state.doc.documentIndex || 0}:${state.doc.documentVersion || ""}`, page: state.doc.pages[index].id, bounds: selectionBounds(items), x: 0, y: 0, cut };
 	if (canvasEditor.nudge) {
 		clipboard.bounds.x += canvasEditor.nudge.x;
 		clipboard.bounds.y += canvasEditor.nudge.y;
@@ -10493,17 +10498,19 @@ function copyEditorSelection(event) {
 	event.clipboardData.setData(OBJECT_CLIPBOARD_TYPE, clipboard.token);
 	event.clipboardData.setData("text/plain", items.map(item => item.text || "").filter(Boolean).join("\n"));
 	event.preventDefault();
-	state.objectClipboard = clipboard;
+	state.objectClipboardToken = clipboard.token;
+	workspace.objectClipboard = clipboard;
 	const capture = () => {
 		const openSeq = state.openSeq, revision = state.editorInfo.revision;
-		return callTabWASM(tab, "ofdgoCaptureObjects", index, ids, clipboard.token).then(async () => {
+		return callTabWASM(tab, "ofdgoCaptureObjects", index, ids, clipboard.token).then(async result => {
+			clipboard.data = result.bytes;
 			clipboard.cut = false;
-			if (cut && isForegroundDocument(tab) && openSeq === state.openSeq && revision === state.editorInfo?.revision && index === state.pageIndex && state.objectClipboard === clipboard) {
+			if (cut && isForegroundDocument(tab) && openSeq === state.openSeq && revision === state.editorInfo?.revision && index === state.pageIndex && state.objectClipboardToken === clipboard.token && workspace.objectClipboard === clipboard) {
 				clipboard.cut = Boolean(await changeDocument("ofdgoDeleteObjects", { index, id: ids, items }));
 			}
 			return true;
 		}, err => {
-			if (isForegroundDocument(tab) && state.objectClipboard === clipboard) showError(err, false);
+			if (isForegroundDocument(tab) && state.objectClipboardToken === clipboard.token) showError(err, false);
 			return false;
 		});
 	};
@@ -10534,16 +10541,17 @@ async function pasteEditorContent(event) {
 	if (!isForegroundDocument(tab) || document.body.hasAttribute("data-busy") || canvasEditor.input || canvasEditor.crop || canvasEditor.drag) return;
 	const index = state.pageIndex, page = state.doc.pages[index];
 	if (token) {
-		const clipboard = state.objectClipboard;
+		const clipboard = workspace.objectClipboard;
 		if (!clipboard || token !== clipboard.token) {
 			setStatus("复制内容已失效，请重新复制");
 			return;
 		}
 		const openSeq = state.openSeq;
-		if (!await clipboard.ready || !isForegroundDocument(tab) || openSeq !== state.openSeq || index !== state.pageIndex || state.objectClipboard !== clipboard) return;
+		if (!await clipboard.ready || !isForegroundDocument(tab) || openSeq !== state.openSeq || index !== state.pageIndex || workspace.objectClipboard !== clipboard) return;
 		if (!pageCan("insert")) return;
 		const visible = visiblePageBounds(index), bounds = clipboard.bounds;
-		const offset = (clipboard.targetPage || clipboard.page) === page.id ? { x: clipboard.x + (clipboard.cut ? 0 : 3), y: clipboard.y + (clipboard.cut ? 0 : 3) } : { x: 0, y: 0 };
+		const target = `${tab.id}:${state.wasmSeq}:${state.doc.documentIndex || 0}:${state.doc.documentVersion || ""}`;
+		const offset = (clipboard.target || clipboard.source) === target && (clipboard.targetPage || clipboard.page) === page.id ? { x: clipboard.x + (clipboard.cut ? 0 : 3), y: clipboard.y + (clipboard.cut ? 0 : 3) } : { x: 0, y: 0 };
 		for (const [axis, size] of [["x", "width"], ["y", "height"]]) {
 			const position = bounds[axis] + offset[axis];
 			if (position < visible[axis] || position + bounds[size] > visible[axis] + visible[size]) {
@@ -10551,7 +10559,8 @@ async function pasteEditorContent(event) {
 				offset[axis] = Math.max(visible[axis] + margin, Math.min(position, visible[axis] + visible[size] - margin - bounds[size])) - bounds[axis];
 			}
 		}
-		if (await changeDocument("ofdgoPasteObjects", null, index, token, offset.x, offset.y)) {
+		if (await changeDocument(state.objectClipboardToken === clipboard.token ? "ofdgoPasteObjects" : "ofdgoImportObjects", null, index, state.objectClipboardToken === clipboard.token ? token : clipboard.data, offset.x, offset.y)) {
+			clipboard.target = target;
 			clipboard.targetPage = page.id;
 			clipboard.x = offset.x;
 			clipboard.y = offset.y;
@@ -12327,19 +12336,19 @@ function updateObjectControls(item, reset = false) {
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const selection = selectedText(item);
 	const text = selection ? currentTextStyle() : state.textDefaults;
-	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items && (!selection || item.items.some(member => member.richText))) || Boolean(canvasEditor.input?.composing || canvasEditor.input?.saving);
+	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items && !selection) || Boolean(canvasEditor.input?.composing || canvasEditor.input?.saving);
 	fontPicker.setDisabled(textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "replaceFont"));
 	el.textSize.disabled = textDisabled || text !== state.textDefaults && !item.draft && (!canEditObject(item, "reflow") || Boolean(item?.items && !item.selectionIDs) && !canEditObject(item, "layoutKnown"));
 	el.textColor.disabled = textDisabled || text !== state.textDefaults && !item.draft && !item.richText && !canEditObject(item, "paint");
 	el.textFontAdd.disabled = !state.editing || !state.ready || state.exporting;
-	const formatsDisabled = textDisabled || Boolean(item?.items || item?.scoped) || Boolean(item && !item.draft && (!selection || !canEditObject(item, "textContent")));
+	const formatsDisabled = textDisabled || Boolean(item && !item.draft && (!selection || !canEditObject(item, "textContent")));
 	for (const button of textFormatButtons) {
 		button.disabled = formatsDisabled;
 		const key = button.dataset.textFormat;
-		button.setAttribute("data-pressed", text[key] === undefined && (canvasEditor.input?.rich || item?.richText) ? "mixed" : String(Boolean(text[key])));
+		button.setAttribute("data-pressed", text[key] === undefined && (canvasEditor.input?.rich || item?.richText || item?.items) ? "mixed" : String(Boolean(text[key])));
 	}
 	textBackground.disabled = formatsDisabled;
-	textBackground.classList.toggle("mixed-color", Boolean((canvasEditor.input?.rich || item?.richText) && text.background === undefined));
+	textBackground.classList.toggle("mixed-color", Boolean((canvasEditor.input?.rich || item?.richText || item?.items) && text.background === undefined));
 	if (text.background) textBackground.value = text.background;
 	document.querySelector("#textHighlight").style.setProperty("--highlight-color", textBackground.value);
 	const richHistory = canvasEditor.input?.rich || canvasEditor.input?.history;

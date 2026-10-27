@@ -16,9 +16,12 @@ package ofdgo
 
 import (
 	"cmp"
+	"context"
 	"fmt"
+	"io"
 	"math"
 	"slices"
+	"strings"
 )
 
 // ObjectSelection 保存正文、注解及组合成员的独立快照，共享当前编辑器的不可变资源
@@ -863,12 +866,155 @@ func (e *Editor) ArrangeTargets(page int, paths []ObjectPath, distribute bool, d
 // 入参: page 页面索引, paths 完整文字路径, style 字体、字号或颜色增量
 // 返回: error 路径、文字或样式错误
 func (e *Editor) StyleTargetsText(page int, paths []ObjectPath, style TextStyle) error {
-	return e.editTargets(paths, func(objects, annotations []string) error {
+	patch := TextFormatPatch{}
+	if style.Font != "" {
+		patch.Font = &style.Font
+	}
+	if style.Size != 0 {
+		patch.Size = &style.Size
+	}
+	if style.Color != "" {
+		patch.Color = &style.Color
+	}
+	return e.formatTargetsText(page, paths, patch, style.Reflow)
+}
+
+// FormatTargetsText 原子修改普通文字和富文本的指定格式，保留未指定的混排属性
+// 入参: page 页面索引, paths 完整文字路径, patch 格式增量
+// 返回: error 路径、格式或不安全重排错误
+func (e *Editor) FormatTargetsText(page int, paths []ObjectPath, patch TextFormatPatch) error {
+	return e.formatTargetsText(page, paths, patch, false)
+}
+
+// formatTargetsText 统一文字选区格式事务，普通字体和颜色修改沿用定位保留路径
+// 入参: page 页面索引, paths 完整路径, patch 格式增量, reflow 显式重排
+// 返回: error 校验或编辑错误
+func (e *Editor) formatTargetsText(page int, paths []ObjectPath, patch TextFormatPatch, reflow bool) error {
+	style := TextStyle{Reflow: reflow}
+	if patch.Font != nil {
+		if strings.TrimSpace(*patch.Font) == "" {
+			return fmt.Errorf("text requires a font")
+		}
+		style.Font = *patch.Font
+	}
+	if patch.Size != nil {
+		if !finite(*patch.Size) || *patch.Size <= 0 {
+			return fmt.Errorf("invalid text size")
+		}
+		style.Size = *patch.Size
+	}
+	if patch.Color != nil {
+		style.Color = *patch.Color
+		if style.Color == "" {
+			style.Color = "0 0 0"
+		}
+	}
+	decorated := patch.Bold != nil || patch.Italic != nil || patch.Underline != nil || patch.Strikeout != nil || patch.Shadow != nil || patch.Background != nil
+	return e.editTargets(paths, func(ids, annotations []string) error {
 		if len(annotations) != 0 {
 			return fmt.Errorf("annotation is not a text object")
 		}
-		return e.StyleText(page, objects, style)
+		objects, _, err := e.selectedObjects(page, ids)
+		if err != nil {
+			return err
+		}
+		var plain []string
+		for _, object := range objects {
+			id := editorObjectID(object)
+			if object.Type == "TextObject" && !decorated {
+				plain = append(plain, id)
+				continue
+			}
+			value, err := e.richTextObject(page, object)
+			if err != nil {
+				return err
+			}
+			if err := value.ApplyFormat(0, value.Len(), patch); err != nil {
+				return err
+			}
+			if err := e.UpdateRichText(page, id, value); err != nil {
+				return err
+			}
+		}
+		if len(plain) != 0 {
+			return e.StyleText(page, plain, style)
+		}
+		return nil
 	}, func(path ObjectPath, indexes []int) error {
-		return e.StyleCompositeText(page, path, indexes, style)
+		members, err := e.CompositeObjectsAt(page, path, indexes)
+		if err != nil {
+			return err
+		}
+		var plain []int
+		for i, member := range members {
+			if member.Object.Type == "TextObject" && !decorated {
+				plain = append(plain, indexes[i])
+				continue
+			}
+			if err := e.formatCompositeText(page, path, indexes[i], patch); err != nil {
+				return err
+			}
+		}
+		if len(plain) != 0 {
+			return e.StyleCompositeText(page, path, plain, style)
+		}
+		return nil
 	})
+}
+
+// WriteTargetsTo 将选区及其关联资源写成独立单页OFD，来源关闭后仍可导入
+// 不修改来源、历史或组合结构，加密来源须显式允许明文导出
+// 不包含页面模板和签名，指向其他页面的跳转随单页导出移除
+// 入参: ctx 取消上下文, writer 输出流, page 来源页, paths 完整对象路径, allowDecrypted 允许明文导出
+// 返回: int64 写入字节数, error 路径、资源或写入错误
+func (e *Editor) WriteTargetsTo(ctx context.Context, writer io.Writer, page int, paths []ObjectPath, allowDecrypted bool) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if e.encryption != nil && !allowDecrypted {
+		return 0, ErrEncryptionPolicyRequired
+	}
+	if len(paths) == 0 {
+		return 0, fmt.Errorf("no objects selected")
+	}
+	snapshot := e.transactionSnapshot()
+	snapshot.history, snapshot.historyIndex, snapshot.historyLimit = nil, 0, 0
+	snapshot.transactionChanges = nil
+	for id, origin := range snapshot.origins {
+		if origin != nil && origin.editor == e {
+			copy := *origin
+			copy.editor = &snapshot
+			snapshot.origins[id] = &copy
+		}
+	}
+	selection, err := snapshot.CaptureTargets(page, paths)
+	if err != nil {
+		return 0, err
+	}
+	content, err := snapshot.page(page)
+	if err != nil {
+		return 0, err
+	}
+	objects, annotations, err := snapshot.PasteSelection(page, selection, 0, 0)
+	if err != nil {
+		return 0, err
+	}
+	box, err := creationBox(content.Area.PhysicalBox)
+	if err != nil {
+		return 0, err
+	}
+	packet := NewEditor()
+	packet.SetRenderBackends(e.backends)
+	packet.SetResources(e.runtimeResources)
+	packet.SetFontDirs(e.fontDirs...)
+	packet.SetFontFS(e.fontFS...)
+	packet.OnWriteProgress = e.OnWriteProgress
+	if _, err := packet.AddPage(box.W, box.H); err != nil {
+		return 0, err
+	}
+	packet.pages[0].Area = content.Area
+	if _, _, err := packet.importSelection(ctx, &snapshot, page, objects, annotations, 0, ObjectImportOptions{AllowDecrypted: true, OnProgress: e.OnWriteProgress}, false); err != nil {
+		return 0, err
+	}
+	return packet.WriteToWithOptions(ctx, writer, WriteOptions{})
 }

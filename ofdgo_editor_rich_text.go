@@ -25,6 +25,7 @@ import (
 	"image/color"
 	"io"
 	"reflect"
+	"slices"
 	"strconv"
 )
 
@@ -338,10 +339,17 @@ func (e *Editor) UpdateCompositeRichText(page int, path ObjectPath, index int, v
 		return fmt.Errorf("invalid rich text frame")
 	}
 	return e.Transaction(func(e *Editor) error {
+		member, err := e.CompositeObject(page, path, index)
+		if err != nil {
+			return err
+		}
+		if member.Object.Type == "TextObject" {
+			return e.updateCompositePlainRichText(page, path, index, value, offset, width)
+		}
 		var metadata richTextMetadata
 		entryIndex := -1
 		changed := false
-		err := e.editCompositeObjects(page, path, []int{index}, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
+		err = e.editCompositeObjects(page, path, []int{index}, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
 			node := nodes[0]
 			current, frame, _, err := e.CompositeRichText(page, members[0])
 			if err != nil {
@@ -388,7 +396,7 @@ func (e *Editor) UpdateCompositeRichText(page int, path ObjectPath, index int, v
 		if err != nil || !changed {
 			return err
 		}
-		member, err := e.CompositeObject(page, path, index)
+		member, err = e.CompositeObject(page, path, index)
 		if err != nil {
 			return err
 		}
@@ -659,18 +667,24 @@ func (e *Editor) putRichTextMetadata(page int, id string, meta richTextMetadata,
 // 入参: page 页面索引, object 普通文字快照
 // 返回: RichText 单片段, error 不安全提升错误
 func (e *Editor) promoteRichText(page int, object GraphicObject) (RichText, error) {
-	t := object.TextObject
-	unsupported := func() (RichText, error) {
-		return RichText{}, &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("text cannot be safely promoted to rich text")}
-	}
-	layer, _, err := e.findObject(page, t.ID)
+	layer, _, err := e.findObject(page, object.TextObject.ID)
 	if err != nil {
 		return RichText{}, err
 	}
-	if layer.DrawParam != "" || t.DrawParam != "" || t.Clips != nil || len(t.Actions) != 0 || t.Alpha != nil && *t.Alpha != 255 || t.Visible != nil && !*t.Visible || t.Stroke != nil && *t.Stroke || t.Fill != nil && !*t.Fill || t.Decoration != "" || t.VScale != 0 || t.HScale != 0 && t.HScale != 1 || t.ReadDirection != 0 || t.CharDirection != 0 || t.Weight != 0 && t.Weight != 400 && t.Weight != 700 {
-		return unsupported()
+	if origin := e.objectOrigin(object.TextObject.ID); layer.DrawParam != "" || origin != nil && !editorXMLSupported(origin.node) {
+		return RichText{}, &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("text cannot be safely promoted to rich text")}
 	}
-	if origin := e.objectOrigin(t.ID); origin != nil && !editorXMLSupported(origin.node) {
+	return e.promoteTextValue(object.TextObject)
+}
+
+// promoteTextValue 校验普通文字是否可无损提升，保留明确段落或可验证单行布局
+// 入参: t 有效文字样式与局部定位
+// 返回: RichText 单片段, error 布局或格式错误
+func (e *Editor) promoteTextValue(t TextObject) (RichText, error) {
+	unsupported := func() (RichText, error) {
+		return RichText{}, &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("text cannot be safely promoted to rich text")}
+	}
+	if t.DrawParam != "" || t.Clips != nil || len(t.Actions) != 0 || t.Alpha != nil && *t.Alpha != 255 || t.Visible != nil && !*t.Visible || t.Stroke != nil && *t.Stroke || t.Fill != nil && !*t.Fill || t.Decoration != "" || t.VScale != 0 || t.HScale != 0 && t.HScale != 1 || t.ReadDirection != 0 || t.CharDirection != 0 || t.Weight != 0 && t.Weight != 400 && t.Weight != 700 {
 		return unsupported()
 	}
 	frame, err := t.TextFrame()
@@ -754,29 +768,87 @@ func (e *Editor) richPlainOffset(text TextObject) (float64, float64, error) {
 	return x, y - baseline, nil
 }
 
-// copyRichTextMetadata 复制已识别组合的语义，使用目标标准子对象的字体引用
-// 入参: source 来源编辑器, sourcePage 来源页, ids 来源标识, page 目标页, copied 目标标识
-// 返回: error 元数据损坏或提交错误
-func (e *Editor) copyRichTextMetadata(source *Editor, sourcePage int, ids []string, page int, copied []string) error {
+// copyRichTextMetadata 迁移选区及其组合、注解内部的编辑标引，复用标准内容中的字体引用
+// 入参: ctx 取消上下文, source 来源编辑器, sourcePage 来源页, ids 正文标识, annotations 注解标识, page 目标页, copied 新正文标识, copiedNotes 新注解标识
+// 返回: error 元数据损坏、结构不一致或提交错误
+func (e *Editor) copyRichTextMetadata(ctx context.Context, source *Editor, sourcePage int, ids, annotations []string, page int, copied, copiedNotes []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	metadata := source.richTextMetadataIndex()
+	if metadata.err != nil || len(metadata.entries) == 0 {
+		return metadata.err
+	}
+	seen := make(map[string]bool)
+	var copyObject func(GraphicObject, GraphicObject) error
+	copyObject = func(before, after GraphicObject) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if before.Type != "CompositeObject" && before.Type != "CompositeGraphicUnit" {
+			return nil
+		}
+		id := editorObjectID(after)
+		if id != "" {
+			if seen[id] {
+				return nil
+			}
+			seen[id] = true
+		}
+		entry, err := source.richTextEntry(sourcePage, editorObjectID(before))
+		if err == nil {
+			if _, err := source.richTextObject(sourcePage, before); err != nil {
+				return err
+			}
+			return e.putCompositeRichTextMetadata(page, after, entry.metadata, -1)
+		}
+		if !errors.Is(err, ErrNotRichText) {
+			return err
+		}
+		units := []CompositeGraphicUnit{before.CompositeGraphicUnit, after.CompositeGraphicUnit}
+		for i, owner := range []*Editor{source, e} {
+			if units[i].ResourceID != "" {
+				definition, err := owner.compositeDefinition(units[i].ResourceID)
+				if err != nil {
+					return err
+				}
+				units[i] = definition.object.CompositeGraphicUnit
+			}
+		}
+		original, target := slices.Collect(units[0].objects()), slices.Collect(units[1].objects())
+		if len(original) != len(target) {
+			return fmt.Errorf("imported composite structure differs")
+		}
+		for i := range original {
+			if err := copyObject(original[i], target[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	for i, id := range ids {
-		object, err := source.Object(sourcePage, id)
+		before, err := source.Object(sourcePage, id)
 		if err != nil {
 			return err
 		}
-		if object.Type != "CompositeObject" {
-			continue
-		}
-		entry, err := source.richTextEntry(sourcePage, id)
-		if errors.Is(err, ErrNotRichText) {
-			continue
-		}
+		after, err := e.Object(page, copied[i])
 		if err != nil {
 			return err
 		}
-		if _, err := source.RichText(sourcePage, id); err != nil {
+		if err := copyObject(before, after); err != nil {
 			return err
 		}
-		if err := e.putRichTextMetadata(page, copied[i], entry.metadata, -1); err != nil {
+	}
+	for i, id := range annotations {
+		before, err := source.Annotation(sourcePage, id)
+		if err != nil {
+			return err
+		}
+		after, err := e.Annotation(page, copiedNotes[i])
+		if err != nil {
+			return err
+		}
+		if err := copyObject(GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: CompositeGraphicUnit{Objects: before.Appearance.Objects}}, GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: CompositeGraphicUnit{Objects: after.Appearance.Objects}}); err != nil {
 			return err
 		}
 	}
@@ -944,4 +1016,103 @@ func richTextMetadataFontSafe(value string) bool {
 		return false
 	}
 	return true
+}
+
+// formatCompositeText 修改内部富文本格式，普通文字安全提升后保留原实例变换
+// 入参: page 页面索引, path 父路径, index 成员序号, patch 格式增量
+// 返回: error 识别、排版或提交错误
+func (e *Editor) formatCompositeText(page int, path ObjectPath, index int, patch TextFormatPatch) error {
+	value, err := e.TargetRichText(page, ObjectPath{ID: path.ID, Annotation: path.Annotation, Children: append(slices.Clone(path.Children), index)})
+	if err != nil {
+		return err
+	}
+	if err := value.ApplyFormat(0, value.Len(), patch); err != nil {
+		return err
+	}
+	return e.UpdateCompositeRichText(page, path, index, value, 0, 0)
+}
+
+// updateCompositePlainRichText 将可验证布局的内部文字提升为富文本并保留实例坐标
+// 入参: page 页面索引, path 父路径, index 成员序号, value 富文本内容, offset 局部偏移, width 可选宽度
+// 返回: error 校验或提交错误
+func (e *Editor) updateCompositePlainRichText(page int, path ObjectPath, index int, value RichText, offset, width float64) error {
+	var metadata richTextMetadata
+	if err := e.editCompositeObjects(page, path, []int{index}, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
+		node, text := nodes[0], members[0].Object.TextObject
+		if node.object.Type != "TextObject" || !editorXMLSupported(node.span) {
+			return ErrNotRichText
+		}
+		text.CTM = ""
+		_, err := e.promoteTextValue(text)
+		if err != nil {
+			return err
+		}
+		if err := value.Validate(); err != nil {
+			return err
+		}
+		frame, err := text.TextFrame()
+		if err != nil {
+			return err
+		}
+		dx, dy, err := e.richPlainOffset(text)
+		if err != nil {
+			return err
+		}
+		object := node.object
+		if !node.boundaryInCTM {
+			object = compositeBoundary(object, node.parent, true)
+		}
+		box, err := creationBox(object.TextObject.Boundary)
+		if err != nil {
+			return err
+		}
+		matrix := TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(object.TextObject.CTM)).Multiply(TranslationMatrix(dx+offset, dy))
+		if width > 0 {
+			frame.W = width
+		}
+		next, meta, err := e.prepareRichText(Box{W: frame.W, H: frame.H}, value)
+		if err != nil {
+			return err
+		}
+		unit := richTextPlacement(meta, matrix)
+		unit.ID, unit.ResourceID = object.TextObject.ID, next.CompositeGraphicUnit.ResourceID
+		next.CompositeGraphicUnit = unit
+		if !node.boundaryInCTM {
+			next = compositeBoundary(next, node.parent, false)
+		}
+		metadata = meta
+		return node.update(next)
+	}); err != nil {
+		return err
+	}
+	member, err := e.CompositeObject(page, path, index)
+	if err != nil {
+		return err
+	}
+	return e.putCompositeRichTextMetadata(page, member.Object, metadata, -1)
+}
+
+// TargetRichText 读取完整路径文字的富文本模型，普通文字仅在可验证布局时提升
+// 入参: page 页面索引, path 完整对象路径
+// 返回: RichText 独立模型, error 路径或不安全提升错误
+func (e *Editor) TargetRichText(page int, path ObjectPath) (RichText, error) {
+	if len(path.Children) == 0 {
+		if path.Annotation != "" {
+			return RichText{}, ErrNotRichText
+		}
+		return e.RichText(page, path.ID)
+	}
+	index := path.Children[len(path.Children)-1]
+	path.Children = path.Children[:len(path.Children)-1]
+	member, err := e.CompositeObject(page, path, index)
+	if err != nil {
+		return RichText{}, err
+	}
+	if member.Object.Type == "TextObject" {
+		text := member.Object.TextObject
+		text.CTM = ""
+		return e.promoteTextValue(text)
+	}
+	value, _, _, err := e.CompositeRichText(page, member)
+	return value, err
 }

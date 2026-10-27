@@ -3862,6 +3862,7 @@ func (e *businessEngine) editorAppearance(item map[string]any, object ofdgo.Grap
 	var fill, stroke *ofdgo.FillColor
 	switch object.Type {
 	case "TextObject":
+		item["bold"], item["italic"] = object.TextObject.Weight >= 700, object.TextObject.Italic
 		fill = object.TextObject.FillColor
 		stroke = (*ofdgo.FillColor)(object.TextObject.StrokeColor)
 		alpha = object.TextObject.Alpha
@@ -4889,10 +4890,19 @@ func (e *businessEngine) styleText(args []platformValue) (any, error) {
 				if err != nil {
 					return err
 				}
-				if object.Type != "TextObject" {
-					return fmt.Errorf("object %q is not text", id)
+				if object.Type == "TextObject" {
+					value.WriteString(object.TextObject.Text())
+				} else {
+					path, err := e.compositePath(id)
+					if err != nil {
+						return err
+					}
+					text, err := e.currentEditor.TargetRichText(page, path)
+					if err != nil {
+						return err
+					}
+					value.WriteString(text.Text())
 				}
-				value.WriteString(object.TextObject.Text())
 			}
 			if err := e.checkFontGlyphs(data, value.String()); err != nil {
 				return err
@@ -4914,6 +4924,33 @@ func (e *businessEngine) styleText(args []platformValue) (any, error) {
 			return err
 		}
 		return e.currentEditor.StyleTargetsText(page, paths, style)
+	})
+}
+
+// formatText 批量修改选区格式，未指定的属性保持各自原值
+// 入参: args 页面索引、完整路径数组和格式JSON
+// 返回: any 文档信息, error 校验或提交错误
+func (e *businessEngine) formatText(args []platformValue) (any, error) {
+	return e.changeObjects(func() error {
+		paths, err := e.editorTargetPaths(e.stringsFromJS(args[1]))
+		if err != nil {
+			return err
+		}
+		var patch ofdgo.TextFormatPatch
+		if err := json.Unmarshal([]byte(args[2].String()), &patch); err != nil {
+			return err
+		}
+		for _, value := range []*string{patch.Color, patch.Background} {
+			if value == nil || *value == "" {
+				continue
+			}
+			var color ofdgo.FillColor
+			if err := e.setEditorColor(&color, *value); err != nil {
+				return err
+			}
+			*value = color.Value
+		}
+		return e.currentEditor.FormatTargetsText(args[0].Int(), paths, patch)
 	})
 }
 
@@ -4966,7 +5003,11 @@ func (e *businessEngine) getRichText(args []platformValue) (any, error) {
 	if e.currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
 	}
-	value, err := e.currentEditor.RichText(args[0].Int(), args[1].String())
+	path, err := e.compositePath(args[1].String())
+	if err != nil {
+		return nil, err
+	}
+	value, err := e.currentEditor.TargetRichText(args[0].Int(), path)
 	if err != nil {
 		return nil, err
 	}
@@ -5394,7 +5435,7 @@ func (e *businessEngine) copyObjects(args []platformValue) (any, error) {
 
 // captureObjects 保存独立选区快照，不修改文档或历史
 // 入参: args 页面索引、对象路径数组和剪贴板标识
-// 返回: any 空结果, error 错误信息
+// 返回: any 可跨文档导入的选区包, error 错误信息
 func (e *businessEngine) captureObjects(args []platformValue) (any, error) {
 	if e.currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
@@ -5404,8 +5445,16 @@ func (e *businessEngine) captureObjects(args []platformValue) (any, error) {
 		return nil, err
 	}
 	clipboard.token = args[2].String()
+	paths, err := e.editorTargetPaths(e.stringsFromJS(args[1]))
+	if err != nil {
+		return nil, err
+	}
+	var output bytes.Buffer
+	if _, err := e.currentEditor.WriteTargetsTo(context.Background(), &output, args[0].Int(), paths, true); err != nil {
+		return nil, err
+	}
 	e.copiedObjects = clipboard
-	return nil, nil
+	return successResult(map[string]any{"bytes": bytesToJS(output.Bytes())}), nil
 }
 
 // pasteObjects 将当前文档的对象快照粘贴到目标页
@@ -5421,6 +5470,38 @@ func (e *businessEngine) pasteObjects(args []platformValue) (any, error) {
 	}
 	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
 	return editorSelectionInfo{info, ids}, err
+}
+
+// importObjects 将独立选区包导入当前文档，来源标签无需保持打开
+// 入参: args 目标页、选区包和横纵位移
+// 返回: any 文档信息及新选区, error 读取或导入错误
+func (e *businessEngine) importObjects(args []platformValue) (any, error) {
+	if e.currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	data, err := e.bytesFromJS(args[1])
+	if err != nil {
+		return nil, err
+	}
+	input, err := ofdgo.NewInput(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+	defer input.Close()
+	reader, err := ofdgo.NewReader(input)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	objects, annotations, err := e.currentEditor.ImportSelection(context.Background(), reader, args[0].Int(), ofdgo.ObjectImportOptions{DX: args[2].Float(), DY: args[3].Float(), AllowDecrypted: true})
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range annotations {
+		objects = append(objects, "annotation:"+id)
+	}
+	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	return editorSelectionInfo{info, objects}, err
 }
 
 // copyEditorObjects 复制快照并更新预览，返回新对象标识
@@ -7872,6 +7953,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoPreviewTextSelection":   e.previewTextSelection,
 		"ofdgoUpdateTextSelection":    e.updateTextSelection,
 		"ofdgoStyleText":              e.styleText,
+		"ofdgoFormatText":             e.formatText,
 		"ofdgoGetRichText":            e.getRichText,
 		"ofdgoSaveRichText":           e.saveRichText,
 		"ofdgoPreviewRichText":        e.previewRichText,
@@ -7897,6 +7979,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoCopyObjects":            e.copyObjects,
 		"ofdgoCaptureObjects":         e.captureObjects,
 		"ofdgoPasteObjects":           e.pasteObjects,
+		"ofdgoImportObjects":          e.importObjects,
 		"ofdgoOrderObjects":           e.orderObjects,
 		"ofdgoDistributeObjects":      e.distributeObjects,
 		"ofdgoRotateObjects":          e.rotateObjects,
