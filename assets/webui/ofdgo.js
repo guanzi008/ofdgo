@@ -2962,7 +2962,11 @@ async function mountDocumentTab(tab) {
 async function releaseDocumentTab(tab) {
 	if (tab.closed) return;
 	const clipboard = workspace.objectClipboard;
-	if (clipboard?.tab === tab && !await prepareObjectClipboard(clipboard, tab) && workspace.objectClipboard === clipboard) workspace.objectClipboard = null;
+	if (clipboard?.tab === tab) {
+		const prepared = await prepareObjectClipboard(clipboard, tab);
+		clipboard.tab = null;
+		if (!prepared && workspace.objectClipboard === clipboard) workspace.objectClipboard = null;
+	}
 	tab.closed = true;
 	tab.print?.destroy();
 	tab.print = null;
@@ -10509,6 +10513,9 @@ function copyEditorSelection(event) {
 		if (previous.tab && !previous.tab.closed) return callTabWASM(previous.tab, "ofdgoDiscardObjects", previous.token);
 	}).catch(() => {});
 	const capture = () => {
+		if (tab.closed || !state.editing || workspace.objectClipboard !== clipboard || state.objectClipboardToken !== clipboard.token
+			|| clipboard.source !== `${tab.id}:${state.wasmSeq}:${state.doc.documentIndex || 0}:${state.doc.documentVersion || ""}`
+			|| state.doc.pages[index]?.id !== clipboard.page) return false;
 		const openSeq = state.openSeq, revision = state.editorInfo.revision;
 		return callTabWASM(tab, "ofdgoCaptureObjects", index, ids, clipboard.token).then(async () => {
 			clipboard.cut = false;
@@ -10518,12 +10525,12 @@ function copyEditorSelection(event) {
 				clipboard.cut = Boolean(await changeDocument("ofdgoDeleteObjects", { index, id: ids, items }));
 			}
 			return true;
-		}, err => {
-			if (isForegroundDocument(tab) && state.objectClipboardToken === clipboard.token) showError(err, false);
-			return false;
 		});
 	};
-	clipboard.ready = canvasEditor.nudge ? canvasEditor.commitNudge().then(saved => saved ? capture() : false) : capture();
+	clipboard.ready = Promise.resolve(canvasEditor.nudge ? canvasEditor.commitNudge().then(saved => saved ? capture() : false) : capture()).catch(err => {
+		if (isForegroundDocument(tab) && state.objectClipboardToken === clipboard.token) showError(err, false);
+		return false;
+	});
 	return true;
 }
 
@@ -10534,7 +10541,6 @@ async function prepareObjectClipboard(clipboard, owner = documentTab()) {
 		const tab = clipboard.tab;
 		clipboard.portable = callTabWASM(tab, "ofdgoExportObjects", clipboard.token).then(result => {
 			clipboard.data = result.bytes;
-			clipboard.tab = null;
 			return true;
 		}, err => {
 			clipboard.portable = null;
