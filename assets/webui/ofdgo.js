@@ -10711,15 +10711,7 @@ function focusSearch() {
 }
 
 function showNavigation(selected) {
-	if (selected !== el.annotationsTab) {
-		const tab = documentTab();
-		for (const [id, request] of wasmRequests) {
-			if (request.tab === tab && request.name === "ofdgoAnnotationInfos") {
-				state.annotationSummary = null;
-				cancelOperation(id);
-			}
-		}
-	}
+	if (selected !== el.annotationsTab) cancelAnnotationSummary(documentTab());
 	const scrollTop = el.navigationContent.scrollTop;
 	for (const [tab, panel] of [[el.pagesTab, el.pageList], [el.outlinesTab, el.outlineList], [el.annotationsTab, el.annotationsPanel], [el.searchTab, el.searchPanel]]) {
 		if (tab.getAttribute("data-selected") === "true") {
@@ -10736,11 +10728,21 @@ function showNavigation(selected) {
 	if (selected === el.annotationsTab) loadAnnotationSummary();
 }
 
+function cancelAnnotationSummary(tab) {
+	for (const [id, request] of wasmRequests) {
+		if (request.tab === tab && request.name === "ofdgoAnnotationInfos" && !request.canceled) {
+			tab.state.annotationSummary = null;
+			cancelOperation(id);
+		}
+	}
+}
+
 async function loadAnnotationSummary() {
 	const tab = documentTab(), state = tab.state;
 	if (!state.doc || !state.ready) return;
 	const seq = state.openSeq;
 	if (state.annotationSummary?.seq === seq) { renderAnnotationSummary(true); return; }
+	cancelAnnotationSummary(tab);
 	const summary = {seq, items: [], loading: true};
 	state.annotationSummary = summary;
 	el.annotationsList.replaceChildren();
@@ -12515,10 +12517,11 @@ function operationProgress(request, progress) {
 	const text = request.name.includes("Print") ? "正在准备打印" : request.name === "ofdgoEditDocument" ? "正在准备编辑" : request.name.includes("Save") ? "正在准备保存" : request.name.includes("Export") ? "正在准备导出" : "正在准备文档";
 	const completed = progress?.phase === "convert" && progress.total > 0;
 	const label = completed ? `${text} · ${progress.completed} / ${progress.total} 页` : text;
+	request.progress = {text:label, percent:completed ? progress.completed / progress.total * 100 : null};
 	if (request.name.includes("Print")) {
 		if (request.tab.print?.context) request.tab.print.status(label, true);
 	} else if (operationRequest(request.tab) === request) {
-		request.tab.progress = {text:label, percent:completed ? progress.completed / progress.total * 100 : null};
+		request.tab.progress = request.progress;
 		if (isForegroundDocument(request.tab)) setProgress(label, request.tab.progress.percent);
 	}
 }
@@ -12640,7 +12643,9 @@ function showError(err, empty = !state.doc) {
 }
 
 function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab()) {
-	busy ||= Boolean(tab.editTask || operationRequest(tab));
+	const operation = operationRequest(tab);
+	busy ||= Boolean(tab.editTask || operation);
+	if (operation?.preparing && operation.progress) ({text, percent} = operation.progress);
 	const resumeSearch = tab.busy && !busy && tab.state.searchPaused;
 	tab.busy = busy;
 	if (text) tab.progress = {text, percent};
@@ -12677,7 +12682,6 @@ function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab())
 	el.outlineForm.inert = busy;
 	el.structureForm.inert = busy;
 	el.outlineList.inert = busy;
-	const operation = operationRequest(tab);
 	el.navigationTabs.inert = busy && !(tab.preparationBusy && operation?.preparing && operation.name === "ofdgoAnnotationInfos");
 	el.pageList.inert = busy;
 	el.editorTools.inert = busy || Boolean(sealPreview || resourceManager.pick);
