@@ -227,8 +227,7 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 			if result != nil && result["ok"] == true && ctx.Err() == nil {
 				e.currentSession.svgFonts = maps.Clone(worker.svgFonts)
 				clear(worker.pageCache)
-				clear(worker.textCache)
-				worker.textOrder = nil
+				worker.textCache.Clear()
 				clear(worker.svgFonts)
 				e.renderIdle = append(e.renderIdle, worker)
 			}
@@ -380,7 +379,7 @@ func (e *NativeEngine) Close() error {
 	if e.pendingImport != nil {
 		err = errors.Join(err, e.pendingImport.Close())
 	}
-	e.currentSession, e.currentEditor, e.pendingImport, e.copiedObjects, e.copiedStyle = nil, nil, nil, nil, nil
+	e.currentSession, e.currentEditor, e.pendingImport, e.copiedObjects, e.portableObjects, e.copiedStyle = nil, nil, nil, nil, nil, nil
 	return err
 }
 
@@ -431,7 +430,7 @@ func (e *NativeEngine) renderSession(ctx context.Context) (*Session, error) {
 	}
 	return &Session{Reader: renderer.Reader, Renderer: renderer, doc: source.doc, fontFS: source.fontFS,
 		pageCache: make(map[int]*ofdgo.PageContent), boxCache: append([]pageBoxInfo(nil), source.boxCache...),
-		textCache: make(map[int]*ofdgo.PageText), svgFonts: make(map[string][]byte), editing: source.editing}, nil
+		textCache: ofdgo.NewPageTextCache(sessionTextCacheBytes), svgFonts: make(map[string][]byte), editing: source.editing}, nil
 }
 
 // prepareRender 同步当前编辑页面的图元标识，避免并行访问编辑器缓存

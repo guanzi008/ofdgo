@@ -962,20 +962,20 @@ func (e *Editor) formatTargetsText(page int, paths []ObjectPath, patch TextForma
 	})
 }
 
-// WriteTargetsTo 将选区及其关联资源写成独立单页OFD，来源关闭后仍可导入
+// PrepareTargets 将选区及其关联资源复制为独立单页编辑器，来源关闭后仍可使用
 // 不修改来源、历史或组合结构，加密来源须显式允许明文导出
 // 不包含页面模板和签名，指向其他页面的跳转随单页导出移除
-// 入参: ctx 取消上下文, writer 输出流, page 来源页, paths 完整对象路径, allowDecrypted 允许明文导出
-// 返回: int64 写入字节数, error 路径、资源或写入错误
-func (e *Editor) WriteTargetsTo(ctx context.Context, writer io.Writer, page int, paths []ObjectPath, allowDecrypted bool) (int64, error) {
+// 入参: ctx 取消上下文, page 来源页, paths 完整对象路径, allowDecrypted 允许明文导出
+// 返回: *Editor 独立选区，可直接导出或继续编辑, error 路径或资源错误
+func (e *Editor) PrepareTargets(ctx context.Context, page int, paths []ObjectPath, allowDecrypted bool) (*Editor, error) {
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return nil, err
 	}
 	if e.encryption != nil && !allowDecrypted {
-		return 0, ErrEncryptionPolicyRequired
+		return nil, ErrEncryptionPolicyRequired
 	}
 	if len(paths) == 0 {
-		return 0, fmt.Errorf("no objects selected")
+		return nil, fmt.Errorf("no objects selected")
 	}
 	snapshot := e.transactionSnapshot()
 	snapshot.history, snapshot.historyIndex, snapshot.historyLimit = nil, 0, 0
@@ -989,19 +989,19 @@ func (e *Editor) WriteTargetsTo(ctx context.Context, writer io.Writer, page int,
 	}
 	selection, err := snapshot.CaptureTargets(page, paths)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	content, err := snapshot.page(page)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	objects, annotations, err := snapshot.PasteSelection(page, selection, 0, 0)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	box, err := creationBox(content.Area.PhysicalBox)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	packet := NewEditor()
 	packet.SetRenderBackends(e.backends)
@@ -1010,10 +1010,22 @@ func (e *Editor) WriteTargetsTo(ctx context.Context, writer io.Writer, page int,
 	packet.SetFontFS(e.fontFS...)
 	packet.OnWriteProgress = e.OnWriteProgress
 	if _, err := packet.AddPage(box.W, box.H); err != nil {
-		return 0, err
+		return nil, err
 	}
 	packet.pages[0].Area = content.Area
 	if _, _, err := packet.importSelection(ctx, &snapshot, page, objects, annotations, 0, ObjectImportOptions{AllowDecrypted: true, OnProgress: e.OnWriteProgress}, false); err != nil {
+		return nil, err
+	}
+	packet.history, packet.historyIndex = nil, 0
+	return packet, nil
+}
+
+// WriteTargetsTo 将选区及关联资源写成独立单页OFD，不修改来源与历史
+// 入参: ctx 取消上下文, writer 输出流, page 来源页, paths 完整对象路径, allowDecrypted 允许明文导出
+// 返回: int64 写入字节数, error 路径、资源或写入错误
+func (e *Editor) WriteTargetsTo(ctx context.Context, writer io.Writer, page int, paths []ObjectPath, allowDecrypted bool) (int64, error) {
+	packet, err := e.PrepareTargets(ctx, page, paths, allowDecrypted)
+	if err != nil {
 		return 0, err
 	}
 	return packet.WriteToWithOptions(ctx, writer, WriteOptions{})

@@ -24,7 +24,14 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+	"unsafe"
 )
+
+// PageTextCache 按内存预算保留最近访问的页面文字索引
+// 缓存后不得修改PageText，页面或字体变化时须删除对应条目
+type PageTextCache struct {
+	cache *renderCache[int, *PageText]
+}
 
 // textPageTokens 保留文字及其复合图元和裁剪，跳过独立路径与图片
 type textPageTokens struct {
@@ -74,6 +81,83 @@ type TextMatchPart struct {
 	Run   int    `json:"run"`
 	Start int    `json:"start"`
 	End   int    `json:"end"`
+}
+
+// NewPageTextCache 创建文字索引缓存，预算包含字符区域和条目开销
+// 入参: bytes 内存预算，非正数禁用缓存
+// 返回: *PageTextCache 独立缓存
+func NewPageTextCache(bytes int) *PageTextCache {
+	return &PageTextCache{cache: resourceCache[int, *PageText](nil, max(0, bytes))}
+}
+
+// MemorySize 估算文字索引占用，包含切片容量和字符串内容
+// 返回: int64 估算字节数，共享字符串按各次引用计费
+func (p *PageText) MemorySize() int64 {
+	size := int64(unsafe.Sizeof(*p)) + int64(cap(p.Runs))*int64(unsafe.Sizeof(TextRun{}))
+	for _, run := range p.Runs {
+		size += int64(len(run.ID)) + int64(len(run.Text))
+		size += int64(cap(run.Boxes))*int64(unsafe.Sizeof(Box{})) + int64(cap(run.Spans))*int64(unsafe.Sizeof(TextSpan{}))
+	}
+	return size
+}
+
+// Get 获取文字索引并更新最近访问顺序
+// 入参: index 页面索引
+// 返回: *PageText 文字索引，未命中时为nil
+func (c *PageTextCache) Get(index int) *PageText {
+	text, _ := c.cache.get(index)
+	return text
+}
+
+// Put 缓存完整文字索引，超出预算的单页不驱逐其他页面
+// 入参: index 页面索引, text 文字索引，nil删除已有条目
+func (c *PageTextCache) Put(index int, text *PageText) {
+	if text == nil {
+		c.Delete(index)
+		return
+	}
+	size := text.MemorySize() + 128
+	if size > int64(c.cache.limit) {
+		c.Delete(index)
+		return
+	}
+	c.cache.put(index, text, int(size))
+}
+
+// Delete 删除页面索引并释放预算
+// 入参: index 页面索引
+func (c *PageTextCache) Delete(index int) {
+	c.cache.mu.Lock()
+	defer c.cache.mu.Unlock()
+	if entry := c.cache.entries[index]; entry != nil {
+		c.cache.remove(entry)
+	}
+}
+
+// Clear 清空缓存和计费状态
+func (c *PageTextCache) Clear() {
+	c.cache.clear()
+}
+
+// Len 返回缓存页面数
+// 返回: int 已缓存页面数
+func (c *PageTextCache) Len() int {
+	c.cache.mu.Lock()
+	defer c.cache.mu.Unlock()
+	return len(c.cache.entries)
+}
+
+// Range 按访问时间从旧到新遍历，遍历期间不得访问当前缓存
+// 入参: visit 访问函数，返回false停止遍历
+func (c *PageTextCache) Range(visit func(int, *PageText) bool) {
+	c.cache.mu.Lock()
+	defer c.cache.mu.Unlock()
+	for entry := c.cache.order.Back(); entry != nil; entry = entry.Prev() {
+		value := entry.Value.(renderCacheEntry[int, *PageText])
+		if !visit(value.key, value.value) {
+			return
+		}
+	}
 }
 
 // Token 读取文字页面所需的XML节点

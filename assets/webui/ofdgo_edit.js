@@ -395,28 +395,47 @@ function resizeCorner(node, event) {
 	return corner;
 }
 
-function alignmentSnap(box, targets, tolerance) {
-	const lines = [];
-	const offset = { x: 0, y: 0 };
-	for (const [axis, size, cross, span] of [["x", "width", "y", "height"], ["y", "height", "x", "width"]]) {
-		let distance = Infinity, line;
-		for (const target of targets) {
-			for (const anchor of [0, 0.5, 1]) {
-				const position = target[axis] + target[size] * anchor;
-				for (const edge of [0, 0.5, 1]) {
-					const delta = position - box[axis] - box[size] * edge;
-					if (Math.abs(delta) > tolerance[axis] || Math.abs(delta) >= distance) continue;
-					distance = Math.abs(delta);
+export class AlignmentIndex {
+	constructor(targets) {
+		for (const [axis, size] of [["x", "width"], ["y", "height"]]) {
+			this[axis] = targets.flatMap((target, index) => [0, 0.5, 1].map((anchor, order) => ({
+				position: target[axis] + target[size] * anchor, target, order: index * 3 + order,
+			}))).sort((a, b) => a.position - b.position || a.order - b.order);
+		}
+	}
+
+	snap(box, tolerance) {
+		const lines = [], offset = { x: 0, y: 0 };
+		for (const [axis, size, cross, span] of [["x", "width", "y", "height"], ["y", "height", "x", "width"]]) {
+			const anchors = this[axis];
+			let best, distance = Infinity, rank = Infinity;
+			for (let edge = 0; edge < 3; edge++) {
+				const value = box[axis] + box[size] * edge / 2;
+				let low = 0, high = anchors.length;
+				while (low < high) {
+					const middle = (low + high) >> 1;
+					if (anchors[middle].position < value - tolerance[axis]) low = middle + 1;
+					else high = middle;
+				}
+				for (let i = low; i < anchors.length && anchors[i].position <= value + tolerance[axis]; i++) {
+					const anchor = anchors[i], delta = anchor.position - box[axis] - box[size] * edge / 2;
+					const next = Math.abs(delta), order = anchor.order * 3 + edge;
+					if (next > tolerance[axis] || next > distance || next === distance && order >= rank) continue;
+					best = anchor;
+					distance = next;
+					rank = order;
 					offset[axis] = delta;
-					const from = Math.min(box[cross], target[cross]);
-					const to = Math.max(box[cross] + box[span], target[cross] + target[span]);
-					line = axis === "x" ? `M${position} ${from}V${to}` : `M${from} ${position}H${to}`;
 				}
 			}
+			if (best) {
+				const { position, target } = best;
+				const from = Math.min(box[cross], target[cross]);
+				const to = Math.max(box[cross] + box[span], target[cross] + target[span]);
+				lines.push(axis === "x" ? `M${position} ${from}V${to}` : `M${from} ${position}H${to}`);
+			}
 		}
-		if (line) lines.push(line);
+		return { ...offset, path: lines.join("") };
 	}
-	return { ...offset, path: lines.join("") };
 }
 
 function transformedBox(box, matrix) {
@@ -546,6 +565,23 @@ export class ObjectIndex {
 			return { ...bounds, left: build(items.slice(0, middle)), right: build(items.slice(middle)) };
 		};
 		this.root = build([...items]);
+	}
+
+	queryBox(box) {
+		const result = [];
+		const intersects = node => node.x <= box.x + box.width && node.x + node.width >= box.x
+			&& node.y <= box.y + box.height && node.y + node.height >= box.y;
+		const visit = node => {
+			if (!node || !intersects(node)) return;
+			if (node.items) {
+				for (const item of node.items) {
+					if (!item.parent && item.x >= box.x && item.x + item.width <= box.x + box.width
+						&& item.y >= box.y && item.y + item.height <= box.y + box.height) result.push(item);
+				}
+			} else { visit(node.left); visit(node.right); }
+		};
+		visit(this.root);
+		return result.sort((a, b) => a.order - b.order);
 	}
 
 	query(point, tolerance = 0) {
@@ -950,9 +986,10 @@ export class CanvasEditor {
 		};
 		if (!this.drag.corner) {
 			const selected = this.items();
-			this.drag.targets = [...item.surface.querySelectorAll(".edit-object")]
+			const targets = [...item.surface.querySelectorAll(".edit-object")]
 				.map(node => this.nodes.get(node)).filter(member => !selected.some(item => item === member || item.id.startsWith(member.id + "/") || member.id.startsWith(item.id + "/")));
-			this.drag.targets.push({ x: 0, y: 0, ...item.page });
+			targets.push({ x: 0, y: 0, ...item.page });
+			this.drag.alignment = new AlignmentIndex(targets);
 		}
 		if (lineShape(item.shape) && this.drag.corner) {
 			Object.assign(this.drag, this.createPreview(item.surface, item.page, item.shape, {
@@ -1133,7 +1170,7 @@ export class CanvasEditor {
 
 	snap(drag, bypass = false) {
 		const { item, rect, rotation, change } = drag;
-		const { x, y, path } = bypass ? { x: 0, y: 0, path: "" } : alignmentSnap({ ...item, x: item.x + change.x, y: item.y + change.y }, drag.targets, {
+		const { x, y, path } = bypass ? { x: 0, y: 0, path: "" } : drag.alignment.snap({ ...item, x: item.x + change.x, y: item.y + change.y }, {
 			x: drag.axis === "y" ? 0 : 4 * item.page.width / (rotation % 180 ? rect.height : rect.width),
 			y: drag.axis === "x" ? 0 : 4 * item.page.height / (rotation % 180 ? rect.width : rect.height),
 		});
@@ -1362,11 +1399,9 @@ export class CanvasEditor {
 		paintShape(drag.node, "rectangle", box);
 		if (Math.hypot(event.clientX-drag.clientX, event.clientY-drag.clientY) < 3) return;
 		const items = [...drag.base];
-		for (const node of drag.surface.querySelectorAll(".edit-object")) {
-			const item = this.nodes.get(node);
-			if (!item.parent && !items.includes(item) && item.x >= box.x && item.x+item.width <= box.x+box.width && item.y >= box.y && item.y+item.height <= box.y+box.height) {
-				items.push(item);
-			}
+		const selected = new Set(items);
+		for (const item of drag.page.hitIndex.queryBox(box)) {
+			if (!selected.has(item)) items.push(item);
 		}
 		this.setSelection(items);
 	}

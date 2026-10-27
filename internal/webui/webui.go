@@ -38,8 +38,8 @@ import (
 	"github.com/xiaoqidun/ofdgo"
 )
 
-// sessionTextCacheLimit 限制会话保留的页面文字索引数量
-const sessionTextCacheLimit = 32
+// sessionTextCacheBytes 限制会话文字索引的内存预算
+const sessionTextCacheBytes = 32 << 20
 
 // OpenOptions 打开OFD文档选项
 type OpenOptions struct {
@@ -63,8 +63,7 @@ type Session struct {
 	doc             *ofdgo.Document
 	pageCache       map[int]*ofdgo.PageContent
 	boxCache        []pageBoxInfo
-	textCache       map[int]*ofdgo.PageText
-	textOrder       []int
+	textCache       *ofdgo.PageTextCache
 	svgFonts        map[string][]byte
 	fontScan        *ofdgo.FontInfoScanner
 	fontInfos       []FontInfo
@@ -355,10 +354,11 @@ type apiResult struct {
 	ReasonCode    ofdgo.EditReason         `json:"reasonCode,omitempty"`
 }
 
-// editorClipboard 当前编辑文档中的对象快照与剪贴板标识
+// editorClipboard 保存选区标识及同文档快照或跨文档副本
 type editorClipboard struct {
 	token     string
 	selection *ofdgo.ObjectSelection
+	packet    *ofdgo.Editor
 }
 
 // editorInfo 编辑文档信息与操作状态
@@ -451,23 +451,27 @@ type pendingPDF struct {
 	font      platformValue
 	operation *outputContext
 	report    func(string, int, int) error
+	stage     string
+	completed int
+	total     int
 }
 
 // businessEngine 独立文档、编辑、剪贴板及操作上下文
 type businessEngine struct {
-	resources      *ofdgo.Resources
-	currentSession *Session
-	currentEditor  *ofdgo.Editor
-	pdf            *pendingPDF
-	pdfWarnings    []byte
-	saveSnapshot   *ofdgo.Editor
-	printDocument  *ofdgo.PrintDocument
-	pendingImport  *ofdgo.Reader
-	copiedObjects  *editorClipboard
-	copiedStyle    *ofdgo.GraphicObject
-	ctx            context.Context
-	resolveInput   func(context.Context, any) (io.ReaderAt, int64, error)
-	conversionPool *ofdgo.ConversionPool
+	resources       *ofdgo.Resources
+	currentSession  *Session
+	currentEditor   *ofdgo.Editor
+	pdf             *pendingPDF
+	pdfWarnings     []byte
+	saveSnapshot    *ofdgo.Editor
+	printDocument   *ofdgo.PrintDocument
+	pendingImport   *ofdgo.Reader
+	copiedObjects   *editorClipboard
+	portableObjects *editorClipboard
+	copiedStyle     *ofdgo.GraphicObject
+	ctx             context.Context
+	resolveInput    func(context.Context, any) (io.ReaderAt, int64, error)
+	conversionPool  *ofdgo.ConversionPool
 }
 
 // Open 打开浏览器内存中的OFD文档
@@ -596,8 +600,7 @@ func (s *Session) SetFonts(fonts []FontFile) error {
 		s.Renderer.SetFontFS()
 		s.fontFS = nil
 	}
-	clear(s.textCache)
-	s.textOrder = nil
+	s.textCache.Clear()
 	clear(s.svgFonts)
 	s.resetFontInfo()
 	return nil
@@ -623,24 +626,13 @@ func (s *Session) PageText(index int) (*ofdgo.PageText, error) {
 // 入参: index 页面索引
 // 返回: *ofdgo.PageText 文字索引，未缓存时为nil
 func (s *Session) cachedPageText(index int) *ofdgo.PageText {
-	text := s.textCache[index]
-	if text != nil {
-		s.cachePageText(index, text)
-	}
-	return text
+	return s.textCache.Get(index)
 }
 
-// cachePageText 保留最近访问的文字索引，避免全文搜索持续占用内存
+// cachePageText 按内存预算保留页面文字索引，复用阅读与搜索结果
 // 入参: index 页面索引, text 文字索引
 func (s *Session) cachePageText(index int, text *ofdgo.PageText) {
-	if position := slices.Index(s.textOrder, index); position >= 0 {
-		s.textOrder = slices.Delete(s.textOrder, position, position+1)
-	} else if len(s.textOrder) == sessionTextCacheLimit {
-		delete(s.textCache, s.textOrder[0])
-		s.textOrder = slices.Delete(s.textOrder, 0, 1)
-	}
-	s.textOrder = append(s.textOrder, index)
-	s.textCache[index] = text
+	s.textCache.Put(index, text)
 }
 
 // PageTextString 获取页面原文，不为全文复制保留额外的页面和文字索引
@@ -879,8 +871,7 @@ func (s *Session) SetRenderBackend(name string) error {
 	}
 	previous, next := s.Renderer.Backends().Info(), backends.Info()
 	if previous.Compiler != next.Compiler || previous.Fonts != next.Fonts || previous.Geometry != next.Geometry {
-		clear(s.textCache)
-		s.textOrder = nil
+		s.textCache.Clear()
 	}
 	ofdgo.WithRenderBackends(backends)(s.Renderer)
 	return nil
@@ -984,7 +975,7 @@ func newSession(reader *ofdgo.Reader, opts OpenOptions) (*Session, error) {
 		doc:       doc,
 		pageCache: make(map[int]*ofdgo.PageContent),
 		boxCache:  make([]pageBoxInfo, len(doc.Pages.Page)),
-		textCache: make(map[int]*ofdgo.PageText),
+		textCache: ofdgo.NewPageTextCache(sessionTextCacheBytes),
 		svgFonts:  make(map[string][]byte),
 	}, nil
 }
@@ -1494,7 +1485,7 @@ func (e *businessEngine) openPDF(args []platformValue) (any, error) {
 		}
 		password = slices.Clone(password)
 	}
-	pending.operation, pending.report = e.newEditorOperationContext(pending.progress)
+	e.bindPDFOperation(pending)
 	options := ofdgo.PDFImportOptions{Resources: e.resources, PasswordUTF8: true, Password: password,
 		OnProgress: func(stage string, completed, total int) error {
 			return pending.report(stage, completed, total)
@@ -1624,10 +1615,24 @@ func (e *businessEngine) checkDocument(name string) error {
 		return nil
 	}
 	switch name {
-	case "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoPageTextString", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
+	case "ofdgoDiscardObjects", "ofdgoExportObjects", "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoPageTextString", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
 		return nil
 	default:
 		return ofdgo.ErrIncompleteDocument
+	}
+}
+
+// bindPDFOperation 更新取消上下文并保留转换阶段，时间片检查不重置进度
+// 入参: pending 当前转换任务
+func (e *businessEngine) bindPDFOperation(pending *pendingPDF) {
+	operation, report := e.newEditorOperationContext(pending.progress)
+	pending.operation = operation
+	pending.report = func(stage string, completed, total int) error {
+		pending.stage, pending.completed, pending.total = stage, completed, total
+		return report(stage, completed, total)
+	}
+	operation.checkpoint = func() error {
+		return report(pending.stage, pending.completed, pending.total)
 	}
 }
 
@@ -1643,7 +1648,7 @@ func (e *businessEngine) preparePDF(name string, args []platformValue) error {
 	default:
 		return nil
 	}
-	e.pdf.operation, e.pdf.report = e.newEditorOperationContext(e.pdf.progress)
+	e.bindPDFOperation(e.pdf)
 	e.pdf.operation.checked = time.Now()
 	e.pdf.operation.interval = 255
 	e.currentSession.Renderer.OutputContext = e.pdf.operation
@@ -1922,8 +1927,7 @@ func (e *businessEngine) configureDocument(args []platformValue) (any, error) {
 	}
 	if e.currentSession.Renderer.RenderAnnotations != args[1].Bool() {
 		e.currentSession.Renderer.RenderAnnotations = args[1].Bool()
-		clear(e.currentSession.textCache)
-		e.currentSession.textOrder = nil
+		e.currentSession.textCache.Clear()
 	}
 	return e.currentSession.Summary(), nil
 }
@@ -5435,7 +5439,7 @@ func (e *businessEngine) copyObjects(args []platformValue) (any, error) {
 
 // captureObjects 保存独立选区快照，不修改文档或历史
 // 入参: args 页面索引、对象路径数组和剪贴板标识
-// 返回: any 可跨文档导入的选区包, error 错误信息
+// 返回: any 捕获结果, error 错误信息
 func (e *businessEngine) captureObjects(args []platformValue) (any, error) {
 	if e.currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
@@ -5449,12 +5453,44 @@ func (e *businessEngine) captureObjects(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	var output bytes.Buffer
-	if _, err := e.currentEditor.WriteTargetsTo(context.Background(), &output, args[0].Int(), paths, true); err != nil {
+	packet, err := e.currentEditor.PrepareTargets(e.operationContext(), args[0].Int(), paths, true)
+	if err != nil {
 		return nil, err
 	}
 	e.copiedObjects = clipboard
+	e.portableObjects = &editorClipboard{token: clipboard.token, packet: packet}
+	return successResult(nil), nil
+}
+
+// exportObjects 按需压缩已准备的独立选区，切换文档或版本不影响结果
+// 入参: args 剪贴板标识
+// 返回: any 可跨文档导入的选区包, error 标识或写入错误
+func (e *businessEngine) exportObjects(args []platformValue) (any, error) {
+	clipboard := e.portableObjects
+	if clipboard == nil || clipboard.token != args[0].String() {
+		return nil, fmt.Errorf("object clipboard is no longer available")
+	}
+	var output bytes.Buffer
+	if _, err := clipboard.packet.WriteToWithOptions(e.operationContext(), &output, ofdgo.WriteOptions{}); err != nil {
+		return nil, err
+	}
+	e.portableObjects = nil
+	clipboard.packet = nil
 	return successResult(map[string]any{"bytes": bytesToJS(output.Bytes())}), nil
+}
+
+// discardObjects 释放被新剪贴板替代的选区，不影响后续捕获
+// 入参: args 剪贴板标识
+// 返回: any 清理结果, error 始终为nil
+func (e *businessEngine) discardObjects(args []platformValue) (any, error) {
+	token := args[0].String()
+	if e.portableObjects != nil && e.portableObjects.token == token {
+		e.portableObjects = nil
+	}
+	if e.copiedObjects != nil && e.copiedObjects.token == token {
+		e.copiedObjects = nil
+	}
+	return successResult(nil), nil
 }
 
 // pasteObjects 将当前文档的对象快照粘贴到目标页
@@ -6847,7 +6883,7 @@ func (e *businessEngine) syncEditorPageIDs(index int, content *ofdgo.PageContent
 				before.PathObject.ID = object.PathObject.ID
 				before.ImageObject.ID = object.ImageObject.ID
 				before.CompositeGraphicUnit.ID = object.CompositeGraphicUnit.ID
-				delete(e.currentSession.textCache, index)
+				e.currentSession.textCache.Delete(index)
 			}
 		}
 	}
@@ -6890,11 +6926,12 @@ func (e *businessEngine) previewEditor(editor *ofdgo.Editor, annotations bool) (
 					session.pageCache[index] = page
 				}
 			}
-			for _, index := range e.currentSession.textOrder {
+			e.currentSession.textCache.Range(func(index int, text *ofdgo.PageText) bool {
 				if !slices.Contains(changed, index) {
-					session.cachePageText(index, e.currentSession.textCache[index])
+					session.cachePageText(index, text)
 				}
-			}
+				return true
+			})
 			for index, box := range e.currentSession.boxCache {
 				if !slices.Contains(changed, index) {
 					session.boxCache[index] = box
@@ -7978,6 +8015,8 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoEraseObjectsPath":       e.eraseObjectsPath,
 		"ofdgoCopyObjects":            e.copyObjects,
 		"ofdgoCaptureObjects":         e.captureObjects,
+		"ofdgoExportObjects":          e.exportObjects,
+		"ofdgoDiscardObjects":         e.discardObjects,
 		"ofdgoPasteObjects":           e.pasteObjects,
 		"ofdgoImportObjects":          e.importObjects,
 		"ofdgoOrderObjects":           e.orderObjects,

@@ -2961,6 +2961,8 @@ async function mountDocumentTab(tab) {
 
 async function releaseDocumentTab(tab) {
 	if (tab.closed) return;
+	const clipboard = workspace.objectClipboard;
+	if (clipboard?.tab === tab && !await prepareObjectClipboard(clipboard, tab) && workspace.objectClipboard === clipboard) workspace.objectClipboard = null;
 	tab.closed = true;
 	tab.print?.destroy();
 	tab.print = null;
@@ -6574,7 +6576,9 @@ function completePDF(tab) {
 		throw new DOMException("文档已关闭", "AbortError");
 	})();
 	task.promise.catch(err => {
-		if (current() && err.name !== "AbortError") {
+		if (!current()) return;
+		tab.pdfTask = null;
+		if (err.name !== "AbortError") {
 			tab.status = err.message;
 			if (isForegroundDocument(tab)) showError(err, false);
 		}
@@ -10490,7 +10494,7 @@ function copyEditorSelection(event) {
 		return true;
 	}
 	const index = items[0].index, ids = items.map(item => item.id);
-	const clipboard = { token: crypto.randomUUID(), source: `${tab.id}:${state.wasmSeq}:${state.doc.documentIndex || 0}:${state.doc.documentVersion || ""}`, page: state.doc.pages[index].id, bounds: selectionBounds(items), x: 0, y: 0, cut };
+	const clipboard = { tab, token: crypto.randomUUID(), source: `${tab.id}:${state.wasmSeq}:${state.doc.documentIndex || 0}:${state.doc.documentVersion || ""}`, page: state.doc.pages[index].id, bounds: selectionBounds(items), x: 0, y: 0, cut };
 	if (canvasEditor.nudge) {
 		clipboard.bounds.x += canvasEditor.nudge.x;
 		clipboard.bounds.y += canvasEditor.nudge.y;
@@ -10499,11 +10503,14 @@ function copyEditorSelection(event) {
 	event.clipboardData.setData("text/plain", items.map(item => item.text || "").filter(Boolean).join("\n"));
 	event.preventDefault();
 	state.objectClipboardToken = clipboard.token;
+	const previous = workspace.objectClipboard;
 	workspace.objectClipboard = clipboard;
+	if (previous?.tab) previous.ready.then(() => {
+		if (previous.tab && !previous.tab.closed) return callTabWASM(previous.tab, "ofdgoDiscardObjects", previous.token);
+	}).catch(() => {});
 	const capture = () => {
 		const openSeq = state.openSeq, revision = state.editorInfo.revision;
-		return callTabWASM(tab, "ofdgoCaptureObjects", index, ids, clipboard.token).then(async result => {
-			clipboard.data = result.bytes;
+		return callTabWASM(tab, "ofdgoCaptureObjects", index, ids, clipboard.token).then(async () => {
 			clipboard.cut = false;
 			if (cut && isForegroundDocument(tab) && openSeq === state.openSeq && revision === state.editorInfo?.revision && index === state.pageIndex
 				&& state.objectClipboardToken === clipboard.token && workspace.objectClipboard === clipboard
@@ -10518,6 +10525,24 @@ function copyEditorSelection(event) {
 	};
 	clipboard.ready = canvasEditor.nudge ? canvasEditor.commitNudge().then(saved => saved ? capture() : false) : capture();
 	return true;
+}
+
+async function prepareObjectClipboard(clipboard, owner = documentTab()) {
+	if (!await clipboard.ready) return false;
+	if (clipboard.data) return true;
+	if (!clipboard.portable) {
+		const tab = clipboard.tab;
+		clipboard.portable = callTabWASM(tab, "ofdgoExportObjects", clipboard.token).then(result => {
+			clipboard.data = result.bytes;
+			clipboard.tab = null;
+			return true;
+		}, err => {
+			clipboard.portable = null;
+			if (workspace.objectClipboard === clipboard && isForegroundDocument(owner)) showError(err, false);
+			return false;
+		});
+	}
+	return clipboard.portable;
 }
 
 function visiblePageBounds(index) {
@@ -10548,8 +10573,10 @@ async function pasteEditorContent(event) {
 			setStatus("复制内容已失效，请重新复制");
 			return;
 		}
-		const openSeq = state.openSeq;
-		if (!await clipboard.ready || !isForegroundDocument(tab) || openSeq !== state.openSeq || index !== state.pageIndex || workspace.objectClipboard !== clipboard) return;
+		const openSeq = state.openSeq, identity = `${state.wasmSeq}:${state.doc.documentIndex || 0}:${state.doc.documentVersion || ""}`;
+		const local = state.objectClipboardToken === clipboard.token;
+		if (!await (local ? clipboard.ready : prepareObjectClipboard(clipboard, tab)) || !isForegroundDocument(tab) || openSeq !== state.openSeq || index !== state.pageIndex || workspace.objectClipboard !== clipboard) return;
+		if (identity !== `${state.wasmSeq}:${state.doc.documentIndex || 0}:${state.doc.documentVersion || ""}` || local && state.objectClipboardToken !== clipboard.token) return;
 		if (!state.editing || formDialogOpen() || document.body.hasAttribute("data-busy") || canvasEditor.input || canvasEditor.crop || canvasEditor.drag || canvasEditor.nudge || canvasEditor.nudgeCommit) return;
 		if (!pageCan("insert")) return;
 		const visible = visiblePageBounds(index), bounds = clipboard.bounds;
@@ -10562,7 +10589,7 @@ async function pasteEditorContent(event) {
 				offset[axis] = Math.max(visible[axis] + margin, Math.min(position, visible[axis] + visible[size] - margin - bounds[size])) - bounds[axis];
 			}
 		}
-		if (await changeDocument(state.objectClipboardToken === clipboard.token ? "ofdgoPasteObjects" : "ofdgoImportObjects", null, index, state.objectClipboardToken === clipboard.token ? token : clipboard.data, offset.x, offset.y)) {
+		if (await changeDocument(local ? "ofdgoPasteObjects" : "ofdgoImportObjects", null, index, local ? token : clipboard.data, offset.x, offset.y)) {
 			clipboard.target = target;
 			clipboard.targetPage = page.id;
 			clipboard.x = offset.x;
