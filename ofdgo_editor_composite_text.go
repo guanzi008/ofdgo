@@ -38,7 +38,7 @@ func (e *Editor) StyleCompositeText(page int, path ObjectPath, indexes []int, st
 }
 
 // LayoutCompositeText 显式重排内部普通文字，保留原始基线、变换、裁剪和绘制属性
-// 段落选项仅保留在编辑会话中，撤销重做随对象恢复，保存为标准TextCode定位
+// 段落选项随标准TextCode定位保存，撤销重做及重新打开时恢复
 // 入参: page 页面索引, path 父路径, index 成员序号, value 原文, options 段落选项
 // 返回: error 错误信息
 func (e *Editor) LayoutCompositeText(page int, path ObjectPath, index int, value string, options TextLayout) error {
@@ -148,7 +148,10 @@ func (e *Editor) updateCompositeText(node *editorCompositeNode, member Composite
 		}
 		object.TextObject.Size, object.TextObject.TextCode = text.Size, text.TextCode
 		object.TextObject.CGTransform = text.CGTransform
-		state.layout = &textLayout{value: content, options: layout}
+		if frame != nil {
+			text.layout.autoWidth = false
+		}
+		state.layout = text.layout
 	}
 	if style.Font != "" && style.Font != object.TextObject.Font {
 		if err := e.prepareText(&text); err != nil {

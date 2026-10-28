@@ -86,7 +86,7 @@ function distributeParagraph(input, paragraph) {
 	document.body.append(probe);
 	try {
 		const lines = [], range = document.createRange(), width = copy.clientWidth;
-		const spacing = parseFloat(getComputedStyle(probe).letterSpacing) || 0;
+		const spacing = parseFloat(getComputedStyle(copy).letterSpacing) || 0;
 		const indent = parseFloat(getComputedStyle(copy).textIndent) || 0;
 		for (const span of copy.children) {
 			const node = span.firstChild;
@@ -375,7 +375,7 @@ export class RichTextSession {
 		const first = this.text.slice(0, start).split("\n").length - 1;
 		const paragraphs = text.split("\n").map((_, i) => {
 			const layout = { ...this.model.layout, ...this.model.paragraphs?.[first + i] };
-			return Object.fromEntries(["align", "lineHeight", "letterSpacing", "leftIndent", "rightIndent", "firstLineIndent"].map(key => [key, key === "align" ? layout[key] || "left" : layout[key] || 0]));
+			return Object.fromEntries(["align", "lineHeight", "letterSpacing", "leftIndent", "rightIndent", "firstLineIndent"].map(key => [key, key === "align" ? layout[key] || this.model.layout.align || "left" : layout[key] || 0]));
 		});
 		const clipboard = { token: crypto.randomUUID(), runs, text, paragraphs, scope: this.editor.options.textClipboardScope?.(),
 			fonts, faces: new Map([...this.faces].filter(([key]) => keys.has(key))), choices: new Map([...this.choices].filter(([key]) => keys.has(key))) };

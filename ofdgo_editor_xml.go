@@ -397,7 +397,7 @@ func editorXMLAttributes(node *editorXML, allowed string) bool {
 		if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" && attr.Name.Space == "" {
 			continue
 		}
-		if textLayoutAttribute(node.name, attr) {
+		if textMetadataAttribute(node.name, attr) {
 			continue
 		}
 		if attr.Name.Space != "" || !slices.Contains(strings.Fields(allowed), attr.Name.Local) {
@@ -572,15 +572,15 @@ func editorXMLMergeNamespace(data []byte, node *editorXML, oldXML, newXML []byte
 		return nil, err
 	}
 	changes := make(map[string]string)
-	layoutValue := func(n *editorXML) string {
+	textValue := func(n *editorXML) string {
 		for _, attr := range n.attrs {
-			if attr.Name.Space == textLayoutNamespace && attr.Name.Local == "Layout" {
+			if attr.Name.Space == textNamespace && attr.Name.Local == "Text" {
 				return attr.Value
 			}
 		}
 		return ""
 	}
-	layoutChanged := layoutValue(oldNode) != layoutValue(newNode)
+	textChanged := textValue(oldNode) != textValue(newNode)
 	if legacyClip {
 		changes["TransFlag"] = ""
 	}
@@ -590,7 +590,7 @@ func editorXMLMergeNamespace(data []byte, node *editorXML, oldXML, newXML []byte
 		}
 	}
 	contentChanged := !bytes.Equal(oldXML[oldNode.open:oldNode.close], newXML[newNode.open:newNode.close])
-	if len(changes) == 0 && !layoutChanged && !contentChanged && namespace == node.name.Space {
+	if len(changes) == 0 && !textChanged && !contentChanged && namespace == node.name.Space {
 		return bytes.Clone(data[node.start:node.end]), nil
 	}
 	d := xml.NewDecoder(bytes.NewReader(data[node.start:node.open]))
@@ -599,12 +599,12 @@ func editorXMLMergeNamespace(data []byte, node *editorXML, oldXML, newXML []byte
 		return nil, err
 	}
 	start := token.(xml.StartElement)
-	if layoutChanged {
-		value, found := layoutValue(newNode), false
+	if textChanged {
+		value, found := textValue(newNode), false
 		attrs := start.Attr[:0]
 		for i, attr := range start.Attr {
 			resolved := node.attrs[i]
-			if resolved.Name.Space == textLayoutNamespace && resolved.Name.Local == "Layout" {
+			if resolved.Name.Space == textNamespace && resolved.Name.Local == "Text" {
 				found = true
 				if value != "" {
 					attr.Value = value
@@ -617,7 +617,7 @@ func editorXMLMergeNamespace(data []byte, node *editorXML, oldXML, newXML []byte
 		start.Attr = attrs
 		if !found && value != "" {
 			prefix := editorXMLNamespacePrefix(node, "ofdgo")
-			start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Space: "xmlns", Local: prefix}, Value: textLayoutNamespace}, xml.Attr{Name: xml.Name{Space: prefix, Local: "Layout"}, Value: value})
+			start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Space: "xmlns", Local: prefix}, Value: textNamespace}, xml.Attr{Name: xml.Name{Space: prefix, Local: "Text"}, Value: value})
 		}
 	}
 	if legacyClip || namespace != node.name.Space {

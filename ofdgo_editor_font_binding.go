@@ -968,7 +968,7 @@ func pruneUnreferencedFiles(ctx context.Context, reader *Reader, candidates ...s
 				return fmt.Errorf("unknown file dependencies in %s", name)
 			}
 			for _, attr := range node.Attr {
-				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace && !textLayoutAttribute(node.Name, attr) {
+				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace && !textMetadataAttribute(node.Name, attr) {
 					uncertain = true
 					return fmt.Errorf("unknown file dependencies in %s", name)
 				}

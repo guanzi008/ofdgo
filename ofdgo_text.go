@@ -432,10 +432,10 @@ func (obj *TextObject) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement
 	}
 	*obj = TextObject(value)
 	for _, attr := range start.Attr {
-		if attr.Name.Space == textLayoutNamespace && attr.Name.Local == "Layout" {
-			var meta textLayoutMetadata
-			if json.Unmarshal([]byte(attr.Value), &meta) == nil && validateRichLayout(meta.Options) == nil && structureXMLText(meta.Text) && meta.Digest == obj.layoutDigest() {
-				obj.layout = &textLayout{value: meta.Text, options: meta.Options, autoWidth: meta.AutoWidth}
+		if attr.Name.Space == textNamespace && attr.Name.Local == "Text" {
+			var meta textMetadata
+			if json.Unmarshal([]byte(attr.Value), &meta) == nil && validateRichLayout(meta.Layout) == nil && structureXMLText(meta.Text) && meta.Digest == obj.textDigest() {
+				obj.layout = &textLayout{value: meta.Text, options: meta.Layout, autoWidth: meta.AutoWidth}
 			}
 		}
 	}

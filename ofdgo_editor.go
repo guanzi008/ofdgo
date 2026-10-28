@@ -800,10 +800,7 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 	if err != nil {
 		return err
 	}
-	if err := LayoutText(obj, value, options, metrics); err != nil {
-		return err
-	}
-	return nil
+	return LayoutText(obj, value, options, metrics)
 }
 
 // newRenderer 使用编辑器字体来源和完整后端配置创建资源度量器

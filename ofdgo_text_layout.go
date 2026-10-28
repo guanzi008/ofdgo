@@ -33,7 +33,7 @@ type configuredTextShaper struct {
 }
 
 // LayoutText 按自有字体度量重排横向文字，保留绘制属性，可显式启用字体塑形
-// 不修改文档，通过AddObject或UpdateObject提交；选项仅供当前编辑过程使用，保存为标准文字定位
+// 不修改文档，通过AddObject或UpdateObject提交；选项随标准文字定位保存，重新打开时恢复
 // 入参: obj 文字对象, value 原文, options 段落排版选项, metrics 字体度量
 // 返回: error 错误信息
 func LayoutText(obj *TextObject, value string, options TextLayout, metrics FontMetrics) error {
@@ -143,7 +143,11 @@ func LayoutText(obj *TextObject, value string, options TextLayout, metrics FontM
 	}
 	obj.TextCode = codes
 	obj.CGTransform = nil
-	obj.layout = &textLayout{value: value, options: options, autoWidth: options == (TextLayout{})}
+	autoWidth := options == (TextLayout{})
+	if obj.layout != nil && obj.layout.options == options {
+		autoWidth = obj.layout.autoWidth
+	}
+	obj.layout = &textLayout{value: value, options: options, autoWidth: autoWidth}
 	return nil
 }
 

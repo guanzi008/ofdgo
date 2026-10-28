@@ -73,27 +73,27 @@ type textLayout struct {
 	autoWidth bool
 }
 
-// textLayoutNamespace 标识普通文字排版元数据，不包含资源引用
-const textLayoutNamespace = "https://ofdgo.aite.me/text-layout"
+// textNamespace 标识普通文字编辑语义的命名空间，版本仅随不兼容的语义变更升级
+const textNamespace = "https://ofdgo.aite.me/ns/text/1"
 
-// textLayoutAttribute 判断无资源引用的文字排版扩展属性
+// textMetadataAttribute 判断无资源引用的普通文字编辑元数据属性
 // 入参: node 所属节点, attr 属性
-// 返回: bool 是否为本库排版属性
-func textLayoutAttribute(node xml.Name, attr xml.Attr) bool {
-	return classifyOFDNamespace(node.Space) != ofdXMLUnknown && (node.Local == "TextObject" || node.Local == "Text") && attr.Name.Space == textLayoutNamespace && attr.Name.Local == "Layout"
+// 返回: bool 是否为本库普通文字元数据
+func textMetadataAttribute(node xml.Name, attr xml.Attr) bool {
+	return classifyOFDNamespace(node.Space) != ofdXMLUnknown && (node.Local == "TextObject" || node.Local == "Text") && attr.Name.Space == textNamespace && attr.Name.Local == "Text"
 }
 
-// textLayoutMetadata 保存原文、选项与标准定位摘要
-type textLayoutMetadata struct {
-	Text      string
-	Options   TextLayout
-	AutoWidth bool
-	Digest    string
+// textMetadata 保存原文、选项与标准定位摘要
+type textMetadata struct {
+	Text      string     `json:"text"`
+	Layout    TextLayout `json:"layout"`
+	AutoWidth bool       `json:"autoWidth"`
+	Digest    string     `json:"digest"`
 }
 
-// layoutDigest 计算与字体编号无关的文字定位摘要
+// textDigest 计算与字体编号无关的文字定位摘要
 // 返回: string 摘要
-func (obj TextObject) layoutDigest() string {
+func (obj TextObject) textDigest() string {
 	codes := append([]TextCode(nil), obj.TextCode...)
 	for i := range codes {
 		codes[i].Value = string(textCodeRunes(codes[i].Value))
@@ -102,13 +102,13 @@ func (obj TextObject) layoutDigest() string {
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
-// layoutMetadata 编码普通文字的排版语义，与标准定位一起保存
+// textMetadata 编码普通文字的排版语义，与标准定位一起保存
 // 返回: string 元数据, error 编码错误
-func (obj TextObject) layoutMetadata() (string, error) {
+func (obj TextObject) textMetadata() (string, error) {
 	if obj.layout == nil {
 		return "", nil
 	}
-	data, err := json.Marshal(textLayoutMetadata{Text: obj.layout.value, Options: obj.layout.options, AutoWidth: obj.layout.autoWidth, Digest: obj.layoutDigest()})
+	data, err := json.Marshal(textMetadata{Text: obj.layout.value, Layout: obj.layout.options, AutoWidth: obj.layout.autoWidth, Digest: obj.textDigest()})
 	return string(data), err
 }
 
