@@ -4351,10 +4351,16 @@ async function beginCanvasText(index, box, surface, page) {
 
 function editorFonts(item) {
 	const fonts = fontManager.editorFonts();
-	if (item) {
-		fonts.unshift({ id: `embedded:${item.font}`, name: item.fontName || item.font, embedded: true, disabled: !canEditObject(item, "textContent") });
+	const embedded = new Map();
+	for (const member of item?.items || (item ? [item] : [])) {
+		for (const id of member.richText ? member.richText.runs.map(run => run.format.font) : [member.font]) {
+			if (!id || embedded.has(id)) continue;
+			const font = state.doc?.fonts?.find(font => font.id === id);
+			embedded.set(id, { id: `embedded:${id}`, name: font?.fontName || (id === member.font ? member.fontName : "") || id,
+				embedded: true, disabled: !canEditObject(member, "textContent") });
+		}
 	}
-	return fonts;
+	return [...embedded.values(), ...fonts];
 }
 
 async function loadEditorFonts() {
@@ -4426,12 +4432,12 @@ function updateTextFonts(item, refresh = false) {
 		}
 		return;
 	}
-	if (item?.richText) item = { ...item, font: currentTextStyle().font };
-	const id = item?.type === "TextObject" && !item.draft ? item.font : null;
-	const key = item?.items ? `selection:${item.items.map(member => member.id).join(",")}:${id || ""}` : id;
+	const id = item?.type === "TextObject" && !item.draft ? item.richText ? currentTextStyle().font : item.font : null;
+	const key = item?.items ? `selection:${item.items.map(member => member.id).join(",")}:${id || ""}`
+		: item?.richText ? `rich:${item.id}:${item.richText.runs.map(run => run.format.font).join(",")}` : id;
 	if (refresh || state.textFontID !== key) {
 		state.textFontID = key;
-		state.textFonts = editorFonts(id ? item : null);
+		state.textFonts = editorFonts(item?.type === "TextObject" && !item.draft ? item : null);
 		const selected = canvasEditor.input?.fontChoice || (id ? state.textFonts[0] : state.textDefaults.fontChoice);
 		if (selected && (canvasEditor.input || selected.embedded)
 			&& !state.textFonts.some(font => (font.id || font.postscriptName) === (selected.id || selected.postscriptName))) {
@@ -4490,8 +4496,8 @@ async function changeTextFont() {
 			setBusy(false, "", 0, "", tab);
 		}
 	} else if (item?.type === "TextObject") {
-		if (canEditObject(item, "replaceFont") && (!font.embedded || item.font !== font.id.slice(9))) {
-			const changed = await changeDocument("ofdgoStyleText", { ...item, id: (item.items || [item]).map(member => member.id) }, readTextFont(font, tab), 0, null);
+		if (canEditObject(item, "replaceFont") && (!font.embedded || currentTextStyle().font !== font.id.slice(9))) {
+			const changed = await changeDocument("ofdgoStyleText", { ...item, id: (item.items || [item]).map(member => member.id) }, () => readTextFont(font, tab), 0, null);
 			if (isForegroundDocument(tab) && (changed || openSeq === state.openSeq)) updateTextFonts(canvasEditor.selected, true);
 		}
 	} else {
