@@ -131,7 +131,10 @@ export class FontPicker {
 		const changed = this.value !== String(index);
 		this.value = String(index);
 		this.close();
-		if (changed) return this.onChange();
+		if (changed) {
+			const task = this.changing = Promise.resolve(this.onChange());
+			return task.finally(() => { if (this.changing === task) this.changing = null; });
+		}
 	}
 
 	commitExact() {
@@ -140,7 +143,15 @@ export class FontPicker {
 			&& [font.fullName, font.name, font.postscriptName, ...(font.names || [])].some(name => name?.toLocaleLowerCase() === value);
 		const selected = Number(this.value);
 		const index = matches(this.fonts[selected]) ? selected : this.fonts.findIndex(matches);
-		if (index >= 0) this.choose(index);
+		if (index >= 0) return this.choose(index);
+	}
+
+	prepareCommit(event) {
+		if (this.open && (!event || ![this.input, this.toggle, this.list].some(node => node.contains(event.target)))) {
+			this.commitExact();
+			this.close();
+		}
+		return this.changing;
 	}
 
 	close() {

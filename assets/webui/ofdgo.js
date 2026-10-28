@@ -702,14 +702,14 @@ const fontManager = new FontManager({
 const fontPicker = new FontPicker(el.textFont, el.textFontToggle, el.textFontList, changeTextFont, loadEditorFonts);
 const textFormatButtons = [...document.querySelectorAll("[data-text-format]")];
 const textBackground = document.querySelector("#textBackground");
-const editorColors = new Map();
+const editorInputs = new Map();
 const annotationFields = Object.fromEntries(["CreateForm", "CreateCancel", "Content", "Old", "Font", "Text", "TextRow", "Image", "ImageRow", "Author", "LinkKind", "Address", "AddressRow", "Target", "TargetRow", "X", "Y", "Width", "Height", "Angle", "Opacity", "Tile", "Placement", "PlacementLabel", "Pick", "Scope", "Pages"].map(key => [key, document.querySelector(`#annotation${key}`)]));
 el.editorTools.addEventListener("scroll", () => fontPicker.position());
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	textControls: [el.textAlign, el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, el.textLineHeight, el.textSpacing, el.textWrap, el.paragraphButton, el.paragraphPanel, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.saveAsButton, el.fontInput, document.querySelector("#textReflow")],
 	keepTextFocus: () => fontPicker.open || el.closePanel.open || el.paragraphPanel.open || canvasEditor.input?.fontDialog,
-	prepareTextCommit: flushEditorColors,
+	prepareTextCommit: flushEditorInputs,
 	onTextFormat: changeRangeFormat,
 	onRichInput: ensureRichInput,
 	textClipboardScope: () => `${documentTab().id}:${documentContentKey(state)}:${state.editorInfo?.revision ?? ""}`,
@@ -868,14 +868,14 @@ editorClick(el.editObjectButton, () => {
 		editCanvasObject(canvasEditor.selected);
 	}
 });
-el.textSize.addEventListener("change", () => changeTextStyle(false));
-bindEditorColor(el.textColor, () => changeTextStyle(true));
+bindEditorInput(el.textSize, () => changeTextStyle(false));
+bindEditorInput(el.textColor, () => changeTextStyle(true));
 for (const button of textFormatButtons) button.addEventListener("click", () => changeRangeFormat(button.dataset.textFormat));
-bindEditorColor(textBackground, value => changeRangeFormat("background", value));
-document.addEventListener("pointerdown", flushEditorColors, true);
+bindEditorInput(textBackground, value => changeRangeFormat("background", value));
+document.addEventListener("pointerdown", flushEditorInputs, true);
 editorClick(el.textWrap, () => changeParagraph(!currentTextStyle().wrap), true);
 el.textAlign.addEventListener("change", () => changeTextAlignment());
-el.textLineHeight.addEventListener("change", () => changeParagraph(undefined, "lineHeight"));
+bindEditorInput(el.textLineHeight, () => changeParagraph(undefined, "lineHeight"));
 editorClick(el.paragraphButton, () => {
 	const item = currentTextStyle();
 	for (const key of ["leftIndent", "rightIndent", "firstLineIndent"]) {
@@ -1210,7 +1210,7 @@ el.paragraphForm.addEventListener("submit", async event => {
 		if (isForegroundDocument(tab) && el.paragraphPanel.open) el.paragraphStatus.textContent = error.message;
 	}
 });
-el.textSpacing.addEventListener("change", () => changeParagraph(undefined, "letterSpacing"));
+bindEditorInput(el.textSpacing, () => changeParagraph(undefined, "letterSpacing"));
 el.shapeWidth.addEventListener("focus", () => { el.shapeWidth.defaultValue = el.shapeWidth.value; });
 for (const input of [el.textSize, el.shapeWidth, el.textLineHeight, el.textSpacing]) {
 	input.addEventListener("keydown", (event) => {
@@ -1220,6 +1220,9 @@ for (const input of [el.textSize, el.shapeWidth, el.textLineHeight, el.textSpaci
 			event.stopPropagation();
 			if (event.repeat) return;
 			if (event.key === "Escape") {
+				const control = editorInputs.get(input);
+				control.pending = null;
+				control.handled = true;
 				updateObjectControls(canvasEditor.selected, true);
 				if (input === el.shapeWidth && canvasEditor.selected?.type !== "PathObject") {
 					input.value = input.defaultValue;
@@ -1306,10 +1309,10 @@ editorClick(el.eraseButton, () => toggleDrawingTool(el.eraseMode.value));
 el.eraseMode.addEventListener("change", () => {
 	if (canvasEditor.tool.startsWith("erase-")) canvasEditor.setTool(el.eraseMode.value);
 });
-for (const input of [el.shapeFill, el.shapeStroke, el.shapeWidth]) {
+for (const input of [el.shapeFill, el.shapeStroke]) {
 	input.addEventListener("change", changeShapeStyle);
 }
-for (const input of [el.shapeFillColor, el.shapeStrokeColor]) bindEditorColor(input, () => changeShapeStyle({ target: input }));
+for (const input of [el.shapeFillColor, el.shapeStrokeColor, el.shapeWidth]) bindEditorInput(input, () => changeShapeStyle({ target: input }));
 el.addPageButton.addEventListener("change", async () => {
 	const action = el.addPageButton.value;
 	el.addPageButton.value = "";
@@ -2840,6 +2843,10 @@ function detachDocumentView() {
 	settings.sequence++;
 	fontBinding.sequence++;
 	fontPicker.close();
+	fontPicker.changing = null;
+	for (const [input, control] of editorInputs) {
+		editorInputs.set(input, { ...control, pending: null, task: null, handled: true });
+	}
 	canvasEditor.cancelNudge();
 	canvasEditor.clear();
 	canvasEditor.setTool("");
@@ -3009,8 +3016,8 @@ async function releaseDocumentTab(tab) {
 		if (!prepared && workspace.objectClipboard === clipboard) workspace.objectClipboard = null;
 	}
 	tab.closed = true;
-	for (const color of editorColors.values()) {
-		if (color.pending?.tab === tab) { color.pending = null; color.handled = true; }
+	for (const control of editorInputs.values()) {
+		if (control.pending?.tab === tab) { control.pending = null; control.handled = true; }
 	}
 	tab.print?.destroy();
 	tab.print = null;
@@ -4215,43 +4222,45 @@ async function reflowCanvasText() {
 	updateObjectControls(canvasEditor.selected, true);
 }
 
-function bindEditorColor(input, change) {
-	const color = { input, change, pending: null, task: null, handled: false };
-	editorColors.set(input, color);
+function bindEditorInput(input, change) {
+	editorInputs.set(input, { input, change, pending: null, task: null, handled: false });
 	const remember = () => {
-		color.pending = { value: input.value, tab: documentTab(), content: documentContentKey(state), editing: canvasEditor.input, selected: canvasEditor.selected };
-		color.handled = false;
+		const control = editorInputs.get(input);
+		control.pending = { value: input.value, tab: documentTab(), content: documentContentKey(state), editing: canvasEditor.input, selected: canvasEditor.selected };
+		control.handled = false;
 	};
 	input.addEventListener("input", remember);
 	input.addEventListener("change", () => {
+		const control = editorInputs.get(input);
 		let task;
-		if (!color.handled) {
-			if (!color.pending) remember();
-			task = flushEditorColor(color);
+		if (!control.handled) {
+			if (!control.pending) remember();
+			task = flushEditorInput(control);
 		}
-		color.handled = false;
+		control.handled = false;
 		return task;
 	});
 }
 
-function flushEditorColor(color) {
-	if (color.task || !color.pending) return color.task;
-	color.task = (async () => {
-		while (color.pending) {
-			const pending = color.pending;
-			color.pending = null;
-			color.handled = true;
+function flushEditorInput(control) {
+	if (control.task || !control.pending) return control.task;
+	control.task = (async () => {
+		while (control.pending) {
+			const pending = control.pending;
+			control.pending = null;
+			control.handled = true;
 			if (!isForegroundDocument(pending.tab) || pending.content !== documentContentKey(state)
 				|| pending.editing !== canvasEditor.input || pending.selected !== canvasEditor.selected) continue;
-			color.input.value = pending.value;
-			await color.change(pending.value);
+			control.input.value = pending.value;
+			await control.change(pending.value);
 		}
-	})().finally(() => { color.task = null; });
-	return color.task;
+	})().finally(() => { control.task = null; });
+	return control.task;
 }
 
-function flushEditorColors() {
-	const tasks = [...editorColors.values()].map(flushEditorColor).filter(Boolean);
+function flushEditorInputs(event) {
+	const tasks = [...editorInputs.values()].filter(control => !event || !control.input.contains(event.target))
+		.map(flushEditorInput).concat(fontPicker.prepareCommit(event)).filter(Boolean);
 	return tasks.length ? Promise.all(tasks) : null;
 }
 
