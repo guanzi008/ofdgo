@@ -3401,12 +3401,13 @@ func (e *businessEngine) editorObjects(index int, text *ofdgo.PageText) ([]any, 
 						inverse, _ := matrix.Invert()
 						local := inverse.TransformBox(box)
 						width := math.Max(object.TextObject.Size, local.X+local.W)
-						if layout != (ofdgo.TextLayout{}) {
+						if capability.LayoutKnown {
 							item["paragraphWidth"] = frame.W
+							width = frame.W
 						}
 						frame = ofdgo.Box{W: width, H: math.Max(object.TextObject.Size, local.Y+local.H)}
 						item["textFrame"] = map[string]any{"width": frame.W, "height": frame.H, "matrix": e.editorMatrix(matrix)}
-						if layout.Wrap {
+						if capability.LayoutKnown {
 							bounds := matrix.TransformBox(frame)
 							item["x"], item["y"], item["width"], item["height"] = bounds.X, bounds.Y, bounds.W, bounds.H
 						}
@@ -4017,16 +4018,17 @@ func (e *businessEngine) compositeObjects(args []platformValue) (any, error) {
 				inverse, _ := member.Matrix.Invert()
 				local := inverse.TransformBox(box)
 				width := math.Max(object.Size, local.X+local.W)
-				if layout != (ofdgo.TextLayout{}) {
+				if member.Capabilities.LayoutKnown {
 					frame, err := object.TextFrame()
 					if err != nil {
 						return nil, err
 					}
 					item["paragraphWidth"] = frame.W
+					width = frame.W
 				}
 				frame := ofdgo.Box{W: width, H: math.Max(object.Size, local.Y+local.H)}
 				item["textFrame"] = map[string]any{"width": frame.W, "height": frame.H, "matrix": e.editorMatrix(member.Matrix)}
-				if layout.Wrap {
+				if member.Capabilities.LayoutKnown {
 					bounds := member.Matrix.TransformBox(frame)
 					item["x"], item["y"], item["width"], item["height"] = bounds.X, bounds.Y, bounds.W, bounds.H
 				}
