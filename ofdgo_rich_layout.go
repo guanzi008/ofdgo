@@ -93,7 +93,7 @@ func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, erro
 	}
 	options := value.Layout
 	available := width - options.LeftIndent - options.RightIndent
-	if !finite(width) || width <= 0 || !finite(available) || available <= 0 || !finite(available-options.FirstLineIndent) || available-options.FirstLineIndent <= 0 {
+	if !finite(width) || width <= 0 {
 		return richLayout{}, fmt.Errorf("invalid rich text width or indents")
 	}
 	geometry, err := e.Geometry()
@@ -155,6 +155,9 @@ func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, erro
 			start = end + 1
 		}
 		available = width - options.LeftIndent - options.RightIndent
+	}
+	if !finite(available) || available <= 0 || !finite(available-options.FirstLineIndent) || available-options.FirstLineIndent <= 0 {
+		return richLayout{}, fmt.Errorf("invalid rich text width or indents")
 	}
 	result.width = width
 	var underlays []GraphicObject

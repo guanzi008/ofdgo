@@ -118,7 +118,7 @@ func (e *Editor) ResizeRichTextFrame(page int, id string, offset, width float64)
 	return e.updateRichTextFrame(page, id, value, offset, width, false)
 }
 
-// updateRichTextFrame 统一提交正文或编辑框变化，width为零时保持原始宽度
+// updateRichTextFrame 统一提交正文或编辑框变化，width为零时沿用原宽度模式
 // 入参: page 页面索引, id 对象标识, value 新内容, offset 局部偏移, width 可选宽度, reflow 是否显式重排原文
 // 返回: error 校验或提交错误
 func (e *Editor) updateRichTextFrame(page int, id string, value RichText, offset, width float64, reflow bool) error {
@@ -326,7 +326,7 @@ func (e *Editor) CompositeRichText(page int, member CompositeMember) (RichText, 
 }
 
 // UpdateCompositeRichText 原子重排内部富文本，保留父变换并隔离共享实例
-// 入参: page 页面索引, path 父路径, index 成员序号, value 富文本, offset 局部横向偏移, width 新段落宽度，零值保留
+// 入参: page 页面索引, path 父路径, index 成员序号, value 富文本, offset 局部横向偏移, width 新段落宽度，零值沿用原宽度模式
 // 返回: error 校验或提交错误
 func (e *Editor) UpdateCompositeRichText(page int, path ObjectPath, index int, value RichText, offset, width float64) error {
 	return e.updateCompositeRichText(page, path, index, value, offset, width, false)
@@ -338,6 +338,9 @@ func (e *Editor) UpdateCompositeRichText(page int, path ObjectPath, index int, v
 func (e *Editor) updateCompositeRichText(page int, path ObjectPath, index int, value RichText, offset, width float64, reflow bool) error {
 	if !finite(offset) || !finite(width) || width < 0 || width == 0 && offset != 0 {
 		return fmt.Errorf("invalid rich text frame")
+	}
+	if width > 0 {
+		value.AutoWidth = false
 	}
 	return e.Transaction(func(e *Editor) error {
 		member, err := e.CompositeObject(page, path, index)
@@ -358,9 +361,6 @@ func (e *Editor) updateCompositeRichText(page int, path ObjectPath, index int, v
 			}
 			if err := value.Validate(); err != nil {
 				return err
-			}
-			if width > 0 {
-				value.AutoWidth = false
 			}
 			if offset == 0 && (width == 0 || width == frame.W) && reflect.DeepEqual(normalizeRichText(current), normalizeRichText(value)) {
 				return nil
