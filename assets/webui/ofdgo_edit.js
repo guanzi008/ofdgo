@@ -2306,12 +2306,19 @@ export class CanvasEditor {
 	async commitText() {
 		const editing = this.input;
 		if (!editing) return true;
-		if (editing.saving) return false;
+		if (editing.saving || editing.preparingCommit) return false;
 		if (editing.composing) {
 			editing.commitAfterComposition = true;
 			return false;
 		}
 		editing.commitAfterComposition = false;
+		const preparation = this.options.prepareTextCommit?.();
+		if (preparation) {
+			editing.preparingCommit = true;
+			try { await preparation; }
+			finally { editing.preparingCommit = false; }
+			if (this.input !== editing) return !this.input;
+		}
 		const value = editTextValue(editing.input);
 		if (!this.textChanged()) {
 			this.closeText();
