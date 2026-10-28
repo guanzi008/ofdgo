@@ -757,6 +757,13 @@ func (s *Session) Details() DocumentDetails {
 	}
 	info.SignatureCount = len(info.Signatures)
 	if fonts, err := s.Renderer.DeclaredFontInfos(); err == nil {
+		for index := range fonts {
+			if fonts[index].Embedded {
+				if face, err := s.Reader.FontFace(fonts[index].ID, 3, 0x0804); err == nil {
+					fonts[index].MatchedFace = face
+				}
+			}
+		}
 		info.Fonts = fonts
 		info.FontCount = len(fonts)
 	}
@@ -3172,7 +3179,23 @@ func (e *businessEngine) fontFaces(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return (ofdgo.FontFile{Data: data}).Faces()
+	return (ofdgo.FontFile{Data: data}).LocalizedFaces(3, 0x0804)
+}
+
+// fontMenu 返回按来源隔离的字体族索引及所需款式候选
+// 入参: args 字体信息、来源及可选目标款式的JSON
+// 返回: any 分组和款式索引, error 参数错误
+func (e *businessEngine) fontMenu(args []platformValue) (any, error) {
+	var request struct {
+		Faces   []ofdgo.FontFace `json:"faces"`
+		Sources []string         `json:"sources"`
+		Bold    bool             `json:"bold"`
+		Italic  bool             `json:"italic"`
+	}
+	if err := json.Unmarshal([]byte(args[0].String()), &request); err != nil {
+		return nil, err
+	}
+	return map[string]any{"groups": ofdgo.FontFamilyIndexes(request.Faces, request.Sources), "index": ofdgo.FontStyleIndex(request.Faces, request.Bold, request.Italic)}, nil
 }
 
 // fontPreferenceOrder 按字体族偏好排列编辑字体候选索引
@@ -4966,6 +4989,45 @@ func (e *businessEngine) formatText(args []platformValue) (any, error) {
 			return e.currentEditor.ReflowTargetsText(args[0].Int(), paths, patch)
 		}
 		return e.currentEditor.FormatTargetsText(args[0].Int(), paths, patch)
+	})
+}
+
+// styleTextFonts 预检并原子导入各款式字体，批量替换文字字体及粗斜体
+// 入参: args 页面索引、完整路径、款式映射JSON、字体数据集合及重排标记
+// 返回: any 文档信息, error 字体或编辑错误
+func (e *businessEngine) styleTextFonts(args []platformValue) (any, error) {
+	return e.changeObjects(func() error {
+		paths, err := e.editorTargetPaths(e.stringsFromJS(args[1]))
+		if err != nil {
+			return err
+		}
+		var changes []ofdgo.TextFontChange
+		if err := json.Unmarshal([]byte(args[2].Get("changes").String()), &changes); err != nil {
+			return err
+		}
+		fonts := make(map[string]string)
+		input := args[2].Get("fonts")
+		for index := 0; index < input.Length(); index++ {
+			entry := input.Index(index)
+			data, err := e.bytesFromJS(entry.Get("data"))
+			if err != nil {
+				return err
+			}
+			if err := e.checkFontGlyphs(data, entry.Get("text").String()); err != nil {
+				return err
+			}
+			id, err := e.currentEditor.AddFont(FontFile{Data: data}, 0)
+			if err != nil {
+				return err
+			}
+			fonts[entry.Get("key").String()] = id
+		}
+		for index := range changes {
+			if id, ok := fonts[changes[index].To.Font]; ok {
+				changes[index].To.Font = id
+			}
+		}
+		return e.currentEditor.StyleTargetsFonts(args[0].Int(), paths, changes, args[2].Get("reflow").Bool())
 	})
 }
 
@@ -8029,6 +8091,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoMatchFontFiles":         e.matchFontFiles,
 		"ofdgoChangeFontBinding":      e.changeFontBinding,
 		"ofdgoFontFaces":              e.fontFaces,
+		"ofdgoFontMenu":               e.fontMenu,
 		"ofdgoFontFace":               e.fontFace,
 		"ofdgoCreateDocument":         e.createDocument,
 		"ofdgoImportImages":           e.importImages,
@@ -8062,6 +8125,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoUpdateTextSelection":    e.updateTextSelection,
 		"ofdgoStyleText":              e.styleText,
 		"ofdgoFormatText":             e.formatText,
+		"ofdgoStyleTextFonts":         e.styleTextFonts,
 		"ofdgoGetRichText":            e.getRichText,
 		"ofdgoRichTextFonts":          e.richTextFonts,
 		"ofdgoSaveRichText":           e.saveRichText,

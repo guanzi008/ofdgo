@@ -699,7 +699,7 @@ const fontManager = new FontManager({
 	onChange: scheduleFontSync,
 	onPermissionChange: updateFontPermissionHint,
 });
-const fontPicker = new FontPicker(el.textFont, el.textFontToggle, el.textFontList, changeTextFont, loadEditorFonts);
+const fontPicker = new FontPicker(el.textFont, el.textFontToggle, el.textFontList, changeTextFont, loadEditorFonts, groupTextFonts);
 const textFormatButtons = [...document.querySelectorAll("[data-text-format]")];
 const textBackground = document.querySelector("#textBackground");
 const editorInputs = new Map();
@@ -4152,15 +4152,61 @@ function currentTextStyle() {
 	const text = selectedText(canvasEditor.selected) || state.textDefaults;
 	if (canvasEditor.input?.rich) {
 		const rich = canvasEditor.input.rich, layout = richTextLayout(rich.model, ...rich.selection());
-		return { ...text, ...rich.state(), ...layout, paragraphHeight: layout.lineHeight };
+		return { ...text, ...rich.state(), ...textFaceStyle(rich.selectedRuns().map(run => run.format)), ...layout, paragraphHeight: layout.lineHeight };
 	}
 	if (text.richText) {
-		const formats = text.richText.runs.map(run => run.format);
+		const formats = text.richText.runs.map(run => effectiveTextFormat(run.format));
 		const layout = richTextLayout(text.richText);
 		return { ...text, ...layout, paragraphHeight: layout.lineHeight, ...Object.fromEntries(["font", "size", "color", "bold", "italic", "underline", "strikeout", "shadow", "background"]
 			.map(key => [key, formats.every(format => format[key] === formats[0]?.[key]) ? formats[0]?.[key] : undefined])) };
 	}
-	return canvasEditor.input?.style ? { ...text, ...canvasEditor.input.style } : text;
+	if (text.items) return { ...text, ...textFaceStyle(text.items.flatMap(item => textFontRuns(item).map(run => run.format))) };
+	return text === state.textDefaults ? text : effectiveTextFormat(canvasEditor.input?.style ? { ...text, ...canvasEditor.input.style } : text);
+}
+
+function documentFontChoice(id) {
+	const font = state.doc?.fonts?.find(font => font.id === id);
+	return { ...(font?.status !== "fallback" && font?.status !== "missing" ? font?.matchedFace : null), id: `embedded:${id}`, name: font?.fontName || id, embedded: true };
+}
+
+function textFontChoice(id) {
+	const rich = canvasEditor.input?.rich;
+	const choice = rich?.choices.get(id);
+	return choice ? { ...choice, richKey: id } : id ? documentFontChoice(id) : state.textDefaults.fontChoice;
+}
+
+function effectiveTextFormat(format) {
+	const font = textFontChoice(format.font), face = canvasEditor.input?.rich?.faces.get(format.font);
+	return { ...format, bold: Boolean(format.bold || font?.bold || Number(face?.weight) >= 600), italic: Boolean(format.italic || font?.italic || face?.style === "italic") };
+}
+
+function textFaceStyle(formats) {
+	formats = formats.map(effectiveTextFormat);
+	return Object.fromEntries(["bold", "italic"].map(key => [key, formats.every(format => format[key] === formats[0]?.[key]) ? formats[0]?.[key] : undefined]));
+}
+
+function textFontRuns(item) {
+	return (item?.items || [item || state.textDefaults]).flatMap(item => item.richText?.runs || [{ text: item.text || "", format: { font: item.font || "", bold: Boolean(item.bold), italic: Boolean(item.italic) } }]);
+}
+
+function textFontSource(font) {
+	return font.embedded ? "embedded" : font.file || ["stored", "upload"].includes(font.source) ? "upload" : "system";
+}
+
+function textFontIdentity(font) {
+	return `${textFontSource(font)}:${font.embedded ? font.richKey || font.id?.slice(9) : font.id ?? font.postscriptName}`;
+}
+
+async function groupTextFonts(fonts, tab = documentTab()) {
+	if (!fonts.some(font => font.familyKey)) return fonts.map((_, index) => [index]);
+	const { groups } = await callTabWASM(tab, "ofdgoFontMenu", JSON.stringify({ faces: fonts.map(font => ({ familyKey: font.familyKey, bold: font.bold, italic: font.italic })), sources: fonts.map(textFontSource) }));
+	return groups;
+}
+
+function sharedTextFont(formats) {
+	const choices = formats.map(format => textFontChoice(format.font));
+	const first = choices[0];
+	return first && choices.every(font => font && (font.familyKey && font.familyKey === first.familyKey && textFontSource(font) === textFontSource(first) || textFontIdentity(font) === textFontIdentity(first))) ? formats[0].font : undefined;
 }
 
 async function loadRichText(item, firstFace, tab = documentTab(), firstData = null, reflow = false) {
@@ -4260,12 +4306,13 @@ function flushEditorInput(control) {
 
 function flushEditorInputs(event) {
 	const tasks = [...editorInputs.values()].filter(control => !event || !control.input.contains(event.target))
-		.map(flushEditorInput).concat(fontPicker.prepareCommit(event)).filter(Boolean);
+		.map(flushEditorInput).concat(fontPicker.prepareCommit(event), canvasEditor.input?.fontTask).filter(Boolean);
 	return tasks.length ? Promise.all(tasks) : null;
 }
 
 async function changeRangeFormat(key, value) {
 	if (!state.ready || document.body.hasAttribute("data-busy") || canvasEditor.input?.composing) return;
+	if (key === "bold" || key === "italic") return changeTextFace(null, key, value ?? currentTextStyle()[key] !== true);
 	const tab = documentTab(), editing = canvasEditor.input;
 	try {
 		if (!canvasEditor.selected && !canvasEditor.input) {
@@ -4414,7 +4461,7 @@ function editorFonts(item) {
 		for (const id of member.richText ? member.richText.runs.map(run => run.format.font) : [member.font]) {
 			if (!id || embedded.has(id)) continue;
 			const font = state.doc?.fonts?.find(font => font.id === id);
-			embedded.set(id, { id: `embedded:${id}`, name: font?.fontName || (id === member.font ? member.fontName : "") || id,
+			embedded.set(id, { ...documentFontChoice(id), name: font?.fontName || (id === member.font ? member.fontName : "") || id,
 				embedded: true, disabled: !canEditObject(member, "textContent") });
 		}
 	}
@@ -4430,6 +4477,7 @@ async function loadEditorFonts(requestPermission = true, tab = documentTab(), wa
 			try {
 				await fontManager.queryLocal();
 				refreshEditorFonts();
+				await loadEditorFonts(false, tab);
 			} catch (err) {
 				if (requestPermission && isForegroundDocument(tab)) setStatus(err?.name === "NotAllowedError" ? "系统字体未授权" : String(err.message || err));
 			} finally {
@@ -4438,7 +4486,7 @@ async function loadEditorFonts(requestPermission = true, tab = documentTab(), wa
 		})();
 		tasks.push(target.fontCatalogLoading);
 	}
-	if (!target.fontFacesLoading && fontManager.userFonts.some(font => font.enabled && !font.faces)) {
+	if (!target.fontFacesLoading && (fontManager.userFonts.some(font => font.enabled && !font.faces) || fontManager.catalog.some(font => font.blob && !font.menuFamily && !font.metadataFailed))) {
 		const wasmSeq = target.wasmSeq;
 		const current = () => !tab.closed && !target.wasmExited && target.wasmSeq === wasmSeq;
 		target.fontFacesLoading = (async () => {
@@ -4496,7 +4544,7 @@ function updateTextFonts(item, refresh = false, preserve = false) {
 	item = selectedText(item);
 	const rich = canvasEditor.input?.rich;
 	if (rich) {
-		const format = rich.state(), id = format.font;
+		const id = sharedTextFont(rich.selectedRuns().map(run => run.format));
 		const key = `rich:${id ?? "mixed"}:${rich.faces.size}`;
 		if (refresh || state.textFontID !== key) {
 			if (!preserve && document.activeElement === el.textFont && fontPicker.open) return;
@@ -4504,7 +4552,8 @@ function updateTextFonts(item, refresh = false, preserve = false) {
 			state.textFonts = editorFonts(null);
 			for (const font of rich.faces.keys()) {
 				const choice = rich.choices?.get(font);
-				state.textFonts.unshift({ ...(choice || { id: `embedded:${font}`,
+				if (choice) state.textFonts = state.textFonts.filter(value => textFontIdentity(value) !== textFontIdentity(choice));
+				state.textFonts.unshift({ ...(choice || { ...documentFontChoice(font),
 					name: state.doc?.fonts?.find(value => value.id === font)?.fontName || (font === rich.editing.item.font ? rich.editing.item.fontName : "") || font,
 					embedded: !rich.imports.has(font) }), richKey: font });
 			}
@@ -4513,7 +4562,7 @@ function updateTextFonts(item, refresh = false, preserve = false) {
 		}
 		return;
 	}
-	const id = item?.type === "TextObject" && !item.draft ? item.richText ? currentTextStyle().font : item.font : null;
+	const id = item?.type === "TextObject" && !item.draft ? sharedTextFont(textFontRuns(item).map(run => run.format)) : null;
 	const key = item?.items ? `selection:${item.items.map(member => member.id).join(",")}:${id || ""}`
 		: item?.richText ? `rich:${item.id}:${item.richText.runs.map(run => run.format.font).join(",")}` : id;
 	if (refresh || state.textFontID !== key) {
@@ -4531,59 +4580,170 @@ function updateTextFonts(item, refresh = false, preserve = false) {
 	}
 }
 
-async function changeTextFont() {
+function textFontStyleKey(format) {
+	return JSON.stringify([format.font || "", Boolean(format.bold), Boolean(format.italic)]);
+}
+
+async function prepareTextFaces(tab, runs, font, key, value, rich) {
+	const { openSeq, wasmSeq, doc } = tab.state;
+	const current = () => !tab.closed && openSeq === tab.state.openSeq && wasmSeq === tab.state.wasmSeq && doc === tab.state.doc && (!rich || canvasEditor.input === rich.editing);
+	const callWASM = (name, ...args) => {
+		if (!current()) throw new Error("文档已更改");
+		return callTabWASM(tab, name, ...args);
+	};
+	const choices = new Map(), data = new Map();
+	const originals = new Map(runs.map(run => [run.format.font || "", textFontChoice(run.format.font)]));
+	const add = font => { if (font && !font.disabled && !choices.has(textFontIdentity(font))) choices.set(textFontIdentity(font), { ...font }); };
+	if (font) add(font);
+	if (rich) for (const id of rich.faces.keys()) add({ ...textFontChoice(id), richKey: id });
+	for (const original of originals.values()) add(original);
+	for (const font of tab.state.doc?.fonts || []) if (font.embedded || font.status === "matched") add(documentFontChoice(font.id));
+	for (const font of fontManager.editorFonts()) add(font);
+	const read = async choice => {
+		const id = textFontIdentity(choice);
+		if (!data.has(id)) data.set(id, choice.richKey && (rich?.imports.get(choice.richKey) || rich?.resources.get(choice.richKey)) || await readTextFont(choice, tab));
+		if (!current()) throw new Error("文档已更改");
+		return data.get(id);
+	};
+	const candidates = [...choices.values()];
+	for (const choice of candidates) {
+		if (choice.menuFamily || ![...originals.values()].some(font => textFontIdentity(font || {}) === textFontIdentity(choice)) && (!font || textFontIdentity(choice) !== textFontIdentity(font))) continue;
+		const [metadata] = await callWASM("ofdgoFontFaces", await read(choice));
+		if (metadata) Object.assign(choice, metadata, { index: choice.index });
+	}
+	const groups = await groupTextFonts(candidates, tab), changes = new Map(), prepared = new Map();
+	for (const run of runs) {
+		const from = { font: run.format.font || "", bold: Boolean(run.format.bold), italic: Boolean(run.format.italic) };
+		const original = choices.get(textFontIdentity(originals.get(from.font) || {}));
+		const target = font ? choices.get(textFontIdentity(font)) : original;
+		if (!target) throw new Error("字体不可用");
+		const bold = key === "bold" ? value : Boolean(from.bold || original?.bold);
+		const italic = key === "italic" ? value : Boolean(from.italic || original?.italic);
+		const group = groups.find(group => group.includes(candidates.indexOf(target))).map(index => candidates[index]);
+		let { index } = await callWASM("ofdgoFontMenu", JSON.stringify({ faces: group.map(({ bold, italic }) => ({ bold, italic })), bold, italic }));
+		if (index < 0 && font) index = group.indexOf(target);
+		if (index < 0) throw new Error("此字体没有对应款式");
+		const selected = group[index], identity = textFontIdentity(selected);
+		if (!prepared.has(identity)) prepared.set(identity, { choice: selected, key: selected.richKey || (selected.embedded ? selected.id.slice(9) : `temp-font-${crypto.randomUUID()}`), data: await read(selected), text: "" });
+		const entry = prepared.get(identity);
+		entry.text += run.text;
+		changes.set(textFontStyleKey(from), { from, to: { font: entry.key,
+			bold: !key && selected.bold && bold ? from.bold : Boolean(bold || selected.bold),
+			italic: !key && selected.italic && italic ? from.italic : Boolean(italic || selected.italic) } });
+	}
+	for (const entry of prepared.values()) {
+		try { await callWASM("ofdgoCheckTextFont", entry.data, entry.text); }
+		catch (error) {
+			if (!error.missingGlyphs || !entry.choice.embedded || !entry.choice.familyKey) throw error;
+			let recovered = false;
+			for (const choice of candidates.filter(choice => !choice.embedded && choice.familyKey === entry.choice.familyKey && choice.postscriptName === entry.choice.postscriptName)) {
+				try {
+					const bytes = await read(choice);
+					await callWASM("ofdgoCheckTextFont", bytes, entry.text);
+					entry.data = bytes;
+					entry.choice = { ...choice, richKey: entry.key };
+					recovered = true;
+					break;
+				} catch { if (!current()) throw error; }
+			}
+			if (!recovered) throw error;
+		}
+		if (!current()) throw new Error("文档已更改");
+		if (rich) entry.face = await new FontFace(`ofdgo-edit-font-${crypto.randomUUID()}`, entry.data, fontFaceStyle(entry.data)).load();
+	}
+	return { changes: [...changes.values()], prepared: [...prepared.values()], fonts: [...prepared.values()].filter(entry => !entry.choice.embedded).map(({ key, data, text }) => ({ key, data, text })) };
+}
+
+function changeTextFont() {
+	const font = state.textFonts[Number(fontPicker.value)];
+	if (font && !font.disabled) return changeTextFace(font);
+}
+
+async function changeTextFace(font, key, value) {
 	const tab = documentTab(), state = tab.state;
 	const openSeq = state.openSeq;
-	const callWASM = (name, ...args) => callTabWASM(tab, name, ...args);
 	const item = selectedText(canvasEditor.selected);
-	const font = state.textFonts[Number(fontPicker.value)];
-	if (!state.ready || document.body.hasAttribute("data-busy") || !font || font.disabled) return;
+	if (!state.ready || document.body.hasAttribute("data-busy")) return;
 	const editing = canvasEditor.input;
-	if (editing) {
-		if (editing.composing) return;
-		try {
-			if (!await ensureRichInput() || canvasEditor.input !== editing || !isForegroundDocument(tab)) return;
-		} catch (error) {
-			if (canvasEditor.input === editing && isForegroundDocument(tab)) showError(error, false);
-			return;
-		}
-		editing.rich?.remember();
-		tab.editTask = true;
-		setBusy(true, "", 0, "", tab);
-		try {
-			const data = font.richKey && editing.rich?.imports.has(font.richKey) ? editing.rich.imports.get(font.richKey) : await readTextFont(font, tab);
-			if (!isForegroundDocument(tab) || openSeq !== state.openSeq || canvasEditor.input !== editing) return;
-			const [start, end] = editing.rich?.selection() || [0, editTextValue(editing.input).length];
-			await callWASM("ofdgoCheckTextFont", data, editTextValue(editing.input).slice(start, end));
-			if (!isForegroundDocument(tab) || openSeq !== state.openSeq || canvasEditor.input !== editing) return;
-			const face = new FontFace(`ofdgo-edit-font-${crypto.randomUUID()}`, data, fontFaceStyle(data));
-			await face.load();
-			if (!isForegroundDocument(tab) || openSeq !== state.openSeq || canvasEditor.input !== editing) return;
-			editing.fontChoice = font;
-			if (item.draft && !font.richKey) state.textDefaults.fontChoice = font;
-			if (editing.rich) {
-				const key = font.richKey || (font.embedded ? font.id.slice(9) : `temp-font-${crypto.randomUUID()}`);
-				editing.rich.choices ||= new Map();
-				editing.rich.choices.set(key, font);
-				canvasEditor.setTextFont(face, font.embedded ? null : data, key);
-			} else canvasEditor.setTextFont(face, data);
-		} catch (err) {
-			if (isForegroundDocument(tab) && openSeq === state.openSeq) {
-				updateTextFonts(canvasEditor.selected, true);
-				showError(err, false);
+	const current = () => isForegroundDocument(tab) && openSeq === state.openSeq && canvasEditor.input === editing;
+	if (!editing && !item) {
+		const source = font || state.textDefaults.fontChoice;
+		const bold = key === "bold" ? value : Boolean(state.textDefaults.bold), italic = key === "italic" ? value : Boolean(state.textDefaults.italic);
+		let selected = source;
+		if (source?.familyKey && (key || bold || italic)) {
+			const busy = {};
+			tab.editTask = busy;
+			setBusy(true, "", 0, "", tab);
+			try {
+				const fonts = fontManager.editorFonts().filter(font => font.familyKey === source.familyKey && textFontSource(font) === textFontSource(source)), groups = await groupTextFonts(fonts, tab);
+				if (!current()) return;
+				const index = fonts.findIndex(choice => textFontIdentity(choice) === textFontIdentity(source));
+				const faces = (groups.find(group => group.includes(index)) || []).map(index => fonts[index]);
+				const result = await callTabWASM(tab, "ofdgoFontMenu", JSON.stringify({ faces: faces.map(({ bold, italic }) => ({ bold, italic })), bold, italic }));
+				if (!current()) return;
+				selected = faces[result.index] || (font ? source : null);
+				if (!selected) throw new Error("此字体没有对应款式");
+			} catch (error) {
+				if (current()) showError(error, false);
+				return;
+			} finally {
+				if (tab.editTask === busy) { tab.editTask = false; setBusy(false, "", 0, "", tab); }
 			}
-		} finally {
-			tab.editTask = false;
-			setBusy(false, "", 0, "", tab);
 		}
-	} else if (item?.type === "TextObject") {
-		if (canEditObject(item, "replaceFont") && (!font.embedded || currentTextStyle().font !== font.id.slice(9))) {
-			const changed = await changeDocument("ofdgoStyleText", { ...item, id: (item.items || [item]).map(member => member.id) }, () => readTextFont(font, tab), 0, null);
-			if (isForegroundDocument(tab) && (changed || openSeq === state.openSeq)) updateTextFonts(canvasEditor.selected, true);
-		}
-	} else {
-		state.textDefaults.fontChoice = font;
+		state.textDefaults.fontChoice = selected;
+		state.textDefaults.bold = Boolean(bold || selected?.bold);
+		state.textDefaults.italic = Boolean(italic || selected?.italic);
+		updateTextFonts(null, true);
+		updateObjectControls(null);
+		return;
 	}
+	if (!editing && item?.type === "TextObject") {
+		if (!key && font?.embedded && textFontRuns(item).every(run => run.format.font === font.id.slice(9))) return;
+		const reflow = Boolean(key && !canEditObject(item, "layoutKnown"));
+		if (!canEditObject(item, "replaceFont") || reflow && !confirmTextReflow(item)) return;
+		await changeDocument("ofdgoStyleTextFonts", { ...item, id: (item.items || [item]).map(member => member.id) }, async () => {
+			const result = await prepareTextFaces(tab, textFontRuns(item), font, key, value);
+			return { changes: JSON.stringify(result.changes), fonts: result.fonts, reflow };
+		});
+		if (isForegroundDocument(tab)) updateTextFonts(canvasEditor.selected, true);
+		return;
+	}
+	if (editing.composing) return;
+	const task = (async () => {
+		try {
+			if (!await ensureRichInput() || !current()) return;
+			const rich = editing.rich;
+			rich.remember();
+			const runs = rich.selectedRuns(), before = rich.model.runs, caret = rich.selection().join();
+			const busy = {};
+			tab.editTask = busy;
+			setBusy(true, "", 0, "", tab);
+			try {
+				const result = await prepareTextFaces(tab, runs, font, key, value, rich);
+				if (!current() || rich.model.runs !== before || rich.selection().join() !== caret || editing.composing || editing.saving) return;
+				for (const entry of result.prepared) {
+					const previous = rich.faces.get(entry.key);
+					rich.faces.set(entry.key, entry.face);
+					if (previous && ![...rich.faces.values()].includes(previous)) document.fonts.delete(previous);
+					if (!entry.choice.embedded) rich.imports.set(entry.key, entry.data);
+					rich.choices.set(entry.key, entry.choice);
+					document.fonts.add(entry.face);
+				}
+				const mapping = new Map(result.changes.map(change => [textFontStyleKey(change.from), change.to]));
+				rich.apply(format => ({ ...format, ...mapping.get(textFontStyleKey(format)) }));
+				if (item?.draft && font && !font.richKey) state.textDefaults.fontChoice = font;
+				updateTextFonts(canvasEditor.selected, true);
+				updateObjectControls(canvasEditor.selected);
+			} finally {
+				if (tab.editTask === busy) { tab.editTask = false; setBusy(false, "", 0, "", tab); }
+			}
+		} catch (error) {
+			if (current()) { updateTextFonts(canvasEditor.selected, true); showError(error, false); }
+		}
+	})();
+	if (editing) editing.fontTask = task;
+	try { await task; }
+	finally { if (editing?.fontTask === task) editing.fontTask = null; }
 }
 
 async function insertObject(event) {
@@ -4916,8 +5076,8 @@ async function changeDocument(name, item, ...args) {
 		const scopedRichText = scoped && name === "ofdgoSaveRichText";
 		if (scopedRichText) args.push(scope);
 		const textSelection = name === "ofdgoUpdateTextSelection";
-		if (scoped && !operation && !textSelection && !scopedRichText && name !== "ofdgoLayoutTexts") throw new Error("内部对象暂不支持此操作");
-		const doc = ["ofdgoStyleText", "ofdgoFormatText", "ofdgoLayoutTexts"].includes(name)
+		if (scoped && !operation && !textSelection && !scopedRichText && !["ofdgoLayoutTexts", "ofdgoStyleTextFonts"].includes(name)) throw new Error("内部对象暂不支持此操作");
+		const doc = ["ofdgoStyleText", "ofdgoFormatText", "ofdgoLayoutTexts", "ofdgoStyleTextFonts"].includes(name)
 			? await callWASM(name, item.index, ids, ...args)
 			: textSelection
 			? await callWASM(name, item.index, item.selectionIDs, ...args)

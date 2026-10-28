@@ -1,8 +1,8 @@
 const DATABASE = "ofdgo";
 
 export class FontPicker {
-	constructor(input, toggle, list, onChange, onOpen) {
-		Object.assign(this, { input, toggle, list, onChange, onOpen, fonts: [], value: "", active: -1, open: false });
+	constructor(input, toggle, list, onChange, onOpen, groupFonts) {
+		Object.assign(this, { input, toggle, list, onChange, onOpen, groupFonts, fonts: [], groups: [], value: "", active: -1, open: false });
 		input.addEventListener("input", () => this.show(input.value));
 		input.addEventListener("focus", () => input.select());
 		input.addEventListener("pointerdown", event => { if (event.button === 0 && !this.open) event.preventDefault(); });
@@ -28,9 +28,10 @@ export class FontPicker {
 		const open = preserve && this.open;
 		if (!open) this.close();
 		this.fonts = fonts;
+		this.groups = fonts.map((_, index) => [index]);
 		this.names = new Map();
 		for (const font of fonts) {
-			const name = (font.fullName || font.name).normalize("NFKC").toLocaleLowerCase();
+			const name = (font.menuFamily || font.fullName || font.name).normalize("NFKC").toLocaleLowerCase();
 			this.names.set(name, (this.names.get(name) || 0) + 1);
 		}
 		const key = font => font?.richKey || font?.id || font?.postscriptName;
@@ -41,6 +42,22 @@ export class FontPicker {
 			const index = active ? this.matches.findIndex(({ font }) => !font.disabled && key(font) === key(active)) : -1;
 			if (index >= 0) this.activate(index);
 		} else this.restore();
+		if (this.groupFonts) this.grouping = this.groupFonts(fonts).then(groups => {
+			if (this.fonts !== fonts) return;
+			this.groups = groups;
+			this.names.clear();
+			for (const group of groups) {
+				const font = fonts[group[0]], name = (font.menuFamily || font.fullName || font.name).normalize("NFKC").toLocaleLowerCase();
+				this.names.set(name, (this.names.get(name) || 0) + 1);
+			}
+			if (this.open) {
+				const active = this.matches[this.active]?.index;
+				this.show(this.query, false);
+				const index = this.matches.findIndex(({ group, font }) => group.includes(active) && !font.disabled);
+				if (index >= 0) this.activate(index);
+			}
+			else this.restore();
+		}).catch(() => {});
 	}
 
 	setDisabled(disabled) {
@@ -50,7 +67,7 @@ export class FontPicker {
 
 	restore() {
 		const font = this.fonts[Number(this.value)];
-		const value = font?.fullName || font?.name || "";
+		const value = font?.menuFamily || font?.fullName || font?.name || "";
 		if (this.input.value !== value) {
 			this.input.value = value;
 			if (document.activeElement === this.input) this.input.select();
@@ -60,7 +77,7 @@ export class FontPicker {
 	}
 
 	sourceLabel(font) {
-		const name = (font.fullName || font.name).normalize("NFKC").toLocaleLowerCase();
+		const name = (font.menuFamily || font.fullName || font.name).normalize("NFKC").toLocaleLowerCase();
 		if (this.names.get(name) < 2) return "";
 		return font.embedded ? "内嵌" : font.file || ["stored", "upload"].includes(font.source) ? "上传" : "系统";
 	}
@@ -70,8 +87,14 @@ export class FontPicker {
 		this.query = query;
 		const normalize = value => value.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ").trim();
 		const terms = normalize(query).split(" ").filter(Boolean);
-		this.matches = this.fonts.map((font, index) => ({ font, index })).filter(({ font }) => {
-			const name = normalize([font.fullName, font.name, font.family, font.style, font.postscriptName, ...(font.names || [])].filter(Boolean).join(" "));
+		this.matches = this.groups.map(group => {
+			const index = group.find(index => !this.fonts[index].bold && !this.fonts[index].italic && !this.fonts[index].disabled) ?? group[0];
+			return { font: this.fonts[index], index, group };
+		}).filter(({ group }) => {
+			const name = normalize(group.flatMap(index => {
+				const font = this.fonts[index];
+				return [font.menuFamily, font.menuStyle, font.fullName, font.name, font.family, font.style, font.postscriptName, ...(font.names || [])];
+			}).filter(Boolean).join(" "));
 			return terms.every(term => name.includes(term));
 		});
 		this.list.replaceChildren();
@@ -82,7 +105,7 @@ export class FontPicker {
 			option.dataset.index = String(index);
 			option.setAttribute("data-disabled", String(Boolean(font.disabled)));
 			const name = document.createElement("span");
-			name.textContent = font.fullName || font.name;
+			name.textContent = font.menuFamily || font.fullName || font.name;
 			option.append(name);
 			const source = this.sourceLabel(font);
 			if (source) {
@@ -103,7 +126,7 @@ export class FontPicker {
 		if (!this.open) this.list.showPopover();
 		this.open = true;
 		this.position();
-		const selected = this.matches.findIndex(({ font, index }) => !font.disabled && String(index) === this.value);
+		const selected = this.matches.findIndex(({ font, group }) => !font.disabled && group.includes(Number(this.value)));
 		this.activate(selected < 0 ? this.matches.findIndex(({ font }) => !font.disabled) : selected);
 		if (load) this.onOpen?.();
 	}
@@ -140,7 +163,7 @@ export class FontPicker {
 	commitExact() {
 		const value = this.input.value.trim().toLocaleLowerCase();
 		const matches = font => font && !font.disabled
-			&& [font.fullName, font.name, font.postscriptName, ...(font.names || [])].some(name => name?.toLocaleLowerCase() === value);
+			&& [font.menuFamily, font.fullName, font.name, font.postscriptName, ...(font.names || [])].some(name => name?.toLocaleLowerCase() === value);
 		const selected = Number(this.value);
 		const index = matches(this.fonts[selected]) ? selected : this.fonts.findIndex(matches);
 		if (index >= 0) return this.choose(index);
@@ -340,10 +363,22 @@ export class FontManager {
 	async loadFaces(inspect, current = () => true) {
 		while (current()) {
 			const file = this.userFonts.find(font => font.enabled && !font.faces);
-			if (!file) return;
+			if (!file) break;
 			try { file.faces = await inspect(await this.read(file)); }
 			catch { if (!current()) return; file.faces = []; }
 		}
+		const pending = this.catalog.filter(font => font.blob && !font.menuFamily && !font.metadataFailed);
+		await Promise.all(Array.from({ length: Math.min(4, pending.length) }, async () => {
+			while (current() && pending.length) {
+				const font = pending.shift();
+				try {
+					const faces = await inspect(await this.read(font));
+					const face = faces.find(face => face.postscriptName === font.postscriptName);
+					if (face) Object.assign(font, { index: face.index, menuFamily: face.menuFamily, menuStyle: face.menuStyle, familyKey: face.familyKey, bold: face.bold, italic: face.italic, names: face.names });
+					else font.metadataFailed = true;
+				} catch { if (current()) font.metadataFailed = true; }
+			}
+		}));
 	}
 
 	async defaultFont(order, inspect, current = () => true) {

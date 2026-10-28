@@ -16,6 +16,7 @@ package font
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"strings"
@@ -23,6 +24,8 @@ import (
 )
 
 // Face 字体文件中的字体名称与零起始索引，不依赖文件名
+// Family和Style为排版族，MenuFamily和MenuStyle为兼容四款式的菜单名称
+// FamilyKey区分兼容族、厂商和版本，未知时为空；Bold和Italic表示字体固有样式
 type Face struct {
 	Index          int      `json:"index"`
 	FullName       string   `json:"fullName"`
@@ -30,6 +33,11 @@ type Face struct {
 	Style          string   `json:"style"`
 	PostScriptName string   `json:"postscriptName"`
 	Names          []string `json:"names"`
+	MenuFamily     string   `json:"menuFamily"`
+	MenuStyle      string   `json:"menuStyle"`
+	FamilyKey      string   `json:"familyKey"`
+	Bold           bool     `json:"bold"`
+	Italic         bool     `json:"italic"`
 }
 
 // FaceInfo 从名称表读取字体信息
@@ -68,7 +76,40 @@ func faceInfoLanguage(data []byte, index int, platform, language uint16) Face {
 		}
 		return name(ids...)
 	}
-	return Face{Index: index, FullName: localized(4, 6, 16, 1), Family: localized(16, 1), Style: localized(17, 2), PostScriptName: name(6), Names: fontNamesFromValues(records, values)}
+	key := ""
+	if family, version := name(1), name(5); family != "" && version != "" {
+		key = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join([]string{family, version, name(8)}, "\x00"))))
+	}
+	family, style := localized(1), localized(2)
+	if family == "" {
+		family = localized(16, 4, 6)
+	}
+	if style == "" {
+		style = localized(17)
+	}
+	return Face{Index: index, FullName: localized(4, 6, 16, 1), Family: localized(16, 1), Style: localized(17, 2), PostScriptName: name(6), Names: fontNamesFromValues(records, values), MenuFamily: family, MenuStyle: style, FamilyKey: key}
+}
+
+// TableFaceInfo 读取名称及字体固有款式，名称键不随显示语言变化
+// 入参: tables 字体表, index 集合索引, platform 平台标识, language 语言标识
+// 返回: Face 字体信息
+func TableFaceInfo(tables map[string][]byte, index int, platform, language uint16) Face {
+	face := faceInfoLanguage(tables["name"], index, platform, language)
+	key := face.FamilyKey
+	if head := tables["head"]; len(head) >= 46 {
+		key += string(head[4:8])
+		style := binary.BigEndian.Uint16(head[44:])
+		face.Bold, face.Italic = style&1 != 0, style&2 != 0
+	}
+	if os2 := tables["OS/2"]; len(os2) >= 64 {
+		key += string(os2[58:62])
+		style := binary.BigEndian.Uint16(os2[62:])
+		face.Bold, face.Italic = style&32 != 0, style&1 != 0 || style&512 != 0
+	}
+	if face.FamilyKey != "" {
+		face.FamilyKey = fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
+	}
+	return face
 }
 
 // FileCount 校验字体或集合头并读取字体数量
@@ -114,7 +155,7 @@ func ReadLocalizedFaces(data []byte, platform, language uint16) ([]Face, error) 
 		if err != nil {
 			return nil, err
 		}
-		face := faceInfoLanguage(tables["name"], index, platform, language)
+		face := TableFaceInfo(tables, index, platform, language)
 		if face.FullName == "" {
 			return nil, fmt.Errorf("font %d has no usable name", index)
 		}

@@ -886,6 +886,95 @@ func (e *Editor) FormatTargetsText(page int, paths []ObjectPath, patch TextForma
 	return e.formatTargetsText(page, paths, patch, false)
 }
 
+// TextFontStyle 标识文字引用的字体资源及显式粗斜体样式
+type TextFontStyle struct {
+	Font   string `json:"font"`
+	Bold   bool   `json:"bold"`
+	Italic bool   `json:"italic"`
+}
+
+// TextFontChange 描述一种原字体款式到目标字体款式的替换
+type TextFontChange struct {
+	From TextFontStyle `json:"from"`
+	To   TextFontStyle `json:"to"`
+}
+
+// StyleTargetsFonts 原子替换跨容器文字的各款式，保留混排属性及对象变换
+// 目标字体须已注册，可用Transaction将AddFont与本操作合并为一条历史记录
+// 入参: page 页面索引, paths 完整文字路径, changes 字体款式映射, reflow 允许显式重排
+// 返回: error 字体、路径或排版错误，失败时回滚全部修改
+func (e *Editor) StyleTargetsFonts(page int, paths []ObjectPath, changes []TextFontChange, reflow bool) error {
+	mapping := make(map[TextFontStyle]TextFontStyle, len(changes))
+	for _, change := range changes {
+		if change.To.Font == "" {
+			return fmt.Errorf("text requires a font")
+		}
+		mapping[change.From] = change.To
+	}
+	return e.Transaction(func(e *Editor) error {
+		for _, path := range paths {
+			if path.Annotation != "" {
+				return ErrNotRichText
+			}
+			var object GraphicObject
+			var err error
+			if len(path.Children) == 0 {
+				object, err = e.Object(page, path.ID)
+			} else {
+				parent := path
+				parent.Children = path.Children[:len(path.Children)-1]
+				var members []CompositeMember
+				members, err = e.CompositeObjectsAt(page, parent, path.Children[len(path.Children)-1:])
+				if err == nil {
+					object = members[0].Object
+				}
+			}
+			if err != nil {
+				return err
+			}
+			if object.Type == "TextObject" && !reflow {
+				text := object.TextObject
+				from := TextFontStyle{Font: text.Font, Bold: text.Weight >= 700, Italic: text.Italic}
+				to, ok := mapping[from]
+				if !ok || to == from {
+					continue
+				}
+				if to.Bold == from.Bold && to.Italic == from.Italic {
+					if err := e.StyleTargetsText(page, []ObjectPath{path}, TextStyle{Font: to.Font}); err != nil {
+						return err
+					}
+					continue
+				}
+			}
+			value, _, _, err := e.PrepareRichText(page, path, reflow)
+			if err != nil {
+				return err
+			}
+			changed := false
+			for index := range value.Runs {
+				format := &value.Runs[index].Format
+				from := TextFontStyle{Font: format.Font, Bold: format.Bold, Italic: format.Italic}
+				if to, ok := mapping[from]; ok && to != from {
+					format.Font, format.Bold, format.Italic = to.Font, to.Bold, to.Italic
+					changed = true
+				}
+			}
+			if !changed {
+				continue
+			}
+			if reflow {
+				err = e.ReflowRichText(page, path, value)
+			} else {
+				err = e.UpdateTargetRichText(page, path, value, 0, 0)
+			}
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // ReflowTargetsText 显式重排跨容器文字并应用格式增量，保留对象位置及组合结构
 // 入参: page 页面索引, paths 完整文字路径, patch 格式增量
 // 返回: error 路径、格式或排版错误

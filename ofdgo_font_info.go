@@ -107,6 +107,46 @@ func (r *Reader) FontData(id string) ([]byte, error) {
 	return r.fontData(id, false)
 }
 
+// FontFace 读取指定内嵌资源的本地化字体信息，集合按资源声明选取，不依赖系统字体
+// 入参: id 字体资源标识, platform 名称表平台标识, language 名称表语言标识
+// 返回: *FontFace 独立字体信息, error 资源或解析错误
+func (r *Reader) FontFace(id string, platform, language uint16) (*FontFace, error) {
+	if r.fontDefinition(id) == nil {
+		if _, err := r.Fonts(); err != nil {
+			return nil, err
+		}
+	}
+	font := r.fontDefinition(id)
+	if font == nil || font.FontFile == "" {
+		return nil, fmt.Errorf("embedded font %q not found", id)
+	}
+	name := r.ResPath(font.FontFile)
+	key := fmt.Sprintf("%s\x00%d:%d", name, platform, language)
+	faces, ok := r.fontFaces[key]
+	if !ok {
+		data, err := r.readFileView(name)
+		if err != nil {
+			return nil, err
+		}
+		values, err := (FontFile{Data: data}).LocalizedFaces(platform, language)
+		if err != nil {
+			return nil, err
+		}
+		faces = make([]*FontFace, len(values))
+		for index := range values {
+			faces[index] = &values[index]
+		}
+		r.fontFaces[key] = faces
+	}
+	names := make([][]string, len(faces))
+	for index, face := range faces {
+		names[index] = face.Names
+	}
+	face := *faces[basefont.NameIndex(names, []string{font.FontName, font.FamilyName}, font.Bold, font.Italic)]
+	face.Names = slices.Clone(face.Names)
+	return &face, nil
+}
+
 // fontData 按调用方所有权读取内嵌字体，集合字体始终独立提取
 // 入参: id 字体资源标识, readonly 是否允许借用只读资源
 // 返回: []byte 字体数据, error 资源或集合错误
@@ -251,7 +291,7 @@ func (r *Reader) embeddedFontFace(of Font) (*FontFace, error) {
 				faces = make([]*FontFace, count)
 				for index := range faces {
 					if tables, err := basefont.FileTables(data, index); err == nil {
-						info := basefont.FaceInfo(tables["name"], index)
+						info := basefont.TableFaceInfo(tables, index, 0xffff, 0xffff)
 						faces[index] = &info
 					}
 				}

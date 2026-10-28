@@ -236,6 +236,10 @@ export class RichTextSession {
 		const runs = sliceRuns(this.model.runs, start, end);
 		return Object.fromEntries(FORMAT_KEYS.map(key => [key, runs.every(run => run.format[key] === runs[0]?.format[key]) ? runs[0]?.format[key] : undefined]));
 	}
+	selectedRuns() {
+		const [start, end] = this.selection();
+		return start === end ? [{ text: "", format: { ...this.typing } }] : sliceRuns(this.model.runs, start, end);
+	}
 	remember() {
 		this.selection();
 		this.entries[this.index].caret = [...this.caret];
@@ -302,13 +306,14 @@ export class RichTextSession {
 		this.remember();
 		const [start, end] = this.selection();
 		const before = this.model.runs;
+		const apply = format => typeof values === "function" ? values(format) : { ...format, ...values };
 		this.caret = this.caret[0] > this.caret[1] ? [end, start] : [start, end];
 		if (start !== end) this.model.runs = normalizeRuns([
 			...sliceRuns(this.model.runs, 0, start),
-			...sliceRuns(this.model.runs, start, end).map(run => ({ ...run, format: { ...run.format, ...values } })),
+			...sliceRuns(this.model.runs, start, end).map(run => ({ ...run, format: apply(run.format) })),
 			...sliceRuns(this.model.runs, end, this.text.length),
 		]);
-		this.typing = { ...this.typing, ...values };
+		this.typing = apply(this.typing);
 		this.record(before);
 		this.render();
 		this.editor.options.onTextChange();

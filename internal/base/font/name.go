@@ -142,7 +142,7 @@ func fontNameValues(data []byte) ([]fontNameRecord, map[[4]uint16]string) {
 	values := make(map[[4]uint16]string)
 	for _, record := range records {
 		switch record.Name {
-		case 1, 2, 4, 6, 16, 17:
+		case 1, 2, 4, 5, 6, 8, 16, 17:
 		default:
 			continue
 		}
