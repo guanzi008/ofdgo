@@ -4111,16 +4111,8 @@ func (e *businessEngine) changeCompositeObjects(args []platformValue) (any, erro
 			if len(indexes) != 1 {
 				return fmt.Errorf("text layout requires one member")
 			}
-			layout := ofdgo.TextLayout{AutoBidi: true, Wrap: args[6].Bool(), Align: args[7].String(), LineHeight: args[8].Float(), LetterSpacing: args[9].Float(), LeftIndent: args[10].Float(), RightIndent: args[11].Float(), FirstLineIndent: args[12].Float()}
-			if !args[4].IsNull() {
-				return e.currentEditor.ResizeCompositeTextFrame(page, path, indexes[0], args[4].Float(), args[5].Float(), layout)
-			}
-			member, err := e.currentEditor.CompositeObject(page, path, indexes[0])
-			if err != nil {
-				return err
-			}
-			value, _ := member.Object.TextObject.TextLayout()
-			return e.currentEditor.LayoutCompositeText(page, path, indexes[0], value, layout)
+			path.Children = append(slices.Clone(path.Children), indexes[0])
+			return e.layoutEditorText(page, path, args[4:])
 		case "fit", "resetCrop":
 			if len(indexes) != 1 {
 				return fmt.Errorf("image operation requires one member")
@@ -5317,32 +5309,21 @@ func (e *businessEngine) layoutText(args []platformValue) (any, error) {
 	if e.currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
 	}
-	page, id := args[0].Int(), args[1].String()
-	object, err := e.currentEditor.Object(page, id)
-	if err != nil {
-		return nil, err
+	return e.changeObjects(func() error {
+		return e.layoutEditorText(args[0].Int(), ofdgo.ObjectPath{ID: args[1].String()}, args[2:])
+	})
+}
+
+// layoutEditorText 将正文和组合内文字的段落调整交给库统一处理
+// 入参: page 页面索引, path 完整对象路径, args 偏移、宽度及段落选项
+// 返回: error 排版或提交错误
+func (e *businessEngine) layoutEditorText(page int, path ofdgo.ObjectPath, args []platformValue) error {
+	offset, width := 0.0, 0.0
+	if !args[0].IsNull() {
+		offset, width = args[0].Float(), args[1].Float()
 	}
-	if object.Type != "TextObject" {
-		return nil, fmt.Errorf("object is not text")
-	}
-	if !args[2].IsNull() {
-		object.TextObject, err = object.TextObject.ResizeTextFrame(args[2].Float(), args[3].Float())
-		if err != nil {
-			return nil, err
-		}
-	}
-	value, _ := object.TextObject.TextLayout()
-	if err := e.currentEditor.LayoutText(&object.TextObject, value, ofdgo.TextLayout{AutoBidi: true, Wrap: args[4].Bool(), Align: args[5].String(), LineHeight: args[6].Float(), LetterSpacing: args[7].Float(), LeftIndent: args[8].Float(), RightIndent: args[9].Float(), FirstLineIndent: args[10].Float()}); err != nil {
-		return nil, err
-	}
-	revision := e.currentEditor.Revision()
-	if err := e.currentEditor.UpdateObject(page, id, object); err != nil {
-		return nil, err
-	}
-	if e.currentEditor.Revision() == revision {
-		return e.editorSummary(), nil
-	}
-	return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	layout := ofdgo.TextLayout{AutoBidi: true, Wrap: args[2].Bool(), Align: args[3].String(), LineHeight: args[4].Float(), LetterSpacing: args[5].Float(), LeftIndent: args[6].Float(), RightIndent: args[7].Float(), FirstLineIndent: args[8].Float()}
+	return e.currentEditor.LayoutTextFrame(page, path, layout, offset, width)
 }
 
 // replaceImage 替换图片资源并更新预览

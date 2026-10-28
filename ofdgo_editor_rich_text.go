@@ -1231,3 +1231,24 @@ func (e *Editor) ReflowRichText(page int, path ObjectPath, value RichText) error
 	path.Children = path.Children[:len(path.Children)-1]
 	return e.updateCompositeRichText(page, path, index, value, 0, 0, true)
 }
+
+// LayoutTextFrame 统一调整普通文字及富文本的段落选项和局部宽度，保留原首行起点与页面变换
+// 对齐应用于所有段落；定位文字沿用自然宽度，显式改宽后采用固定宽度，提交一条撤销记录
+// 入参: page 页面索引, path 完整对象路径, options 段落选项, offset 左边界局部偏移, width 新宽度，零值保留宽度模式
+// 返回: error 路径、尺寸或排版错误
+func (e *Editor) LayoutTextFrame(page int, path ObjectPath, options TextLayout, offset, width float64) error {
+	if !finite(offset) || !finite(width) || width < 0 || width == 0 && offset != 0 {
+		return fmt.Errorf("invalid text frame")
+	}
+	value, _, _, err := e.PrepareRichText(page, path, true)
+	if err != nil {
+		return err
+	}
+	value.Layout, value.Paragraphs = options, nil
+	if len(path.Children) == 0 {
+		return e.updateRichTextFrame(page, path.ID, value, offset, width, true)
+	}
+	index := path.Children[len(path.Children)-1]
+	path.Children = path.Children[:len(path.Children)-1]
+	return e.updateCompositeRichText(page, path, index, value, offset, width, true)
+}
