@@ -105,6 +105,24 @@ func (e *Editor) UpdateRichText(page int, id string, value RichText) error {
 	return e.updateRichTextFrame(page, id, value, 0, 0, false)
 }
 
+// UpdateTargetRichText 一次提交正文或组合内富文本的内容和局部宽度，保留页面变换
+// 入参: page 页面索引, path 完整对象路径, value 富文本, offset 局部偏移, width 宽度，零值保留宽度模式
+// 返回: error 路径、尺寸或排版错误
+func (e *Editor) UpdateTargetRichText(page int, path ObjectPath, value RichText, offset, width float64) error {
+	if !finite(offset) || !finite(width) || width < 0 || width == 0 && offset != 0 {
+		return fmt.Errorf("invalid text frame")
+	}
+	if len(path.Children) == 0 {
+		if path.Annotation != "" {
+			return ErrNotRichText
+		}
+		return e.updateRichTextFrame(page, path.ID, value, offset, width, false)
+	}
+	index := path.Children[len(path.Children)-1]
+	path.Children = path.Children[:len(path.Children)-1]
+	return e.updateCompositeRichText(page, path, index, value, offset, width, false)
+}
+
 // ResizeRichTextFrame 调整局部左边界与段落宽度并原子重排，保留页面方向和缩放
 // 入参: page 页面索引, id 对象标识, offset 局部横向偏移, width 新的局部段落宽度
 // 返回: error 尺寸、排版或提交错误
@@ -1066,17 +1084,17 @@ func richTextMetadataFontSafe(value string) bool {
 }
 
 // formatCompositeText 修改内部富文本格式，普通文字安全提升后保留原实例变换
-// 入参: page 页面索引, path 父路径, index 成员序号, patch 格式增量
+// 入参: page 页面索引, path 父路径, index 成员序号, patch 格式增量, reflow 显式重排
 // 返回: error 识别、排版或提交错误
-func (e *Editor) formatCompositeText(page int, path ObjectPath, index int, patch TextFormatPatch) error {
-	value, err := e.TargetRichText(page, ObjectPath{ID: path.ID, Annotation: path.Annotation, Children: append(slices.Clone(path.Children), index)})
+func (e *Editor) formatCompositeText(page int, path ObjectPath, index int, patch TextFormatPatch, reflow bool) error {
+	value, _, _, err := e.PrepareRichText(page, ObjectPath{ID: path.ID, Annotation: path.Annotation, Children: append(slices.Clone(path.Children), index)}, reflow)
 	if err != nil {
 		return err
 	}
 	if err := value.ApplyFormat(0, value.Len(), patch); err != nil {
 		return err
 	}
-	return e.UpdateCompositeRichText(page, path, index, value, 0, 0)
+	return e.updateCompositeRichText(page, path, index, value, 0, 0, reflow)
 }
 
 // updateCompositePlainRichText 将可验证布局的内部文字提升为富文本并保留实例坐标

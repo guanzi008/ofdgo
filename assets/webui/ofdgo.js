@@ -874,7 +874,7 @@ el.textLineHeight.addEventListener("change", () => changeParagraph(undefined, "l
 editorClick(el.paragraphButton, () => {
 	const item = currentTextStyle();
 	for (const key of ["leftIndent", "rightIndent", "firstLineIndent"]) {
-		const mixed = Boolean(canvasEditor.input?.rich || item.richText) && item[key] === undefined;
+		const mixed = Boolean(canvasEditor.input?.rich || item.richText || item.items) && item[key] === undefined;
 		el[key].required = !mixed;
 		el[key].placeholder = mixed ? "混合" : "";
 		el[key].value = mixed ? "" : item[key] || 0;
@@ -1197,10 +1197,7 @@ el.paragraphForm.addEventListener("submit", async event => {
 		} else if (item === state.textDefaults) {
 			Object.assign(item, indents);
 		} else {
-			if (!confirmTextReflow(item)) return;
-			const saved = item.richText ? await saveRichParagraphs(item, indents)
-				: await changeDocument("ofdgoLayoutText", item, null, null, Boolean(item.wrap), item.align || "left",
-					item.paragraphHeight || 0, item.letterSpacing || 0, ...textIndents(indents));
+			const saved = await saveTextParagraphs(item, indents);
 			if (!saved) return;
 		}
 		if (isForegroundDocument(tab)) el.paragraphPanel.close();
@@ -4163,13 +4160,15 @@ async function loadRichText(item, firstFace, tab = documentTab(), firstData = nu
 	const fontData = remaining.runs.length ? await callWASM("ofdgoRichTextFonts", JSON.stringify(remaining)) : [];
 	const resources = new Map(fontData.map(font => [font.key, font.data]));
 	if (firstData) resources.set(item.font, firstData);
-	const faces = new Map();
-	for (const id of new Set(model.runs.map(run => run.format.font))) {
-		const data = id === item.font && firstFace ? null : resources.get(id);
-		const face = data ? await new FontFace(`ofdgo-rich-${crypto.randomUUID()}`, data, fontFaceStyle(data)).load() : firstFace;
-		if (tab.closed || wasmSeq !== tab.state.wasmSeq) throw new Error("文档已更改");
-		faces.set(id, face);
-	}
+	const faces = new Map(), pending = [...new Set(model.runs.map(run => run.format.font))];
+	await Promise.all(Array.from({ length: Math.min(4, pending.length) }, async () => {
+		while (pending.length) {
+			const id = pending.shift(), data = id === item.font && firstFace ? null : resources.get(id);
+			const face = data ? await new FontFace(`ofdgo-rich-${crypto.randomUUID()}`, data, fontFaceStyle(data)).load() : firstFace;
+			if (tab.closed || wasmSeq !== tab.state.wasmSeq) throw new Error("文档已更改");
+			faces.set(id, face);
+		}
+	}));
 	return { model, faces, resources, frame: prepared.frame, reflow };
 }
 
@@ -4216,10 +4215,12 @@ async function changeRangeFormat(key, value) {
 			updateObjectControls(null); return;
 		}
 		const item = canvasEditor.selected;
-		if (!canvasEditor.input && (item?.items || item?.scoped)) {
+		if (!canvasEditor.input && item) {
+			const reflow = !canEditObject(item, "layoutKnown");
+			if (reflow && !confirmTextReflow(item)) return;
 			const current = currentTextStyle()[key];
 			const patch = { [key]: value ?? (key === "background" ? current ? "" : textBackground.value : current !== true) };
-			await changeDocument("ofdgoFormatText", { ...item, id: (item.items || [item]).map(member => member.id) }, JSON.stringify(patch));
+			await changeDocument("ofdgoFormatText", { ...item, id: (item.items || [item]).map(member => member.id) }, JSON.stringify(patch), reflow);
 			return;
 		}
 		if (!await ensureRichInput()) return;
@@ -4278,15 +4279,13 @@ async function validateRichText(item, model, width, fonts = []) {
 	}
 }
 
-async function saveRichText(item, model, fonts = [], box = item) {
-	const tab = documentTab(), openSeq = state.openSeq, wasmSeq = state.wasmSeq;
+function saveRichText(item, model, fonts = [], box = item) {
 	const boundary = { x: box.x, y: box.y, width: box.width, height: box.height };
 	if (item.richReflow) boundary.reflow = true;
 	if (box.frameWidth !== undefined) Object.assign(boundary, { frameWidth: box.frameWidth, frameOffset: box.frameOffset || 0 });
-	fonts = await validateRichText(item, model, box.frameWidth ?? item.textFrame?.width ?? item.width, fonts);
-	if (tab.closed || !isForegroundDocument(tab) || tab.state.openSeq !== openSeq || tab.state.wasmSeq !== wasmSeq) return false;
 	return changeDocument("ofdgoSaveRichText", item.draft ? null : item,
-		...(item.draft ? [item.index, ""] : []), JSON.stringify(model), boundary, fonts);
+		...(item.draft ? [item.index, ""] : []), JSON.stringify(model), boundary,
+		() => validateRichText(item, model, box.frameWidth ?? item.textFrame?.width ?? item.width, fonts));
 }
 
 function textIndents(item) {
@@ -4452,15 +4451,6 @@ async function changeTextFont() {
 	const item = selectedText(canvasEditor.selected);
 	const font = state.textFonts[Number(fontPicker.value)];
 	if (!state.ready || document.body.hasAttribute("data-busy") || !font || font.disabled) return;
-	if (item?.richText && !canvasEditor.input) {
-		try {
-			await editCanvasObject(item);
-			if (!isForegroundDocument(tab) || openSeq !== state.openSeq || !canvasEditor.input?.rich) return;
-		} catch (error) {
-			if (isForegroundDocument(tab) && openSeq === state.openSeq) showError(error, false);
-			return;
-		}
-	}
 	const editing = canvasEditor.input;
 	if (editing) {
 		if (editing.composing) return;
@@ -4595,10 +4585,7 @@ async function changeTextAlignment() {
 			if (!editing.rich && !editing.item.draft && !confirmTextReflow(editing.item)) return;
 			if (!await ensureRichInput(!canEditObject(editing.item, "layoutKnown")) || !isForegroundDocument(tab) || canvasEditor.input !== editing || editing.alignSequence !== sequence) return;
 			editing.rich.align(align);
-		} else if (canvasEditor.selected?.richText) {
-			const item = canvasEditor.selected;
-			await saveRichParagraphs(item, { align });
-		} else await changeParagraph();
+		} else await saveTextParagraphs(currentTextStyle(), { align });
 	} catch (error) {
 		if (isForegroundDocument(tab) && canvasEditor.input === editing && (!editing || editing.alignSequence === sequence)) showError(error, false);
 	} finally {
@@ -4606,10 +4593,14 @@ async function changeTextAlignment() {
 	}
 }
 
-async function saveRichParagraphs(item, patch) {
-	const { wrap, ...values } = patch, model = item.richText;
-	return saveRichText(item, { ...model, layout: { ...model.layout, ...(wrap !== undefined ? { wrap } : {}) },
-		paragraphs: model.runs.map(run => run.text).join("").split("\n").map((_, i) => ({ align: "", ...model.paragraphs?.[i], ...values })) });
+async function saveTextParagraphs(item, patch) {
+	if (!Object.keys(patch).length) return true;
+	if (item === state.textDefaults) {
+		Object.assign(item, patch);
+		return true;
+	}
+	if (!confirmTextReflow(item)) return false;
+	return changeDocument("ofdgoLayoutTexts", item, JSON.stringify(patch));
 }
 
 async function changeParagraph(wrap, changed) {
@@ -4623,33 +4614,18 @@ async function changeParagraph(wrap, changed) {
 		}
 		return changeInputParagraph(patch);
 	}
-	wrap ??= item.wrap;
 	if (document.body.hasAttribute("data-busy") || item.draft) return;
-	if (!el.textLineHeight.checkValidity()) {
-		updateObjectControls(item, true);
-		return;
+	const patch = wrap !== undefined ? { wrap: Boolean(wrap) } : {};
+	for (const [input, key, original] of [[el.textLineHeight, "lineHeight", item.paragraphHeight], [el.textSpacing, "letterSpacing", item.letterSpacing]]) {
+		if (key !== changed) continue;
+		if (!input.checkValidity()) return updateObjectControls(item, true);
+		patch[key] = inputMillimeters(input, original || 0);
 	}
-	const height = inputMillimeters(el.textLineHeight, item.paragraphHeight || 0);
-	if (!el.textSpacing.checkValidity()) {
-		updateObjectControls(canvasEditor.selected, true);
-		return;
-	}
-	const spacing = inputMillimeters(el.textSpacing, item.letterSpacing || 0);
 	if (item === state.textDefaults) {
-		Object.assign(item, { wrap: Boolean(wrap), align: el.textAlign.value, paragraphHeight: height, letterSpacing: spacing });
-		updateObjectControls(canvasEditor.selected, true);
-		return;
-	}
-	if (!confirmTextReflow(item)) {
-		updateObjectControls(item, true);
-		return;
-	}
-	try {
-		if (item.richText) await saveRichParagraphs(item, changed === "lineHeight" ? { lineHeight: height } : changed === "letterSpacing" ? { letterSpacing: spacing } : { wrap: Boolean(wrap) });
-		else await changeDocument("ofdgoLayoutText", item, null, null, Boolean(wrap), el.textAlign.value, height, spacing, ...textIndents(item));
-	} catch (error) {
-		if (isForegroundDocument(tab)) showError(error, false);
-	}
+		if (patch.lineHeight !== undefined) item.paragraphHeight = patch.lineHeight;
+		if (patch.letterSpacing !== undefined) item.letterSpacing = patch.letterSpacing;
+		if (patch.wrap !== undefined) item.wrap = patch.wrap;
+	} else await saveTextParagraphs(item, patch);
 	if (isForegroundDocument(tab)) updateObjectControls(canvasEditor.selected, true);
 }
 
@@ -4679,7 +4655,7 @@ async function changeTextStyle(color) {
 	const size = color ? item.size : inputMillimeters(el.textSize, item.size);
 	const selectedColor = el.textColor.value;
 	const fill = color && selectedColor !== item.color ? selectedColor : null;
-	if (canvasEditor.input || item.richText) {
+	if (canvasEditor.input) {
 		const editing = canvasEditor.input, tab = documentTab();
 		try {
 			if (!await ensureRichInput() || !isForegroundDocument(tab) || editing && canvasEditor.input !== editing) return;
@@ -4689,6 +4665,10 @@ async function changeTextStyle(color) {
 		}
 		canvasEditor.setTextStyle(color ? { color: selectedColor } : { size });
 		updateObjectControls(canvasEditor.selected, true);
+		return;
+	}
+	if (item.richText) {
+		await changeDocument("ofdgoFormatText", item, JSON.stringify(color ? { color: selectedColor } : { size }));
 		return;
 	}
 	if (item?.scoped && color) {
@@ -4813,7 +4793,7 @@ async function changeDocument(name, item, ...args) {
 	const toolbarFocus = el.editorTools.contains(active) ? active : null;
 	const previous = pageView.currentPageInfo() || state.doc.pages[Math.min(state.pageIndex, state.doc.pages.length - 1)] || {};
 	const originalDocument = state.doc;
-	const before = editorLocation(), revision = state.editorInfo.revision;
+	const before = editorLocation(), revision = state.editorInfo.revision, wasmSeq = state.wasmSeq;
 	const restoring = name === "ofdgoUndo" || name === "ofdgoRedo";
 	const { scrollLeft, scrollTop } = el.viewerPanel;
 	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages" || name === "ofdgoImportDocuments";
@@ -4830,8 +4810,8 @@ async function changeDocument(name, item, ...args) {
 		}
 	}, 250) : null;
 	try {
-		args = await Promise.all(args);
-		if (tab.closed) {
+		args = await Promise.all(args.map(value => typeof value === "function" ? value() : value));
+		if (tab.closed || state.wasmSeq !== wasmSeq || state.doc !== originalDocument || state.editorInfo?.revision !== revision) {
 			return;
 		}
 		const scope = objectParent(item);
@@ -4849,8 +4829,8 @@ async function changeDocument(name, item, ...args) {
 		const scopedRichText = scoped && name === "ofdgoSaveRichText";
 		if (scopedRichText) args.push(scope);
 		const textSelection = name === "ofdgoUpdateTextSelection";
-		if (scoped && !operation && !textSelection && !scopedRichText) throw new Error("内部对象暂不支持此操作");
-		const doc = ["ofdgoStyleText", "ofdgoFormatText"].includes(name)
+		if (scoped && !operation && !textSelection && !scopedRichText && name !== "ofdgoLayoutTexts") throw new Error("内部对象暂不支持此操作");
+		const doc = ["ofdgoStyleText", "ofdgoFormatText", "ofdgoLayoutTexts"].includes(name)
 			? await callWASM(name, item.index, ids, ...args)
 			: textSelection
 			? await callWASM(name, item.index, item.selectionIDs, ...args)
@@ -4987,7 +4967,9 @@ async function changeDocument(name, item, ...args) {
 		if (name === "ofdgoChangeFontBinding") err.message = fontBindingError(err.message);
 		if (name === "ofdgoChangeInvoice") err.message = invoiceIssues([err.message]);
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) {
-			if (settingsElements.Panel.open) {
+			if (name === "ofdgoSaveRichText" && canvasEditor.input?.saving) {
+				canvasEditor.setTextError(err);
+			} else if (settingsElements.Panel.open) {
 				settingsElements.Status.textContent = err.message;
 			} else if (fontBindingElements.Panel.open) {
 				fontBindingElements.Status.textContent = fontBindingError(err.message);
@@ -12553,22 +12535,22 @@ function updateObjectControls(item, reset = false) {
 		el.undoButton.disabled = !state.editorInfo?.canUndo || !state.ready || state.exporting;
 		el.redoButton.disabled = !state.editorInfo?.canRedo || !state.ready || state.exporting;
 	}
-	el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled || Boolean(item?.items);
+	el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled;
 	el.textWrap.disabled = el.textLineHeight.disabled || text === state.textDefaults;
 	const reflow = document.querySelector("#textReflow"), positioned = canvasEditor.input?.source && (item?.selectionIDs || !canEditObject(item, "layoutKnown"));
 	reflow.hidden = !positioned;
 	el.textWrap.hidden = !!positioned;
 	reflow.disabled = textDisabled || !canEditObject(item, "reflow") || !!canvasEditor.input?.reflow;
 	el.paragraphButton.disabled = el.textLineHeight.disabled;
-	el.textAlign.disabled = el.textSize.disabled || Boolean(item?.items || item?.selectionIDs);
+	el.textAlign.disabled = el.textSize.disabled || Boolean(item?.selectionIDs);
 	const layoutKnown = text === state.textDefaults || Boolean(item?.draft) || canEditObject(item, "layoutKnown");
 	const rich = canvasEditor.input?.rich;
-	const alignment = rich ? richTextAlignment(rich.model, ...rich.selection()) : item?.richText ? richTextAlignment(item.richText) : layoutKnown ? text.align || "left" : "";
-	el.textAlign.options[0].textContent = rich || item?.richText ? "混合" : "原文";
+	const alignment = item?.items ? text.align ?? "" : rich ? richTextAlignment(rich.model, ...rich.selection()) : item?.richText ? richTextAlignment(item.richText) : layoutKnown ? text.align || "left" : "";
+	el.textAlign.options[0].textContent = rich || item?.richText || item?.items ? "混合" : "原文";
 	el.textAlign.value = alignment;
-	el.textLineHeight.placeholder = (rich || item?.richText) && text.paragraphHeight === undefined ? "混合" : layoutKnown ? "自动" : "原文";
-	el.textSpacing.placeholder = (rich || item?.richText) && text.letterSpacing === undefined ? "混合" : layoutKnown ? "0" : "原文";
-	el.textWrap.setAttribute("data-pressed", String(Boolean(text.wrap)));
+	el.textLineHeight.placeholder = (rich || item?.richText || item?.items) && text.paragraphHeight === undefined ? "混合" : layoutKnown ? "自动" : "原文";
+	el.textSpacing.placeholder = (rich || item?.richText || item?.items) && text.letterSpacing === undefined ? "混合" : layoutKnown ? "0" : "原文";
+	el.textWrap.setAttribute("data-pressed", item?.items && text.wrap === undefined ? "mixed" : String(Boolean(text.wrap)));
 	if (reset || document.activeElement !== el.textLineHeight) {
 		el.textLineHeight.value = text.paragraphHeight ? String(displayPoints(text.paragraphHeight)) : "";
 	}

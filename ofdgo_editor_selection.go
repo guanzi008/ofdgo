@@ -886,6 +886,61 @@ func (e *Editor) FormatTargetsText(page int, paths []ObjectPath, patch TextForma
 	return e.formatTargetsText(page, paths, patch, false)
 }
 
+// ReflowTargetsText 显式重排跨容器文字并应用格式增量，保留对象位置及组合结构
+// 入参: page 页面索引, paths 完整文字路径, patch 格式增量
+// 返回: error 路径、格式或排版错误
+func (e *Editor) ReflowTargetsText(page int, paths []ObjectPath, patch TextFormatPatch) error {
+	return e.formatTargetsText(page, paths, patch, true)
+}
+
+// LayoutTargetsText 原子修改跨容器文字的段落增量，保留各自宽度、变换及未指定的样式
+// 定位文字显式重排为富文本，任一对象失败时回滚全部修改及新增资源
+// 入参: page 页面索引, paths 完整文字路径, patch 段落增量, wrap 折行选项，nil保持原值
+// 返回: error 路径、段落或排版错误
+func (e *Editor) LayoutTargetsText(page int, paths []ObjectPath, patch RichTextParagraph, wrap *bool) error {
+	if patch == (RichTextParagraph{}) && wrap == nil {
+		return nil
+	}
+	apply := func(path ObjectPath) error {
+		value, _, _, err := e.PrepareRichText(page, path, true)
+		if err != nil {
+			return err
+		}
+		if wrap != nil {
+			value.Layout.Wrap = *wrap
+		}
+		if err := value.FormatParagraphs(0, value.Len(), patch); err != nil {
+			return err
+		}
+		if strings.HasSuffix(value.Text(), "\n") {
+			if err := value.FormatParagraphs(value.Len(), value.Len(), patch); err != nil {
+				return err
+			}
+		}
+		return e.ReflowRichText(page, path, value)
+	}
+	return e.editTargets(paths, func(ids, annotations []string) error {
+		if len(annotations) != 0 {
+			return ErrNotRichText
+		}
+		for _, id := range ids {
+			if err := apply(ObjectPath{ID: id}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, func(path ObjectPath, indexes []int) error {
+		for _, index := range indexes {
+			target := path
+			target.Children = append(slices.Clone(path.Children), index)
+			if err := apply(target); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // formatTargetsText 统一文字选区格式事务，普通字体和颜色修改沿用定位保留路径
 // 入参: page 页面索引, paths 完整路径, patch 格式增量, reflow 显式重排
 // 返回: error 校验或编辑错误
@@ -925,14 +980,14 @@ func (e *Editor) formatTargetsText(page int, paths []ObjectPath, patch TextForma
 				plain = append(plain, id)
 				continue
 			}
-			value, err := e.richTextObject(page, object)
+			value, _, _, err := e.PrepareRichText(page, ObjectPath{ID: id}, reflow)
 			if err != nil {
 				return err
 			}
 			if err := value.ApplyFormat(0, value.Len(), patch); err != nil {
 				return err
 			}
-			if err := e.UpdateRichText(page, id, value); err != nil {
+			if err := e.updateRichTextFrame(page, id, value, 0, 0, reflow); err != nil {
 				return err
 			}
 		}
@@ -951,7 +1006,7 @@ func (e *Editor) formatTargetsText(page int, paths []ObjectPath, patch TextForma
 				plain = append(plain, indexes[i])
 				continue
 			}
-			if err := e.formatCompositeText(page, path, indexes[i], patch); err != nil {
+			if err := e.formatCompositeText(page, path, indexes[i], patch, reflow); err != nil {
 				return err
 			}
 		}

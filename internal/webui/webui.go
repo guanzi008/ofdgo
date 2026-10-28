@@ -4926,7 +4926,7 @@ func (e *businessEngine) styleText(args []platformValue) (any, error) {
 }
 
 // formatText 批量修改选区格式，未指定的属性保持各自原值
-// 入参: args 页面索引、完整路径数组和格式JSON
+// 入参: args 页面索引、完整路径数组、格式JSON及可选显式重排标志
 // 返回: any 文档信息, error 校验或提交错误
 func (e *businessEngine) formatText(args []platformValue) (any, error) {
 	return e.changeObjects(func() error {
@@ -4948,7 +4948,30 @@ func (e *businessEngine) formatText(args []platformValue) (any, error) {
 			}
 			*value = color.Value
 		}
+		if len(args) > 3 && args[3].Bool() {
+			return e.currentEditor.ReflowTargetsText(args[0].Int(), paths, patch)
+		}
 		return e.currentEditor.FormatTargetsText(args[0].Int(), paths, patch)
+	})
+}
+
+// layoutTexts 批量修改段落增量，未指定的选项沿用各对象原值
+// 入参: args 页面索引、完整路径数组和段落JSON
+// 返回: any 文档信息, error 校验或提交错误
+func (e *businessEngine) layoutTexts(args []platformValue) (any, error) {
+	return e.changeObjects(func() error {
+		paths, err := e.editorTargetPaths(e.stringsFromJS(args[1]))
+		if err != nil {
+			return err
+		}
+		var patch struct {
+			ofdgo.RichTextParagraph
+			Wrap *bool `json:"wrap"`
+		}
+		if err := json.Unmarshal([]byte(args[2].String()), &patch); err != nil {
+			return err
+		}
+		return e.currentEditor.LayoutTargetsText(args[0].Int(), paths, patch.RichTextParagraph, patch.Wrap)
 	})
 }
 
@@ -5151,42 +5174,29 @@ func (e *businessEngine) saveRichText(args []platformValue) (any, error) {
 			}
 			return e.currentEditor.ReflowRichText(page, path, value)
 		}
+		if id != "" {
+			path, err := e.compositePath(id)
+			if err != nil {
+				return err
+			}
+			offset, width := 0.0, 0.0
+			if !box.IsNull() && !box.IsUndefined() && box.Get("frameWidth").Type() == platformTypeNumber {
+				width = box.Get("frameWidth").Float()
+				if box.Get("frameOffset").Type() == platformTypeNumber {
+					offset = box.Get("frameOffset").Float()
+				}
+			}
+			return e.currentEditor.UpdateTargetRichText(page, path, value, offset, width)
+		}
 		if len(args) > 5 && args[5].String() != "" {
 			key := args[5].String()
 			path, err := e.compositePath(key)
 			if err != nil {
 				return err
 			}
-			if id != "" {
-				indexes, err := e.compositeIndexes(key, []string{id})
-				if err != nil {
-					return err
-				}
-				width, offset := 0.0, 0.0
-				if !box.IsNull() && !box.IsUndefined() && box.Get("frameWidth").Type() == platformTypeNumber {
-					width = box.Get("frameWidth").Float()
-					if box.Get("frameOffset").Type() == platformTypeNumber {
-						offset = box.Get("frameOffset").Float()
-					}
-				}
-				return e.currentEditor.UpdateCompositeRichText(page, path, indexes[0], value, offset, width)
-			}
 			index, err := e.currentEditor.AddCompositeRichText(page, path, ofdgo.Box{X: box.Get("x").Float(), Y: box.Get("y").Float(), W: box.Get("width").Float(), H: box.Get("height").Float()}, value)
 			id = fmt.Sprintf("%s/%d", key, index)
 			return err
-		}
-		if id != "" {
-			if err := e.currentEditor.UpdateRichText(page, id, value); err != nil {
-				return err
-			}
-			if !box.IsNull() && !box.IsUndefined() && box.Get("frameWidth").Type() == platformTypeNumber {
-				offset := 0.0
-				if box.Get("frameOffset").Type() == platformTypeNumber {
-					offset = box.Get("frameOffset").Float()
-				}
-				return e.currentEditor.ResizeRichTextFrame(page, id, offset, box.Get("frameWidth").Float())
-			}
-			return nil
 		}
 		id, err = e.currentEditor.AddRichText(page, ofdgo.Box{X: box.Get("x").Float(), Y: box.Get("y").Float(), W: box.Get("width").Float(), H: box.Get("height").Float()}, value)
 		return err
@@ -8054,6 +8064,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoReshapeLine":            e.reshapeLine,
 		"ofdgoResetImageCrop":         e.resetImageCrop,
 		"ofdgoLayoutText":             e.layoutText,
+		"ofdgoLayoutTexts":            e.layoutTexts,
 		"ofdgoTransformObjects":       e.transformObjects,
 		"ofdgoCompositeObjects":       e.compositeObjects,
 		"ofdgoChangeCompositeObjects": e.changeCompositeObjects,

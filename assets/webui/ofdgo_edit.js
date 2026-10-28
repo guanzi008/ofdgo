@@ -754,6 +754,14 @@ export function selectedText(item) {
 		const value = formats[0][key];
 		text[key] = formats.every(format => format[key] === value) ? value : undefined;
 	}
+	const layouts = item.items.map(member => member.richText ? { ...richTextLayout(member.richText), wrap: Boolean(member.richText.layout.wrap) } : {
+		align: member.align || "left", wrap: Boolean(member.wrap), lineHeight: member.paragraphHeight || 0,
+		letterSpacing: member.letterSpacing || 0, leftIndent: member.leftIndent || 0, rightIndent: member.rightIndent || 0, firstLineIndent: member.firstLineIndent || 0,
+	});
+	for (const key of ["align", "wrap", "lineHeight", "letterSpacing", "leftIndent", "rightIndent", "firstLineIndent"]) {
+		const values = layouts.map(layout => layout[key]);
+		text[key === "lineHeight" ? "paragraphHeight" : key] = values.every(value => value === values[0]) ? values[0] : undefined;
+	}
 	return text;
 }
 
