@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"fmt"
 	"path"
+	"sort"
 	"unicode/utf8"
 
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
@@ -24,6 +25,40 @@ import (
 
 // FontFace 字体文件中的字体名称与零起始索引，不依赖文件名
 type FontFace = basefont.Face
+
+// FontPreferenceOrder 按字体族偏好排列候选索引，同族优先常规样式，其余保持原顺序
+// 入参: faces 候选字体, families 按优先级排列的字体族别名组
+// 返回: []int 候选字体的零起始索引，不修改输入列表
+func FontPreferenceOrder(faces []FontFace, families [][]string) []int {
+	priorities := make(map[string]int)
+	for priority, names := range families {
+		for _, name := range names {
+			key := FontNormalizeName(name)
+			if _, exists := priorities[key]; key != "" && !exists {
+				priorities[key] = priority
+			}
+		}
+	}
+	order, ranks := make([]int, len(faces)), make([]int, len(faces))
+	for i, face := range faces {
+		order[i], ranks[i] = i, len(families)*2
+		names := append([]string{face.Family, face.FullName, face.PostScriptName}, face.Names...)
+		for _, name := range names {
+			if priority, exists := priorities[FontNormalizeName(name)]; exists && priority*2 < ranks[i] {
+				ranks[i] = priority * 2
+			}
+		}
+		if ranks[i] < len(families)*2 {
+			switch FontNormalizeName(face.Style) {
+			case "", "regular", "normal", "roman", "常规", "正常", "标准":
+			default:
+				ranks[i]++
+			}
+		}
+	}
+	sort.SliceStable(order, func(i, j int) bool { return ranks[order[i]] < ranks[order[j]] })
+	return order
+}
 
 // FixFontDataAggressive 激进修复字体数据
 // 尝试修复缺失表(OS/2, cmap等)的TrueType字体或包装CFF裸数据

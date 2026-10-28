@@ -335,6 +335,25 @@ export class FontManager {
 		}
 	}
 
+	async defaultFont(order, inspect, current = () => true) {
+		const fonts = this.editorFonts().filter(font => !font.disabled);
+		if (!fonts.length) return;
+		const families = [["DengXian", "等线"], ["Microsoft YaHei", "微软雅黑"], ["PingFang SC", "苹方-简", "苹方 简体"],
+			["Noto Sans SC", "Noto Sans CJK SC"], ["Source Han Sans SC", "Source Han Sans CN", "思源黑体", "思源黑体 CN"]];
+		const indices = await order(fonts, families);
+		let fallback = fonts.length;
+		for (const index of indices) {
+			if (!current()) return;
+			try {
+				await inspect(fonts[index], "中文汉字编辑水印，。！？");
+				if (current()) return fonts[index];
+			} catch (error) {
+				if (error.missingGlyphs) fallback = Math.min(fallback, index);
+			}
+		}
+		if (current()) return fonts[fallback];
+	}
+
 	async add(fonts) {
 		let saved = true;
 		try {

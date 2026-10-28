@@ -3175,6 +3175,20 @@ func (e *businessEngine) fontFaces(args []platformValue) (any, error) {
 	return (ofdgo.FontFile{Data: data}).Faces()
 }
 
+// fontPreferenceOrder 按字体族偏好排列编辑字体候选索引
+// 入参: args 候选字体和字体族别名组的JSON数据
+// 返回: any 候选索引列表, error 错误信息
+func (e *businessEngine) fontPreferenceOrder(args []platformValue) (any, error) {
+	var request struct {
+		Faces    []ofdgo.FontFace `json:"faces"`
+		Families [][]string       `json:"families"`
+	}
+	if err := json.Unmarshal([]byte(args[0].String()), &request); err != nil {
+		return nil, err
+	}
+	return ofdgo.FontPreferenceOrder(request.Faces, request.Families), nil
+}
+
 // fontFace 提取编辑时选定的字体，供输入预览和保存共用
 // 入参: args 字体数据和零起始索引
 // 返回: any 独立字体数据, error 错误信息
@@ -8053,6 +8067,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoSaveRichText":           e.saveRichText,
 		"ofdgoPreviewRichText":        e.previewRichText,
 		"ofdgoCheckTextFont":          e.checkTextFont,
+		"ofdgoFontPreferenceOrder":    e.fontPreferenceOrder,
 		"ofdgoInsertImage":            e.insertImage,
 		"ofdgoInsertShape":            e.insertShape,
 		"ofdgoUpdatePathStyle":        e.updatePathStyle,

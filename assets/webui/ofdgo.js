@@ -113,6 +113,8 @@ function createDocumentState() {
 		outlineExpanded: new Map(),
 		textFonts: [],
 		textFontID: null,
+		textFontInitialized: false,
+		textFontInitializing: null,
 		textDefaults: { type: "TextObject", size: 16 * 25.4 / 72, color: "#000000", wrap: true, align: "left", paragraphHeight: 0, letterSpacing: 0 },
 		ofdBytes: null,
 		sourcePDF: false,
@@ -4363,13 +4365,12 @@ function editorFonts(item) {
 	return [...embedded.values(), ...fonts];
 }
 
-async function loadEditorFonts(requestPermission = true) {
-	const tab = documentTab(), target = tab.state;
-	const tasks = [];
-	if (!state.fontCatalogLoading && fontManager.canReadLocal() && !fontManager.catalogLoaded && fontManager.permission !== "denied"
+async function loadEditorFonts(requestPermission = true, tab = documentTab(), waitPending = false) {
+	const target = tab.state;
+	const tasks = waitPending ? [target.fontCatalogLoading, target.fontFacesLoading].filter(Boolean) : [];
+	if (!target.fontCatalogLoading && fontManager.canReadLocal() && !fontManager.catalogLoaded && fontManager.permission !== "denied"
 		&& (requestPermission || fontManager.permission === "granted")) {
-		target.fontCatalogLoading = true;
-		tasks.push((async () => {
+		target.fontCatalogLoading = (async () => {
 			try {
 				await fontManager.queryLocal();
 				refreshEditorFonts();
@@ -4378,13 +4379,13 @@ async function loadEditorFonts(requestPermission = true) {
 			} finally {
 				target.fontCatalogLoading = false;
 			}
-		})());
+		})();
+		tasks.push(target.fontCatalogLoading);
 	}
-	if (!state.fontFacesLoading && fontManager.userFonts.some(font => font.enabled && !font.faces)) {
-		target.fontFacesLoading = true;
+	if (!target.fontFacesLoading && fontManager.userFonts.some(font => font.enabled && !font.faces)) {
 		const wasmSeq = target.wasmSeq;
 		const current = () => !tab.closed && !target.wasmExited && target.wasmSeq === wasmSeq;
-		tasks.push((async () => {
+		target.fontFacesLoading = (async () => {
 			try {
 				await fontManager.loadFaces(data => callTabWASM(tab, "ofdgoFontFaces", data), current);
 				refreshEditorFonts();
@@ -4392,9 +4393,31 @@ async function loadEditorFonts(requestPermission = true) {
 				target.fontFacesLoading = false;
 				if (!current() && state.ready) loadEditorFonts(false);
 			}
-		})());
+		})();
+		tasks.push(target.fontFacesLoading);
 	}
 	await Promise.all(tasks);
+}
+
+async function initializeTextFont(tab) {
+	const target = tab.state;
+	if (target.textFontInitialized) return;
+	if (target.textFontInitializing) return target.textFontInitializing;
+	const wasmSeq = target.wasmSeq;
+	const current = () => !tab.closed && !target.wasmExited && target.wasmSeq === wasmSeq;
+	target.textFontInitializing = (async () => {
+		await loadEditorFonts(false, tab, true);
+		if (!current()) return;
+		const font = await fontManager.defaultFont((faces, families) => callTabWASM(tab, "ofdgoFontPreferenceOrder", JSON.stringify({
+			faces: faces.map(({ family, fullName, postscriptName, style, names }) => ({ family, fullName, postscriptName, style, names })), families
+		})), async (font, text) => callTabWASM(tab, "ofdgoCheckTextFont", await readTextFont(font, tab), text), current);
+		if (!current()) return;
+		target.textDefaults.fontChoice = font || (fontManager.editorFonts().length ? null : undefined);
+		target.textFontInitialized = true;
+		if (isForegroundDocument(tab)) refreshEditorFonts();
+	})();
+	try { await target.textFontInitializing; }
+	finally { target.textFontInitializing = null; }
 }
 
 function refreshEditorFonts() {
@@ -4446,9 +4469,9 @@ function updateTextFonts(item, refresh = false, preserve = false) {
 			state.textFonts.unshift(selected);
 		}
 		const mixed = (item?.items || item?.richText) && !id;
-		fontPicker.setFonts(state.textFonts, mixed ? null : selected || state.textFonts[0], preserve);
+		fontPicker.setFonts(state.textFonts, mixed ? null : selected || (state.textDefaults.fontChoice === null ? null : state.textFonts[0]), preserve);
 		el.textFont.placeholder = mixed ? "混合" : "";
-		if (!id && !item?.items && !item?.richText) state.textDefaults.fontChoice = state.textFonts[Number(fontPicker.value)];
+		if (!id && !item?.items && !item?.richText) state.textDefaults.fontChoice = state.textFonts[Number(fontPicker.value)] || (state.textDefaults.fontChoice === null ? null : undefined);
 	}
 }
 
@@ -6567,6 +6590,7 @@ async function openDocument(options = {}) {
 			return;
 		}
 		const pageFonts = state.sourcePDF && !nativeHost && !state.editorInfo ? await fontManager.files(fontManager.records()) : fonts;
+		if (state.editing) await initializeTextFont(tab);
 		if (openSeq !== state.openSeq) return;
 		tab.worker.configurePages?.(!state.editorInfo && !doc.encrypted && state.ofdBytes ? {
 			file: state.ofdBytes, fonts: pageFonts, pdf: state.sourcePDF, fontNames: state.sourcePDF ? [...fontManager.localEntries().keys()] : [], annotations: state.renderAnnotations, document: doc.documentIndex, version: doc.documentVersion
