@@ -3262,6 +3262,12 @@ button.outline-link:hover {
 	text-indent: inherit;
 }
 
+.edit-text div::after,
+.edit-text p::after {
+	content: "";
+	font-size: 0;
+}
+
 .edit-text span[data-glyph] {
 	position: relative;
 	-webkit-text-fill-color: transparent;
