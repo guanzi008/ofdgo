@@ -413,7 +413,9 @@ export class RichTextSession {
 	}
 	setFont(face, data, key) {
 		key ||= `temp-font-${crypto.randomUUID()}`;
+		const previous = this.faces.get(key);
 		this.faces.set(key, face);
+		if (previous && ![...this.faces.values()].includes(previous)) document.fonts.delete(previous);
 		if (data) this.imports.set(key, data);
 		document.fonts.add(face);
 		this.apply({ font: key });

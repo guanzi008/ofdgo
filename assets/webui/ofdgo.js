@@ -4423,11 +4423,13 @@ function updateTextFonts(item, refresh = false) {
 			if (document.activeElement === el.textFont && fontPicker.open) return;
 			state.textFontID = key;
 			state.textFonts = editorFonts(null);
-			for (const [font, face] of rich.faces) {
+			for (const font of rich.faces.keys()) {
 				const choice = rich.choices?.get(font);
-				state.textFonts.unshift(choice || { id: `embedded:${font}`, name: font === rich.editing.item.font ? rich.editing.item.fontName || font : face.family, embedded: !rich.imports.has(font), richKey: font });
+				state.textFonts.unshift({ ...(choice || { id: `embedded:${font}`,
+					name: state.doc?.fonts?.find(value => value.id === font)?.fontName || (font === rich.editing.item.font ? rich.editing.item.fontName : "") || font,
+					embedded: !rich.imports.has(font) }), richKey: font });
 			}
-			fontPicker.setFonts(state.textFonts, id === undefined ? null : state.textFonts.find(font => font.richKey === id || rich.choices?.get(id) === font));
+			fontPicker.setFonts(state.textFonts, id === undefined ? null : state.textFonts.find(font => font.richKey === id));
 			el.textFont.placeholder = id === undefined ? "混合" : "";
 		}
 		return;
@@ -4479,7 +4481,7 @@ async function changeTextFont() {
 			await face.load();
 			if (!isForegroundDocument(tab) || openSeq !== state.openSeq || canvasEditor.input !== editing) return;
 			editing.fontChoice = font;
-			if (item.draft) state.textDefaults.fontChoice = font;
+			if (item.draft && !font.richKey) state.textDefaults.fontChoice = font;
 			if (editing.rich) {
 				const key = font.richKey || (font.embedded ? font.id.slice(9) : `temp-font-${crypto.randomUUID()}`);
 				editing.rich.choices ||= new Map();
