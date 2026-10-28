@@ -4353,15 +4353,15 @@ async function validateRichText(item, model, width, fonts = []) {
 			attempted.add(id);
 			const original = (await callWASM("ofdgoEditorFont", id)).bytes;
 			const [source] = await callWASM("ofdgoFontFaces", original);
-			if (!source?.postscriptName) throw error;
+			if (!source?.postscriptName || !source.familyKey) throw error;
 			await fontManager.loadFaces(data => callWASM("ofdgoFontFaces", data));
-			const candidates = fontManager.editorFonts().filter(font => !font.disabled && font.postscriptName === source.postscriptName);
+			const candidates = fontManager.editorFonts().filter(font => !font.disabled && font.postscriptName === source.postscriptName && font.familyKey === source.familyKey);
 			let recovered;
 			for (const choice of candidates) {
 				try {
 					const data = await readTextFont(choice, tab);
 					const [face] = await callWASM("ofdgoFontFaces", data);
-					if (face?.postscriptName !== source.postscriptName) continue;
+					if (face?.postscriptName !== source.postscriptName || face.familyKey !== source.familyKey) continue;
 					await callWASM("ofdgoCheckTextFont", data, model.runs.filter(run => run.format.font === id).map(run => run.text).join(""));
 					recovered = { key: id, data, choice };
 					break;
@@ -4376,8 +4376,9 @@ async function validateRichText(item, model, width, fonts = []) {
 				rich.imports.set(id, recovered.data);
 				rich.choices.set(id, recovered.choice);
 				const previous = rich.faces.get(id);
-				if (previous) document.fonts.delete(previous);
-				rich.faces.set(id, face); document.fonts.add(face);
+				rich.faces.set(id, face);
+				if (previous && ![...rich.faces.values()].includes(previous)) document.fonts.delete(previous);
+				document.fonts.add(face);
 				if (!editing.composing && !editing.saving) { rich.selection(); rich.render(); updateObjectControls(canvasEditor.selected); }
 			}
 		}
