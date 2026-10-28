@@ -143,7 +143,7 @@ func scanEditorFontFilesMode(ctx context.Context, reader *Reader, index int, ins
 				return nil
 			}
 			for _, attr := range node.attrs {
-				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace {
+				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace && !textLayoutAttribute(node.name, attr) {
 					scan.unsafe = true
 				}
 			}

@@ -338,7 +338,9 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 			return err
 		}
 		object.state = copy.states[editorObjectID(copy.object)]
-		object.TextObject.layout = object.state.layout
+		if object.state.layout != nil {
+			object.TextObject.layout = object.state.layout
+		}
 		copy.object.TextObject.layout = object.TextObject.layout
 		if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
 			object.CompositeGraphicUnit.states = maps.Clone(copy.states)

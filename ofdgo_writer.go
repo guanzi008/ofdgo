@@ -1242,6 +1242,15 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 	switch object.Type {
 	case "TextObject", "Text":
 		obj := object.TextObject
+		metadata, err := obj.layoutMetadata()
+		if err != nil {
+			x.err = err
+			return
+		}
+		if metadata != "" {
+			attrs.add("xmlns:ofdgo", textLayoutNamespace)
+			attrs.add("ofdgo:Layout", metadata)
+		}
 		attrs.add("ID", obj.ID)
 		attrs.add("DrawParam", obj.DrawParam)
 		attrs.add("Boundary", obj.Boundary)

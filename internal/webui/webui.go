@@ -5001,7 +5001,7 @@ func (e *businessEngine) editorRichText(item map[string]any, object ofdgo.Graphi
 
 // getRichText 读取文字分段与段落选项，颜色转换为浏览器RGB格式
 // 入参: args 页码、对象标识和可选显式重排标记
-// 返回: any 富文本快照，携带重排标记时附带局部编辑框及页面变换, error 错误信息
+// 返回: any 富文本快照及可选编辑框，无法提升时返回unsupported, error 读取或排版错误
 func (e *businessEngine) getRichText(args []platformValue) (any, error) {
 	if e.currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
@@ -5011,6 +5011,10 @@ func (e *businessEngine) getRichText(args []platformValue) (any, error) {
 		return nil, err
 	}
 	value, frame, matrix, err := e.currentEditor.PrepareRichText(args[0].Int(), path, len(args) > 2 && args[2].Bool())
+	var editError *ofdgo.EditError
+	if len(args) > 2 && (errors.Is(err, ofdgo.ErrNotRichText) || errors.As(err, &editError) && editError.Code == ofdgo.EditLayoutRequired) {
+		return map[string]any{"unsupported": true}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -5067,7 +5071,13 @@ func (e *businessEngine) browserRichText(value ofdgo.RichText) map[string]any {
 	}
 	paragraphs := make([]any, len(value.Paragraphs))
 	for i, paragraph := range value.Paragraphs {
-		paragraphs[i] = map[string]any{"align": paragraph.Align}
+		entry := map[string]any{"align": paragraph.Align}
+		for key, value := range map[string]*float64{"lineHeight": paragraph.LineHeight, "letterSpacing": paragraph.LetterSpacing, "leftIndent": paragraph.LeftIndent, "rightIndent": paragraph.RightIndent, "firstLineIndent": paragraph.FirstLineIndent} {
+			if value != nil {
+				entry[key] = *value
+			}
+		}
+		paragraphs[i] = entry
 	}
 	layout := value.Layout
 	return map[string]any{"autoWidth": value.AutoWidth, "runs": runs, "paragraphs": paragraphs, "layout": map[string]any{

@@ -15,6 +15,9 @@
 package ofdgo
 
 import (
+	"crypto/sha256"
+	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"image/color"
@@ -34,7 +37,7 @@ type MissingGlyphError struct {
 
 // TextLayout 本地横向段落选项
 // Shape显式启用FontShaper，保存为标准TextCode和CGTransform，不改变阅读时的原文定位
-// Shaping提供可比较的塑形选项，非零值也会启用塑形，并随会话内文字编辑保留
+// Shaping提供可比较的塑形选项，非零值也会启用塑形，并随排版元数据保存
 // Wrap按CTM变换前的边界宽度折行，Align为left、center、right、justify或distributed
 // LineHeight为毫米单位的基线间距，0使用字体度量；LetterSpacing为字素间的附加毫米间距，可为负
 // LeftIndent和RightIndent为左右缩进，FirstLineIndent为每段首行相对左缩进的偏移，单位为毫米
@@ -63,10 +66,50 @@ type TextStyle struct {
 	Reflow bool
 }
 
-// textLayout 保存编辑中的原文与选项，不写入OFD，也不参与渲染
+// textLayout 保存可恢复的原文与排版选项，不参与阅读渲染
 type textLayout struct {
-	value   string
-	options TextLayout
+	value     string
+	options   TextLayout
+	autoWidth bool
+}
+
+// textLayoutNamespace 标识普通文字排版元数据，不包含资源引用
+const textLayoutNamespace = "https://ofdgo.aite.me/text-layout"
+
+// textLayoutAttribute 判断无资源引用的文字排版扩展属性
+// 入参: node 所属节点, attr 属性
+// 返回: bool 是否为本库排版属性
+func textLayoutAttribute(node xml.Name, attr xml.Attr) bool {
+	return classifyOFDNamespace(node.Space) != ofdXMLUnknown && (node.Local == "TextObject" || node.Local == "Text") && attr.Name.Space == textLayoutNamespace && attr.Name.Local == "Layout"
+}
+
+// textLayoutMetadata 保存原文、选项与标准定位摘要
+type textLayoutMetadata struct {
+	Text      string
+	Options   TextLayout
+	AutoWidth bool
+	Digest    string
+}
+
+// layoutDigest 计算与字体编号无关的文字定位摘要
+// 返回: string 摘要
+func (obj TextObject) layoutDigest() string {
+	codes := append([]TextCode(nil), obj.TextCode...)
+	for i := range codes {
+		codes[i].Value = string(textCodeRunes(codes[i].Value))
+	}
+	data, _ := json.Marshal(codes)
+	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
+// layoutMetadata 编码普通文字的排版语义，与标准定位一起保存
+// 返回: string 元数据, error 编码错误
+func (obj TextObject) layoutMetadata() (string, error) {
+	if obj.layout == nil {
+		return "", nil
+	}
+	data, err := json.Marshal(textLayoutMetadata{Text: obj.layout.value, Options: obj.layout.options, AutoWidth: obj.layout.autoWidth, Digest: obj.layoutDigest()})
+	return string(data), err
 }
 
 // Error 返回缺失字符的Unicode码点
@@ -106,7 +149,7 @@ func (e *Editor) StyleText(page int, ids []string, style TextStyle) (err error) 
 	return e.UpdateObjects(page, updates)
 }
 
-// UpdateTextContent 修改文字内容及样式，原文保留定位，已知段落按会话选项重排
+// UpdateTextContent 修改文字内容及样式，原文保留定位，已知段落按排版选项重排
 // 原文等长替换保留全部位移，单个TextCode内增删仅调整局部步进，跨定位段增删需显式重排
 // 入参: page 页面索引, id 文字对象标识, value 新内容, style 样式增量
 // 返回: error 错误信息

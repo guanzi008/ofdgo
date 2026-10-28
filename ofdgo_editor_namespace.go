@@ -76,7 +76,7 @@ func editorXMLGenerated(data []byte, namespace string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	prefix := editorXMLNamespacePrefix(root)
+	prefix := editorXMLNamespacePrefix(root, "ofd")
 	var patches []editorXMLPatch
 	var visit func(*editorXML, bool) error
 	visit = func(node *editorXML, declare bool) error {
@@ -152,9 +152,9 @@ func editorXMLGenerated(data []byte, namespace string) ([]byte, error) {
 }
 
 // editorXMLNamespacePrefix 选择未被当前作用域及子树占用的命名空间前缀
-// 入参: node 节点
+// 入参: node 节点, base 首选前缀
 // 返回: string 可用前缀
-func editorXMLNamespacePrefix(node *editorXML) string {
+func editorXMLNamespacePrefix(node *editorXML, base string) string {
 	used := make(map[string]bool)
 	collect := func(current *editorXML) {
 		for _, attr := range current.attrs {
@@ -174,9 +174,9 @@ func editorXMLNamespacePrefix(node *editorXML) string {
 		}
 	}
 	visit(node)
-	prefix := "ofd"
+	prefix := base
 	for index := 1; used[prefix]; index++ {
-		prefix = "ofd" + strconv.Itoa(index)
+		prefix = base + strconv.Itoa(index)
 	}
 	return prefix
 }

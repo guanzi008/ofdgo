@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"math"
 	"strconv"
@@ -430,6 +431,14 @@ func (obj *TextObject) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement
 		return err
 	}
 	*obj = TextObject(value)
+	for _, attr := range start.Attr {
+		if attr.Name.Space == textLayoutNamespace && attr.Name.Local == "Layout" {
+			var meta textLayoutMetadata
+			if json.Unmarshal([]byte(attr.Value), &meta) == nil && validateRichLayout(meta.Options) == nil && structureXMLText(meta.Text) && meta.Digest == obj.layoutDigest() {
+				obj.layout = &textLayout{value: meta.Text, options: meta.Options, autoWidth: meta.AutoWidth}
+			}
+		}
+	}
 	for _, attr := range ofdXMLStart(start).Attr {
 		if attr.Name.Local == "LineWidth" {
 			obj.LineWidthSet = obj.LineWidth == 0

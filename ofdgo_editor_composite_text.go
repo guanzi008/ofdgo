@@ -80,6 +80,14 @@ func (e *Editor) updateCompositeText(node *editorCompositeNode, member Composite
 	object := cloneEditorData(node.object)
 	text := cloneEditorData(member.Object.TextObject)
 	state := node.states[editorObjectID(node.object)]
+	if state.layout == nil && text.layout != nil {
+		x, _, err := e.richPlainOffset(text)
+		if err != nil {
+			return err
+		}
+		y, _ := strconv.ParseFloat(text.TextCode[0].Y, 64)
+		state.layout, state.origin = text.layout, [2]float64{x, y}
+	}
 	content, layout := text.TextLayout()
 	original := content
 	if style.Font != "" {
@@ -161,6 +169,7 @@ func (e *Editor) updateCompositeText(node *editorCompositeNode, member Composite
 		}
 		object.TextObject.FillColor = editorStyleColor(fill, member.Object.TextObject.FillColor)
 	}
+	object.TextObject.layout = state.layout
 	if err := node.update(object); err != nil {
 		return err
 	}

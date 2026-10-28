@@ -248,7 +248,6 @@ func (e *Editor) PageContext(ctx context.Context, index int) (*PageContent, erro
 			}
 			switch object.Type {
 			case "TextObject":
-				object.TextObject.layout = nil
 				layer.TextObject = append(layer.TextObject, object.TextObject)
 			case "PathObject":
 				layer.PathObject = append(layer.PathObject, object.PathObject)
@@ -803,9 +802,6 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 	}
 	if err := LayoutText(obj, value, options, metrics); err != nil {
 		return err
-	}
-	if obj.layout == nil && e.objectOrigin(obj.ID) != nil {
-		obj.layout = &textLayout{value: obj.Text(), options: options}
 	}
 	return nil
 }

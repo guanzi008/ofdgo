@@ -251,7 +251,9 @@ func (e *Editor) ungroupCompositeNode(renderer *Renderer, node *editorCompositeN
 			}
 			member.node.parent = &editorXML{name: xml.Name{Local: "Layer"}, parent: &editorXML{name: xml.Name{Local: "Content"}}}
 			member.object.state = states[editorObjectID(member.object)]
-			member.object.TextObject.layout = member.object.state.layout
+			if member.object.state.layout != nil {
+				member.object.TextObject.layout = member.object.state.layout
+			}
 			member.object.CompositeGraphicUnit.states = states
 			member.object.origin = &editorObjectOrigin{editor: e, document: e.documentIdentity(), data: member.data, node: member.node, object: member.object}
 			objects[i] = member.object

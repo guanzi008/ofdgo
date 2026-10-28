@@ -38,9 +38,34 @@ type RichText struct {
 	Paragraphs []RichTextParagraph `json:"paragraphs,omitempty"`
 }
 
-// RichTextParagraph 保存显式段落的对齐方式，空值沿用Layout，按LF分隔的段落顺序排列
+// RichTextParagraph 保存显式段落选项，空值沿用Layout，按LF分隔的段落顺序排列
 type RichTextParagraph struct {
-	Align string `json:"align"`
+	Align           string   `json:"align"`
+	LineHeight      *float64 `json:"lineHeight,omitempty"`
+	LetterSpacing   *float64 `json:"letterSpacing,omitempty"`
+	LeftIndent      *float64 `json:"leftIndent,omitempty"`
+	RightIndent     *float64 `json:"rightIndent,omitempty"`
+	FirstLineIndent *float64 `json:"firstLineIndent,omitempty"`
+}
+
+// ParagraphLayout 返回指定段落覆盖后的排版选项
+// 入参: index 段落序号
+// 返回: TextLayout 有效段落选项
+func (v RichText) ParagraphLayout(index int) TextLayout {
+	options := v.Layout
+	if index < 0 || index >= len(v.Paragraphs) {
+		return options
+	}
+	p := v.Paragraphs[index]
+	if p.Align != "" {
+		options.Align = p.Align
+	}
+	for _, pair := range []struct{ source, target *float64 }{{p.LineHeight, &options.LineHeight}, {p.LetterSpacing, &options.LetterSpacing}, {p.LeftIndent, &options.LeftIndent}, {p.RightIndent, &options.RightIndent}, {p.FirstLineIndent, &options.FirstLineIndent}} {
+		if pair.source != nil {
+			*pair.target = *pair.source
+		}
+	}
+	return options
 }
 
 // RichTextRun 保存文字及完整格式，换行使用LF，长度单位为毫米
@@ -154,8 +179,8 @@ func (v RichText) Validate() error {
 	if len(v.Paragraphs) != 0 && len(v.Paragraphs) != strings.Count(v.Text(), "\n")+1 {
 		return fmt.Errorf("rich text paragraph count does not match text")
 	}
-	for _, paragraph := range v.Paragraphs {
-		if err := validateRichLayout(TextLayout{Align: paragraph.Align}); err != nil {
+	for index := range v.Paragraphs {
+		if err := validateRichLayout(v.ParagraphLayout(index)); err != nil {
 			return err
 		}
 	}
@@ -249,12 +274,12 @@ func (v RichText) Slice(start, end int) (RichText, error) {
 	if err := v.checkRange(start, end); err != nil {
 		return RichText{}, err
 	}
-	result := RichText{Layout: v.Layout, Runs: v.sliceRuns(start, end)}
+	result := RichText{AutoWidth: v.AutoWidth, Layout: v.Layout, Runs: v.sliceRuns(start, end)}
 	if len(v.Paragraphs) > 0 {
 		chars := []rune(v.Text())
 		first := strings.Count(string(chars[:start]), "\n")
 		count := strings.Count(string(chars[start:end]), "\n") + 1
-		result.Paragraphs = slices.Clone(v.Paragraphs[first : first+count])
+		result.Paragraphs = cloneEditorData(v.Paragraphs[first : first+count])
 	}
 	if len(result.Runs) == 0 {
 		position := 0
@@ -298,7 +323,7 @@ func (v *RichText) Replace(start, end int, runs []RichTextRun) error {
 	if err := v.checkRange(start, end); err != nil {
 		return err
 	}
-	next := RichText{Layout: v.Layout, Runs: v.sliceRuns(0, start)}
+	next := RichText{AutoWidth: v.AutoWidth, Layout: v.Layout, Runs: v.sliceRuns(0, start)}
 	next.Runs = append(next.Runs, runs...)
 	next.Runs = append(next.Runs, v.sliceRuns(end, v.Len())...)
 	if len(next.Runs) == 0 {
@@ -318,6 +343,7 @@ func (v *RichText) Replace(start, end int, runs []RichTextRun) error {
 			next.Paragraphs = append(next.Paragraphs, v.Paragraphs[first])
 		}
 		next.Paragraphs = append(next.Paragraphs, v.Paragraphs[last+1:]...)
+		next.Paragraphs = cloneEditorData(next.Paragraphs)
 	}
 	next = normalizeRichText(next)
 	if err := next.Validate(); err != nil {
@@ -359,13 +385,31 @@ func (v *RichText) ApplyFormat(start, end int, patch TextFormatPatch) error {
 // 入参: start 起点, end 终点, align 对齐方式
 // 返回: error 无效范围或对齐方式
 func (v *RichText) AlignParagraphs(start, end int, align string) error {
+	if err := v.FormatParagraphs(start, end, RichTextParagraph{Align: align}); err != nil {
+		return err
+	}
+	if align == "" {
+		chars := []rune(v.Text())
+		first := strings.Count(string(chars[:start]), "\n")
+		last := strings.Count(string(chars[:max(start, end-1)]), "\n")
+		for i := first; i <= last; i++ {
+			v.Paragraphs[i].Align = ""
+		}
+	}
+	return nil
+}
+
+// FormatParagraphs 修改当前或选中段落的显式选项，未提供的字段保持原值
+// 入参: start 起点, end 终点, patch 段落增量
+// 返回: error 范围或排版错误
+func (v *RichText) FormatParagraphs(start, end int, patch RichTextParagraph) error {
 	if v == nil {
 		return fmt.Errorf("nil rich text")
 	}
 	if err := v.checkRange(start, end); err != nil {
 		return err
 	}
-	if err := validateRichLayout(TextLayout{Align: align}); err != nil {
+	if err := validateRichLayout((RichText{Paragraphs: []RichTextParagraph{patch}}).ParagraphLayout(0)); err != nil {
 		return err
 	}
 	chars := []rune(v.Text())
@@ -379,7 +423,19 @@ func (v *RichText) AlignParagraphs(start, end int, align string) error {
 		paragraphs = make([]RichTextParagraph, strings.Count(v.Text(), "\n")+1)
 	}
 	for i := first; i <= last; i++ {
-		paragraphs[i].Align = align
+		p := &paragraphs[i]
+		if patch.Align != "" {
+			p.Align = patch.Align
+		}
+		for _, pair := range []struct {
+			source *float64
+			target **float64
+		}{{patch.LineHeight, &p.LineHeight}, {patch.LetterSpacing, &p.LetterSpacing}, {patch.LeftIndent, &p.LeftIndent}, {patch.RightIndent, &p.RightIndent}, {patch.FirstLineIndent, &p.FirstLineIndent}} {
+			if pair.source != nil {
+				value := *pair.source
+				*pair.target = &value
+			}
+		}
 	}
 	v.Paragraphs = paragraphs
 	return nil

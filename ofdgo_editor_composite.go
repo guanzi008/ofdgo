@@ -334,7 +334,9 @@ func (n *editorCompositeNode) setStates(states map[string]editorCompositeState) 
 		}
 	}
 	visit(n.node)
-	n.object.TextObject.layout = n.states[editorObjectID(n.object)].layout
+	if state, ok := n.states[editorObjectID(n.object)]; ok {
+		n.object.TextObject.layout = state.layout
+	}
 }
 
 // setState 替换当前对象的会话记录并计入本次事务

@@ -92,7 +92,6 @@ func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, erro
 		return richLayout{}, err
 	}
 	options := value.Layout
-	available := width - options.LeftIndent - options.RightIndent
 	if !finite(width) || width <= 0 {
 		return richLayout{}, fmt.Errorf("invalid rich text width or indents")
 	}
@@ -126,14 +125,14 @@ func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, erro
 	chars := []rune(value.Text())
 	var face *typefont.Face
 	if value.AutoWidth && !options.Wrap {
-		width = max(1, options.LeftIndent+options.RightIndent+max(0, options.FirstLineIndent)+1)
-		for start := 0; start <= len(chars); {
+		width = 1
+		for start, paragraphIndex := 0, 0; start <= len(chars); paragraphIndex++ {
 			end := start
 			for end < len(chars) && chars[end] != '\n' {
 				end++
 			}
 			paragraph := chars[start:end]
-			local := richParagraphOptions(paragraph, options)
+			local := richParagraphOptions(paragraph, value.ParagraphLayout(paragraphIndex))
 			if local.Shaping.Bidi && face == nil && len(paragraph) > 0 {
 				face, err = typefont.ParseTTF(bytes.NewReader(metrics[owners[start]].font.Write()))
 				if err != nil {
@@ -148,16 +147,12 @@ func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, erro
 			for _, advance := range advances {
 				length += advance
 			}
-			width = max(width, local.LeftIndent+local.RightIndent+local.FirstLineIndent+length)
+			width = max(width, local.LeftIndent+local.RightIndent+max(0, local.FirstLineIndent)+1, local.LeftIndent+local.RightIndent+local.FirstLineIndent+length)
 			if end == len(chars) {
 				break
 			}
 			start = end + 1
 		}
-		available = width - options.LeftIndent - options.RightIndent
-	}
-	if !finite(available) || available <= 0 || !finite(available-options.FirstLineIndent) || available-options.FirstLineIndent <= 0 {
-		return richLayout{}, fmt.Errorf("invalid rich text width or indents")
 	}
 	result.width = width
 	var underlays []GraphicObject
@@ -169,9 +164,10 @@ func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, erro
 			end++
 		}
 		paragraph := chars[start:end]
-		local := options
-		if len(value.Paragraphs) > 0 && value.Paragraphs[paragraphIndex].Align != "" {
-			local.Align = value.Paragraphs[paragraphIndex].Align
+		local := value.ParagraphLayout(paragraphIndex)
+		available := width - local.LeftIndent - local.RightIndent
+		if !finite(available) || available <= 0 || !finite(available-local.FirstLineIndent) || available-local.FirstLineIndent <= 0 {
+			return richLayout{}, fmt.Errorf("invalid rich text width or indents")
 		}
 		local = richParagraphOptions(paragraph, local)
 		if local.Shaping.Bidi && face == nil && len(paragraph) > 0 {

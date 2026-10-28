@@ -207,7 +207,7 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			}
 		}
 		for _, attr := range token.Attr {
-			if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" || attr.Name.Local == "xmlns:ofd" || attr.Name.Space == XMLNamespace {
+			if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" || attr.Name.Local == "xmlns:ofd" || attr.Name.Space == XMLNamespace || textLayoutAttribute(token.Name, attr) {
 				continue
 			}
 			custom := len(s.stack) == 0 && token.Name.Local == "CustomTags" || len(s.stack) > 0 && s.stack[0] == "CustomTags"

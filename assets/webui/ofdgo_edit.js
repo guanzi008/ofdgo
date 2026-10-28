@@ -59,6 +59,17 @@ export function richTextAlignment(model, start = 0, end = model.runs.reduce((n, 
 	return align;
 }
 
+export function richTextLayout(model, start = 0, end = model.runs.reduce((n, run) => n + run.text.length, 0)) {
+	const [first, last] = paragraphRange(model.runs.map(run => run.text).join(""), start, end);
+	const value = { ...model.layout, ...model.paragraphs?.[first] };
+	for (const key of ["lineHeight", "letterSpacing", "leftIndent", "rightIndent", "firstLineIndent"]) {
+		value[key] ??= 0;
+		for (let i = first + 1; i <= last; i++) if ((model.paragraphs?.[i]?.[key] ?? model.layout[key] ?? 0) !== value[key]) value[key] = undefined;
+	}
+	value.align = richTextAlignment(model, start, end);
+	return value;
+}
+
 function replaceParagraphs(model, text, start, end, inserted, paragraphs) {
 	if (!model.paragraphs?.length && !paragraphs?.length) return;
 	const first = text.slice(0, start).split("\n").length - 1, last = text.slice(0, end).split("\n").length - 1;
@@ -179,6 +190,7 @@ export class RichTextSession {
 		this.model.runs = normalizeRuns(model.runs);
 		this.initial = JSON.stringify(this.model);
 		this.recordedParagraphs = this.model.paragraphs;
+		this.recordedLayout = this.model.layout;
 		this.faces = faces;
 		for (const face of faces.values()) document.fonts.add(face);
 		this.imports = new Map(imports.map(font => [font.key, font.data]));
@@ -232,13 +244,16 @@ export class RichTextSession {
 		const change = textChange(before, this.model.runs);
 		const entry = { change, typing: { ...this.typing }, caret: [...this.caret] }, old = this.entries[this.index];
 		const paragraphsChanged = JSON.stringify(this.recordedParagraphs) !== JSON.stringify(this.model.paragraphs);
+		const layoutChanged = JSON.stringify(this.recordedLayout) !== JSON.stringify(this.model.layout);
+		if (layoutChanged) entry.layout = { before: this.recordedLayout, after: this.model.layout };
+		this.recordedLayout = this.model.layout;
 		if (paragraphsChanged) entry.paragraphs = { before: this.recordedParagraphs, after: this.model.paragraphs };
 		this.recordedParagraphs = this.model.paragraphs;
 		const changed = change.before.length || change.after.length;
-		if (!changed && !paragraphsChanged && JSON.stringify(entry.typing) === JSON.stringify(old.typing)) return;
+		if (!changed && !paragraphsChanged && !layoutChanged && JSON.stringify(entry.typing) === JSON.stringify(old.typing)) return;
 		if (!changed) entry.change = null;
 		this.entries.splice(++this.index, Infinity, entry);
-		if (changed || paragraphsChanged) this.preview();
+		if (changed || paragraphsChanged || layoutChanged) this.preview();
 	}
 	undo(direction) {
 		if (this.editing.composing || this.editing.saving) return;
@@ -252,6 +267,9 @@ export class RichTextSession {
 		}
 		const paragraphs = (direction < 0 ? this.entries[this.index] : entry).paragraphs;
 		if (paragraphs) this.model.paragraphs = direction < 0 ? paragraphs.before : paragraphs.after;
+		const layout = (direction < 0 ? this.entries[this.index] : entry).layout;
+		if (layout) this.model.layout = direction < 0 ? layout.before : layout.after;
+		this.recordedLayout = this.model.layout;
 		this.recordedParagraphs = this.model.paragraphs;
 		this.index += direction;
 		this.typing = { ...entry.typing };
@@ -296,10 +314,15 @@ export class RichTextSession {
 		this.editor.options.onTextChange();
 	}
 	align(value) {
+		this.paragraph({ align: value });
+	}
+	paragraph(values) {
 		if (this.editing.composing || this.editing.saving) return;
 		this.remember();
 		const [start, end] = this.selection(), [first, last] = paragraphRange(this.text, start, end);
-		this.model.paragraphs = this.text.split("\n").map((_, i) => ({ align: i >= first && i <= last ? value : this.model.paragraphs?.[i]?.align || "" }));
+		const { wrap, ...patch } = values;
+		if (wrap !== undefined) this.model.layout = { ...this.model.layout, wrap };
+		if (Object.keys(patch).length) this.model.paragraphs = this.text.split("\n").map((_, i) => ({ align: "", ...this.model.paragraphs?.[i], ...(i >= first && i <= last ? patch : {}) }));
 		this.record(this.model.runs);
 		this.render();
 		this.editor.options.onTextChange();
@@ -350,7 +373,10 @@ export class RichTextSession {
 		const keys = new Set(runs.map(run => run.format.font));
 		const fonts = new Map([...keys].map(key => [key, this.imports.get(key) || this.resources.get(key)]).filter(([, data]) => data));
 		const first = this.text.slice(0, start).split("\n").length - 1;
-		const paragraphs = text.split("\n").map((_, i) => ({ align: this.model.paragraphs?.[first + i]?.align || this.model.layout.align || "left" }));
+		const paragraphs = text.split("\n").map((_, i) => {
+			const layout = { ...this.model.layout, ...this.model.paragraphs?.[first + i] };
+			return Object.fromEntries(["align", "lineHeight", "letterSpacing", "leftIndent", "rightIndent", "firstLineIndent"].map(key => [key, key === "align" ? layout[key] || "left" : layout[key] || 0]));
+		});
 		const clipboard = { token: crypto.randomUUID(), runs, text, paragraphs, scope: this.editor.options.textClipboardScope?.(),
 			fonts, faces: new Map([...this.faces].filter(([key]) => keys.has(key))), choices: new Map([...this.choices].filter(([key]) => keys.has(key))) };
 		if (this.editor.options.setTextClipboard) this.editor.options.setTextClipboard(clipboard);
@@ -411,7 +437,8 @@ export class RichTextSession {
 		const previous = this.renderedLines || [];
 		let offset = 0;
 		this.renderedLines = lines.map((parts, index) => {
-			const align = this.model.paragraphs?.[index]?.align || this.model.layout.align || "left";
+			const layout = { ...this.model.layout, ...this.model.paragraphs?.[index] };
+			const align = layout.align || this.model.layout.align || "left";
 			const distribute = align === "distributed" && !CSS.supports("text-justify", "inter-character");
 			const key = JSON.stringify([parts.map(part => [part.text, part.format, this.faces.get(part.format.font)?.family]), align, layout, distribute ? input.offsetWidth : null]);
 			let paragraph = (!autoWidth || !distribute) && previous[index]?.key === key && previous[index].node.parentNode === input ? previous[index].node : null;
@@ -431,6 +458,8 @@ export class RichTextSession {
 					paragraph.append(document.createElement("br"));
 				}
 				Object.assign(paragraph.style, { minWidth: layout.wrap ? "" : "max-content", textAlign: distribute ? "left" : align === "distributed" ? "justify" : align,
+					marginLeft: `${(layout.leftIndent || 0) * PX_PER_MM}px`, marginRight: `${(layout.rightIndent || 0) * PX_PER_MM}px`,
+					lineHeight: layout.lineHeight ? `${layout.lineHeight * PX_PER_MM}px` : "normal", letterSpacing: `${(layout.letterSpacing || 0) * PX_PER_MM}px`, textIndent: `${(layout.firstLineIndent || 0) * PX_PER_MM}px`,
 					textAlignLast: !distribute && align === "distributed" ? "justify" : "auto", textJustify: align === "distributed" ? "inter-character" : "auto" });
 			}
 			if (distribute && (autoWidth || previous[index]?.node !== paragraph)) distributed.push(paragraph);
@@ -1783,7 +1812,7 @@ export class CanvasEditor {
 			else paragraph.append(document.createElement("br"));
 			input.append(paragraph);
 		}
-		const left = rich?.model.layout.leftIndent || item.leftIndent || 0;
+		const left = rich ? 0 : item.leftIndent || 0;
 		const frame = { ...(rich?.frame || item.textFrame || { width: item.width, height: item.height, matrix: [1, 0, 0, 1, item.x, item.y] }) };
 		if (!rich?.frame && item.paragraphWidth != null) frame.width = item.paragraphWidth;
 		const [a, b, c, d, e, f] = frame.matrix;
@@ -1844,6 +1873,16 @@ export class CanvasEditor {
 				return;
 			}
 			event.preventDefault();
+			const copy = this.options.getTextClipboard ? this.options.getTextClipboard() : this.richClipboard;
+			if (copy && event.clipboardData.getData(RICH_CLIPBOARD) === copy.token && event.clipboardData.getData("text/plain") === copy.text && this.options.onRichInput) {
+				const data = new Map([RICH_CLIPBOARD, "text/plain"].map(key => [key, event.clipboardData.getData(key)]));
+				const value = editTextValue(input), caret = editTextSelection(input, editing.range);
+				Promise.resolve(this.options.onRichInput()).then(ready => {
+					if (ready && this.input === editing && editing.rich.text === value && (!caret || editing.rich.selection().every((at, i) => at === caret[i])))
+						return editing.rich.paste({ preventDefault() {}, clipboardData: { getData: key => data.get(key) || "" } });
+				}).catch(error => { if (this.input === editing) this.setTextError(error); });
+				return;
+			}
 			document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
 		});
 		input.addEventListener("beforeinput", event => {
@@ -1901,10 +1940,11 @@ export class CanvasEditor {
 			if (event.isComposing || editing.composing || editing.saving) {
 				return;
 			}
-			if (editing.rich && (event.ctrlKey || event.metaKey) && !event.altKey && ["b", "i", "u"].includes(event.key.toLowerCase())) {
+			if ((editing.rich || this.options.onTextFormat) && (event.ctrlKey || event.metaKey) && !event.altKey && ["b", "i", "u"].includes(event.key.toLowerCase())) {
 				event.preventDefault();
 				const key = { b: "bold", i: "italic", u: "underline" }[event.key.toLowerCase()];
-				editing.rich.apply({ [key]: editing.rich.state()[key] !== true });
+				if (this.options.onTextFormat) this.options.onTextFormat(key);
+				else editing.rich.apply({ [key]: editing.rich.state()[key] !== true });
 			} else if ((editing.source || editing.rich) && (event.ctrlKey || event.metaKey) && !event.altKey && ["z", "y"].includes(event.key.toLowerCase())) {
 				event.preventDefault();
 				this.textUndo(event.key.toLowerCase() === "y" || event.shiftKey ? 1 : -1);
@@ -1917,8 +1957,8 @@ export class CanvasEditor {
 				this.commitText();
 			}
 		});
-		input.addEventListener("copy", event => editing.rich?.copy(event));
-		input.addEventListener("cut", event => editing.rich?.copy(event, true));
+		input.addEventListener("copy", event => this.copyText(event));
+		input.addEventListener("cut", event => this.copyText(event, true));
 		if (editing.rich) editing.rich.render();
 		input.focus({ preventScroll: true });
 		if (!item.draft) document.getSelection().selectAllChildren(input);
@@ -1931,13 +1971,33 @@ export class CanvasEditor {
 		if (this.input?.rich) this.input.rich.undo(direction);
 		else this.restoreSourceText(direction);
 	}
+	copyText(event, cut = false) {
+		const editing = this.input;
+		if (!editing || editing.composing || editing.saving) return;
+		if (editing.rich) return editing.rich.copy(event, cut);
+		if (editing.item.selectionIDs) return;
+		const range = editTextSelection(editing.input, editing.range);
+		if (!range || range[0] === range[1]) return;
+		const [start, end] = range.sort((a, b) => a - b), text = editTextValue(editing.input).slice(start, end);
+		const model = richTextModel({ ...editing.item, ...editing.style, text });
+		const font = editing.fontData || editing.fontResource;
+		const clipboard = { token: crypto.randomUUID(), text, runs: model.runs, scope: this.options.textClipboardScope?.(),
+			fonts: new Map(font ? [[editing.item.font, font]] : []), faces: new Map([[editing.item.font, editing.face]]), choices: new Map(),
+			paragraphs: text.split("\n").map(() => ({ align: "left" })) };
+		if (this.options.setTextClipboard) this.options.setTextClipboard(clipboard);
+		else this.richClipboard = clipboard;
+		event.preventDefault();
+		event.clipboardData.setData("text/plain", text);
+		event.clipboardData.setData(RICH_CLIPBOARD, clipboard.token);
+		if (cut) document.execCommand("delete");
+	}
 
 	fitTextInput() {
 		const editing = this.input;
 		if (!editing || editing.source) return;
 		const { input, frame, item, rich } = editing;
 		const layout = rich?.model.layout || item;
-		const width = Math.max(0, frame.width - (layout.leftIndent || 0) - (layout.rightIndent || 0)) * PX_PER_MM + 4;
+		const width = Math.max(0, frame.width - (rich ? 0 : layout.leftIndent || 0) - (rich ? 0 : layout.rightIndent || 0)) * PX_PER_MM + 4;
 		Object.assign(input.style, { width: rich?.model.autoWidth && !layout.wrap ? "max-content" : `${width}px`, minWidth: "4px", minHeight: "0px", height: "auto" });
 	}
 
@@ -1992,7 +2052,7 @@ export class CanvasEditor {
 		document.removeEventListener("selectionchange", editing.selectionListener);
 		editing.history = null;
 		editing.range = null;
-		const [a, b, c, d, e, f] = editing.frame.matrix, left = rich.model.layout.leftIndent || 0;
+		const [a, b, c, d, e, f] = editing.frame.matrix, left = 0;
 		editing.input.style.transform = `matrix(${a},${b},${c},${d},${(e + a * left) * PX_PER_MM},${(f + b * left) * PX_PER_MM})`;
 		session.render();
 		session.preview();

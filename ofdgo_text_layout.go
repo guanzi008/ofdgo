@@ -143,10 +143,7 @@ func LayoutText(obj *TextObject, value string, options TextLayout, metrics FontM
 	}
 	obj.TextCode = codes
 	obj.CGTransform = nil
-	obj.layout = nil
-	if options != (TextLayout{}) {
-		obj.layout = &textLayout{value: value, options: options}
-	}
+	obj.layout = &textLayout{value: value, options: options, autoWidth: options == (TextLayout{})}
 	return nil
 }
 

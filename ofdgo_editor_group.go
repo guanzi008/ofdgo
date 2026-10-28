@@ -93,7 +93,10 @@ func (e *Editor) GroupObjects(page int, ids []string) (id string, err error) {
 		state := object.state
 		if object.Type == "TextObject" && object.TextObject.layout != nil {
 			state.layout = object.TextObject.layout
-			state.origin[0], _ = strconv.ParseFloat(object.TextObject.TextCode[0].X, 64)
+			state.origin[0], _, err = e.richPlainOffset(object.TextObject)
+			if err != nil {
+				return "", err
+			}
 			state.origin[1], _ = strconv.ParseFloat(object.TextObject.TextCode[0].Y, 64)
 		}
 		states[editorObjectID(object)] = state

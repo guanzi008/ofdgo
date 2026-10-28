@@ -741,7 +741,7 @@ func (e *Editor) promoteTextValue(t TextObject) (RichText, error) {
 		}
 		color = fmt.Sprintf("%d %d %d", r>>8, g>>8, b>>8)
 	}
-	result := RichText{AutoWidth: t.layout == nil, Runs: []RichTextRun{{Text: value, Format: TextFormat{Font: t.Font, Size: t.Size, Color: color, Bold: t.Weight == 700, Italic: t.Italic}}}, Layout: layout}
+	result := RichText{AutoWidth: t.layout == nil || t.layout.autoWidth, Runs: []RichTextRun{{Text: value, Format: TextFormat{Font: t.Font, Size: t.Size, Color: color, Bold: t.Weight == 700, Italic: t.Italic}}}, Layout: layout}
 	return result, result.Validate()
 }
 
@@ -1192,7 +1192,7 @@ func (e *Editor) PrepareRichText(page int, path ObjectPath, reflow bool) (RichTe
 	if err != nil {
 		return RichText{}, Box{}, Matrix{}, err
 	}
-	autoWidth := text.layout == nil
+	autoWidth := text.layout == nil || text.layout.autoWidth
 	if reflow {
 		value, layout := text.TextLayout()
 		layout.AutoBidi = true
