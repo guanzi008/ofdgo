@@ -4443,9 +4443,10 @@ async function beginCanvasText(index, box, surface, page) {
 		const item = { ...state.textDefaults, ...box, wrap: Boolean(box.wrap),
 			index, page, surface, node, text: "", draft: true, fontData: data };
 		const model = { ...richTextModel(item), autoWidth: !box.wrap };
-		const key = `temp-font-${crypto.randomUUID()}`;
+		const key = font.embedded ? font.id.slice(9) : `temp-font-${crypto.randomUUID()}`;
+		const embedded = font.embedded && state.doc?.fonts?.some(font => font.id === key && font.embedded);
 		model.runs[0].format.font = key;
-		canvasEditor.editText(item, face, null, { model, faces: new Map([[key, face]]), fonts: [{ key, data }] });
+		canvasEditor.editText(item, face, null, { model, faces: new Map([[key, face]]), fonts: embedded ? [] : [{ key, data }], resources: new Map([[key, data]]) });
 	} catch (err) {
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) showError(err, false);
 	} finally {
@@ -4608,8 +4609,12 @@ async function prepareTextFaces(tab, runs, font, key, value, rich) {
 	const candidates = [...choices.values()];
 	for (const choice of candidates) {
 		if (choice.menuFamily || ![...originals.values()].some(font => textFontIdentity(font || {}) === textFontIdentity(choice)) && (!font || textFontIdentity(choice) !== textFontIdentity(font))) continue;
-		const [metadata] = await callWASM("ofdgoFontFaces", await read(choice));
-		if (metadata) Object.assign(choice, metadata, { index: choice.index });
+		try {
+			const [metadata] = await callWASM("ofdgoFontFaces", await read(choice));
+			if (metadata) Object.assign(choice, metadata, { index: choice.index });
+		} catch (error) {
+			if (!current() || !font || textFontIdentity(choice) === textFontIdentity(font)) throw error;
+		}
 	}
 	const groups = await groupTextFonts(candidates, tab), changes = new Map(), prepared = new Map();
 	for (const run of runs) {
@@ -4675,7 +4680,9 @@ async function changeTextFace(font, key, value) {
 			tab.editTask = busy;
 			setBusy(true, "", 0, "", tab);
 			try {
-				const fonts = fontManager.editorFonts().filter(font => font.familyKey === source.familyKey && textFontSource(font) === textFontSource(source)), groups = await groupTextFonts(fonts, tab);
+				const available = source.embedded ? (state.doc?.fonts || []).filter(font => font.embedded || font.status === "matched").map(font => documentFontChoice(font.id)) : fontManager.editorFonts();
+				const fonts = [source, ...available.filter(font => textFontIdentity(font) !== textFontIdentity(source))].filter(font => font.familyKey === source.familyKey && textFontSource(font) === textFontSource(source));
+				const groups = await groupTextFonts(fonts, tab);
 				if (!current()) return;
 				const index = fonts.findIndex(choice => textFontIdentity(choice) === textFontIdentity(source));
 				const faces = (groups.find(group => group.includes(index)) || []).map(index => fonts[index]);
@@ -4726,6 +4733,7 @@ async function changeTextFace(font, key, value) {
 					rich.faces.set(entry.key, entry.face);
 					if (previous && ![...rich.faces.values()].includes(previous)) document.fonts.delete(previous);
 					if (!entry.choice.embedded) rich.imports.set(entry.key, entry.data);
+					else rich.resources.set(entry.key, entry.data);
 					rich.choices.set(entry.key, entry.choice);
 					document.fonts.add(entry.face);
 				}
