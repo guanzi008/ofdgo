@@ -968,16 +968,17 @@ export class CanvasEditor {
 			width: `${item.width * change.scale * PX_PER_MM}px`, height: `${item.height * change.scale * PX_PER_MM}px`,
 		});
 		if (item.contour) item.contour.svg.setAttribute("viewBox", `${item.x} ${item.y} ${item.width} ${item.height}`);
-		if (item.textFrame) {
-			const [a, b, c, d, e, f] = item.textFrame.matrix;
-			const box = textFrameBox(item);
-			for (const handle of item.node.children) {
-				if (handle.dataset.corner !== "w" && handle.dataset.corner !== "e") continue;
-				const x = box.x + (handle.dataset.corner === "e" ? box.width : 0), y = box.y + box.height / 2;
-				handle.style.left = `${(a * x + c * y + e - item.x) * change.scale * PX_PER_MM}px`;
-				handle.style.top = `${(b * x + d * y + f - item.y) * change.scale * PX_PER_MM}px`;
-				handle.style.cursor = a === 0 ? "var(--resize-vertical, ns-resize)" : "var(--resize-horizontal, ew-resize)";
-			}
+		if (item.textFrame) this.placeTextHandles(item, textFrameBox(item), item, change.scale);
+	}
+
+	placeTextHandles(item, box, bounds, scale = 1) {
+		const [a, b, c, d, e, f] = item.textFrame.matrix;
+		for (const handle of item.node.children) {
+			if (handle.dataset.corner !== "w" && handle.dataset.corner !== "e") continue;
+			const x = box.x + (handle.dataset.corner === "e" ? box.width : 0), y = box.y + box.height / 2;
+			handle.style.left = `${(a * x + c * y + e - bounds.x) * scale * PX_PER_MM}px`;
+			handle.style.top = `${(b * x + d * y + f - bounds.y) * scale * PX_PER_MM}px`;
+			handle.style.cursor = a === 0 ? "var(--resize-vertical, ns-resize)" : "var(--resize-horizontal, ew-resize)";
 		}
 	}
 
@@ -1066,7 +1067,7 @@ export class CanvasEditor {
 			const handles = !canEditObject(item, "transform") ? [] : lineShape(item.shape) ? ["start", "end"]
 				: item.shape || item.oriented || canEditObject(item, "stretch") ? ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
 					: item.type === "TextObject" && canEditObject(item, "reflow") && canEditObject(item, "layoutKnown")
-						? ["w", "e"] : ["nw", "ne", "sw", "se"];
+						? ["nw", "ne", "sw", "se", "w", "e"] : ["nw", "ne", "sw", "se"];
 			for (const corner of handles) {
 				const handle = document.createElement("span");
 				handle.className = `edit-handle edit-${corner}`;
@@ -1303,6 +1304,7 @@ export class CanvasEditor {
 				const bounds = transformedBox(box, frame.matrix);
 				Object.assign(drag.item.node.style, { left: `${bounds.x * PX_PER_MM}px`, top: `${bounds.y * PX_PER_MM}px`,
 					width: `${bounds.width * PX_PER_MM}px`, height: `${bounds.height * PX_PER_MM}px` });
+				this.placeTextHandles(drag.item, box, bounds);
 				return;
 			}
 			drag.box = reshapeBox({ geometry: drag.item }, to.x - from.x, 0, drag.corner, false);

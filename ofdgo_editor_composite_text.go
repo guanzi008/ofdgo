@@ -20,7 +20,7 @@ import (
 	"strconv"
 )
 
-// UpdateCompositeText 修改内部文字，原文保留定位，已知段落按会话选项重排
+// UpdateCompositeText 修改内部文字，原文保留定位，已知段落按排版选项重排
 // 空样式保留原字体、字号和颜色，显式改变字号时重新排版并保留首行基线
 // 方向和字形映射沿用RewriteText的定位校验，不改变原文中未修改的属性
 // 入参: page 页面索引, path 父复合路径, index 成员序号, value 文字, style 文字样式增量
@@ -29,7 +29,7 @@ func (e *Editor) UpdateCompositeText(page int, path ObjectPath, index int, value
 	return e.changeCompositeText(page, path, []int{index}, &value, style, nil, nil)
 }
 
-// StyleCompositeText 批量修改内部文字字体、字号或颜色，换字体保留原文字定位
+// StyleCompositeText 批量修改内部文字字体、字号或颜色，已知段落重排，原文保留定位
 // 更换字体时同步字形索引，无法逐字映射时需显式重排，缺字使整批操作失败
 // 入参: page 页面索引, path 父复合路径, indexes 成员序号, style 文字样式增量
 // 返回: error 错误信息
@@ -129,7 +129,7 @@ func (e *Editor) updateCompositeText(node *editorCompositeNode, member Composite
 		}
 		object.TextObject.TextCode = text.TextCode
 		object.TextObject.CGTransform = text.CGTransform
-	} else if options != nil || content != original || style.Size != 0 && style.Size != text.Size || state.layout != nil && state.layout.options.Shape && style.Font != "" && style.Font != object.TextObject.Font {
+	} else if options != nil || content != original || style.Size != 0 && style.Size != text.Size || state.layout != nil && style.Font != "" && style.Font != object.TextObject.Font {
 		if style.Size != 0 {
 			text.Size = style.Size
 		}
