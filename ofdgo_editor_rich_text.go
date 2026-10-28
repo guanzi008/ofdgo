@@ -743,7 +743,7 @@ func (e *Editor) promoteTextValue(t TextObject) (RichText, error) {
 		}
 		color = fmt.Sprintf("%d %d %d", r>>8, g>>8, b>>8)
 	}
-	result := RichText{Runs: []RichTextRun{{Text: value, Format: TextFormat{Font: t.Font, Size: t.Size, Color: color, Bold: t.Weight == 700, Italic: t.Italic}}}, Layout: layout}
+	result := RichText{AutoWidth: t.layout == nil, Runs: []RichTextRun{{Text: value, Format: TextFormat{Font: t.Font, Size: t.Size, Color: color, Bold: t.Weight == 700, Italic: t.Italic}}}, Layout: layout}
 	return result, result.Validate()
 }
 
@@ -1134,7 +1134,8 @@ func (e *Editor) TargetRichText(page int, path ObjectPath) (RichText, error) {
 	return value, err
 }
 
-// PrepareRichText 读取独立富文本模型和局部编辑框，显式重排时保留原首行起点及页面变换
+// PrepareRichText 读取独立富文本模型和局部编辑框，定位文字采用自然宽度，已知段落保留宽度
+// 显式重排保留原首行起点及页面变换，不从原始Boundary推断段落宽度
 // 入参: page 页面索引, path 完整对象路径, reflow 是否允许重排普通文字
 // 返回: RichText 内容, Box 局部编辑框, Matrix 页面变换, error 路径、外观或排版错误
 func (e *Editor) PrepareRichText(page int, path ObjectPath, reflow bool) (RichText, Box, Matrix, error) {
@@ -1193,6 +1194,7 @@ func (e *Editor) PrepareRichText(page int, path ObjectPath, reflow bool) (RichTe
 	if err != nil {
 		return RichText{}, Box{}, Matrix{}, err
 	}
+	autoWidth := text.layout == nil
 	if reflow {
 		value, layout := text.TextLayout()
 		layout.AutoBidi = true
@@ -1201,7 +1203,18 @@ func (e *Editor) PrepareRichText(page int, path ObjectPath, reflow bool) (RichTe
 		}
 	}
 	value, err := e.promoteTextValue(text)
-	return value, Box{W: frame.W, H: frame.H}, matrix.Multiply(TranslationMatrix(dx, dy)), err
+	if err != nil {
+		return RichText{}, Box{}, Matrix{}, err
+	}
+	value.AutoWidth = autoWidth
+	if autoWidth {
+		result, err := e.layoutRichText(value, frame.W)
+		if err != nil {
+			return RichText{}, Box{}, Matrix{}, err
+		}
+		frame.W, frame.H = result.width, result.bounds.Y+result.bounds.H
+	}
+	return value, Box{W: frame.W, H: frame.H}, matrix.Multiply(TranslationMatrix(dx, dy)), nil
 }
 
 // ReflowRichText 原子重排完整路径文字，保留局部宽度、页面变换及共享实例隔离

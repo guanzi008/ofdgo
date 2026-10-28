@@ -3401,7 +3401,7 @@ func (e *businessEngine) editorObjects(index int, text *ofdgo.PageText) ([]any, 
 						inverse, _ := matrix.Invert()
 						local := inverse.TransformBox(box)
 						width := math.Max(object.TextObject.Size, local.X+local.W)
-						if layout.Wrap {
+						if layout != (ofdgo.TextLayout{}) {
 							item["paragraphWidth"] = frame.W
 						}
 						frame = ofdgo.Box{W: width, H: math.Max(object.TextObject.Size, local.Y+local.H)}
@@ -4017,7 +4017,7 @@ func (e *businessEngine) compositeObjects(args []platformValue) (any, error) {
 				inverse, _ := member.Matrix.Invert()
 				local := inverse.TransformBox(box)
 				width := math.Max(object.Size, local.X+local.W)
-				if layout.Wrap {
+				if layout != (ofdgo.TextLayout{}) {
 					frame, err := object.TextFrame()
 					if err != nil {
 						return nil, err
@@ -4969,8 +4969,12 @@ func (e *businessEngine) editorRichText(item map[string]any, object ofdgo.Graphi
 	if err != nil {
 		return
 	}
-	frame := matrix.TransformBox(contentBounds)
 	format, layout := value.Runs[0].Format, value.Layout
+	selection := contentBounds
+	if !value.AutoWidth || layout.Wrap {
+		selection = ofdgo.Box{W: width, H: height}
+	}
+	frame := matrix.TransformBox(selection)
 	var content strings.Builder
 	for _, run := range value.Runs {
 		content.WriteString(run.Text)
@@ -4987,7 +4991,7 @@ func (e *businessEngine) editorRichText(item map[string]any, object ofdgo.Graphi
 	item["letterSpacing"], item["leftIndent"], item["rightIndent"], item["firstLineIndent"] = layout.LetterSpacing, layout.LeftIndent, layout.RightIndent, layout.FirstLineIndent
 	item["paragraphWidth"], item["bounds"] = width, e.editorBox(frame)
 	item["x"], item["y"], item["width"], item["height"] = frame.X, frame.Y, frame.W, frame.H
-	item["textFrame"] = map[string]any{"width": width, "height": height, "matrix": e.editorMatrix(matrix), "content": e.editorBox(contentBounds)}
+	item["textFrame"] = map[string]any{"width": width, "height": height, "matrix": e.editorMatrix(matrix)}
 	capabilities := item["capabilities"].(map[string]any)
 	for _, key := range []string{"textContent", "rewriteText", "replaceFont", "reflow", "layoutKnown", "paint"} {
 		capabilities[key] = true

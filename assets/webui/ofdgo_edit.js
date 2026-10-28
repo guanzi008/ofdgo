@@ -11,6 +11,10 @@ function sourceTextScale(editing) {
 	return Math.max(Math.hypot(a, b), Math.hypot(c, d)) || 1;
 }
 
+function textFrameBox(item) {
+	return { x: 0, y: 0, width: item.paragraphWidth ?? item.textFrame.width, height: item.textFrame.height };
+}
+
 export function fontFaceStyle(data) {
 	const style = { weight: "400", style: "normal" };
 	const bytes = ArrayBuffer.isView(data) ? new DataView(data.buffer, data.byteOffset, data.byteLength) : new DataView(data);
@@ -936,8 +940,8 @@ export class CanvasEditor {
 		});
 		if (item.contour) item.contour.svg.setAttribute("viewBox", `${item.x} ${item.y} ${item.width} ${item.height}`);
 		if (item.textFrame) {
-			const { matrix: [a, b, c, d, e, f], width, height } = item.textFrame;
-			const box = item.textFrame.content || { x: 0, y: 0, width, height };
+			const [a, b, c, d, e, f] = item.textFrame.matrix;
+			const box = textFrameBox(item);
 			for (const handle of item.node.children) {
 				if (handle.dataset.corner !== "w" && handle.dataset.corner !== "e") continue;
 				const x = box.x + (handle.dataset.corner === "e" ? box.width : 0), y = box.y + box.height / 2;
@@ -1265,7 +1269,7 @@ export class CanvasEditor {
 			if (drag.item.textFrame) {
 				const frame = drag.item.textFrame, [a, b, c, d] = frame.matrix;
 				const dx = (d * (to.x - from.x) - c * (to.y - from.y)) / (a * d - b * c);
-				const box = reshapeBox({ geometry: frame.content || { x: 0, y: 0, width: frame.width, height: frame.height } }, dx, 0, drag.corner, false);
+				const box = reshapeBox({ geometry: textFrameBox(drag.item) }, dx, 0, drag.corner, false);
 				drag.box = { x: drag.item.x + box.x, width: box.width };
 				const bounds = transformedBox(box, frame.matrix);
 				Object.assign(drag.item.node.style, { left: `${bounds.x * PX_PER_MM}px`, top: `${bounds.y * PX_PER_MM}px`,
@@ -1429,7 +1433,7 @@ export class CanvasEditor {
 			this.drag = null;
 			this.viewer.releasePointerCapture(drag.pointerID);
 			const frame = drag.item.textFrame;
-			const geometry = drag.item.oriented?.box || drag.item.geometry || (frame ? { x: drag.item.x + (frame.content?.x || 0), width: frame.content?.width ?? frame.width } : drag.item);
+			const geometry = drag.item.oriented?.box || drag.item.geometry || (frame ? { x: drag.item.x, width: textFrameBox(drag.item).width } : drag.item);
 			const changed = Object.keys(drag.box).some((key) => drag.box[key] !== geometry[key]);
 			const apply = drag.item.shape || drag.item.oriented ? this.options.onReshape : canEditObject(drag.item, "stretch") ? this.options.onResize : this.options.onTextWidth;
 			Promise.resolve(changed && apply(drag.item, drag.box)).finally(() => {
@@ -1779,9 +1783,9 @@ export class CanvasEditor {
 			else paragraph.append(document.createElement("br"));
 			input.append(paragraph);
 		}
-		const left = item.leftIndent || 0;
-		const frame = { ...(item.textFrame || { width: item.width, height: item.height, matrix: [1, 0, 0, 1, item.x, item.y] }) };
-		if (item.wrap && item.paragraphWidth != null) frame.width = item.paragraphWidth;
+		const left = rich?.model.layout.leftIndent || item.leftIndent || 0;
+		const frame = { ...(rich?.frame || item.textFrame || { width: item.width, height: item.height, matrix: [1, 0, 0, 1, item.x, item.y] }) };
+		if (!rich?.frame && item.paragraphWidth != null) frame.width = item.paragraphWidth;
 		const [a, b, c, d, e, f] = frame.matrix;
 		Object.assign(input.style, {
 			left: "0px", top: "0px",

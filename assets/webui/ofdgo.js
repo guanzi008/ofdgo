@@ -3968,7 +3968,7 @@ async function editCanvasObject(item, point = null) {
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
 		let rich = null;
 		if (item.richText) rich = await loadRichText(item, face, tab, data.bytes);
-		else if (!item.scoped && layoutKnown) {
+		else if (layoutKnown) {
 			try { rich = await loadRichText(item, face, tab, data.bytes); } catch {}
 		}
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
@@ -4284,7 +4284,6 @@ async function toggleTextTool() {
 	const font = state.textFonts[Number(fontPicker.value)];
 	state.textDefaults = { type: "TextObject", size: style.size, color: style.color, wrap: style.wrap,
 		bold: Boolean(style.bold), italic: Boolean(style.italic), underline: Boolean(style.underline), strikeout: Boolean(style.strikeout), shadow: Boolean(style.shadow), background: style.background || "",
-		wrapOverride: style === state.textDefaults ? style.wrapOverride : style.wrap,
 		align: style.align || "left", paragraphHeight: style.paragraphHeight || 0, letterSpacing: style.letterSpacing || 0,
 		leftIndent: style.leftIndent || 0, rightIndent: style.rightIndent || 0, firstLineIndent: style.firstLineIndent || 0,
 		fontChoice: font && !font.disabled ? font : state.textDefaults.fontChoice };
@@ -4312,7 +4311,7 @@ async function beginCanvasText(index, box, surface, page) {
 		await face.load();
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq || !surface.isConnected) return;
 		const node = document.createElement("div");
-		const item = { ...state.textDefaults, ...box, wrap: state.textDefaults.wrapOverride ?? box.wrap ?? state.textDefaults.wrap,
+		const item = { ...state.textDefaults, ...box, wrap: Boolean(box.wrap),
 			index, page, surface, node, text: "", draft: true, fontData: data };
 		const model = { ...richTextModel(item), autoWidth: !box.wrap };
 		const key = `temp-font-${crypto.randomUUID()}`;
@@ -4578,7 +4577,6 @@ async function changeTextAlignment() {
 
 async function changeParagraph(wrap) {
 	const item = currentTextStyle();
-	const explicitWrap = wrap !== undefined;
 	wrap ??= item.wrap;
 	if (document.body.hasAttribute("data-busy") || item.draft) return;
 	if (!el.textLineHeight.checkValidity()) {
@@ -4593,7 +4591,6 @@ async function changeParagraph(wrap) {
 	const spacing = inputMillimeters(el.textSpacing, item.letterSpacing || 0);
 	if (item === state.textDefaults) {
 		Object.assign(item, { wrap: Boolean(wrap), align: el.textAlign.value, paragraphHeight: height, letterSpacing: spacing });
-		if (explicitWrap) item.wrapOverride = Boolean(wrap);
 		updateObjectControls(canvasEditor.selected, true);
 		return;
 	}
@@ -12490,12 +12487,13 @@ function updateObjectControls(item, reset = false) {
 		el.undoButton.disabled = !state.editorInfo?.canUndo || !state.ready || state.exporting;
 		el.redoButton.disabled = !state.editorInfo?.canRedo || !state.ready || state.exporting;
 	}
-	el.textWrap.disabled = el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled || Boolean(item?.items || item?.draft) || Boolean(canvasEditor.input);
+	el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled || Boolean(item?.items || item?.draft) || Boolean(canvasEditor.input);
+	el.textWrap.disabled = el.textLineHeight.disabled || text === state.textDefaults;
 	const reflow = document.querySelector("#textReflow"), positioned = canvasEditor.input?.source && (item?.selectionIDs || !canEditObject(item, "layoutKnown"));
 	reflow.hidden = !positioned;
 	el.textWrap.hidden = !!positioned;
 	reflow.disabled = textDisabled || !canEditObject(item, "reflow") || !!canvasEditor.input?.reflow;
-	el.paragraphButton.disabled = el.textWrap.disabled;
+	el.paragraphButton.disabled = el.textLineHeight.disabled;
 	el.textAlign.disabled = el.textSize.disabled || Boolean(item?.items || item?.selectionIDs);
 	const layoutKnown = text === state.textDefaults || Boolean(item?.draft) || canEditObject(item, "layoutKnown");
 	const rich = canvasEditor.input?.rich;
