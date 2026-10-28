@@ -69,6 +69,7 @@ type richTextIndex struct {
 }
 
 // AddRichText 原子添加标准组合及持久化编辑标引，成功时只产生一条历史
+// 按给定宽度排版，高度随内容自适应
 // 入参: page 页面索引, box 页面编辑框, value 富文本内容
 // 返回: string 组合对象标识, error 排版、资源或持久化错误
 func (e *Editor) AddRichText(page int, box Box, value RichText) (string, error) {
@@ -96,7 +97,7 @@ func (e *Editor) AddRichText(page int, box Box, value RichText) (string, error) 
 	return id, nil
 }
 
-// UpdateRichText 原子替换富文本内容，保留对象标识、局部编辑框及页面变换
+// UpdateRichText 原子替换富文本内容，保留对象标识、段落宽度及页面变换，高度随内容调整
 // 安全普通文字显式重排后提升为组合；不修改共享的旧组合资源
 // 入参: page 页面索引, id 对象标识, value 完整富文本
 // 返回: error 识别、排版或提交错误
@@ -452,7 +453,7 @@ func (e *Editor) putCompositeRichTextCopies(page int, path ObjectPath, indexes [
 	return nil
 }
 
-// prepareRichText 构造独立组合资源和不含字体编号的编辑标引
+// prepareRichText 构造独立组合资源和不含字体编号的编辑标引，高度随排版内容自适应
 // 入参: box 页面或局部编辑框, value 富文本
 // 返回: GraphicObject 标准组合, richTextMetadata 标引, error 准备错误
 func (e *Editor) prepareRichText(box Box, value RichText) (GraphicObject, richTextMetadata, error) {
@@ -466,12 +467,9 @@ func (e *Editor) prepareRichText(box Box, value RichText) (GraphicObject, richTe
 	if err != nil {
 		return GraphicObject{}, richTextMetadata{}, err
 	}
-	box.W = result.width
-	if value.AutoWidth && !value.Layout.Wrap {
-		box.H = result.bounds.Y + result.bounds.H
-	}
+	box.W, box.H = result.width, result.bounds.Y+result.bounds.H
 	padX, padY := -min(0, result.bounds.X), -min(0, result.bounds.Y)
-	extent := Box{W: max(box.W, result.bounds.X+result.bounds.W) + padX, H: max(box.H, result.bounds.Y+result.bounds.H) + padY}
+	extent := Box{W: max(box.W, result.bounds.X+result.bounds.W) + padX, H: box.H + padY}
 	if !finite(extent.W) || !finite(extent.H) || extent.W <= 0 || extent.H <= 0 {
 		return GraphicObject{}, richTextMetadata{}, fmt.Errorf("rich text extent exceeds finite range")
 	}
@@ -494,7 +492,7 @@ func (e *Editor) prepareRichText(box Box, value RichText) (GraphicObject, richTe
 	if err != nil {
 		return GraphicObject{}, richTextMetadata{}, err
 	}
-	meta := richTextMetadata{Version: 1, Value: cloneEditorData(value), Frame: Box{W: box.W, H: max(box.H, result.bounds.Y+result.bounds.H)}, Extent: extent, Offset: [2]float64{padX, padY}, Anchors: result.anchors, Digest: richTextDigest(unit.object.CompositeGraphicUnit.Objects)}
+	meta := richTextMetadata{Version: 1, Value: cloneEditorData(value), Frame: Box{W: box.W, H: box.H}, Extent: extent, Offset: [2]float64{padX, padY}, Anchors: result.anchors, Digest: richTextDigest(unit.object.CompositeGraphicUnit.Objects)}
 	for i := range meta.Value.Runs {
 		meta.Value.Runs[i].Format.Font = ""
 	}

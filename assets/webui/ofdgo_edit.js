@@ -1037,7 +1037,7 @@ export class CanvasEditor {
 			const handles = !canEditObject(item, "transform") ? [] : lineShape(item.shape) ? ["start", "end"]
 				: item.shape || item.oriented || canEditObject(item, "stretch") ? ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
 					: item.type === "TextObject" && canEditObject(item, "reflow") && canEditObject(item, "layoutKnown")
-						? ["nw", "n", "ne", "e", "se", "s", "sw", "w"] : ["nw", "ne", "sw", "se"];
+						? ["w", "e"] : ["nw", "ne", "sw", "se"];
 			for (const corner of handles) {
 				const handle = document.createElement("span");
 				handle.className = `edit-handle edit-${corner}`;

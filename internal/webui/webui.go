@@ -4956,11 +4956,12 @@ func (e *businessEngine) editorRichText(item map[string]any, object ofdgo.Graphi
 	if len(value.Runs) == 0 || object.CompositeGraphicUnit.Clips != nil {
 		return
 	}
-	width, height := local.W, local.H
+	width := local.W
 	_, contentBounds, err := e.currentEditor.LayoutRichText(value, width)
 	if err != nil {
 		return
 	}
+	height := contentBounds.Y + contentBounds.H
 	format, layout := value.Runs[0].Format, value.Layout
 	selection := contentBounds
 	if !value.AutoWidth || layout.Wrap {
