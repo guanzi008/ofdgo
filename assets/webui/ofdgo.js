@@ -4363,17 +4363,18 @@ function editorFonts(item) {
 	return [...embedded.values(), ...fonts];
 }
 
-async function loadEditorFonts() {
+async function loadEditorFonts(requestPermission = true) {
 	const tab = documentTab(), target = tab.state;
 	const tasks = [];
-	if (!state.fontCatalogLoading && fontManager.canReadLocal() && !fontManager.catalogLoaded && fontManager.permission !== "denied") {
+	if (!state.fontCatalogLoading && fontManager.canReadLocal() && !fontManager.catalogLoaded && fontManager.permission !== "denied"
+		&& (requestPermission || fontManager.permission === "granted")) {
 		target.fontCatalogLoading = true;
 		tasks.push((async () => {
 			try {
 				await fontManager.queryLocal();
-				if (isForegroundDocument(tab)) refreshEditorFonts();
+				refreshEditorFonts();
 			} catch (err) {
-				if (isForegroundDocument(tab)) setStatus(err?.name === "NotAllowedError" ? "系统字体未授权" : String(err.message || err));
+				if (requestPermission && isForegroundDocument(tab)) setStatus(err?.name === "NotAllowedError" ? "系统字体未授权" : String(err.message || err));
 			} finally {
 				target.fontCatalogLoading = false;
 			}
@@ -4381,12 +4382,15 @@ async function loadEditorFonts() {
 	}
 	if (!state.fontFacesLoading && fontManager.userFonts.some(font => font.enabled && !font.faces)) {
 		target.fontFacesLoading = true;
+		const wasmSeq = target.wasmSeq;
+		const current = () => !tab.closed && !target.wasmExited && target.wasmSeq === wasmSeq;
 		tasks.push((async () => {
 			try {
-				await fontManager.loadFaces(data => callTabWASM(tab, "ofdgoFontFaces", data));
-				if (isForegroundDocument(tab)) refreshEditorFonts();
+				await fontManager.loadFaces(data => callTabWASM(tab, "ofdgoFontFaces", data), current);
+				refreshEditorFonts();
 			} finally {
 				target.fontFacesLoading = false;
+				if (!current() && state.ready) loadEditorFonts(false);
 			}
 		})());
 	}
@@ -4394,11 +4398,7 @@ async function loadEditorFonts() {
 }
 
 function refreshEditorFonts() {
-	const open = fontPicker.open;
-	const selected = state.textFonts[Number(fontPicker.value)];
-	const query = el.textFont.value === (selected?.fullName || selected?.name || "") ? "" : el.textFont.value;
-	updateTextFonts(canvasEditor.selected, true);
-	if (open && !el.textFont.disabled) { if (query) el.textFont.value = query; fontPicker.show(query, false); }
+	updateTextFonts(canvasEditor.selected, true, true);
 }
 
 async function readTextFont(font, tab = documentTab()) {
@@ -4413,14 +4413,14 @@ async function readTextFont(font, tab = documentTab()) {
 	return result.bytes;
 }
 
-function updateTextFonts(item, refresh = false) {
+function updateTextFonts(item, refresh = false, preserve = false) {
 	item = selectedText(item);
 	const rich = canvasEditor.input?.rich;
 	if (rich) {
 		const format = rich.state(), id = format.font;
 		const key = `rich:${id ?? "mixed"}:${rich.faces.size}`;
 		if (refresh || state.textFontID !== key) {
-			if (document.activeElement === el.textFont && fontPicker.open) return;
+			if (!preserve && document.activeElement === el.textFont && fontPicker.open) return;
 			state.textFontID = key;
 			state.textFonts = editorFonts(null);
 			for (const font of rich.faces.keys()) {
@@ -4429,7 +4429,7 @@ function updateTextFonts(item, refresh = false) {
 					name: state.doc?.fonts?.find(value => value.id === font)?.fontName || (font === rich.editing.item.font ? rich.editing.item.fontName : "") || font,
 					embedded: !rich.imports.has(font) }), richKey: font });
 			}
-			fontPicker.setFonts(state.textFonts, id === undefined ? null : state.textFonts.find(font => font.richKey === id));
+			fontPicker.setFonts(state.textFonts, id === undefined ? null : state.textFonts.find(font => font.richKey === id), preserve);
 			el.textFont.placeholder = id === undefined ? "混合" : "";
 		}
 		return;
@@ -4446,7 +4446,7 @@ function updateTextFonts(item, refresh = false) {
 			state.textFonts.unshift(selected);
 		}
 		const mixed = (item?.items || item?.richText) && !id;
-		fontPicker.setFonts(state.textFonts, mixed ? null : selected || state.textFonts[0]);
+		fontPicker.setFonts(state.textFonts, mixed ? null : selected || state.textFonts[0], preserve);
 		el.textFont.placeholder = mixed ? "混合" : "";
 		if (!id && !item?.items && !item?.richText) state.textDefaults.fontChoice = state.textFonts[Number(fontPicker.value)];
 	}
@@ -5262,6 +5262,7 @@ async function boot() {
 		updateControls();
 		updateLocalFontButton();
 		await fontManager.refreshPermission();
+		loadEditorFonts(false);
 		if (openSeq === state.openSeq) {
 			setStatus(fontsRestored ? STATUS.ready : "字体读取失败");
 			setBusy(false);
@@ -6281,7 +6282,8 @@ async function changeFont(font, changes) {
 }
 
 function renderFontList() {
-	updateTextFonts(canvasEditor.selected, true);
+	refreshEditorFonts();
+	if (state.ready) loadEditorFonts(false);
 	el.fontList.replaceChildren();
 	const fonts = fontManager.records();
 	if (!fonts.length) {

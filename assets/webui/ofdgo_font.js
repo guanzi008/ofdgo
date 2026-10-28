@@ -5,13 +5,14 @@ export class FontPicker {
 		Object.assign(this, { input, toggle, list, onChange, onOpen, fonts: [], value: "", active: -1, open: false });
 		input.addEventListener("input", () => this.show(input.value));
 		input.addEventListener("focus", () => input.select());
-		input.addEventListener("click", () => { if (!this.open) this.show(); });
+		input.addEventListener("pointerdown", event => { if (event.button === 0 && !this.open) event.preventDefault(); });
+		input.addEventListener("click", () => { if (!this.open) { input.focus(); input.select(); this.show(); } });
 		input.addEventListener("keydown", event => this.keyDown(event));
 		input.addEventListener("blur", () => { this.commitExact(); this.close(); });
 		toggle.addEventListener("pointerdown", event => event.preventDefault());
 		toggle.addEventListener("click", () => {
 			if (this.open) this.close();
-			else { input.focus(); this.show(); }
+			else { input.focus(); input.select(); this.show(); }
 		});
 		list.addEventListener("pointerdown", event => {
 			if (event.target.closest(".font-option")) event.preventDefault();
@@ -23,8 +24,9 @@ export class FontPicker {
 		window.addEventListener("resize", () => this.close());
 	}
 
-	setFonts(fonts, selected) {
-		this.close();
+	setFonts(fonts, selected, preserve = false) {
+		const open = preserve && this.open;
+		if (!open) this.close();
 		this.fonts = fonts;
 		this.names = new Map();
 		for (const font of fonts) {
@@ -33,7 +35,12 @@ export class FontPicker {
 		}
 		const key = font => font?.richKey || font?.id || font?.postscriptName;
 		this.value = !fonts.length ? "" : selected === null ? "-1" : String(Math.max(0, fonts.findIndex(font => key(font) === key(selected))));
-		this.restore();
+		if (open) {
+			const active = this.matches[this.active]?.font;
+			this.show(this.query, false);
+			const index = active ? this.matches.findIndex(({ font }) => !font.disabled && key(font) === key(active)) : -1;
+			if (index >= 0) this.activate(index);
+		} else this.restore();
 	}
 
 	setDisabled(disabled) {
@@ -43,7 +50,11 @@ export class FontPicker {
 
 	restore() {
 		const font = this.fonts[Number(this.value)];
-		this.input.value = font?.fullName || font?.name || "";
+		const value = font?.fullName || font?.name || "";
+		if (this.input.value !== value) {
+			this.input.value = value;
+			if (document.activeElement === this.input) this.input.select();
+		}
 		this.input.scrollLeft = 0;
 		this.input.title = font ? [this.input.value, this.sourceLabel(font)].filter(Boolean).join(" · ") : "";
 	}
@@ -56,6 +67,7 @@ export class FontPicker {
 
 	show(query = "", load = true) {
 		if (this.input.disabled) return;
+		this.query = query;
 		const normalize = value => value.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ").trim();
 		const terms = normalize(query).split(" ").filter(Boolean);
 		this.matches = this.fonts.map((font, index) => ({ font, index })).filter(({ font }) => {
@@ -314,12 +326,12 @@ export class FontManager {
 		}), ...this.catalog];
 	}
 
-	async loadFaces(inspect) {
-		while (true) {
+	async loadFaces(inspect, current = () => true) {
+		while (current()) {
 			const file = this.userFonts.find(font => font.enabled && !font.faces);
 			if (!file) return;
 			try { file.faces = await inspect(await this.read(file)); }
-			catch { file.faces = []; }
+			catch { if (!current()) return; file.faces = []; }
 		}
 	}
 
