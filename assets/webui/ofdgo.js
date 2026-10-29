@@ -1808,6 +1808,7 @@ el.annotationButton.addEventListener("click", toggleAnnotations);
 document.addEventListener("copy", copySelection);
 document.addEventListener("cut", copySelection);
 el.viewerPanel.addEventListener("paste", pasteEditorContent);
+el.editorTools.addEventListener("paste", pasteEditorContent);
 document.addEventListener("selectionchange", syncSelection);
 el.exportFormat.addEventListener("change", () => updateDPIControl());
 el.outputCompression.addEventListener("change", () => {
@@ -1934,6 +1935,11 @@ el.documentNewTab.addEventListener("click", openEmptyDocumentTab);
 updateSidebarState();
 boot();
 
+function editorShortcutTarget(target) {
+	const field = target.closest?.("input, textarea, select, [contenteditable]");
+	return !field || el.editorTools.contains(field) && field.matches('select, input[type="checkbox"], input[type="radio"], input[type="color"], input[type="range"]');
+}
+
 function handleKeyDown(event) {
 	if (sealPreview) {
 		if (event.key === "Escape") { event.preventDefault(); finishSealPosition(); }
@@ -1995,9 +2001,7 @@ function handleKeyDown(event) {
 		}
 	}
 	if (event.ctrlKey || event.metaKey) {
-		const field = target.closest("input, textarea, select, [contenteditable]");
-		const editorControl = field && el.editorTools.contains(field) && field.matches('select, input[type="checkbox"], input[type="radio"], input[type="color"], input[type="range"]');
-		if (state.editing && (!field || editorControl)
+		if (state.editing && editorShortcutTarget(target)
 			&& (key.toLowerCase() === "z" || (!event.shiftKey && key.toLowerCase() === "y"))) {
 			event.preventDefault();
 			(key.toLowerCase() === "y" || event.shiftKey ? el.redoButton : el.undoButton).click();
@@ -10854,8 +10858,9 @@ async function selectDocumentText() {
 
 function copyEditorSelection(event) {
 	const tab = documentTab(), state = tab.state;
-	if (!state.editing || !canvasEditor.enabled || !canvasEditor.selected || !el.viewerPanel.contains(event.target)
-		|| canvasEditor.input || canvasEditor.crop || canvasEditor.drag || document.body.hasAttribute("data-busy")) return false;
+	if (!state.editing || !canvasEditor.enabled || !canvasEditor.selected || !editorShortcutTarget(event.target)
+		|| !el.viewerPanel.contains(event.target) && !el.editorTools.contains(event.target)
+		|| canvasEditor.input || canvasEditor.crop || canvasEditor.drag || document.body.hasAttribute("data-busy") || formDialogOpen()) return false;
 	const items = canvasEditor.items().slice().sort((a, b) => a.order - b.order);
 	const cut = event.type === "cut";
 	if (!canEditObject(canvasEditor.selected, "copy") || cut && !canEditObject(canvasEditor.selected, "delete")) {
@@ -10931,7 +10936,7 @@ function visiblePageBounds(index) {
 
 async function pasteEditorContent(event) {
 	const tab = documentTab(), state = tab.state;
-	if (!state.editing || event.target.closest?.("input, textarea, select, [contenteditable]") || formDialogOpen()) return;
+	if (!state.editing || !editorShortcutTarget(event.target) || formDialogOpen()) return;
 	event.preventDefault();
 	const token = event.clipboardData.getData(OBJECT_CLIPBOARD_TYPE);
 	const files = Array.from(event.clipboardData.files);
@@ -11000,7 +11005,7 @@ async function pasteEditorContent(event) {
 
 function copySelection(event) {
 	if (sealPreview) return;
-	if (event.target.closest?.("input, textarea, [contenteditable]")) {
+	if (!editorShortcutTarget(event.target)) {
 		return;
 	}
 	const selection = document.getSelection();
