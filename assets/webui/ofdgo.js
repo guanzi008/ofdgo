@@ -1995,7 +1995,9 @@ function handleKeyDown(event) {
 		}
 	}
 	if (event.ctrlKey || event.metaKey) {
-		if (state.editing && !target.closest("input, textarea, select, [contenteditable]")
+		const field = target.closest("input, textarea, select, [contenteditable]");
+		const editorControl = field && el.editorTools.contains(field) && field.matches('select, input[type="checkbox"], input[type="radio"], input[type="color"], input[type="range"]');
+		if (state.editing && (!field || editorControl)
 			&& (key.toLowerCase() === "z" || (!event.shiftKey && key.toLowerCase() === "y"))) {
 			event.preventDefault();
 			(key.toLowerCase() === "y" || event.shiftKey ? el.redoButton : el.undoButton).click();
