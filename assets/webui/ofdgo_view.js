@@ -292,6 +292,14 @@ export function createPageView(context) {
 		unmountPage(index) {
 			const shell = pageView.pageShell(index);
 			if (!shell) return;
+			if (context.state.editing && shell.classList.contains("rendered")) {
+				const bounds = shell.getBoundingClientRect(), viewport = context.el.viewerPanel.getBoundingClientRect();
+				const margin = context.state.pageWindow?.overscan ?? 600;
+				if (bounds.bottom >= viewport.top - margin && bounds.top <= viewport.bottom + margin) {
+					context.state.selectedPages.add(index);
+					return;
+				}
+			}
 			const selection = document.getSelection();
 			const range = !selection.isCollapsed && selection.rangeCount ? selection.getRangeAt(0) : null;
 			if (context.canvasEditor.input?.item.index === index || context.canvasEditor.crop?.item.index === index
