@@ -1,5 +1,5 @@
 # 基础镜像
-FROM alpine:3.24.2
+FROM alpine:3.24.3
 
 # 作者信息
 LABEL authors="肖其顿 (XIAO QI DUN)"
