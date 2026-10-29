@@ -295,7 +295,8 @@ export function createPageView(context) {
 			if (context.state.editing && shell.classList.contains("rendered")) {
 				const bounds = shell.getBoundingClientRect(), viewport = context.el.viewerPanel.getBoundingClientRect();
 				const margin = context.state.pageWindow?.overscan ?? 600;
-				if (bounds.bottom >= viewport.top - margin && bounds.top <= viewport.bottom + margin) {
+				const bottom = Math.max(bounds.bottom, bounds.top + shell.scrollHeight);
+				if (bottom >= viewport.top - margin && bounds.top <= viewport.bottom + margin) {
 					context.state.selectedPages.add(index);
 					return;
 				}
