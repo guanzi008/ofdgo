@@ -5703,6 +5703,20 @@ func (e *businessEngine) orderObjects(args []platformValue) (any, error) {
 	})
 }
 
+// distributionAxes 获取画布选区可用的等间距分布方向
+// 入参: args 页面索引和画布对象标识数组
+// 返回: any 可用方向, error 路径或度量错误
+func (e *businessEngine) distributionAxes(args []platformValue) (any, error) {
+	if e.currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	paths, err := e.editorTargetPaths(e.stringsFromJS(args[1]))
+	if err != nil {
+		return nil, err
+	}
+	return e.currentEditor.DistributionAxes(args[0].Int(), paths)
+}
+
 // distributeObjects 按指定轴等距分布选区
 // 入参: args 页面索引、对象标识数组和分布轴
 // 返回: any 文档信息, error 错误信息
@@ -8159,6 +8173,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoImportObjects":          e.importObjects,
 		"ofdgoOrderObjects":           e.orderObjects,
 		"ofdgoDistributeObjects":      e.distributeObjects,
+		"ofdgoDistributionAxes":       e.distributionAxes,
 		"ofdgoRotateObjects":          e.rotateObjects,
 		"ofdgoFlipObjects":            e.flipObjects,
 		"ofdgoCropImage":              e.cropImage,

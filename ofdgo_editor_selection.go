@@ -808,6 +808,40 @@ func (e *Editor) ResizeTargets(page int, paths []ObjectPath, box Box) error {
 	return e.TransformTargets(page, paths, Matrix{a: sx, d: sy, e: box.X - bounds.X*sx, f: box.Y - bounds.Y*sy})
 }
 
+// DistributionAxes 获取选区可保持位置顺序的等间距分布方向，不修改文档或历史
+// 入参: page 页面索引, paths 按绘制顺序排列的完整路径
+// 返回: []string 可用的horizontal和vertical方向, error 路径或度量错误
+func (e *Editor) DistributionAxes(page int, paths []ObjectPath) ([]string, error) {
+	objects, annotations, groups, err := editorTargetGroups(paths)
+	if err != nil {
+		return nil, err
+	}
+	var boxes []Box
+	var positions []editorObjectPosition
+	if len(groups) == 0 {
+		boxes, positions, _, err = e.selectionGeometry(page, objects, annotations)
+	} else {
+		boxes, _, _, err = e.targetGeometry(page, paths)
+		positions = make([]editorObjectPosition, len(paths))
+		for i := range positions {
+			positions[i].index = i
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	axes := []string{}
+	if len(boxes) < 3 {
+		return axes, nil
+	}
+	for _, axis := range []string{"horizontal", "vertical"} {
+		if _, err := editorDistribution(boxes, positions, axis); err == nil {
+			axes = append(axes, axis)
+		}
+	}
+	return axes, nil
+}
+
 // ArrangeTargets 对齐或等距分布跨容器选区，单选对齐页面
 // 入参: page 页面索引, paths 按绘制顺序排列的完整路径, distribute 是否分布, direction 对齐方向或分布轴
 // 返回: error 路径、方向或编辑错误

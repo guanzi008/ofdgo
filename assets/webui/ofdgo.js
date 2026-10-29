@@ -110,6 +110,7 @@ function createDocumentState() {
 		styleOriginal: null,
 		objectClipboardToken: null,
 		styleClipboard: null,
+		objectDistribution: null,
 		outlineExpanded: new Map(),
 		textFonts: [],
 		textFontID: null,
@@ -1260,7 +1261,7 @@ el.objectAlign.addEventListener("change", () => {
 el.objectDistribute.addEventListener("change", () => {
 	const axis = el.objectDistribute.value;
 	el.objectDistribute.value = "";
-	if (axis && canvasEditor.items().length >= 3) {
+	if (axis && !el.objectDistribute.disabled && state.objectDistribution?.axes?.includes(axis)) {
 		return changeDocument("ofdgoDistributeObjects", canvasEditor.selected, axis);
 	}
 });
@@ -12746,6 +12747,30 @@ function updateEditorTools() {
 	updateObjectControls(canvasEditor.selected);
 }
 
+function updateObjectDistribution(item, disabled) {
+	const tab = documentTab(), state = tab.state;
+	const ids = item?.items?.slice().sort((a, b) => a.order - b.order).map(member => member.id) || [];
+	if (disabled || ids.length < 3) state.objectDistribution = null;
+	else {
+		const { openSeq, wasmSeq } = state, revision = state.editorInfo?.revision;
+		const key = JSON.stringify([openSeq, wasmSeq, revision, item.index, ids]);
+		if (state.objectDistribution?.key !== key) {
+			const request = state.objectDistribution = { key, axes: [] };
+			const current = () => !tab.closed && state.objectDistribution === request && state.openSeq === openSeq && state.wasmSeq === wasmSeq && state.editorInfo?.revision === revision;
+			callTabWASM(tab, "ofdgoDistributionAxes", item.index, ids).then(axes => {
+				if (!current()) return;
+				request.axes = axes;
+				if (isForegroundDocument(tab)) updateObjectControls(canvasEditor.selected);
+			}).catch(error => {
+				if (current() && isForegroundDocument(tab)) showError(error, false);
+			});
+		}
+	}
+	const axes = state.objectDistribution?.axes || [];
+	el.objectDistribute.disabled = disabled || !axes.length;
+	for (const option of el.objectDistribute.options) if (option.value) option.disabled = !axes.includes(option.value);
+}
+
 function updateObjectControls(item, reset = false) {
 	const members = item?.items || (item ? [item] : []);
 	const disabled = !item || Boolean(item.draft) || !state.ready || state.exporting;
@@ -12763,7 +12788,7 @@ function updateObjectControls(item, reset = false) {
 	el.cropImageButton.setAttribute("data-pressed", String(cropping));
 	el.resetCropButton.textContent = cropping ? "取消" : "还原";
 	el.resetCropButton.disabled = canEditObject(item, "resetCrop") ? disabled : el.cropImageButton.disabled || !cropping && (item.scoped ? !item.cropped : !item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
-	el.objectDistribute.disabled = el.objectAlign.disabled || !item.items || item.items.length < 3;
+	updateObjectDistribution(item, el.objectAlign.disabled);
 	el.editObjectButton.disabled = disabled || (item.items ? !item.items.every(member => member.type === "TextObject" && !member.richText)
 		: !canEditObject(item, "children") && (item.type === "PathObject"
 		|| !(item.type === "TextObject" && canEditObject(item, "rewriteText")) && !canEditObject(item, item.type === "TextObject" ? "textContent" : item.type === "ImageObject" ? "replaceImage" : "update")));
