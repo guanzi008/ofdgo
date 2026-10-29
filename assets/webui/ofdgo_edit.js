@@ -1212,6 +1212,10 @@ export class CanvasEditor {
 			rect: item.surface.getBoundingClientRect(), rotation: this.options.rotation(),
 			clientX: event.clientX, clientY: event.clientY,
 		};
+		const extent = this.drag.extent = document.createElement("div");
+		Object.assign(extent.style, { position: "absolute", left: "0", top: "0", pointerEvents: "none",
+			width: `${this.viewer.scrollWidth}px`, height: `${this.viewer.scrollHeight}px` });
+		this.viewer.append(extent);
 		if (!this.drag.corner) {
 			const selected = this.items();
 			const targets = [...item.surface.querySelectorAll(".edit-object")]
@@ -1485,6 +1489,7 @@ export class CanvasEditor {
 		}
 		if (drag.corner && drag.box) {
 			this.drag = null;
+			drag.extent?.remove();
 			this.viewer.releasePointerCapture(drag.pointerID);
 			const frame = drag.item.textFrame;
 			const geometry = drag.item.oriented?.box || drag.item.geometry || (frame ? { x: drag.item.x, width: textFrameBox(drag.item).width } : drag.item);
@@ -1498,6 +1503,7 @@ export class CanvasEditor {
 		}
 		if (drag.change && (drag.change.x || drag.change.y || drag.change.scale !== 1)) {
 			this.drag = null;
+			drag.extent?.remove();
 			drag.guides?.preview.remove();
 			this.viewer.releasePointerCapture(drag.pointerID);
 			Promise.resolve(this.options.onTransform(drag.item, drag.change)).finally(() => this.place(drag.item));
@@ -1508,6 +1514,7 @@ export class CanvasEditor {
 		const drag = this.drag;
 		this.drag = null;
 		if (drag) {
+			drag.extent?.remove();
 			for (const item of drag.erased || []) item.node.classList.remove("erasing");
 			if (drag.crop) {
 				this.crop.box = drag.box;
