@@ -1308,7 +1308,10 @@ for (const [button, tool] of [[el.drawLineButton, "line"], [el.drawRectangleButt
 }
 editorClick(el.eraseButton, () => toggleDrawingTool(el.eraseMode.value));
 el.eraseMode.addEventListener("change", () => {
-	if (canvasEditor.tool.startsWith("erase-")) canvasEditor.setTool(el.eraseMode.value);
+	if (canvasEditor.tool.startsWith("erase-")) {
+		canvasEditor.setTool(el.eraseMode.value);
+		canvasEditor.focus();
+	}
 });
 for (const input of [el.shapeFill, el.shapeStroke]) {
 	input.addEventListener("change", changeShapeStyle);
@@ -1408,9 +1411,11 @@ for (const [button, ungroup] of [[el.groupObjectsButton, false], [el.ungroupObje
 	});
 }
 el.arrowTool.addEventListener("change", async () => {
+	const tab = documentTab(), content = documentContentKey(state);
+	const current = () => isForegroundDocument(tab) && state.editing && content === documentContentKey(state);
 	const tool = el.arrowTool.value;
 	el.arrowTool.value = "";
-	if (await canvasEditor.commitText() && await canvasEditor.commitCrop()) {
+	if (await canvasEditor.commitText() && current() && await canvasEditor.commitCrop() && current()) {
 		const item = canvasEditor.selected;
 		if (lineShape(item?.shape)) {
 			const box = item.geometry;
@@ -1421,6 +1426,7 @@ el.arrowTool.addEventListener("change", async () => {
 		state.selectObjects = true;
 		canvasEditor.setTool(tool);
 		updateControls();
+		canvasEditor.focus();
 	}
 });
 el.copyStyleButton.addEventListener("click", async () => {
@@ -2015,6 +2021,11 @@ function handleKeyDown(event) {
 		return;
 	}
 	if (!state.doc) {
+		return;
+	}
+	if (state.editing && !event.shiftKey && el.editorTools.contains(target) && editorShortcutTarget(target)
+		&& (key === "Delete" || key === "F2")) {
+		canvasEditor.keyDown(event, true);
 		return;
 	}
 	if (key === "Escape" && !event.shiftKey && state.documentSelection && el.viewerPanel.contains(target)

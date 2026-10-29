@@ -1741,8 +1741,8 @@ export class CanvasEditor {
 		return this.nudgeCommit;
 	}
 
-	keyDown(event) {
-		if (event.defaultPrevented || event.target?.closest("input, textarea, select, [contenteditable]")) return;
+	keyDown(event, toolbar = false) {
+		if (event.defaultPrevented || !toolbar && event.target?.closest("input, textarea, select, [contenteditable]")) return;
 		if (this.crop && !this.options.busy()) {
 			if (event.key === "Escape" || event.key === "Enter") {
 				event.preventDefault();
@@ -1952,7 +1952,7 @@ export class CanvasEditor {
 			}
 		});
 		input.addEventListener("keydown", (event) => {
-			if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "s") return;
+			if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "s") return;
 			event.stopPropagation();
 			if (event.isComposing || editing.composing || editing.saving) {
 				return;
