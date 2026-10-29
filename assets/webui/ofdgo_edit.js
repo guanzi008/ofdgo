@@ -1960,6 +1960,7 @@ export class CanvasEditor {
 			}
 		});
 		input.addEventListener("keydown", (event) => {
+			if (event.key === "F3" && !event.ctrlKey && !event.metaKey && !event.altKey) return;
 			if ((event.ctrlKey || event.metaKey) && !event.altKey && (["s", "w", "tab"].includes(event.key.toLowerCase())
 				|| !event.shiftKey && ["f", "o", "p"].includes(event.key.toLowerCase()))) return;
 			event.stopPropagation();

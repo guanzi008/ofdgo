@@ -2041,11 +2041,7 @@ function handleKeyDown(event) {
 	}
 	if (key === "F3") {
 		event.preventDefault();
-		if (state.searchMatches.length) {
-			selectSearchMatch(event.shiftKey ? Math.max(0, state.searchIndex) - 1 : state.searchIndex + 1);
-		} else {
-			focusSearch();
-		}
+		focusSearch(event.shiftKey ? -1 : 1);
 		return;
 	}
 	if (key === "Escape" && !event.shiftKey && !el.searchPanel.hidden && (el.pageListPanel.contains(target) || el.viewerPanel.contains(target))) {
@@ -11065,13 +11061,14 @@ function copySelection(event) {
 	event.preventDefault();
 }
 
-async function focusSearch() {
+async function focusSearch(direction = 0) {
 	if (canvasEditor.input || canvasEditor.crop || canvasEditor.nudge || canvasEditor.nudgeCommit) {
 		const tab = documentTab(), content = documentContentKey(state);
 		const current = () => isForegroundDocument(tab) && content === documentContentKey(state);
 		if (!await canvasEditor.commitNudge() || !current() || !await canvasEditor.commitText() || !current()
 			|| !await canvasEditor.commitCrop() || !current() || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
 	}
+	if (direction && state.searchMatches.length) return selectSearchMatch((direction < 0 ? Math.max(0, state.searchIndex) : state.searchIndex) + direction);
 	if (!state.showPages) {
 		toggleSidebar("pages");
 	}
