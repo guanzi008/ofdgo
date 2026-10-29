@@ -1952,7 +1952,7 @@ export class CanvasEditor {
 			}
 		});
 		input.addEventListener("keydown", (event) => {
-			if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "s") return;
+			if ((event.ctrlKey || event.metaKey) && !event.altKey && ["s", "w", "tab"].includes(event.key.toLowerCase())) return;
 			event.stopPropagation();
 			if (event.isComposing || editing.composing || editing.saving) {
 				return;

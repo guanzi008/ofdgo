@@ -183,7 +183,7 @@ export class FontPicker {
 	}
 
 	keyDown(event) {
-		if (event.isComposing) return;
+		if (event.isComposing || event.key === "Tab" && (event.ctrlKey || event.metaKey || event.altKey)) return;
 		if (!["Escape", "Enter", "ArrowDown", "ArrowUp", "Tab"].includes(event.key)) return;
 		event.stopPropagation();
 		if (event.key === "Escape") {
