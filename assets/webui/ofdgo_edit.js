@@ -1322,6 +1322,7 @@ export class CanvasEditor {
 		}
 		const from = drag.origin ||= pagePoint(drag.clientX, drag.clientY, drag.rect, drag.item.page, drag.rotation);
 		const to = pagePoint(event.clientX, event.clientY, drag.rect, drag.item.page, drag.rotation);
+		this.autoScroll(drag);
 		if (drag.item.type === "TextObject" && (drag.corner === "w" || drag.corner === "e")) {
 			if (drag.item.textFrame) {
 				const frame = drag.item.textFrame, [a, b, c, d] = frame.matrix;
@@ -1367,14 +1368,13 @@ export class CanvasEditor {
 			drag.axis = event.shiftKey ? Math.abs(drag.change.x) >= Math.abs(drag.change.y) ? "x" : "y" : "";
 			if (drag.axis) drag.change[drag.axis === "x" ? "y" : "x"] = 0;
 			this.snap(drag, event.altKey);
-			this.autoScroll(drag);
 		}
 		this.place(drag.item, drag.change);
 	}
 
 	scroll() {
 		const drag = this.drag;
-		if (!drag || !drag.item && !drag.marquee || drag.corner || !drag.pointer) {
+		if (!drag || !drag.item && !drag.marquee || !drag.pointer) {
 			this.cancel();
 			return;
 		}
