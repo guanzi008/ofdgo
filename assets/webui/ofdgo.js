@@ -11065,7 +11065,13 @@ function copySelection(event) {
 	event.preventDefault();
 }
 
-function focusSearch() {
+async function focusSearch() {
+	if (canvasEditor.input || canvasEditor.crop || canvasEditor.nudge || canvasEditor.nudgeCommit) {
+		const tab = documentTab(), content = documentContentKey(state);
+		const current = () => isForegroundDocument(tab) && content === documentContentKey(state);
+		if (!await canvasEditor.commitNudge() || !current() || !await canvasEditor.commitText() || !current()
+			|| !await canvasEditor.commitCrop() || !current() || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
+	}
 	if (!state.showPages) {
 		toggleSidebar("pages");
 	}
