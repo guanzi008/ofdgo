@@ -1122,6 +1122,14 @@ export class CanvasEditor {
 		return true;
 	}
 
+	selectAll(index) {
+		if (!this.enabled || this.input || this.crop || this.drag || this.nudge || this.nudgeCommit || this.options.busy()) return;
+		this.setTool("");
+		document.getSelection()?.removeAllRanges();
+		this.setSelection(this.pageItems(index));
+		this.focus();
+	}
+
 	clear() {
 		this.closeText();
 		this.closeCrop();
@@ -1952,7 +1960,8 @@ export class CanvasEditor {
 			}
 		});
 		input.addEventListener("keydown", (event) => {
-			if ((event.ctrlKey || event.metaKey) && !event.altKey && ["s", "w", "tab"].includes(event.key.toLowerCase())) return;
+			if ((event.ctrlKey || event.metaKey) && !event.altKey && (["s", "w", "tab"].includes(event.key.toLowerCase())
+				|| !event.shiftKey && ["f", "o", "p"].includes(event.key.toLowerCase()))) return;
 			event.stopPropagation();
 			if (event.isComposing || editing.composing || editing.saving) {
 				return;

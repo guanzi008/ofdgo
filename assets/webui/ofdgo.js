@@ -684,9 +684,12 @@ function createPrintDialog(tab) {
 	});
 }
 
-function openPrintPanel() {
-	const tab = documentTab();
+async function openPrintPanel() {
+	const tab = documentTab(), content = documentContentKey(state);
 	if (!tab.state.doc || !tab.state.ready || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
+	const current = () => isForegroundDocument(tab) && content === documentContentKey(state);
+	if (!await canvasEditor.commitNudge() || !current() || !await canvasEditor.commitText() || !current()
+		|| !await canvasEditor.commitCrop() || !current() || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
 	tab.print ||= createPrintDialog(tab);
 	tab.print.open({tab, document:documentEntryKey(tab.state.doc.documents?.[tab.state.doc.documentIndex || 0]), call:(name, ...args) => callTabWASM(tab, name, ...args), page:tab.state.pageIndex,
 		selection:tab.state.pageSelection.size ? selectedPageIndexes() : [], annotations:tab.state.renderAnnotations,
@@ -1978,10 +1981,11 @@ function handleKeyDown(event) {
 		return;
 	}
 	if ((event.ctrlKey || event.metaKey) && !event.shiftKey && key.toLowerCase() === "a" && state.doc
-		&& el.viewerPanel.contains(target) && !target.closest("input, textarea, select, [contenteditable]")) {
+		&& (el.viewerPanel.contains(target) || state.editing && el.editorTools.contains(target)) && editorShortcutTarget(target)) {
 		event.preventDefault();
 		if (!document.body.hasAttribute("data-busy") && !formDialogOpen()) {
-			selectDocumentText();
+			if (state.editing) canvasEditor.selectAll(state.pageIndex);
+			else selectDocumentText();
 		}
 		return;
 	}
