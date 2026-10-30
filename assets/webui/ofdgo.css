@@ -182,7 +182,8 @@
 }
 
 .document-titlebar {
-	--tab-action-gap: max(2px, calc((var(--titlebar-height, 36px) - 28px) / 2));
+	--tab-action-size: min(28px, calc(var(--titlebar-height, 36px) - 6px));
+	--tab-action-gap: calc((var(--titlebar-height, 36px) - var(--tab-action-size)) / 2);
 	position: relative;
 	display: flex;
 	min-width: 0;
@@ -222,7 +223,6 @@
 	display: flex;
 	min-width: 0;
 	min-height: 0;
-	border-right: 1px solid transparent;
 	overflow-x: auto;
 	scrollbar-width: none;
 	align-items: stretch;
@@ -237,7 +237,7 @@
 	min-width: 100px;
 	max-width: min(240px, 100%);
 	gap: 8px;
-	padding: 0 var(--tab-action-gap) 0 12px;
+	padding: 0 calc(var(--tab-action-gap) - 1px) 0 12px;
 	border: 0;
 	border-right: 1px solid var(--line);
 	background: transparent;
@@ -275,24 +275,23 @@
 .document-new-tab {
 	display: grid;
 	place-items: center;
-	flex: 0 0 28px;
-	width: 28px;
-	min-width: 28px;
+	flex: 0 0 var(--tab-action-size);
+	width: var(--tab-action-size);
+	min-width: var(--tab-action-size);
 	align-self: center;
-	height: min(26px, calc(var(--titlebar-height, 36px) - 6px));
+	height: var(--tab-action-size);
 	border: 0;
+	border-radius: var(--radius-control);
 	padding: 0;
 	background: transparent;
 }
 
-.document-tab-close:hover,
-.document-new-tab:hover,
-.app-update:not(:disabled):hover {
-	background: var(--selected);
+.document-new-tab {
+	margin-inline: var(--tab-action-gap);
 }
 
-.document-new-tab {
-	margin-left: var(--tab-action-gap);
+.document-titlebar button:focus-visible {
+	outline-offset: -2px;
 }
 
 .document-titlebar :is(.close-icon, .new-icon, .settings-icon, .update-icon) {
@@ -4810,6 +4809,7 @@ audio.page-media {
 	flex: 0 0 46px;
 	width: 46px;
 	min-width: 46px;
+	height: var(--tab-action-size);
 }
 
 .settings-icon,
