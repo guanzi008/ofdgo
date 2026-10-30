@@ -198,6 +198,12 @@
 	user-select: none;
 }
 
+:root[data-titlebar-material],
+:root[data-titlebar-material] body,
+:root[data-titlebar-material] .document-titlebar {
+	background: transparent;
+}
+
 .document-titlebar::before {
 	content: "";
 	position: absolute;

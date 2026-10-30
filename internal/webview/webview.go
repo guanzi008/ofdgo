@@ -1212,18 +1212,23 @@ func windowOptions(dataDir string) (guigo.Options, error) {
 	if err != nil {
 		return guigo.Options{}, err
 	}
+	material := guigo.TitleBarSolid
+	if guigo.SupportsTitleBarMaterial(guigo.TitleBarMicaAlt) {
+		material = guigo.TitleBarMicaAlt
+	}
 	return guigo.Options{
-		AppID:          appID,
-		Title:          "OFDGo - OFD编辑器",
-		TitleBar:       guigo.TitleBarContent,
-		TitleBarColors: themeColors(false),
-		Icon:           icon,
-		Width:          1440,
-		Height:         900,
-		MinWidth:       360,
-		MinHeight:      240,
-		Center:         true,
-		Maximized:      true,
-		UserDataDir:    dataDir,
+		AppID:            appID,
+		Title:            "OFDGo - OFD编辑器",
+		TitleBar:         guigo.TitleBarContent,
+		TitleBarColors:   themeColors(false),
+		TitleBarMaterial: material,
+		Icon:             icon,
+		Width:            1440,
+		Height:           900,
+		MinWidth:         360,
+		MinHeight:        240,
+		Center:           true,
+		Maximized:        true,
+		UserDataDir:      dataDir,
 	}, nil
 }

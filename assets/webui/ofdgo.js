@@ -2649,6 +2649,7 @@ function isForegroundDocument(tab) {
 function applyTitleBarInfo(info) {
 	if (!info || !info.height) return;
 	workspace.titleBarReady = true;
+	document.documentElement.toggleAttribute("data-titlebar-material", info.material === 1);
 	document.body.style.setProperty("--titlebar-height", `${info.height}px`);
 	el.documentTitleBar.style.setProperty("--titlebar-left", `${info.left}px`);
 	el.documentTitleBar.style.setProperty("--titlebar-right", `${info.right}px`);
