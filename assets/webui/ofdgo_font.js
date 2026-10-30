@@ -98,13 +98,12 @@ export class FontPicker {
 			return terms.every(term => name.includes(term));
 		});
 		this.list.replaceChildren();
-		for (const { font, index, group } of this.matches) {
+		for (const { font, index } of this.matches) {
 			const option = document.createElement("div");
 			option.className = "font-option";
 			option.id = `${this.list.id}-${index}`;
 			option.dataset.index = String(index);
 			option.setAttribute("data-disabled", String(Boolean(font.disabled)));
-			option.setAttribute("data-current", String(!font.disabled && group.includes(Number(this.value))));
 			const name = document.createElement("span");
 			name.textContent = font.menuFamily || font.fullName || font.name;
 			option.append(name);

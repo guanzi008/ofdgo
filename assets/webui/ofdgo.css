@@ -640,7 +640,6 @@ a:focus-visible {
 }
 
 .font-listbox .font-option {
-	position: relative;
 	display: flex;
 	align-items: baseline;
 	justify-content: space-between;
@@ -663,26 +662,13 @@ a:focus-visible {
 	font-size: 12px;
 }
 
-.font-listbox .font-option:not([data-disabled="true"]):hover,
-.font-listbox [data-selected="true"] {
+.font-listbox .font-option:not([data-disabled="true"]):not([data-selected="true"]):hover {
 	background: var(--hover);
 }
 
 .font-listbox [data-selected="true"] {
-	outline: 1px solid var(--focus);
-	outline-offset: -1px;
-}
-
-.font-listbox [data-current="true"] {
+	background: var(--selected);
 	color: var(--accent-strong);
-}
-
-.font-listbox [data-current="true"]::before {
-	position: absolute;
-	inset: 6px auto 6px 0;
-	width: 2px;
-	background: var(--accent);
-	content: "";
 }
 
 .font-listbox [data-disabled="true"],
@@ -1287,27 +1273,6 @@ button:not(:disabled):hover {
 	display: inline-flex;
 	width: var(--convert-control-width);
 	vertical-align: middle;
-}
-
-.convert-format select {
-	-webkit-appearance: none;
-	appearance: none;
-	padding: 0 12px;
-}
-
-.convert-format::after {
-	position: absolute;
-	right: 6px;
-	top: calc(50% - 2px);
-	border: 3px solid transparent;
-	border-bottom: 0;
-	border-top-color: currentColor;
-	pointer-events: none;
-	content: "";
-}
-
-.convert-format:has(select:disabled)::after {
-	opacity: 0.48;
 }
 
 .convert-table tbody tr:last-child td {
@@ -2822,6 +2787,7 @@ body[data-hide-meta] .meta-panel {
 	padding-left: 6px;
 	border: 1px solid var(--line);
 	background-color: var(--input);
+	color: var(--text);
 	font: inherit;
 }
 
