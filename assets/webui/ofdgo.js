@@ -2660,6 +2660,7 @@ function applyTitleBarInfo(info) {
 function updateTitleBarIcons() {
 	const scale = window.devicePixelRatio;
 	el.documentTitleBar.style.setProperty("--titlebar-icon-size", `${Math.floor(10 * scale) / scale}px`);
+	el.documentTitleBar.style.setProperty("--titlebar-settings-icon-size", `${Math.floor(12 * scale) / scale}px`);
 	const icons = [...el.documentTitleBar.querySelectorAll(".close-icon, .new-icon, .settings-icon, .update-icon")];
 	for (const icon of icons) icon.style.inset = "";
 	const offsets = icons.map(icon => {
