@@ -4440,7 +4440,7 @@ audio.page-media {
 	align-items: center;
 	justify-content: center;
 	min-width: 32px;
-	height: 20px;
+	height: 26px;
 	padding: 0 6px;
 	border: 1px solid var(--line);
 	background: var(--panel);
