@@ -23,7 +23,10 @@
 	--bar-height: 48px;
 	--bar-pad: 5px 10px;
 	--control-height: 28px;
+	--radius-control: 4px;
+	--radius-dialog: 8px;
 	--page-space: clamp(14px, 2.5vw, 28px);
+	--shadow-flyout: 0 4px 12px rgba(31, 36, 40, 0.12);
 	--shadow-soft: 0 10px 28px rgba(31, 36, 40, 0.12);
 	--shadow-page: 0 14px 30px rgba(31, 36, 40, 0.16);
 	--base: #eef1f3;
@@ -80,6 +83,7 @@
 	--warning-line: #6e6040;
 	--success-line: #3d6658;
 	--backdrop: rgb(0 0 0 / 35%);
+	--shadow-flyout: 0 4px 12px #0005;
 	--shadow-soft: 0 12px 36px #0006, 0 2px 6px #0003;
 	--shadow-page: 0 14px 30px #0005;
 	--dropdown-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e0e7eb' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m5 9 7 7 7-7'/%3E%3C/svg%3E");
@@ -427,7 +431,7 @@ a:focus-visible {
 	height: var(--control-height);
 	padding: 0 20px 0 6px;
 	border: 1px solid var(--line-strong);
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 	background: var(--input);
 	color: var(--text);
 	background-image: var(--dropdown-arrow);
@@ -551,13 +555,13 @@ a:focus-visible {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) 12px;
 	height: var(--control-height);
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 }
 
 .text-highlight:has([data-pressed="true"]) { background: var(--selected); }
 .text-highlight:has([data-pressed="mixed"]) { background: var(--hover); box-shadow: inset 0 -3px var(--text-muted); }
 .editor-group:has(#textFont) .text-highlight [data-pressed="mixed"] { box-shadow: none; }
-.text-highlight .button { min-width: 0; border-radius: 5px 0 0 5px; }
+.text-highlight .button { min-width: 0; border-radius: var(--radius-control) 0 0 var(--radius-control); }
 .text-highlight .button span { border-bottom: 3px solid var(--highlight-color, #ffff00); }
 .text-highlight [data-pressed="mixed"] span { border-image: repeating-linear-gradient(135deg, var(--input) 0 4px, var(--text-muted) 4px 8px) 3; }
 
@@ -567,7 +571,7 @@ a:focus-visible {
 	height: 100%;
 	padding: 0;
 	border: 0;
-	border-radius: 0 5px 5px 0;
+	border-radius: 0 var(--radius-control) var(--radius-control) 0;
 	background: var(--dropdown-arrow) center / 10px 10px no-repeat;
 }
 
@@ -610,6 +614,7 @@ a:focus-visible {
 	min-width: 24px;
 	padding: 0;
 	border: 0;
+	border-radius: 0 calc(var(--radius-control) - 1px) calc(var(--radius-control) - 1px) 0;
 }
 
 #textFontToggle::after {
@@ -626,9 +631,9 @@ a:focus-visible {
 	margin: 0;
 	padding: 4px;
 	border: 1px solid var(--line);
-	background: var(--panel);
+	background: var(--popup);
 	color: var(--text);
-	box-shadow: 0 5px 18px rgba(20, 40, 50, 0.14);
+	box-shadow: var(--shadow-flyout);
 	overflow-y: auto;
 	overflow-x: hidden;
 	font-size: 14px;
@@ -728,7 +733,7 @@ a:focus-visible {
 	border: 0;
 	background: transparent;
 	line-height: 16px;
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 }
 
 .editor-group-action:not(:disabled):hover {
@@ -807,7 +812,7 @@ a:focus-visible {
 	align-items: center;
 	justify-content: center;
 	height: var(--control-height);
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 }
 
 .button {
@@ -936,7 +941,7 @@ button:not(:disabled):hover {
 	height: var(--control-height);
 	padding: 0 7px;
 	border: 1px solid var(--line);
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 	background: var(--input);
 	color: var(--text-muted);
 	text-align: center;
@@ -975,7 +980,7 @@ button:not(:disabled):hover {
 	min-width: 0;
 	padding: 0 4px;
 	border: 1px solid var(--line);
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 	background: var(--input);
 	color: var(--text);
 }
@@ -1041,7 +1046,8 @@ button:not(:disabled):hover {
 	margin: auto;
 	padding: 0;
 	border: 1px solid var(--line);
-	background: var(--panel);
+	border-radius: var(--radius-dialog);
+	background: var(--popup);
 	color: var(--text);
 	box-shadow: var(--shadow-soft);
 	font-size: 14px;
@@ -1239,7 +1245,7 @@ button:not(:disabled):hover {
 	vertical-align: middle;
 	font: inherit;
 	border: 1px solid var(--line);
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 	background: var(--input);
 	color: inherit;
 }
@@ -1618,6 +1624,16 @@ button:not(:disabled):hover {
 	border-left: 0;
 }
 
+.form-options label:first-child span {
+	border-top-left-radius: var(--radius-control);
+	border-bottom-left-radius: var(--radius-control);
+}
+
+.form-options label:last-child span {
+	border-top-right-radius: var(--radius-control);
+	border-bottom-right-radius: var(--radius-control);
+}
+
 .form-options input:checked + span {
 	background: var(--selected);
 	color: var(--accent-strong);
@@ -1644,7 +1660,7 @@ button:not(:disabled):hover {
 	height: var(--control-height);
 	padding: 0 6px;
 	border: 1px solid var(--line);
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 	background: var(--input);
 	color: var(--text);
 }
@@ -1788,7 +1804,7 @@ button:not(:disabled):hover {
 	height: var(--control-height);
 	padding: 3px;
 	border: 1px solid var(--line);
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 	background: var(--input);
 	cursor: pointer;
 }
@@ -1824,7 +1840,7 @@ button:not(:disabled):hover {
 	padding: 0 8px;
 	border: 0;
 	border-right: 1px solid var(--line);
-	border-radius: 5px;
+	border-radius: calc(var(--radius-control) - 1px) 0 0 calc(var(--radius-control) - 1px);
 	background: var(--panel);
 	color: var(--text);
 	font: inherit;
@@ -2029,7 +2045,7 @@ body[data-hide-meta] .meta-panel {
 	justify-content: center;
 	height: 26px;
 	padding: 0 6px;
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 	font-size: 12px;
 	white-space: nowrap;
 }
@@ -2047,7 +2063,14 @@ body[data-hide-meta] .meta-panel {
 	min-width: 0;
 	height: 28px;
 	padding: 0 6px;
+	border: 1px solid var(--line);
+	background-color: var(--input);
+	color: var(--text);
 	font-size: 12px;
+}
+
+.document-select:not(:disabled):hover {
+	background-color: var(--hover);
 }
 
 .document-dialog {
@@ -2284,14 +2307,17 @@ body[data-hide-meta] .meta-panel {
 	min-width: 2em;
 	padding: 8px 0;
 	border: 0;
+	border-radius: 0;
 	border-bottom: 2px solid transparent;
 	background: transparent;
+	color: var(--text-muted);
+	font-weight: 400;
 	white-space: nowrap;
 }
 
 .panel-tabs > .button[data-selected="true"] {
-	border-bottom-color: currentColor;
-	color: var(--accent);
+	border-bottom-color: var(--accent);
+	color: var(--accent-strong);
 }
 
 .invoice-actions {
@@ -2808,11 +2834,12 @@ body[data-hide-meta] .meta-panel {
 	height: 28px;
 	padding: 0 0 6px;
 	border: 0;
+	border-radius: 0;
 	border-bottom: 2px solid transparent;
 	background: transparent;
 	color: var(--text-muted);
 	font-size: 12px;
-	font-weight: 700;
+	font-weight: 400;
 }
 
 .navigation-tabs button[data-selected="true"] {
@@ -2864,7 +2891,7 @@ body[data-hide-meta] .meta-panel {
 	height: var(--control-height);
 	padding: 0 6px;
 	border: 1px solid var(--line);
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 	background: var(--input);
 	color: var(--text);
 	font-size: 13px;
@@ -3207,9 +3234,10 @@ button.outline-link:hover {
 	gap: 8px 10px;
 	width: min(420px, calc(100vw - 32px));
 	padding: 10px 12px;
-	border: 1px solid var(--line-strong);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-dialog);
 	background: var(--popup);
-	box-shadow: var(--shadow-soft);
+	box-shadow: var(--shadow-flyout);
 	transform: translateX(-50%);
 	backdrop-filter: blur(8px);
 }
@@ -3967,8 +3995,7 @@ audio.page-media {
 	min-width: 28px;
 	height: 26px;
 	padding: 0 7px;
-	border: 1px solid var(--line);
-	background: var(--input);
+	border: 1px solid transparent;
 	color: var(--text-muted);
 	font-size: 12px;
 	text-align: center;
@@ -4622,7 +4649,7 @@ audio.page-media {
 		bottom: 0;
 		z-index: 8;
 		width: var(--sidebar-width);
-		box-shadow: 0 16px 32px rgba(31, 36, 40, 0.18);
+		box-shadow: var(--shadow-soft);
 		transition: transform 0.18s ease;
 	}
 
@@ -4749,12 +4776,11 @@ audio.page-media {
 
 .editor-number,
 .font-picker,
-.form-dialog,
 .font-listbox,
 .page-control,
 .format-select,
 .order-select {
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 }
 
 .editor-toolbar > .editor-group > select {
@@ -4792,7 +4818,7 @@ audio.page-media {
 	border: 0;
 	background: transparent;
 	color: inherit;
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 }
 
 .app-appearance,
@@ -4836,9 +4862,9 @@ audio.page-media {
 	max-width: calc(100vw - 24px);
 	max-height: calc(100dvh - var(--appearance-top, 40px) - 12px);
 	padding: 0;
-	border-radius: 9px;
+	border-radius: var(--radius-dialog);
 	background: var(--popup);
-	box-shadow: var(--shadow-soft);
+	box-shadow: var(--shadow-flyout);
 }
 
 .appearance-dialog::backdrop {
@@ -4863,7 +4889,7 @@ audio.page-media {
 	display: flex;
 	gap: 3px;
 	padding: 3px;
-	border-radius: 7px;
+	border-radius: calc(var(--radius-control) + 3px);
 	background: var(--base);
 }
 
@@ -4877,7 +4903,7 @@ audio.page-media {
 	height: 68px;
 	padding: 5px;
 	border: 1px solid transparent;
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 	background: transparent;
 	font-size: 12px;
 }
@@ -4911,7 +4937,7 @@ select:not([multiple]):not([size]) {
 	background-size: 12px 12px;
 	background-repeat: no-repeat;
 	padding-right: 20px;
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 }
 
 .toolbar-select > select:not([multiple]):not([size]),
