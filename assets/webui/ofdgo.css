@@ -241,8 +241,7 @@
 }
 
 .document-tab-close,
-.document-new-tab,
-.app-update {
+.document-new-tab {
 	display: grid;
 	place-items: center;
 	flex: 0 0 28px;
@@ -707,10 +706,6 @@ a:focus-visible {
 	flex: 1 1 auto;
 	border-bottom: 0;
 	box-shadow: none;
-}
-
-.app-update {
-	margin-left: var(--tab-action-gap);
 }
 
 .app-update[hidden] {
@@ -4725,6 +4720,7 @@ audio.page-media {
 }
 
 .app-appearance,
+.app-update,
 .appearance-close {
 	display: grid;
 	place-items: center;
@@ -4739,8 +4735,11 @@ audio.page-media {
 	border-radius: 5px;
 }
 
-.app-appearance {
-	margin: 0 4px;
+.app-appearance,
+.app-update {
+	flex: 0 0 46px;
+	width: 46px;
+	min-width: 46px;
 }
 
 .settings-icon,
