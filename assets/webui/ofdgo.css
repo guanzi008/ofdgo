@@ -4468,11 +4468,11 @@ audio.page-media {
 
 @media (min-width: 901px) and (max-width: 1900px) {
 	.editor-toolbar {
-		--editor-control-width: 55px;
+		--editor-control-width: 44px;
 	}
 
 	.editor-group {
-		padding-inline: 8px;
+		padding-inline: 3px;
 		column-gap: 3px;
 	}
 
@@ -4480,8 +4480,10 @@ audio.page-media {
 		padding-inline: 6px;
 	}
 
-	.editor-group > select {
-		padding-inline: 6px 20px;
+	.editor-group > select:not([multiple]):not([size]) {
+		padding-inline: 2px 14px;
+		background-position: right 2px center;
+		background-size: 10px 10px;
 	}
 
 	.editor-group:has(#textFont) {
