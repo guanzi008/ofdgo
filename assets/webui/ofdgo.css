@@ -30,6 +30,7 @@
 	--text: #263238;
 	--input: #ffffff;
 	--hover: #e8edef;
+	--pressed-overlay: rgb(0 0 0 / 8%);
 	--canvas: #e7ebee;
 	--canvas-grid: rgba(31, 36, 40, 0.04);
 	--popup: #fcfdfd;
@@ -62,6 +63,7 @@
 	--accent-strong: #65cbb6;
 	--focus: #65cbb6;
 	--hover: #343e45;
+	--pressed-overlay: rgb(255 255 255 / 8%);
 	--canvas: #191f23;
 	--canvas-grid: rgba(224, 231, 235, 0.035);
 	--popup: #30393f;
@@ -726,8 +728,11 @@ a:focus-visible {
 	border: 0;
 	background: transparent;
 	line-height: 16px;
-	text-decoration: underline dotted;
-	text-underline-offset: 3px;
+	border-radius: 5px;
+}
+
+.editor-group-action:not(:disabled):hover {
+	color: var(--accent-strong);
 }
 
 .mixed-color::-webkit-color-swatch {
@@ -1108,10 +1113,8 @@ button:not(:disabled):hover {
 }
 
 .form-title {
-	margin: -12px -12px 12px;
-	padding: 10px 12px;
-	border-bottom: 1px solid var(--line);
-	background: var(--base);
+	margin: 0 0 12px;
+	padding: 0;
 	font-size: 14px;
 	font-weight: 600;
 	line-height: 1.5;
@@ -2417,17 +2420,12 @@ body[data-hide-meta] .meta-panel {
 	flex: none;
 	align-items: baseline;
 	gap: 8px 16px;
-	padding: 10px 12px;
-	border-bottom: 1px solid var(--line);
-	background: var(--base);
+	padding: 12px;
 }
 
 .settings-header .form-title {
 	flex: none;
 	margin: 0;
-	padding: 0;
-	border: 0;
-	background: none;
 }
 
 .settings-location {
@@ -3761,6 +3759,7 @@ audio.page-media {
 	justify-content: space-between;
 	gap: 12px;
 	margin: 0;
+	padding: 12px;
 }
 
 .media-dialog .page-media {
@@ -4742,6 +4741,12 @@ audio.page-media {
 	color: var(--accent-strong);
 }
 
+:root button:not(:disabled):active,
+.form-actions button[type="submit"]:not(:disabled):active,
+.editor-group:has(#textFont) button:not(:disabled):active {
+	background-image: linear-gradient(var(--pressed-overlay), var(--pressed-overlay));
+}
+
 .editor-number,
 .font-picker,
 .form-dialog,
@@ -4830,7 +4835,7 @@ audio.page-media {
 	width: 285px;
 	max-width: calc(100vw - 24px);
 	max-height: calc(100dvh - var(--appearance-top, 40px) - 12px);
-	padding: 17px;
+	padding: 0;
 	border-radius: 9px;
 	background: var(--popup);
 	box-shadow: var(--shadow-soft);
@@ -4845,13 +4850,13 @@ audio.page-media {
 	align-items: center;
 	justify-content: space-between;
 	font-weight: 600;
-	margin-bottom: 14px;
+	margin-bottom: 12px;
 }
 
 .appearance-label {
 	font-size: 12px;
 	color: var(--text-muted);
-	margin-bottom: 10px;
+	margin-bottom: 12px;
 }
 
 .appearance-themes {
@@ -4897,10 +4902,6 @@ audio.page-media {
 
 .appearance-heading .form-title {
 	margin: 0;
-	padding: 0;
-	border: 0;
-	background: transparent;
-	font-size: 14px;
 }
 
 select:not([multiple]):not([size]) {
