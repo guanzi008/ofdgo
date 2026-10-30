@@ -203,6 +203,7 @@ const el = {
 	aboutPanel: document.querySelector("#aboutPanel"),
 	aboutVersion: document.querySelector("#aboutVersion"),
 	associationSection: document.querySelector("#associationSection"),
+	associationCategory: document.querySelector("#associationCategory"),
 	associationMessage: document.querySelector("#associationMessage"),
 	signButton: document.querySelector("#signButton"),
 	signPanel: document.querySelector("#signPanel"),
@@ -2122,6 +2123,12 @@ async function openAboutPanel() {
 	el.aboutVersion.textContent = `${day}-${match[2].slice(0, 7)}`;
 }
 
+function selectAppearanceCategory(value) {
+	for (const button of el.appearancePanel.querySelectorAll("[data-appearance-category]")) button.dataset.selected = String(button.dataset.appearanceCategory === value);
+	for (const section of el.appearancePanel.querySelectorAll("[data-appearance-page]")) section.hidden = section.dataset.appearancePage !== value;
+	el.appearancePanel.querySelector(".appearance-content").scrollTop = 0;
+}
+
 async function refreshFileAssociations() {
 	if (!nativeHost || el.associationSection.dataset.busy) return;
 	el.associationSection.dataset.busy = "true";
@@ -2132,7 +2139,11 @@ async function refreshFileAssociations() {
 	}
 	try {
 		const states = await nativeHost.call("association.query", {});
-		el.associationSection.hidden = !states.user.supported;
+		el.associationCategory.hidden = !states.user.supported;
+		if (el.associationCategory.hidden && el.associationCategory.dataset.selected === "true") {
+			selectAppearanceCategory("theme");
+			if (el.appearancePanel.open) el.appearancePanel.querySelector('[data-appearance-category="theme"]').focus({preventScroll:true});
+		}
 		for (const row of el.associationSection.querySelectorAll(".association-row")) {
 			const state = states[row.dataset.scope];
 			const label = row.querySelector(".association-state");
@@ -2142,7 +2153,7 @@ async function refreshFileAssociations() {
 			row.querySelector('[data-action="remove"]').disabled = !state.writable || !!state.error || !state.registered;
 		}
 	} catch (error) {
-		el.associationSection.hidden = false;
+		el.associationCategory.hidden = false;
 		for (const label of el.associationSection.querySelectorAll(".association-state")) label.textContent = "不可用";
 		el.associationMessage.textContent = `查询失败：${error.message}`;
 		el.associationMessage.hidden = false;
@@ -5518,13 +5529,11 @@ function resizeViewer() {
 async function boot() {
 	window.ofdgoTheme.connect(nativeHost, error => showError(error, false));
 	el.appearanceButton.addEventListener("click", () => {
-		const bounds = el.appearanceButton.getBoundingClientRect();
-		el.appearancePanel.style.setProperty("--appearance-top", `${bounds.bottom + 4}px`);
-		el.appearancePanel.style.setProperty("--appearance-right", `${Math.max(12, innerWidth - bounds.right)}px`);
 		el.associationMessage.hidden = true;
 		documentDialogs.showApplication(el.appearancePanel);
 		if (nativeHost) void refreshFileAssociations();
 	});
+	for (const button of el.appearancePanel.querySelectorAll("[data-appearance-category]")) button.addEventListener("click", () => selectAppearanceCategory(button.dataset.appearanceCategory));
 	for (const button of el.appearancePanel.querySelectorAll("[data-theme-choice]")) button.addEventListener("click", () => window.ofdgoTheme.set(button.dataset.themeChoice));
 	documentDialogs = new DocumentDialogs({document, titlebar: el.documentTitleBar,
 		targets: () => [...document.body.children].filter(node => node !== el.documentTitleBar)});

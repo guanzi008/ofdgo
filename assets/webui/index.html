@@ -447,20 +447,30 @@
 		</dialog>
 		<dialog id="appearancePanel" class="form-dialog appearance-dialog">
 			<form method="dialog">
-				<div class="appearance-heading"><h2 id="appearanceTitle" class="form-title">设置</h2><button class="appearance-close" type="submit" title="关闭"><span class="close-icon"></span></button></div>
-				<div class="appearance-label">外观主题</div>
-				<div class="appearance-themes">
-					<button type="button" data-theme-choice="system"><span class="theme-system-icon"></span><span>系统</span></button>
-					<button type="button" data-theme-choice="light"><span class="theme-light-icon"></span><span>浅色</span></button>
-					<button type="button" data-theme-choice="dark"><span class="theme-dark-icon"></span><span>深色</span></button>
+				<div class="appearance-heading"><h2 id="appearanceTitle" class="form-title">系统设置</h2><button class="appearance-close" type="submit" title="关闭"><span class="close-icon"></span></button></div>
+				<div class="appearance-body">
+					<nav class="appearance-navigation">
+						<button type="button" data-appearance-category="theme" data-selected="true" autofocus>外观主题</button>
+						<button id="associationCategory" type="button" data-appearance-category="association" data-selected="false" hidden>文件关联</button>
+					</nav>
+					<div class="appearance-content">
+						<section data-appearance-page="theme">
+							<div class="appearance-label">外观主题</div>
+							<div class="appearance-themes">
+								<button type="button" data-theme-choice="system"><span class="theme-system-icon"></span><span>系统</span></button>
+								<button type="button" data-theme-choice="light"><span class="theme-light-icon"></span><span>浅色</span></button>
+								<button type="button" data-theme-choice="dark"><span class="theme-dark-icon"></span><span>深色</span></button>
+							</div>
+						</section>
+						<section id="associationSection" data-appearance-page="association" hidden>
+							<div class="appearance-label">文件关联</div>
+							<div class="association-row" data-scope="user"><span>当前用户</span><span class="association-state"></span><div class="association-actions"><button class="small-button" type="button" data-action="register">注册</button><button class="small-button" type="button" data-action="remove">撤销</button></div></div>
+							<div class="association-row" data-scope="machine"><span>所有用户</span><span class="association-state"></span><div class="association-actions"><button class="small-button" type="button" data-action="register">注册</button><button class="small-button" type="button" data-action="remove">撤销</button></div></div>
+							<div id="associationMessage" class="form-status" hidden></div>
+						</section>
+					</div>
 				</div>
 			</form>
-			<section id="associationSection" class="appearance-associations" hidden>
-				<div class="appearance-label">文件关联</div>
-				<div class="association-row" data-scope="user"><span>当前用户</span><span class="association-state"></span><div class="association-actions"><button class="small-button" type="button" data-action="register">注册</button><button class="small-button" type="button" data-action="remove">撤销</button></div></div>
-				<div class="association-row" data-scope="machine"><span>所有用户</span><span class="association-state"></span><div class="association-actions"><button class="small-button" type="button" data-action="register">注册</button><button class="small-button" type="button" data-action="remove">撤销</button></div></div>
-				<div id="associationMessage" class="form-status" hidden></div>
-			</section>
 		</dialog>
 		<dialog id="settingsPanel" class="form-dialog settings-dialog">
 			<form id="settingsForm">
