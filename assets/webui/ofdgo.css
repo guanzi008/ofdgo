@@ -678,14 +678,16 @@ a:focus-visible {
 }
 
 #textColor {
-	width: 100%;
+	justify-self: end;
 }
 
 .shape-paint {
 	justify-content: space-between;
 }
 
+#textColor,
 .shape-paint .color-input {
+	flex-shrink: 0;
 	width: 32px;
 }
 
@@ -4571,7 +4573,7 @@ audio.page-media {
 	}
 
 	.editor-group:has(#shapeFill) {
-		grid-template-columns: repeat(2, 76px);
+		grid-template-columns: repeat(2, 79px);
 	}
 }
 
