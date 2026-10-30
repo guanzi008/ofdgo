@@ -173,6 +173,7 @@
 
 .document-titlebar {
 	--tab-action-gap: max(2px, calc((var(--titlebar-height, 36px) - 28px) / 2));
+	position: relative;
 	display: flex;
 	min-width: 0;
 	align-items: stretch;
@@ -185,6 +186,16 @@
 	background: var(--titlebar-background);
 	color: var(--titlebar-foreground);
 	user-select: none;
+}
+
+.document-titlebar::before {
+	content: "";
+	position: absolute;
+	inset: 0 0 auto;
+	z-index: 1;
+	height: 1px;
+	background: var(--line);
+	pointer-events: none;
 }
 
 .document-tabs {
