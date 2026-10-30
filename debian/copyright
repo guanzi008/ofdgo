@@ -1,0 +1,17 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: OFDGo
+Source: https://github.com/xiaoqidun/ofdgo
+
+Files: *
+Copyright: 2025-2026 肖其顿 (XIAO QI DUN)
+License: Apache-2.0
+ Full license text: /usr/share/doc/ofdgo/LICENSE
+
+Files: debian/*
+Copyright: 2026 guanzi008 <20619190+guanzi008@users.noreply.github.com>
+License: Apache-2.0
+ Full license text: /usr/share/doc/ofdgo/LICENSE
+
+Comment: The desktop executable includes GUIGo by 肖其顿 (XIAO QI DUN).
+ Source: https://github.com/xiaoqidun/guigo
+ License: Apache-2.0

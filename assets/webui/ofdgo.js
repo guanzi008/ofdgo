@@ -6301,6 +6301,8 @@ async function loadLocalFonts() {
 		await nextFrame();
 		const available = await fontManager.queryLocal();
 		if (tab.closed) return;
+		fontManager.systemListVisible = true;
+		if (isForegroundDocument(tab)) renderFontList();
 		if (!state.doc) {
 			tab.status = available.length ? `已授权${available.length}种字体` : "暂无系统字体";
 			if (isForegroundDocument(tab)) setStatus(tab.status);
@@ -6311,7 +6313,7 @@ async function loadLocalFonts() {
 		}
 	} catch (err) {
 		tab.status = err?.name === "NotAllowedError" ? "系统字体未授权" : String(err.message || err);
-		if (isForegroundDocument(tab)) setStatus(tab.status);
+		if (isForegroundDocument(tab)) showError(err, false);
 	} finally {
 		tab.fontTask = false;
 		setBusy(false, "", 0, "", tab);
@@ -6586,7 +6588,7 @@ function renderFontList() {
 	if (state.ready) loadEditorFonts(false);
 	el.fontList.replaceChildren();
 	const fonts = fontManager.records();
-	if (!fonts.length) {
+	if (!fonts.length && !fontManager.systemListVisible) {
 		const empty = document.createElement("div");
 		empty.className = "font-empty";
 		empty.textContent = "暂无字体";
@@ -6601,7 +6603,7 @@ function renderFontList() {
 
 		const source = document.createElement("span");
 		source.className = "font-source";
-		source.textContent = fontSourceText(font.source);
+		source.textContent = font.origin === "system" ? "系统" : fontSourceText(font.source);
 
 		const enabled = document.createElement("input");
 		enabled.type = "checkbox";
@@ -6652,6 +6654,63 @@ function renderFontList() {
 		fragment.append(row);
 	}
 	el.fontList.append(fragment);
+	if (fontManager.systemListVisible) renderSystemFontList();
+}
+
+function renderSystemFontList() {
+	if (!fontManager.catalog.length) {
+		const empty = document.createElement("div");
+		empty.className = "font-empty";
+		empty.textContent = "未找到系统字体，可以点击添加选择字体文件";
+		el.fontList.append(empty);
+		return;
+	}
+	const added = new Set(fontManager.userFonts.map(font => font.systemKey).filter(Boolean));
+	for (const font of fontManager.catalog) {
+		const key = font.postscriptName || `${font.family}/${font.style}/${font.index || 0}`;
+		if (added.has(key)) continue;
+		const row = document.createElement("div");
+		row.className = "font-row";
+		const main = document.createElement("div");
+		main.className = "font-main";
+		const source = document.createElement("span");
+		source.className = "font-source";
+		source.textContent = "系统";
+		const name = document.createElement("input");
+		name.className = "font-name-input";
+		name.value = font.fullName || font.family || font.postscriptName;
+		name.title = name.value;
+		name.readOnly = true;
+		main.append(source, name);
+		const add = document.createElement("button");
+		add.className = "small-button";
+		add.type = "button";
+		add.textContent = "添加";
+		add.addEventListener("click", () => addSystemFont(font, key));
+		row.append(main, add);
+		el.fontList.append(row);
+	}
+}
+
+async function addSystemFont(font, systemKey) {
+	const tab = documentTab();
+	if (tab.fontTask || document.body.hasAttribute("data-busy")) return;
+	tab.fontTask = true;
+	setBusy(true, "正在读取字体", null, STATUS.fonts, tab);
+	try {
+		const data = await readTextFont(font, tab);
+		if (tab.closed) return;
+		const record = { ...fontManager.record(fontManager.localName(font), data, "upload"), origin: "system", systemKey };
+		const { saved } = await fontManager.add([record]);
+		await applyFontChange(tab);
+		tab.status = saved ? "字体已添加" : "字体未保存，仅本次可用";
+		if (isForegroundDocument(tab)) setStatus(tab.status);
+	} catch (err) {
+		if (isForegroundDocument(tab)) showError(err, false);
+	} finally {
+		tab.fontTask = false;
+		setBusy(false, "", 0, "", tab);
+	}
 }
 
 function fontSourceText(source) {

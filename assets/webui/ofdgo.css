@@ -644,6 +644,14 @@ a:focus-visible {
 	border-radius: var(--radius-control);
 }
 
+.dropdown-fallback {
+	z-index: 1100;
+}
+
+.dropdown-fallback:not([data-dropdown-open="true"]) {
+	display: none;
+}
+
 .font-listbox .font-option,
 .dropdown-list .dropdown-option {
 	display: flex;

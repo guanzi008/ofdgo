@@ -790,7 +790,7 @@ class NativeHost {
 	}
 
 	async fonts() {
-		return (await this.call("fonts", {})).map(({file, ...font}) => ({...font, nativeFile:new NativeFile(file)}));
+		return (await this.call("fonts", {}) || []).map(({file, ...font}) => ({...font, nativeFile:new NativeFile(file)}));
 	}
 
 	async start(onFiles, onError) {
