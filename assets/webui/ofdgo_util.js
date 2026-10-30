@@ -322,3 +322,229 @@ export class DocumentDialogs {
 		if (restore) for (const item of this.current().entries.get(panel)?.snapshot?.nodes || []) { item.node.scrollTop = item.scrollTop; item.node.scrollLeft = item.scrollLeft; }
 	}
 }
+
+export function positionDropdown(list, anchor, fit = false) {
+	const rect = anchor.getBoundingClientRect(), viewport = window.visualViewport;
+	const left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0;
+	const width = viewport?.width || window.innerWidth, height = viewport?.height || window.innerHeight;
+	if (rect.right <= left || rect.left >= left + width || rect.bottom <= top || rect.top >= top + height) return false;
+	const below = top + height - rect.bottom - 12, above = rect.top - top - 12;
+	const limit = Math.min(280, Math.max(below, above));
+	if (limit < 20) return false;
+	const minimum = Math.min(rect.width, width - 16);
+	Object.assign(list.style, { width: fit ? "max-content" : `${minimum}px`, minWidth: `${minimum}px`, maxWidth: `${width - 16}px`, maxHeight: `${limit}px` });
+	const size = list.getBoundingClientRect();
+	Object.assign(list.style, { left: `${Math.max(left + 8, Math.min(rect.left, left + width - size.width - 8))}px`,
+		top: `${below >= size.height || below >= above ? rect.bottom + 4 : rect.top - size.height - 4}px` });
+	return true;
+}
+
+export function bindDropdownPointer(list, choose) {
+	list.addEventListener("pointerdown", event => {
+		if (event.pointerType !== "touch" && event.target.closest("[data-index]")) event.preventDefault();
+	});
+	list.addEventListener("mousedown", event => { if (event.target.closest("[data-index]")) event.preventDefault(); });
+	list.addEventListener("click", event => {
+		const option = event.target.closest("[data-index]");
+		if (option) choose(Number(option.dataset.index));
+	});
+}
+
+export class SelectPicker {
+	constructor(onOpen) {
+		Object.assign(this, { onOpen, select: null, options: [], active: -1, selected: -1, query: "", queryTime: 0, frame: 0, touchClick: false });
+		this.list = document.createElement("div");
+		this.list.className = "dropdown-list";
+		this.list.setAttribute("popover", "manual");
+		bindDropdownPointer(this.list, index => this.choose(index));
+		window.addEventListener("pointerdown", event => {
+			if (event.button !== 0) return;
+			this.touchClick = false;
+			const select = event.target.closest("select");
+			if (select && !select.matches(":disabled")) event.preventDefault();
+			if (this.select && event.target !== this.select && !this.list.contains(event.target)) this.close();
+		}, true);
+		window.addEventListener("pointerup", event => {
+			const select = event.target.closest("select");
+			if (event.pointerType !== "touch" || !select || select.matches(":disabled")) return;
+			event.preventDefault();
+			if (this.select === select) this.close();
+			else this.show(select);
+			this.touchClick = true;
+		}, true);
+		window.addEventListener("mousedown", event => {
+			if (event.button === 0 && event.target.closest("select")) event.preventDefault();
+		}, true);
+		window.addEventListener("click", event => {
+			const select = event.target.closest("select");
+			if (!select || select.matches(":disabled")) return;
+			event.preventDefault();
+			if (this.touchClick) { this.touchClick = false; return; }
+			if (this.select === select) this.close();
+			else this.show(select);
+		}, true);
+		window.addEventListener("keydown", event => this.keyDown(event), true);
+		window.addEventListener("focusin", event => {
+			if (this.select && event.target !== this.select && !this.list.contains(event.target)) this.close();
+		});
+		window.addEventListener("scroll", event => {
+			if (this.select && !this.list.contains(event.target)) this.position();
+		}, true);
+		window.addEventListener("resize", () => this.close());
+		window.addEventListener("blur", () => this.close());
+		window.addEventListener("pagehide", () => this.close());
+		document.addEventListener("close", event => {
+			if (this.select && event.target.contains(this.select)) this.close();
+		}, true);
+		document.addEventListener("reset", event => {
+			if (this.select?.form === event.target) this.close();
+		}, true);
+		document.addEventListener("change", event => {
+			if (event.target === this.select) this.render();
+		}, true);
+	}
+
+	show(select) {
+		this.close();
+		this.onOpen?.();
+		select.focus({ preventScroll: true });
+		if (!select.isConnected || select.matches(":disabled")) return;
+		this.select = select;
+		(select.closest("dialog") || document.body).append(this.list);
+		this.render();
+		if (!this.select) return;
+		this.list.showPopover();
+		this.position();
+		if (!this.select) return;
+		this.activate(this.active);
+		this.observer = new MutationObserver(() => this.render());
+		this.observer.observe(select, { subtree: true, childList: true, characterData: true, attributes: true });
+		this.watch();
+	}
+
+	render() {
+		const select = this.select;
+		if (!select) return;
+		const previous = this.options[this.active]?.option, changed = this.selected !== select.selectedIndex;
+		this.selected = select.selectedIndex;
+		this.options = [...select.options].filter(option => !option.hidden && !option.parentElement.hidden).map(option => ({
+			option, disabled: option.disabled || option.parentElement.tagName === "OPTGROUP" && option.parentElement.disabled,
+		}));
+		if (!this.options.length) { this.close(); return; }
+		this.list.replaceChildren();
+		let group = null;
+		for (const [index, { option, disabled }] of this.options.entries()) {
+			if (option.parentElement.tagName === "OPTGROUP" && group !== option.parentElement) {
+				group = option.parentElement;
+				const heading = document.createElement("div");
+				heading.className = "dropdown-group";
+				heading.textContent = group.label;
+				this.list.append(heading);
+			}
+			const row = document.createElement("div");
+			row.className = "dropdown-option";
+			row.dataset.index = String(index);
+			row.dataset.disabled = String(disabled);
+			const label = document.createElement("span");
+			label.textContent = option.label;
+			row.append(label);
+			row.title = option.title;
+			this.list.append(row);
+		}
+		const selected = this.options.findIndex(({ option, disabled }) => !disabled && option === (changed ? select.selectedOptions[0] : previous));
+		this.activate(selected < 0 ? this.options.findIndex(({ disabled }) => !disabled) : selected);
+		if (this.list.matches(":popover-open")) this.position();
+	}
+
+	watch() {
+		const select = this.select;
+		if (!select) return;
+		if (!select.isConnected || select.matches(":disabled") || !select.getClientRects().length || select.closest("[hidden], [inert], dialog:not([open])")) {
+			this.close();
+			return;
+		}
+		if (this.selected !== select.selectedIndex) this.render();
+		if (this.select) this.frame = requestAnimationFrame(() => this.watch());
+	}
+
+	position() {
+		if (this.select && !positionDropdown(this.list, this.select, true)) this.close();
+	}
+
+	activate(index) {
+		this.active = index;
+		for (const row of this.list.querySelectorAll(".dropdown-option")) {
+			row.dataset.selected = String(Number(row.dataset.index) === index);
+			if (row.dataset.selected === "true" && this.list.matches(":popover-open")) row.scrollIntoView({ block: "nearest" });
+		}
+	}
+
+	choose(index) {
+		const select = this.select, item = this.options[index];
+		if (!select || select.matches(":disabled") || !item || item.disabled || !select.contains(item.option)) return;
+		const changed = select.selectedIndex !== item.option.index;
+		select.selectedIndex = item.option.index;
+		this.close();
+		if (changed) {
+			select.dispatchEvent(new Event("input", { bubbles: true }));
+			select.dispatchEvent(new Event("change", { bubbles: true }));
+		}
+	}
+
+	close() {
+		if (!this.select) return;
+		this.observer?.disconnect();
+		this.observer = null;
+		cancelAnimationFrame(this.frame);
+		this.frame = 0;
+		this.list.hidePopover();
+		this.list.remove();
+		this.list.replaceChildren();
+		this.select = null;
+		this.options = [];
+		this.active = this.selected = -1;
+		this.query = "";
+		this.queryTime = 0;
+	}
+
+	keyDown(event) {
+		if (event.defaultPrevented || event.isComposing) return;
+		this.touchClick = false;
+		if (event.ctrlKey || event.metaKey || event.key === "Tab") { this.close(); return; }
+		const select = event.target.closest("select");
+		if (!select || select.matches(":disabled") || event.altKey && !["ArrowDown", "ArrowUp"].includes(event.key)) return;
+		const key = event.key, open = this.select === select;
+		if (key === "Escape") {
+			if (!open) return;
+			this.close();
+		} else if (key === "F4" || event.altKey) {
+			if (open) this.close();
+			else this.show(select);
+		} else if (["Enter", " "].includes(key)) {
+			if (open) this.choose(this.active);
+			else this.show(select);
+		} else if (["ArrowDown", "ArrowUp", "Home", "End", "PageDown", "PageUp"].includes(key)) {
+			if (!open) this.show(select);
+			if (this.select && (open || !["ArrowDown", "ArrowUp"].includes(key))) {
+				const available = this.options.flatMap(({ disabled }, index) => disabled ? [] : [index]);
+				const at = available.indexOf(this.active), direction = ["ArrowUp", "PageUp"].includes(key) ? -1 : 1;
+				const step = key.startsWith("Page") ? Math.max(1, Math.floor(this.list.clientHeight / (this.list.querySelector(".dropdown-option")?.offsetHeight || 32)) - 1) : 1;
+				const next = key === "Home" ? 0 : key === "End" ? available.length - 1 : Math.max(0, Math.min(available.length - 1, at + direction * step));
+				this.activate(available[next] ?? -1);
+			}
+		} else if (key.length === 1) {
+			if (!open) this.show(select);
+			const now = performance.now();
+			this.query = (now - this.queryTime < 700 ? this.query : "") + key.toLocaleLowerCase();
+			this.queryTime = now;
+			const repeated = [...this.query].every(value => value === this.query[0]), query = repeated ? this.query[0] : this.query;
+			const start = repeated ? this.active + 1 : Math.max(0, this.active);
+			for (let offset = 0; offset < this.options.length; offset++) {
+				const index = (start + offset) % this.options.length, item = this.options[index];
+				if (!item.disabled && item.option.label.trim().toLocaleLowerCase().startsWith(query)) { this.activate(index); break; }
+			}
+		} else return;
+		event.preventDefault();
+		event.stopImmediatePropagation();
+	}
+}

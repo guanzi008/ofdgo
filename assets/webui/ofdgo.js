@@ -2,7 +2,7 @@ import { SVG_NAMESPACE, CanvasEditor, canEditObject, editTextValue, richTextMode
 import { FontManager, FontPicker } from "./ofdgo_font.js";
 import { nativeHost, createEngineWorker, engineLimits, documentBytes, saveFilePicker, directoryPicker } from "./ofdgo_host.js";
 import { PrintDialog } from "./ofdgo_print.js";
-import { DocumentDialogs } from "./ofdgo_util.js";
+import { DocumentDialogs, SelectPicker } from "./ofdgo_util.js";
 import { MM_TO_PX, SCROLL_SEGMENT_SIZE, createPageView } from "./ofdgo_view.js";
 
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
@@ -705,7 +705,8 @@ const fontManager = new FontManager({
 	onChange: scheduleFontSync,
 	onPermissionChange: updateFontPermissionHint,
 });
-const fontPicker = new FontPicker(el.textFont, el.textFontToggle, el.textFontList, changeTextFont, loadEditorFonts, groupTextFonts);
+const fontPicker = new FontPicker(el.textFont, el.textFontToggle, el.textFontList, changeTextFont, () => { selectPicker.close(); loadEditorFonts(); }, groupTextFonts);
+const selectPicker = new SelectPicker(() => fontPicker.prepareCommit());
 const textFormatButtons = [...document.querySelectorAll("[data-text-format]")];
 const textBackground = document.querySelector("#textBackground");
 const editorInputs = new Map();
@@ -2872,6 +2873,7 @@ function detachDocumentView() {
 	resourceManager.sequence++;
 	settings.sequence++;
 	fontBinding.sequence++;
+	selectPicker.close();
 	fontPicker.close();
 	fontPicker.changing = null;
 	for (const [input, control] of editorInputs) {

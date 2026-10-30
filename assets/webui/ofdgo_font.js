@@ -1,3 +1,5 @@
+import { bindDropdownPointer, positionDropdown } from "./ofdgo_util.js";
+
 const DATABASE = "ofdgo";
 
 export class FontPicker {
@@ -14,13 +16,7 @@ export class FontPicker {
 			if (this.open) this.close();
 			else { input.focus(); input.select(); this.show(); }
 		});
-		list.addEventListener("pointerdown", event => {
-			if (event.target.closest(".font-option")) event.preventDefault();
-		});
-		list.addEventListener("click", event => {
-			const option = event.target.closest(".font-option");
-			if (option) this.choose(Number(option.dataset.index));
-		});
+		bindDropdownPointer(list, index => this.choose(index));
 		window.addEventListener("resize", () => this.close());
 	}
 
@@ -133,11 +129,7 @@ export class FontPicker {
 
 	position() {
 		if (!this.open) return;
-		const rect = this.input.parentElement.getBoundingClientRect();
-		if (rect.right <= 0 || rect.left >= window.innerWidth) { this.close(); return; }
-		const width = Math.min(rect.width, window.innerWidth - 16);
-		Object.assign(this.list.style, { left: `${Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))}px`,
-			top: `${rect.bottom + 4}px`, width: `${width}px`, maxHeight: `${Math.max(40, Math.min(280, window.innerHeight - rect.bottom - 12))}px` });
+		if (!positionDropdown(this.list, this.input.parentElement)) this.close();
 	}
 
 	activate(index) {
