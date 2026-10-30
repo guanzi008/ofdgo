@@ -3979,7 +3979,9 @@ audio.page-media {
 	min-width: 28px;
 	height: 26px;
 	padding: 0 7px;
-	border: 1px solid transparent;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-control);
+	background: var(--base);
 	color: var(--text-muted);
 	font-size: 12px;
 	text-align: center;
