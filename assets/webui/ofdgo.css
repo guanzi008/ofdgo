@@ -352,7 +352,7 @@ a:focus-visible {
 
 .editor-group {
 	display: grid;
-	flex: 0 0 auto;
+	flex: 1 0 auto;
 	justify-content: center;
 	grid-template-columns: repeat(3, var(--editor-control-width));
 	grid-template-rows: repeat(2, var(--control-height)) 28px;
@@ -510,9 +510,23 @@ a:focus-visible {
 	height: var(--control-height);
 }
 
-.text-highlight .button { min-width: 0; }
+.text-highlight .button { min-width: 0; border-radius: 5px 0 0 5px; }
 .text-highlight .button span { border-bottom: 3px solid var(--highlight-color, #ffff00); }
-.text-highlight .color-input { min-width: 0; width: 12px; height: 100%; padding: 0; }
+.text-highlight [data-pressed="mixed"] span { border-image: repeating-linear-gradient(135deg, var(--input) 0 4px, var(--text-muted) 4px 8px) 3; }
+
+.text-highlight .color-input {
+	min-width: 0;
+	width: 12px;
+	height: 100%;
+	padding: 0;
+	border: 0;
+	border-radius: 0 5px 5px 0;
+	background: var(--dropdown-arrow) center / 10px 10px no-repeat;
+}
+
+.text-highlight .color-input:not(:disabled):hover { background-color: var(--hover); }
+.text-highlight .color-input::-webkit-color-swatch { opacity: 0; }
+.text-highlight .color-input::-moz-color-swatch { opacity: 0; }
 
 .editor-group:has(#shapeFill) {
 	grid-template-columns: repeat(2, 84px);
@@ -637,14 +651,14 @@ a:focus-visible {
 }
 
 .editor-group:first-child {
-	flex-grow: 0;
+	flex-grow: 0.5;
 	justify-content: start;
 	padding-left: 0;
 }
 
 .editor-group:last-child {
-	flex-grow: 0;
-	justify-content: center;
+	flex-grow: 0.5;
+	justify-content: end;
 	padding-right: 0;
 	border-right: 0;
 }
@@ -2738,8 +2752,9 @@ body[data-hide-meta] .meta-panel {
 
 #annotationsPanel select {
 	min-width: 0;
+	padding-left: 6px;
 	border: 1px solid var(--line);
-	background: var(--input);
+	background-color: var(--input);
 	font: inherit;
 }
 
