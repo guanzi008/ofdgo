@@ -15,6 +15,7 @@
 	--focus: #087f6d;
 	--sidebar-width: clamp(220px, 20vw, 292px);
 	--bar-bg: #fafbfc;
+	--bar-line: var(--line);
 	--titlebar-background: #e8edee;
 	--titlebar-foreground: #263238;
 	--titlebar-inactive-background: var(--base);
@@ -51,6 +52,7 @@
 	--input: #2d353b;
 	--panel: #242b30;
 	--bar-bg: #272e33;
+	--bar-line: #30383e;
 	--line: #374047;
 	--line-strong: #505d66;
 	--text-muted: #9aa8b1;
@@ -194,8 +196,12 @@
 	inset: 0 0 auto;
 	z-index: 1;
 	height: 1px;
-	background: var(--line);
+	background: var(--bar-line);
 	pointer-events: none;
+}
+
+.document-titlebar[data-maximized]::before {
+	display: none;
 }
 
 .document-tabs {
@@ -276,10 +282,27 @@
 }
 
 .document-titlebar :is(.close-icon, .new-icon, .settings-icon, .update-icon) {
-	width: 16px;
-	height: 16px;
-	flex: 0 0 16px;
-	mask-size: 12px 12px;
+	position: relative;
+	width: var(--titlebar-icon-size, 10px);
+	height: var(--titlebar-icon-size, 10px);
+	flex: 0 0 var(--titlebar-icon-size, 10px);
+	mask-size: contain;
+}
+
+.document-titlebar .close-icon {
+	mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='2.15 2.15 19.7 19.7' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m3 3 18 18M21 3 3 21'/%3E%3C/svg%3E");
+}
+
+.document-titlebar .new-icon {
+	mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='2.15 2.15 19.7 19.7' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3v18M3 12h18'/%3E%3C/svg%3E");
+}
+
+.document-titlebar .settings-icon {
+	mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='2.15 2.15 19.7 19.7' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m10 3-.7 2.4-2 .9L5 5.7 3 9l1.9 1.7v2.6L3 15l2 3.3 2.3-.6 2 .9L10 21h4l.7-2.4 2-.9 2.3.6 2-3.3-1.9-1.7v-2.6L21 9l-2-3.3-2.3.6-2-.9L14 3z'/%3E%3Ccircle cx='12' cy='12' r='4'/%3E%3C/svg%3E");
+}
+
+.document-titlebar .update-icon {
+	mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='3.15 3.15 17.7 17.7' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 11a8 8 0 0 0-14.9-3M4 4v4h4M4 13a8 8 0 0 0 14.9 3M20 20v-4h-4'/%3E%3C/svg%3E");
 }
 
 .document-title-drag {
@@ -730,8 +753,8 @@ a:focus-visible {
 	display: flex;
 	min-width: 0;
 	background: var(--bar-bg);
-	border-top: 1px solid var(--line);
-	border-bottom: 1px solid var(--line);
+	border-top: 1px solid var(--bar-line);
+	border-bottom: 1px solid var(--bar-line);
 }
 
 .toolbar-frame > .toolbar {
@@ -4425,7 +4448,8 @@ audio.page-media {
 	z-index: 12;
 	justify-content: space-between;
 	overflow: hidden;
-	border-top: 1px solid var(--line);
+	border-top: 1px solid var(--bar-line);
+	box-shadow: none;
 	color: var(--text-muted);
 	font-size: 12px;
 }

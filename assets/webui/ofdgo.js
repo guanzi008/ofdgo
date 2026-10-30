@@ -1873,7 +1873,9 @@ el.pageInput.addEventListener("change", () => {
 window.addEventListener("resize", resizeViewer);
 window.addEventListener("resize", () => {
 	for (const tabs of document.querySelectorAll(".panel-tabs, .document-tabs")) revealPanelTab(tabs);
+	updateTitleBarIcons();
 });
+el.documentTabs.addEventListener("scroll", updateTitleBarIcons);
 window.addEventListener("blur", () => pageView.endPan());
 COMPACT_LAYOUT.addEventListener("change", syncLayoutMode);
 el.viewerPanel.addEventListener("scroll", () => {
@@ -2646,7 +2648,20 @@ function applyTitleBarInfo(info) {
 	updateTitleBarRegions();
 }
 
+function updateTitleBarIcons() {
+	const scale = window.devicePixelRatio;
+	el.documentTitleBar.style.setProperty("--titlebar-icon-size", `${Math.floor(10 * scale) / scale}px`);
+	const icons = [...el.documentTitleBar.querySelectorAll(".close-icon, .new-icon, .settings-icon, .update-icon")];
+	for (const icon of icons) icon.style.inset = "";
+	const offsets = icons.map(icon => {
+		const bounds = icon.getBoundingClientRect();
+		return `${Math.round(bounds.y * scale) / scale - bounds.y}px auto auto ${Math.round(bounds.x * scale) / scale - bounds.x}px`;
+	});
+	icons.forEach((icon, index) => icon.style.inset = offsets[index]);
+}
+
 function updateTitleBarRegions() {
+	updateTitleBarIcons();
 	if (!nativeHost || !workspace.titleBarReady) return;
 	const bounds = el.documentTitleBar.querySelector(".document-title-drag").getBoundingClientRect();
 	const regions = bounds.width > 0 && bounds.height > 0 ? [{x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height}] : [];
@@ -5682,6 +5697,7 @@ function watchApplicationUpdates(checksum) {
 				}
 			} else if (latest) {
 				el.refreshAppButton.hidden = latest === checksum;
+				updateTitleBarIcons();
 			}
 		} catch {
 		} finally {
