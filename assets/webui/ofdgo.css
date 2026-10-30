@@ -1075,15 +1075,9 @@ button:not(:disabled):hover {
 	overflow-wrap: anywhere;
 }
 
-.about-associations {
+.appearance-associations {
 	padding: 12px;
 	border-top: 1px solid var(--line);
-}
-
-.association-heading {
-	margin-bottom: 12px;
-	font-weight: 600;
-	white-space: nowrap;
 }
 
 .association-row {

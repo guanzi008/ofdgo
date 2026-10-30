@@ -2096,9 +2096,7 @@ function formDialogOpen() {
 
 async function openAboutPanel() {
 	el.aboutVersion.textContent = "读取中";
-	el.associationMessage.hidden = true;
 	documentDialogs.showApplication(el.aboutPanel);
-	if (nativeHost) void refreshFileAssociations();
 	let raw = "";
 	try {
 		const response = await fetch("./", { cache: "no-store" });
@@ -5521,7 +5519,9 @@ async function boot() {
 		const bounds = el.appearanceButton.getBoundingClientRect();
 		el.appearancePanel.style.setProperty("--appearance-top", `${bounds.bottom + 4}px`);
 		el.appearancePanel.style.setProperty("--appearance-right", `${Math.max(12, innerWidth - bounds.right)}px`);
+		el.associationMessage.hidden = true;
 		documentDialogs.showApplication(el.appearancePanel);
+		if (nativeHost) void refreshFileAssociations();
 	});
 	for (const button of el.appearancePanel.querySelectorAll("[data-theme-choice]")) button.addEventListener("click", () => window.ofdgoTheme.set(button.dataset.themeChoice));
 	documentDialogs = new DocumentDialogs({document, titlebar: el.documentTitleBar,

@@ -203,12 +203,6 @@
 				<div class="about-row"><span>桌面软件</span><a href="https://ofdgo.aite.me/releases/" target="_blank" rel="noreferrer">https://ofdgo.aite.me/releases/</a></div>
 				<div class="about-row"><span>项目仓库</span><a href="https://github.com/xiaoqidun/ofdgo" target="_blank" rel="noreferrer">https://github.com/xiaoqidun/ofdgo</a></div>
 			</form>
-			<section id="associationSection" class="about-associations" hidden>
-				<div class="association-heading">文件关联</div>
-				<div class="association-row" data-scope="user"><span>当前用户</span><span class="association-state"></span><div class="association-actions"><button class="small-button" type="button" data-action="register">注册</button><button class="small-button" type="button" data-action="remove">撤销</button></div></div>
-				<div class="association-row" data-scope="machine"><span>所有用户</span><span class="association-state"></span><div class="association-actions"><button class="small-button" type="button" data-action="register">注册</button><button class="small-button" type="button" data-action="remove">撤销</button></div></div>
-				<div id="associationMessage" class="form-status" hidden></div>
-			</section>
 		</dialog>
 		<dialog id="closePanel" class="form-dialog confirm-dialog">
 			<form method="dialog">
@@ -462,6 +456,12 @@
 					<button type="button" data-theme-choice="dark"><span class="theme-dark-icon"></span><span>深色</span></button>
 				</div>
 			</form>
+			<section id="associationSection" class="appearance-associations" hidden>
+				<div class="appearance-label">文件关联</div>
+				<div class="association-row" data-scope="user"><span>当前用户</span><span class="association-state"></span><div class="association-actions"><button class="small-button" type="button" data-action="register">注册</button><button class="small-button" type="button" data-action="remove">撤销</button></div></div>
+				<div class="association-row" data-scope="machine"><span>所有用户</span><span class="association-state"></span><div class="association-actions"><button class="small-button" type="button" data-action="register">注册</button><button class="small-button" type="button" data-action="remove">撤销</button></div></div>
+				<div id="associationMessage" class="form-status" hidden></div>
+			</section>
 		</dialog>
 		<dialog id="settingsPanel" class="form-dialog settings-dialog">
 			<form id="settingsForm">
