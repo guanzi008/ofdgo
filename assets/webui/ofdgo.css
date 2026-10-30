@@ -640,6 +640,7 @@ a:focus-visible {
 }
 
 .font-listbox .font-option {
+	position: relative;
 	display: flex;
 	align-items: baseline;
 	justify-content: space-between;
@@ -662,15 +663,35 @@ a:focus-visible {
 	font-size: 12px;
 }
 
-.font-listbox .font-option:hover,
+.font-listbox .font-option:not([data-disabled="true"]):hover,
 .font-listbox [data-selected="true"] {
-	background: var(--selected);
-	color: var(--accent);
+	background: var(--hover);
+}
+
+.font-listbox [data-selected="true"] {
+	outline: 1px solid var(--focus);
+	outline-offset: -1px;
+}
+
+.font-listbox [data-current="true"] {
+	color: var(--accent-strong);
+}
+
+.font-listbox [data-current="true"]::before {
+	position: absolute;
+	inset: 6px auto 6px 0;
+	width: 2px;
+	background: var(--accent);
+	content: "";
 }
 
 .font-listbox [data-disabled="true"],
 .font-search-empty {
 	color: var(--text-muted);
+}
+
+.font-listbox [data-disabled="true"] {
+	cursor: default;
 }
 
 .font-search-empty {
@@ -1915,21 +1936,6 @@ button:not(:disabled):hover {
 	background: var(--accent-strong);
 }
 
-.format-select:focus,
-.format-select:focus-visible,
-.order-select:focus,
-.order-select:focus-visible {
-	border-color: var(--accent);
-	outline: 2px solid var(--accent);
-	outline-offset: 2px;
-}
-
-.format-select option:checked,
-.order-select option:checked {
-	background-color: var(--selected);
-	color: var(--accent-strong);
-}
-
 .zoom-label {
 	min-width: 42px;
 	text-align: center;
@@ -2069,10 +2075,6 @@ body[data-hide-meta] .meta-panel {
 	background-color: var(--input);
 	color: var(--text);
 	font-size: 12px;
-}
-
-.document-select:not(:disabled):hover {
-	background-color: var(--hover);
 }
 
 .document-dialog {
@@ -4795,10 +4797,6 @@ audio.page-media {
 	background-color: var(--input);
 }
 
-.editor-toolbar > .editor-group > select:not(:disabled):hover {
-	background-color: var(--hover);
-}
-
 .page-surface,
 .thumb-paper,
 .print-preview-page img,
@@ -4930,6 +4928,11 @@ audio.page-media {
 
 .appearance-heading .form-title {
 	margin: 0;
+}
+
+select:not(:disabled):hover,
+#textAlign:not(:disabled):hover {
+	background-color: var(--hover);
 }
 
 select:not([multiple]):not([size]) {
