@@ -281,6 +281,8 @@ export class FontManager {
 					name: font.name,
 					data: new Blob([font.data]),
 					enabled: font.enabled,
+					origin: font.origin,
+					systemKey: font.systemKey,
 					checksum,
 				});
 			}

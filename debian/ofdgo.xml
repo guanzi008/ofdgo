@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/ofd">
+    <comment>Open Fixed-layout Document</comment>
+    <comment xml:lang="zh_CN">OFD 文档</comment>
+    <glob pattern="*.ofd"/>
+  </mime-type>
+</mime-info>
