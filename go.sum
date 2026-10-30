@@ -30,8 +30,8 @@ github.com/benoitkugler/textprocessing v0.0.6 h1:obkMyj62GEPg3xUVYqROlCN22z1Oleu
 github.com/benoitkugler/textprocessing v0.0.6/go.mod h1:Io0gN08/PXEzrSOWFa88xHx2Xv3VjvLMY7H76YoI23A=
 github.com/ebitengine/purego v0.11.2 h1:WWiTx8rD8zYdOwSj8O/NiNbsOvSAgJMTlyV1XlbUSeU=
 github.com/ebitengine/purego v0.11.2/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
-github.com/emmansun/gmsm v0.45.1 h1:S77WOluBZ9JH2wh701H2QR03eQYNGLeN8IUkdhgGpRA=
-github.com/emmansun/gmsm v0.45.1/go.mod h1:RfnfrzyB9XbDi73nF1NHbJeqJj+a6pg/pXr5lrZKMok=
+github.com/emmansun/gmsm v0.45.2 h1:GUqMkdHDrEvxqcRtIfhkyqMzgwtiQsnCVYtioOdYlQc=
+github.com/emmansun/gmsm v0.45.2/go.mod h1:RfnfrzyB9XbDi73nF1NHbJeqJj+a6pg/pXr5lrZKMok=
 github.com/go-fonts/latin-modern v0.3.3 h1:g2xNgI8yzdNzIVm+qvbMryB6yGPe0pSMss8QT3QwlJ0=
 github.com/go-fonts/latin-modern v0.3.3/go.mod h1:tHaiWDGze4EPB0Go4cLT5M3QzRY3peya09Z/8KSCrpY=
 github.com/go-text/typesetting v0.3.5 h1:XZPUooClHY0Vf/rFyUyuPRNEkawARaFzLMQcXLSEyPk=
@@ -60,8 +60,8 @@ github.com/tdewolff/parse/v2 v2.8.16 h1:bLk5svUOQRkW/Y2SJ+DeENSIkZBcTIkq+Atyv5D8
 github.com/tdewolff/parse/v2 v2.8.16/go.mod h1:XdsoSFThlVIRIajAuqz1evNY7bagZS8LBOPA3aVopwQ=
 github.com/tdewolff/test v1.0.12 h1:7F21DqIajswxuche0geHdrUZRCWE4oko4b7bcmkkrxk=
 github.com/tdewolff/test v1.0.12/go.mod h1:XPuWBzvdUzhCuxWO1ojpXsyzsA5bFoS3tO/Q3kFuTG8=
-github.com/xiaoqidun/guigo v0.0.0-20261030152023-f745e1ac5b04 h1:4slpaBWgvAKkjEJgICXUQ6ypTe7wso7jjAh0OtcCBTQ=
-github.com/xiaoqidun/guigo v0.0.0-20261030152023-f745e1ac5b04/go.mod h1:bXz+dPMVntPIVwePTTuMXt8Q0z1YoUGuROQSsXyUEfY=
+github.com/xiaoqidun/guigo v0.0.0-20261030153939-c39abf593a0f h1:wek1tEiTjf0i5eT6w6ILJLEPwdXP+TaH3qtRBOO1xeI=
+github.com/xiaoqidun/guigo v0.0.0-20261030153939-c39abf593a0f/go.mod h1:bXz+dPMVntPIVwePTTuMXt8Q0z1YoUGuROQSsXyUEfY=
 github.com/xiaoqidun/j2kgo v1.0.2 h1:OAjjEOfaBaQzBNcj9wx+eM68UI5pewR6SzNZa1R1DIw=
 github.com/xiaoqidun/j2kgo v1.0.2/go.mod h1:DCwAfuDzCDYqUiAlZ7BDwigTjaXw7o9L1FtEma/D1aA=
 github.com/xiaoqidun/jbig2 v1.1.8 h1:dERPW7F8gs18a/DOD9gXHR3fP1Vl6KhCNsLnq5l3BIo=

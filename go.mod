@@ -4,11 +4,11 @@ go 1.26.0
 
 require (
 	github.com/andybalholm/brotli v1.2.7
-	github.com/emmansun/gmsm v0.45.1
+	github.com/emmansun/gmsm v0.45.2
 	github.com/go-text/typesetting v0.3.5
 	github.com/tdewolff/canvas v0.0.0-20260923214215-09804640d00c
 	github.com/tdewolff/font v0.0.0-20261010204837-88a7f6b56918
-	github.com/xiaoqidun/guigo v0.0.0-20261030152023-f745e1ac5b04
+	github.com/xiaoqidun/guigo v0.0.0-20261030153939-c39abf593a0f
 	github.com/xiaoqidun/j2kgo v1.0.2
 	github.com/xiaoqidun/jbig2 v1.1.8
 	github.com/xiaoqidun/pdfgo v0.0.0-20261026125713-90454771d5d0
