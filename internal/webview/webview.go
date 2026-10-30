@@ -48,6 +48,9 @@ const applicationDownloadURL = "https://ofdgo.aite.me/releases/"
 
 // Host 连接桌面系统能力和共用文档业务
 type Host struct {
+	themeMu        sync.Mutex
+	theme          applicationTheme
+	themePath      string
 	mu             sync.Mutex
 	window         *guigo.Window
 	files          *fileStore
@@ -104,7 +107,11 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 			return err
 		}
 	}
-	h := &Host{pendingPaths: paths}
+	h := &Host{pendingPaths: paths, themePath: filepath.Join(options.UserDataDir, "appearance.json")}
+	if err := h.loadTheme(); err != nil {
+		return err
+	}
+	options.TitleBarColors = themeColors(h.theme.Dark)
 	data, err := json.Marshal(paths)
 	if err != nil {
 		return err
@@ -142,7 +149,7 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 	h.conversionPool = h.resources.ConversionPool()
 	defer h.close()
 	bindings := make(map[string]guigo.HandlerFunc)
-	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "drop.release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "launch.done", "title", "window.info", "window.drag", "window.close", "update.check", "update.open", "association.query", "association.register", "association.remove", "print.capabilities", "print.dialog", "print.printers", "print.query", "print.properties", "print"} {
+	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "file", "release", "drop.release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "launch.done", "title", "window.info", "window.drag", "window.close", "appearance", "update.check", "update.open", "association.query", "association.register", "association.remove", "print.capabilities", "print.dialog", "print.printers", "print.query", "print.properties", "print"} {
 		bindings["ofdgo.host."+name] = func(ctx context.Context, args any) (any, error) { return h.call(ctx, name, args) }
 	}
 	static := http.FileServerFS(webuiassets.NativeFS)
@@ -153,6 +160,18 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 		}
 		if strings.HasSuffix(r.URL.Path, ".wasm") || strings.HasSuffix(r.URL.Path, "wasm_exec.js") || strings.HasSuffix(r.URL.Path, "ofdgo_work.js") {
 			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			data, err := h.themeIndex()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("X-OFDGo-Build-Version", build.Version)
+			w.Header().Set("Cache-Control", "no-store")
+			w.Write(data)
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
@@ -237,7 +256,13 @@ func (h *Host) resource(r *http.Request) (*guigo.Resource, error) {
 		if name == "" {
 			name = "index.html"
 		}
-		data, err := webuiassets.NativeFS.ReadFile(name)
+		var data []byte
+		var err error
+		if name == "index.html" {
+			data, err = h.themeIndex()
+		} else {
+			data, err = webuiassets.NativeFS.ReadFile(name)
+		}
 		if err != nil {
 			return nil, nil
 		}
@@ -411,6 +436,8 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 	text := func(key string) string { value, _ := args[key].(string); return value }
 	flag := func(key string) bool { value, _ := args[key].(bool); return value }
 	switch name {
+	case "appearance":
+		return nil, h.setTheme(applicationTheme{Mode: text("mode"), Dark: flag("dark")})
 	case "print.capabilities", "print.dialog", "print.printers", "print.query", "print.properties", "print":
 		h.mu.Lock()
 		window := h.window
@@ -1186,22 +1213,17 @@ func windowOptions(dataDir string) (guigo.Options, error) {
 		return guigo.Options{}, err
 	}
 	return guigo.Options{
-		AppID:    appID,
-		Title:    "OFDGo - OFD编辑器",
-		TitleBar: guigo.TitleBarContent,
-		TitleBarColors: guigo.TitleBarColors{
-			Background:         "#e8edf0",
-			Foreground:         "#1f2428",
-			InactiveBackground: "#eef1f4",
-			InactiveForeground: "#66737f",
-		},
-		Icon:        icon,
-		Width:       1440,
-		Height:      900,
-		MinWidth:    360,
-		MinHeight:   240,
-		Center:      true,
-		Maximized:   true,
-		UserDataDir: dataDir,
+		AppID:          appID,
+		Title:          "OFDGo - OFD编辑器",
+		TitleBar:       guigo.TitleBarContent,
+		TitleBarColors: themeColors(false),
+		Icon:           icon,
+		Width:          1440,
+		Height:         900,
+		MinWidth:       360,
+		MinHeight:      240,
+		Center:         true,
+		Maximized:      true,
+		UserDataDir:    dataDir,
 	}, nil
 }

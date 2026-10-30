@@ -8,6 +8,7 @@
 	<link rel="manifest" href="./ofdgo.json">
 	<link rel="icon" type="image/x-icon" sizes="16x16 32x32 48x48 64x64 128x128 256x256" href="./ofdgo.ico">
 	<link rel="icon" type="image/svg+xml" href="./ofdgo.svg">
+	<script src="./ofdgo_theme.js"></script>
 	<link rel="stylesheet" href="./ofdgo.css">
 </head>
 <body>
@@ -16,6 +17,7 @@
 			<div id="documentTabs" class="document-tabs"></div>
 			<button id="documentNewTab" class="document-new-tab" type="button" title="新建"><span class="new-icon"></span></button>
 			<div class="document-title-drag"></div>
+			<button id="appearanceButton" class="app-appearance" type="button" title="设置"><span class="settings-icon"></span></button>
 			<button id="refreshAppButton" class="app-update" type="button" title="更新" hidden><span class="update-icon"></span></button>
 		</div>
 		<header class="toolbar-frame">
@@ -447,6 +449,17 @@
 					<button id="documentDownButton" class="button" type="button">后移</button>
 					<div id="documentStatus" class="form-status"></div>
 					<button id="documentClose" class="button" type="button">关闭</button>
+				</div>
+			</form>
+		</dialog>
+		<dialog id="appearancePanel" class="form-dialog appearance-dialog">
+			<form method="dialog">
+				<div class="appearance-heading"><h2 id="appearanceTitle" class="form-title">设置</h2><button class="appearance-close" type="submit" title="关闭"><span class="close-icon"></span></button></div>
+				<div class="appearance-label">外观主题</div>
+				<div class="appearance-themes">
+					<button type="button" data-theme-choice="system"><span class="theme-system-icon"></span><span>系统</span></button>
+					<button type="button" data-theme-choice="light"><span class="theme-light-icon"></span><span>浅色</span></button>
+					<button type="button" data-theme-choice="dark"><span class="theme-dark-icon"></span><span>深色</span></button>
 				</div>
 			</form>
 		</dialog>

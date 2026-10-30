@@ -192,6 +192,8 @@ function createDocumentState() {
 let state = createDocumentState();
 
 const el = {
+	appearanceButton: document.querySelector("#appearanceButton"),
+	appearancePanel: document.querySelector("#appearancePanel"),
 	printButton: document.querySelector("#printButton"),
 	printPanel: document.querySelector("#printPanel"),
 	documentTitleBar: document.querySelector("#documentTitleBar"),
@@ -711,8 +713,8 @@ const annotationFields = Object.fromEntries(["CreateForm", "CreateCancel", "Cont
 el.editorTools.addEventListener("scroll", () => fontPicker.position());
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
-	textControls: [el.textAlign, el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, el.textLineHeight, el.textSpacing, el.textWrap, el.paragraphButton, el.paragraphPanel, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.saveAsButton, el.fontInput, document.querySelector("#textReflow")],
-	keepTextFocus: () => fontPicker.open || el.closePanel.open || el.paragraphPanel.open || canvasEditor.input?.fontDialog,
+	textControls: [el.appearanceButton, el.appearancePanel, el.textAlign, el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, el.textLineHeight, el.textSpacing, el.textWrap, el.paragraphButton, el.paragraphPanel, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.saveAsButton, el.fontInput, document.querySelector("#textReflow")],
+	keepTextFocus: () => el.appearancePanel.open || fontPicker.open || el.closePanel.open || el.paragraphPanel.open || canvasEditor.input?.fontDialog,
 	prepareTextCommit: flushEditorInputs,
 	onTextFormat: changeRangeFormat,
 	onRichInput: ensureRichInput,
@@ -2086,7 +2088,7 @@ function handleKeyDown(event) {
 
 function formDialogOpen() {
 	if (documentTab().print?.context) return true;
-	return Boolean(sealPreview || resourceManager.pick) || el.aboutPanel.open || el.closePanel.open || el.attachmentDialog.open || settingsElements.Panel.open || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
+	return el.appearancePanel.open || Boolean(sealPreview || resourceManager.pick) || el.aboutPanel.open || el.closePanel.open || el.attachmentDialog.open || settingsElements.Panel.open || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
 		|| resourceElements.Panel.open || el.structureDialog.open || el.versionPanel.open || el.batchPagesPanel.open || el.objectStylePanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
 
@@ -2638,9 +2640,6 @@ function applyTitleBarInfo(info) {
 	document.body.style.setProperty("--titlebar-height", `${info.height}px`);
 	el.documentTitleBar.style.setProperty("--titlebar-left", `${info.left}px`);
 	el.documentTitleBar.style.setProperty("--titlebar-right", `${info.right}px`);
-	for (const [name, value] of Object.entries(info.colors || {})) {
-		if (value) el.documentTitleBar.style.setProperty(`--titlebar-${name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`, value);
-	}
 	el.documentTitleBar.dataset.active = String(info.active);
 	el.documentTitleBar.dataset.maximized = String(info.maximized);
 	revealPanelTab(el.documentTabs);
@@ -5502,6 +5501,14 @@ function resizeViewer() {
 }
 
 async function boot() {
+	window.ofdgoTheme.connect(nativeHost, error => showError(error, false));
+	el.appearanceButton.addEventListener("click", () => {
+		const bounds = el.appearanceButton.getBoundingClientRect();
+		el.appearancePanel.style.setProperty("--appearance-top", `${bounds.bottom + 4}px`);
+		el.appearancePanel.style.setProperty("--appearance-right", `${Math.max(12, innerWidth - bounds.right)}px`);
+		documentDialogs.showApplication(el.appearancePanel);
+	});
+	for (const button of el.appearancePanel.querySelectorAll("[data-theme-choice]")) button.addEventListener("click", () => window.ofdgoTheme.set(button.dataset.themeChoice));
 	documentDialogs = new DocumentDialogs({document, titlebar: el.documentTitleBar,
 		targets: () => [...document.body.children].filter(node => node !== el.documentTitleBar)});
 	for (const panel of document.querySelectorAll("dialog.form-dialog")) if (panel !== el.printPanel) documentDialogs.register(panel, {persistent: panel === batchElements.Panel});
