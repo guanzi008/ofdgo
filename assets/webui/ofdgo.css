@@ -21,6 +21,8 @@
 	--titlebar-foreground: #263238;
 	--titlebar-inactive-background: var(--base);
 	--titlebar-inactive-foreground: #728087;
+	--titlebar-hover: rgb(0 0 0 / 6%);
+	--titlebar-pressed: rgb(0 0 0 / 3%);
 	--bar-height: 48px;
 	--bar-pad: 5px 10px;
 	--control-height: 28px;
@@ -77,6 +79,8 @@
 	--titlebar-foreground: #e0e7eb;
 	--titlebar-inactive-background: #242b30;
 	--titlebar-inactive-foreground: #9aa8b1;
+	--titlebar-hover: rgb(255 255 255 / 10%);
+	--titlebar-pressed: rgb(255 255 255 / 6%);
 	--danger: #f1a39b;
 	--danger-soft: #462e2e;
 	--danger-line: #704745;
@@ -4834,7 +4838,12 @@ audio.page-media {
 
 .app-appearance:not(:disabled):hover,
 .app-update:not(:disabled):hover {
-	background: var(--pressed-overlay);
+	background: var(--titlebar-hover);
+}
+
+:root .app-appearance:not(:disabled):active,
+:root .app-update:not(:disabled):active {
+	background: var(--titlebar-pressed);
 }
 
 .settings-icon,
