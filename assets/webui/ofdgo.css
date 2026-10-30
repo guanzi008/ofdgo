@@ -440,8 +440,7 @@ a:focus-visible {
 	background-repeat: no-repeat;
 }
 
-.editor-paragraph > .editor-field,
-.editor-group:has(#textFont) > .editor-field {
+.editor-paragraph > .editor-field {
 	grid-column: auto;
 }
 
@@ -523,12 +522,13 @@ a:focus-visible {
 }
 
 .editor-group:has(#textFont) > .text-font {
-	grid-column: 1 / 5;
-	grid-template-columns: minmax(0, 1fr) 32px;
+	grid-template-columns: minmax(0, 1fr) 64px 32px;
 	column-gap: 4px;
 }
 
-.editor-group:has(#textFont) > .editor-field { grid-column: 5 / 8; }
+#textSize {
+	text-align: left;
+}
 
 .editor-paragraph {
 	grid-template-columns: var(--editor-control-width) 120px;
