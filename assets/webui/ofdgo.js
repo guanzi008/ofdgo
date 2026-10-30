@@ -1090,8 +1090,7 @@ function addInfoRow(container, values, sourceIndex) {
 	}
 	const remove = document.createElement("button");
 	remove.type = "button";
-	remove.className = "icon-button";
-	remove.textContent = "×";
+	remove.className = "icon-button remove-button";
 	remove.title = values.length === 1 ? "删除词条" : "删除属性";
 	remove.addEventListener("click", () => row.remove());
 	row.append(remove);
@@ -2434,8 +2433,7 @@ function addGradientStop(position, color, transparency, source) {
 	}
 	const remove = document.createElement("button");
 	remove.type = "button";
-	remove.className = "icon-button";
-	remove.textContent = "×";
+	remove.className = "icon-button remove-button";
 	remove.title = "删除色标";
 	remove.addEventListener("click", () => row.remove());
 	row.append(remove);
@@ -6637,10 +6635,9 @@ function renderFontList() {
 		toggle.append(enabled, enabledText);
 
 		const remove = document.createElement("button");
-		remove.className = "font-delete";
+		remove.className = "icon-button remove-button font-delete";
 		remove.type = "button";
 		remove.title = "删除字体";
-		remove.textContent = "×";
 		remove.addEventListener("click", async () => {
 			await changeFont(font);
 		});
@@ -9973,8 +9970,7 @@ function renderBatchList() {
 		const action = row.insertCell();
 		const remove = document.createElement("button");
 		remove.type = "button";
-		remove.className = "icon-button";
-		remove.textContent = "×";
+		remove.className = "icon-button remove-button";
 		remove.title = "移除";
 		remove.disabled = batch.running;
 		remove.addEventListener("click", () => { batch.items.splice(batch.items.indexOf(item), 1); renderBatchList(); });
@@ -12033,8 +12029,7 @@ function addStructureAttribute(attribute = {}) {
 	}
 	const remove = document.createElement("button");
 	remove.type = "button";
-	remove.className = "icon-button";
-	remove.textContent = "×";
+	remove.className = "icon-button remove-button";
 	remove.title = "删除属性";
 	remove.addEventListener("click", () => row.remove());
 	row.append(remove);
@@ -12052,9 +12047,9 @@ function addStructureReference(reference = {}) {
 	for (const [index, item] of state.doc.pages.entries()) page.add(new Option(`第${index + 1}页`, item.id));
 	if (reference.pageId) page.value = reference.pageId;
 	const remove = document.createElement("button"), add = document.createElement("button");
-	for (const [button, label, text] of [[remove, "删除引用", "×"], [add, "添加图元", "+"]]) {
+	for (const [button, label, text] of [[remove, "删除引用", ""], [add, "添加图元", "+"]]) {
 		button.type = "button";
-		button.className = "icon-button";
+		button.className = button === remove ? "icon-button remove-button" : "icon-button";
 		button.textContent = text;
 		button.title = label;
 	}

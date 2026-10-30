@@ -868,6 +868,28 @@ button:not(:disabled):hover {
 	font-size: 14px;
 }
 
+.remove-button {
+	border: 0;
+	background: transparent;
+	color: var(--text-muted);
+}
+
+.remove-button:not(:disabled):hover {
+	background: var(--danger-soft);
+	color: var(--danger);
+}
+
+.remove-button:focus-visible {
+	outline-offset: -2px;
+}
+
+.remove-button::before {
+	content: "";
+	width: 14px;
+	height: 14px;
+	background: currentColor;
+}
+
 .arrow-prev::before,
 .arrow-next::before {
 	width: 5px;
@@ -902,7 +924,8 @@ button:not(:disabled):hover {
 	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7V3h6l3 4h9v14H3Z'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
-.close-icon {
+.close-icon,
+.remove-button::before {
 	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m3 3 18 18M21 3 3 21'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
@@ -4438,14 +4461,8 @@ audio.page-media {
 }
 
 .font-delete {
-	display: inline-grid;
-	place-items: center;
 	width: 26px;
 	height: 26px;
-	padding: 0;
-	color: var(--danger);
-	font-size: 18px;
-	line-height: 1;
 }
 
 .font-empty {
