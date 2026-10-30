@@ -12636,10 +12636,14 @@ function fontSummary(fonts) {
 	}
 	const missing = fonts.filter((font) => font.status === "missing").length;
 	const fallback = fonts.filter((font) => font.status === "fallback").length;
-	if (missing || fallback) {
-		return `${fonts.length} · 缺失 ${missing} · 回退 ${fallback}`;
+	const parts = [String(fonts.length)];
+	if (missing) {
+		parts.push(`缺失 ${missing}`);
 	}
-	return `共 ${fonts.length}`;
+	if (fallback) {
+		parts.push(`回退 ${fallback}`);
+	}
+	return parts.join(" · ");
 }
 
 function pageStatus(index, pageCount) {

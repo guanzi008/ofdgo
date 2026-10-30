@@ -7,6 +7,7 @@
 	--line-strong: #c5cdd2;
 	--panel: #f5f7f8;
 	--page: #ffffff;
+	--text-secondary: #52616b;
 	--text-muted: #728087;
 	--accent: #087f6d;
 	--accent-soft: rgba(15, 123, 104, 0.12);
@@ -59,6 +60,7 @@
 	--bar-line: #30383e;
 	--line: #374047;
 	--line-strong: #505d66;
+	--text-secondary: #b8c4cc;
 	--text-muted: #9aa8b1;
 	--accent: #65cbb6;
 	--accent-soft: rgba(101, 203, 182, 0.16);
@@ -3982,7 +3984,7 @@ audio.page-media {
 	border: 1px solid var(--line);
 	border-radius: var(--radius-control);
 	background: var(--base);
-	color: var(--text-muted);
+	color: var(--text-secondary);
 	font-size: 12px;
 	text-align: center;
 	white-space: nowrap;
