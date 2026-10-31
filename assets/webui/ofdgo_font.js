@@ -1,10 +1,11 @@
-import { bindDropdownPointer, positionDropdown } from "./ofdgo_util.js";
+import { bindDropdownPointer, positionDropdown, showDropdown, hideDropdown } from "./ofdgo_util.js";
 
 const DATABASE = "ofdgo";
 
 export class FontPicker {
 	constructor(input, toggle, list, onChange, onOpen, groupFonts) {
 		Object.assign(this, { input, toggle, list, onChange, onOpen, groupFonts, fonts: [], groups: [], value: "", active: -1, open: false });
+		if (typeof list.showPopover !== "function") hideDropdown(list);
 		input.addEventListener("input", () => this.show(input.value));
 		input.addEventListener("focus", () => input.select());
 		input.addEventListener("pointerdown", event => { if (event.button === 0 && !this.open) event.preventDefault(); });
@@ -119,7 +120,7 @@ export class FontPicker {
 			empty.textContent = this.fonts.length ? "暂无匹配字体" : "暂无字体";
 			this.list.append(empty);
 		}
-		if (!this.open) this.list.showPopover();
+		if (!this.open) showDropdown(this.list);
 		this.open = true;
 		this.position();
 		const selected = this.matches.findIndex(({ font, group }) => !font.disabled && group.includes(Number(this.value)));
@@ -170,7 +171,7 @@ export class FontPicker {
 	}
 
 	close() {
-		if (this.open) { this.open = false; this.list.hidePopover(); }
+		if (this.open) { this.open = false; hideDropdown(this.list); }
 		this.restore();
 	}
 

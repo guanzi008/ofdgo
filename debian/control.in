@@ -1,0 +1,11 @@
+Package: ofdgo
+Version: @VERSION@
+Installed-Size: @SIZE@
+Section: graphics
+Priority: optional
+Architecture: @ARCH@
+Maintainer: guanzi008 <20619190+guanzi008@users.noreply.github.com>
+Depends: @DEPENDS@
+Homepage: https://github.com/guanzi008/ofdgo
+Description: OFD and PDF document viewer and editor
+ Native desktop application based on OFDGo and GUIGo.

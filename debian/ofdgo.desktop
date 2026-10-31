@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OFDGo
+Comment=Open and edit OFD and PDF documents
+Comment[zh_CN]=打开和编辑 OFD、PDF 文档
+Exec=ofdgo %F
+Icon=ofdgo
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/ofd;application/pdf;
+StartupNotify=true
