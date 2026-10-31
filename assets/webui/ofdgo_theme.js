@@ -3,7 +3,7 @@
 	const preference = matchMedia("(prefers-color-scheme: dark)");
 	const key = "ofdgo.theme";
 	let mode = root.dataset.themeMode || "system";
-	let material = root.dataset.windowChoice || "acrylic";
+	let material = root.dataset.windowChoice || "solid";
 	let host = null, report = null, pending = Promise.resolve(), revision = 0, committed = null;
 	if (!root.dataset.themeMode) {
 		try { mode = localStorage.getItem(key) || "system"; } catch {}

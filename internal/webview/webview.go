@@ -1213,16 +1213,12 @@ func windowOptions(dataDir string) (guigo.Options, error) {
 	if err != nil {
 		return guigo.Options{}, err
 	}
-	material := guigo.WindowSolid
-	if guigo.SupportsWindowMaterial(guigo.WindowAcrylic) {
-		material = guigo.WindowAcrylic
-	}
 	return guigo.Options{
 		AppID:          appID,
 		Title:          "OFDGo - OFD编辑器",
 		TitleBar:       guigo.TitleBarContent,
 		TitleBarColors: themeColors(false),
-		WindowMaterial: material,
+		WindowMaterial: guigo.WindowSolid,
 		Icon:           icon,
 		Width:          1440,
 		Height:         900,
