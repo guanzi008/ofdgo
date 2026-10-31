@@ -1844,7 +1844,7 @@ button:not(:disabled):hover {
 }
 
 .form-options label + label span {
-	border-left: 0;
+	border-left-color: transparent;
 }
 
 .form-options label:first-child span {
