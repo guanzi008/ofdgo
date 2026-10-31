@@ -13,6 +13,7 @@
 	--accent-soft: rgba(15, 123, 104, 0.12);
 	--selected: #dfefeb;
 	--accent-strong: #095c4e;
+	--accent-hover: #095c4e;
 	--focus: #087f6d;
 	--sidebar-width: clamp(220px, 20vw, 292px);
 	--bar-bg: #fafbfc;
@@ -30,7 +31,9 @@
 	--radius-dialog: 8px;
 	--page-space: clamp(14px, 2.5vw, 28px);
 	--shadow-flyout: 0 4px 12px rgba(31, 36, 40, 0.12);
-	--shadow-soft: 0 10px 28px rgba(31, 36, 40, 0.12);
+	--shadow-soft: 0 12px 32px rgba(31, 36, 40, 0.18);
+	--shadow-choice: 0 1px 4px rgb(31 36 40 / 10%);
+	--popup-line: color-mix(in srgb, var(--text) 18%, transparent);
 	--shadow-page: 0 14px 30px rgba(31, 36, 40, 0.16);
 	--base: #eef1f3;
 	--text: #263238;
@@ -48,7 +51,7 @@
 	--warning-soft: #fbefd3;
 	--warning-line: #ded0a6;
 	--success-line: #bdd8cc;
-	--backdrop: rgb(31 36 40 / 18%);
+	--backdrop: rgb(0 0 0 / 18%);
 	--control-fill: var(--input);
 	--panel-fill: var(--panel);
 	--well-fill: var(--base);
@@ -77,6 +80,7 @@
 	--accent-soft: rgba(101, 203, 182, 0.16);
 	--selected: #24463e;
 	--accent-strong: #65cbb6;
+	--accent-hover: #80d6c4;
 	--focus: #65cbb6;
 	--hover: #343e45;
 	--pressed-overlay: rgb(255 255 255 / 8%);
@@ -100,6 +104,7 @@
 	--backdrop: rgb(0 0 0 / 35%);
 	--shadow-flyout: 0 4px 12px #0005;
 	--shadow-soft: 0 12px 36px #0006, 0 2px 6px #0003;
+	--shadow-choice: 0 1px 4px rgb(0 0 0 / 24%);
 	--shadow-page: 0 14px 30px #0005;
 	--dropdown-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e0e7eb' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m5 9 7 7 7-7'/%3E%3C/svg%3E");
 }
@@ -697,7 +702,7 @@ a:focus-visible {
 	position: fixed;
 	margin: 0;
 	padding: 4px;
-	border: 1px solid var(--line);
+	border: 1px solid var(--popup-line);
 	background: var(--popup-fill);
 	color: var(--text);
 	box-shadow: var(--shadow-flyout);
@@ -830,11 +835,11 @@ a:focus-visible {
 }
 
 .mixed-color::-webkit-color-swatch {
-	background: repeating-linear-gradient(135deg, #fff 0 4px, #aeb7bc 4px 8px);
+	background: repeating-linear-gradient(135deg, var(--input) 0 4px, var(--line-strong) 4px 8px);
 }
 
 .mixed-color::-moz-color-swatch {
-	background: repeating-linear-gradient(135deg, #fff 0 4px, #aeb7bc 4px 8px);
+	background: repeating-linear-gradient(135deg, var(--input) 0 4px, var(--line-strong) 4px 8px);
 }
 
 .app-bar {
@@ -1161,7 +1166,7 @@ button:not(:disabled):hover {
 	overflow: auto;
 	margin: auto;
 	padding: 0;
-	border: 1px solid var(--line);
+	border: 1px solid var(--popup-line);
 	border-radius: var(--radius-dialog);
 	background: var(--popup-fill);
 	color: var(--text);
@@ -1240,11 +1245,17 @@ button:not(:disabled):hover {
 .confirm-message {
 	margin: 0 0 16px;
 	line-height: 1.5;
+	white-space: pre-line;
+	overflow-wrap: anywhere;
 }
 
 .confirm-dialog .form-actions {
 	grid-template-columns: repeat(3, max-content);
 	justify-content: end;
+}
+
+#confirmPanel .form-actions {
+	grid-template-columns: repeat(2, max-content);
 }
 
 .confirm-dialog .form-actions button[hidden] {
@@ -1878,12 +1889,17 @@ button:not(:disabled):hover {
 	white-space: nowrap;
 }
 
-#createImageOrder input:not(:disabled):not(:checked) + span:hover {
-	background: var(--hover-fill);
+.form-options input:not(:disabled):not(:checked) + span:hover {
+	background-color: var(--hover-fill);
 }
 
-#createImageOrder input:disabled + span {
+.form-options input:disabled + span {
 	opacity: 0.48;
+	cursor: default;
+}
+
+.form-options input:not(:disabled) + span:active {
+	background-image: linear-gradient(var(--pressed-overlay), var(--pressed-overlay));
 }
 
 .info-rows textarea,
@@ -2154,7 +2170,7 @@ button:not(:disabled):hover {
 }
 
 .form-actions button[type="submit"]:not(:disabled):hover {
-	background: var(--accent-strong);
+	background: var(--accent-hover);
 }
 
 .zoom-label {
@@ -2187,6 +2203,10 @@ body[data-hide-meta] .meta-panel {
 	display: none;
 }
 
+.form-dialog,
+.form-dialog *,
+.font-listbox,
+.dropdown-list,
 .navigation-content,
 .viewer-panel,
 .search-results,
@@ -2195,6 +2215,10 @@ body[data-hide-meta] .meta-panel {
 .meta-panel {
 	scrollbar-width: thin;
 	scrollbar-color: var(--line-strong) transparent;
+}
+
+:is(.form-dialog, .form-dialog *, .font-listbox, .dropdown-list, .navigation-content, .viewer-panel, .search-results, .editor-toolbar, .document-list, .meta-panel):hover {
+	scrollbar-color: var(--text-muted) transparent;
 }
 
 .page-list-panel,
@@ -2453,7 +2477,7 @@ body[data-hide-meta] .meta-panel {
 	height: 180px;
 	margin-top: 12px;
 	overflow: auto;
-	background: white;
+	background: var(--well-fill);
 }
 
 .resource-viewer[hidden] {
@@ -2465,6 +2489,10 @@ body[data-hide-meta] .meta-panel {
 	max-width: 100%;
 	max-height: 100%;
 	object-fit: contain;
+}
+
+.resource-viewer img {
+	background: var(--page);
 }
 
 .resource-viewer audio {
@@ -3350,13 +3378,13 @@ button.outline-link:hover {
 	line-height: 1;
 }
 
-.thumb-paper.pending,
-.thumb-paper.error {
+.thumb-paper.pending {
 	background:
-		linear-gradient(90deg, rgba(31, 36, 40, 0.04) 1px, transparent 1px),
-		linear-gradient(0deg, rgba(31, 36, 40, 0.04) 1px, transparent 1px),
-		#ffffff;
+		linear-gradient(90deg, var(--canvas-grid) 1px, transparent 1px),
+		linear-gradient(0deg, var(--canvas-grid) 1px, transparent 1px),
+		var(--panel);
 	background-size: 12px 12px;
+	color: var(--text-muted);
 }
 
 .thumb-svg {
@@ -3472,7 +3500,7 @@ button.outline-link:hover {
 	gap: 8px 10px;
 	width: min(420px, calc(100vw - 32px));
 	padding: 10px 12px;
-	border: 1px solid var(--line);
+	border: 1px solid var(--popup-line);
 	border-radius: var(--radius-dialog);
 	background: var(--popup-fill);
 	box-shadow: var(--shadow-flyout);
@@ -3584,8 +3612,11 @@ button.outline-link:hover {
 	z-index: 1;
 }
 
-.page-shell.error {
-	background: #fff8f7;
+.page-shell.error,
+.page-shell.error .page-placeholder,
+.thumb-paper.error {
+	background: var(--danger-soft);
+	color: var(--danger);
 }
 
 .page-surface {
@@ -4141,9 +4172,9 @@ audio.page-media {
 	color: var(--text-muted);
 	font-size: 13px;
 	background:
-		linear-gradient(90deg, rgba(31, 36, 40, 0.04) 1px, transparent 1px),
-		linear-gradient(0deg, rgba(31, 36, 40, 0.04) 1px, transparent 1px),
-		#ffffff;
+		linear-gradient(90deg, var(--canvas-grid) 1px, transparent 1px),
+		linear-gradient(0deg, var(--canvas-grid) 1px, transparent 1px),
+		var(--panel);
 	background-size: 18px 18px;
 }
 
@@ -5219,7 +5250,7 @@ audio.page-media {
 	background: var(--control-fill);
 	color: var(--accent);
 	border-color: var(--line);
-	box-shadow: 0 1px 4px #0001;
+	box-shadow: var(--shadow-choice);
 }
 
 .appearance-choices [data-pressed="true"]::after {

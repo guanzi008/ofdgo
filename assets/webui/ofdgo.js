@@ -40,6 +40,7 @@ let wasmRequestID = 0;
 let wasmRecoveryTimer = 0;
 let credentialRequest = null;
 let documentDialogs = null;
+let confirmationTask = Promise.resolve();
 let cancelPageTouch = null;
 
 const workspace = { tabs: [], active: null, sequence: 0, nextID: 0, switching: false, closing: false, objectClipboard: null, textClipboard: null };
@@ -285,6 +286,8 @@ const el = {
 	ofdInput: document.querySelector("#ofdInput"),
 	ofdButton: document.querySelector("#ofdButton"),
 	closeButton: document.querySelector("#closeButton"),
+	confirmPanel: document.querySelector("#confirmPanel"),
+	confirmMessage: document.querySelector("#confirmPanel .confirm-message"),
 	closePanel: document.querySelector("#closePanel"),
 	closeTitle: document.querySelector("#closePanel .form-title"),
 	closeMessage: document.querySelector("#closePanel .confirm-message"),
@@ -725,7 +728,7 @@ el.editorTools.addEventListener("scroll", () => fontPicker.position());
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	textControls: [el.appearanceButton, el.appearancePanel, el.textAlign, el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, el.textLineHeight, el.textSpacing, el.textWrap, el.paragraphButton, el.paragraphPanel, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.saveAsButton, el.fontInput, document.querySelector("#textReflow")],
-	keepTextFocus: () => el.appearancePanel.open || fontPicker.open || el.closePanel.open || el.paragraphPanel.open || canvasEditor.input?.fontDialog,
+	keepTextFocus: () => el.appearancePanel.open || fontPicker.open || el.confirmPanel.open || el.closePanel.open || el.paragraphPanel.open || canvasEditor.input?.fontDialog,
 	prepareTextCommit: flushEditorInputs,
 	onTextFormat: changeRangeFormat,
 	onRichInput: ensureRichInput,
@@ -984,7 +987,7 @@ resourceElements.Delete.addEventListener("click", () => resourceTask(async () =>
 	const item = resourceManager.selected;
 	if (!item) return;
 	const message = item.kind === "Attachment" ? `删除附件“${item.name}”？相关附件链接将一并移除。` : `删除资源“${item.name}”？`;
-	if (window.confirm(message)) await changeManagedResource("delete", item);
+	if (await requestConfirmation(message)) await changeManagedResource("delete", item);
 }));
 for (const [button, action] of [[resourceElements.Bind, "bind"], [resourceElements.Unbind, "unbind"]]) {
 	button.addEventListener("click", () => resourceTask(() => changeManagedResource(action, resourceManager.selected)));
@@ -1024,6 +1027,7 @@ el.versionList.addEventListener("keydown", event => {
 	event.preventDefault();
 	selectManagedVersion(manager.entries[Math.max(0, Math.min(index, manager.entries.length - 1))].id, true);
 });
+document.querySelector("#confirmCancel").addEventListener("click", () => el.confirmPanel.close("cancel"));
 el.documentClose.addEventListener("click", () => el.documentPanel.close());
 el.documentPanel.addEventListener("cancel", event => { if (el.documentForm.inert) event.preventDefault(); });
 el.documentPanel.addEventListener("close", () => {
@@ -1040,9 +1044,9 @@ el.documentList.addEventListener("keydown", event => {
 	selectManagedDocument(event.key === "Home" ? 0 : event.key === "End" ? count - 1
 		: Math.max(0, Math.min(count - 1, index + (event.key === "ArrowUp" ? -1 : 1))), true);
 });
-editorClick(el.documentDeleteButton, () => {
+editorClick(el.documentDeleteButton, async () => {
 	const index = managedDocumentIndex(), entry = state.doc.documents[index];
-	if (window.confirm(`删除文档“${entry.title || "未命名"}”？`)) return changeDocument("ofdgoChangeDocument", null, "delete", index);
+	if (await requestConfirmation(`删除文档“${entry.title || "未命名"}”？`)) return changeDocument("ofdgoChangeDocument", null, "delete", index);
 });
 editorClick(el.documentUpButton, () => {
 	const index = managedDocumentIndex();
@@ -1366,7 +1370,7 @@ el.importForm.addEventListener("submit", async event => {
 	const position = state.importDocumentMode ? managedDocumentIndex() + 1 : { before:state.pageIndex, after:state.pageIndex+1, first:0, last:state.doc.pageCount }[el.importPosition.value];
 	const options = [];
 	if (state.importEncrypted) {
-		if (!window.confirm(state.doc.encryption?.encrypted ? "按目标文档的加密策略导入，是否继续？" : "目标未加密，导入内容将按明文保存，是否继续？")) return;
+		if (!await requestConfirmation(state.doc.encryption?.encrypted ? "按目标文档的加密策略导入，是否继续？" : "目标未加密，导入内容将按明文保存，是否继续？")) return;
 		options.push(true);
 	}
 	const range = el.importRange.value === "custom" ? state.importDocumentMode ? selectedImportDocuments() : el.importPages.value : "";
@@ -1844,7 +1848,7 @@ document.querySelector("#objectActionsButton").addEventListener("click", async (
 	if (!item || item.scoped || item.items) return;
 	const original = state.objectLinkOriginal;
 	if ((el.objectLinkKind.value !== original.kind || el.objectLinkAddress.value !== original.address || el.objectLinkPage.value !== original.page)
-		&& !window.confirm("链接尚未应用，放弃链接更改？")) return;
+		&& !await requestConfirmation("链接尚未应用，放弃链接更改？")) return;
 	syncObjectLink(item);
 	settings.scope = "object";
 	settings.kind = "actions";
@@ -2174,7 +2178,7 @@ function handleKeyDown(event) {
 
 function formDialogOpen() {
 	if (documentTab().print?.context) return true;
-	return el.appearancePanel.open || Boolean(sealPreview || resourceManager.pick) || el.aboutPanel.open || el.closePanel.open || el.attachmentDialog.open || settingsElements.Panel.open || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
+	return el.confirmPanel.open || el.appearancePanel.open || Boolean(sealPreview || resourceManager.pick) || el.aboutPanel.open || el.closePanel.open || el.attachmentDialog.open || settingsElements.Panel.open || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
 		|| resourceElements.Panel.open || el.structureDialog.open || el.versionPanel.open || el.batchPagesPanel.open || el.objectStylePanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
 
@@ -2780,8 +2784,8 @@ async function closeWorkspace() {
 		for (const tab of workspace.tabs) cancelDocumentPreparation(tab);
 		await Promise.all(workspace.tabs.filter(tab => tab.state.saving && tab.saveCompletion).map(tab => tab.saveCompletion));
 		if (workspace.tabs.some(tab => tab.state.saving)) { setStatus("文档正在保存，请稍后关闭"); return; }
-		if (batch.running && !window.confirm("批量转换尚未完成，是否退出？")) return;
-		if (workspace.tabs.some(tab => tab.opening || tab.state.exporting) && !window.confirm("文档正在处理，是否取消并退出？")) return;
+		if (batch.running && !await requestConfirmation("批量转换尚未完成，是否退出？", null)) return;
+		if (workspace.tabs.some(tab => tab.opening || tab.state.exporting) && !await requestConfirmation("文档正在处理，是否取消并退出？", null)) return;
 		const activeDirty = state.dirty || canvasEditor.textChanged() || canvasEditor.cropChanged() || canvasEditor.nudgeChanged();
 		const dirty = activeDirty || workspace.tabs.some(tab => tab.state.dirty);
 		if (dirty && (workspace.switching || workspace.tabs.some(tab => tab.closing) || formDialogOpen() || (activeDirty && document.body.hasAttribute("data-busy")))) {
@@ -3203,6 +3207,21 @@ function setDirty(dirty) {
 	updateWorkspaceDirty();
 }
 
+function requestConfirmation(message, tab = documentTab()) {
+	const sequence = tab?.state.openSeq, scope = tab && documentPanelScope(tab.state);
+	const current = () => !tab || isForegroundDocument(tab) && sequence === tab.state.openSeq && scope === documentPanelScope(tab.state);
+	const task = confirmationTask.then(async () => {
+		if (!current()) return false;
+		el.confirmMessage.textContent = message;
+		el.confirmPanel.returnValue = "cancel";
+		const choice = new Promise(resolve => el.confirmPanel.addEventListener("close", () => resolve(el.confirmPanel.returnValue), { once: true }));
+		documentDialogs.showApplication(el.confirmPanel);
+		return await choice === "confirm" && current();
+	});
+	confirmationTask = task.then(() => {}, () => {});
+	return task;
+}
+
 async function requestCloseAction(title, message, save, tab = documentTab()) {
 	const setup = () => {
 		el.closeTitle.textContent = title;
@@ -3412,7 +3431,7 @@ async function changeVersion(action) {
 		}
 		return;
 	}
-	if (action === "delete" && (!entry.id || !window.confirm(`删除版本“${entry.name || entry.index}”？`))) return;
+	if (action === "delete" && (!entry.id || !await requestConfirmation(`删除版本“${entry.name || entry.index}”？`))) return;
 	el.versionStatus.textContent = "正在处理版本";
 	if (await changeDocument("ofdgoChangeVersion", null, action, entry.id, el.versionName.value.trim())) {
 		if (tab.closed || state.versionManagement !== manager) return;
@@ -3508,7 +3527,7 @@ async function exportManagedVersion() {
 	const manager = state.versionManagement;
 	const entry = manager?.entries?.find(item => item.id === manager.id);
 	if (!entry?.id || !state.ready || state.exporting || manager.loading || manager.failed || document.body.hasAttribute("data-busy")) return;
-	if (state.doc.signatureCount && !window.confirm("版本副本可能使原签名失效，是否继续？")) return;
+	if (state.doc.signatureCount && !await requestConfirmation("版本副本可能使原签名失效，是否继续？")) return;
 	const originalDocument = state.doc, wasmSeq = state.wasmSeq;
 	const name = `${baseFileName()}_${entry.name || `版本${entry.index}`}`.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_") + ".ofd";
 	state.exporting = true;
@@ -3811,9 +3830,9 @@ async function toggleEditor() {
 	}
 }
 
-function confirmTextReflow(item) {
+async function confirmTextReflow(item) {
 	return canEditObject(item, "reflow") && (canEditObject(item, "layoutKnown")
-		|| window.confirm("将重新排版原文，是否继续？"));
+		|| await requestConfirmation("将重新排版原文，是否继续？"));
 }
 
 function openCreatePanel(insert = false, packageDocument = false) {
@@ -4596,7 +4615,7 @@ async function ensureRichInput(reflow = false) {
 	let rich = await loadRichText(editing.item, editing.face, tab, editing.fontResource, reflow);
 	if (canvasEditor.input !== editing || !isForegroundDocument(tab)) return false;
 	if (!rich && !reflow) {
-		if (!confirmTextReflow(editing.item)) return false;
+		if (!await confirmTextReflow(editing.item)) return false;
 		rich = await loadRichText(editing.item, editing.face, tab, editing.fontResource, true);
 	}
 	if (canvasEditor.input !== editing || !isForegroundDocument(tab)) return false;
@@ -4607,7 +4626,7 @@ async function ensureRichInput(reflow = false) {
 async function reflowCanvasText() {
 	const editing = canvasEditor.input;
 	if (document.body.hasAttribute("data-busy") || !editing?.source || editing.composing || editing.saving || !canEditObject(editing.item, "reflow")) return;
-	if (!window.confirm("将重新排版原文，是否继续？")) return;
+	if (!await requestConfirmation("将重新排版原文，是否继续？")) return;
 	editing.reflow = true;
 	canvasEditor.recordSourceText();
 	await canvasEditor.previewSourceText();
@@ -4668,7 +4687,7 @@ async function changeRangeFormat(key, value) {
 		const item = canvasEditor.selected;
 		if (!canvasEditor.input && item) {
 			const reflow = !canEditObject(item, "layoutKnown");
-			if (reflow && !confirmTextReflow(item)) return;
+			if (reflow && !await confirmTextReflow(item)) return;
 			const current = currentTextStyle()[key];
 			const patch = { [key]: value ?? (key === "background" ? current ? "" : textBackground.value : current !== true) };
 			await changeDocument("ofdgoFormatText", { ...item, id: (item.items || [item]).map(member => member.id) }, JSON.stringify(patch), reflow);
@@ -5054,7 +5073,7 @@ async function changeTextFace(font, key, value) {
 	if (!editing && item?.type === "TextObject") {
 		if (!key && font?.embedded && textFontRuns(item).every(run => run.format.font === font.id.slice(9))) return;
 		const reflow = Boolean(key && !canEditObject(item, "layoutKnown"));
-		if (!canEditObject(item, "replaceFont") || reflow && !confirmTextReflow(item)) return;
+		if (!canEditObject(item, "replaceFont") || reflow && !await confirmTextReflow(item)) return;
 		await changeDocument("ofdgoStyleTextFonts", { ...item, id: (item.items || [item]).map(member => member.id) }, async () => {
 			const result = await prepareTextFaces(tab, textFontRuns(item), font, key, value);
 			return { changes: JSON.stringify(result.changes), fonts: result.fonts, reflow };
@@ -5184,7 +5203,7 @@ async function changeTextAlignment() {
 	const sequence = editing ? editing.alignSequence = (editing.alignSequence || 0) + 1 : 0;
 	try {
 		if (editing) {
-			if (!editing.rich && !editing.item.draft && !confirmTextReflow(editing.item)) return;
+			if (!editing.rich && !editing.item.draft && !await confirmTextReflow(editing.item)) return;
 			if (!await ensureRichInput(!canEditObject(editing.item, "layoutKnown")) || !isForegroundDocument(tab) || canvasEditor.input !== editing || editing.alignSequence !== sequence) return;
 			editing.rich.align(align);
 		} else await saveTextParagraphs(currentTextStyle(), { align });
@@ -5201,7 +5220,7 @@ async function saveTextParagraphs(item, patch) {
 		Object.assign(item, patch);
 		return true;
 	}
-	if (!confirmTextReflow(item)) return false;
+	if (!await confirmTextReflow(item)) return false;
 	return changeDocument("ofdgoLayoutTexts", item, JSON.stringify(patch));
 }
 
@@ -5296,7 +5315,7 @@ async function changeTextStyle(color) {
 		return;
 	}
 	if (size !== item.size || fill !== null) {
-		if (color ? !canEditObject(item, "paint") : !confirmTextReflow(item)) {
+		if (color ? !canEditObject(item, "paint") : !await confirmTextReflow(item)) {
 			updateObjectControls(item, true);
 			return;
 		}
@@ -6118,7 +6137,7 @@ async function refreshApplication() {
 	const temporaryFonts = fontManager.userFonts.some((font) => font.source === "upload");
 	const dirty = state.dirty || workspace.tabs.some(tab => tab.state.dirty);
 	const message = [dirty ? "文档尚未保存，刷新将丢失更改" : "刷新后需重新打开文件", temporaryFonts ? "未保存字体需重新添加" : ""].filter(Boolean).join("\n");
-	if ((workspace.tabs.some(tab => tab.state.doc || tab.state.ofdBytes) || temporaryFonts) && !window.confirm(message)) {
+	if ((workspace.tabs.some(tab => tab.state.doc || tab.state.ofdBytes) || temporaryFonts) && !await requestConfirmation(message, null)) {
 		return;
 	}
 	setBusy(true, "正在更新应用", null, "正在更新应用");
@@ -7531,10 +7550,10 @@ function restoreSettingsDraft() {
 	if (body) body.scrollTop = draft.scroll;
 }
 
-function closeDocumentSettings() {
+async function closeDocumentSettings() {
 	if (settings.busy) return;
 	rememberSettingsDraft();
-	if ((settings.drafts.size || [...invoicePanel.drafts.values()].some(draft => draft.dirty.size)) && !window.confirm(settings.invoice ? "发票尚未应用，放弃更改？" : "配置尚未应用，放弃更改？")) return;
+	if ((settings.drafts.size || [...invoicePanel.drafts.values()].some(draft => draft.dirty.size)) && !await requestConfirmation(settings.invoice ? "发票尚未应用，放弃更改？" : "配置尚未应用，放弃更改？")) return;
 	settingsElements.Panel.close();
 }
 
@@ -7902,7 +7921,7 @@ function renderInvoiceSettings() {
 		settingsButton("还原", () => resetInvoiceDraft(draft), !draft.dirty.size, "InvoiceReset");
 		if (draft.entry) settingsButton("删除", async () => {
 			if (draft.dirty.size) throw new Error("请先应用或还原草稿");
-			if (window.confirm("删除此来源中的发票数据？页面将保留" + invoiceOtherDraftWarning(draft))) await commitInvoice(draft, { operation: "delete" });
+			if (await requestConfirmation("删除此来源中的发票数据？页面将保留" + invoiceOtherDraftWarning(draft))) await commitInvoice(draft, { operation: "delete" });
 		}, !draft.detail.capabilities?.delete, "InvoiceDelete");
 	}
 	settingsElements.Status.textContent = draft.status || invoiceIssues(draft.detail.issues) || "";
@@ -7912,7 +7931,7 @@ function renderInvoiceSettings() {
 async function newInvoiceDraft() {
 	const tab = documentTab(), state = tab.state, settings = tab.settings, invoicePanel = tab.invoice;
 	if (!state.editing) return;
-	if (invoicePanel.drafts.get("new")?.dirty.size && !window.confirm("放弃尚未应用的新建发票？")) return;
+	if (invoicePanel.drafts.get("new")?.dirty.size && !await requestConfirmation("放弃尚未应用的新建发票？")) return;
 	const format = invoicePanel.formats.find(value => value.create && value.standard !== invoiceReferenceStandard) || invoicePanel.formats.find(value => value.create);
 	if (!format) throw new Error("暂无可新建票种");
 	const invoice = { kind: format.kind, standard: format.standard, version: format.version, buyer: {}, seller: {}, items: [], facts: [] };
@@ -8365,9 +8384,9 @@ function invoiceOtherDraftWarning(draft) {
 	return [...invoicePanel.drafts.values()].some(value => value !== draft && value.entry && value.dirty.size && invoiceSourceKey(value.entry.source) === invoiceSourceKey(draft.entry.source)) ? "\n该来源其他发票的未应用修改也将放弃" : "";
 }
 
-function resetInvoiceDraft(draft) {
+async function resetInvoiceDraft(draft) {
 	const section = { xml: "xml", fields: draft.entry ? "fields" : "model", appearance: "bindings" }[invoicePanel.tab] || "model";
-	if (!draft.dirty.has(section) || !window.confirm("放弃当前编辑项的未应用修改？")) return;
+	if (!draft.dirty.has(section) || !await requestConfirmation("放弃当前编辑项的未应用修改？")) return;
 	if (section === "xml") draft.xml = draft.detail.xml || "";
 	else if (section === "fields") draft.changes.clear();
 	else if (section === "bindings") draft.bindings = structuredClone(draft.detail.bindings || []);
@@ -8450,7 +8469,7 @@ async function applyInvoiceDraft(draft, synchronize = draft.synchronize) {
 	request.synchronize = draft.invoice.standard === invoiceReferenceStandard || synchronize;
 	if (!await prepareInvoiceRequest(draft, request)) return;
 	if (!isForegroundDocument(tab)) return;
-	if (request.operation === "replace" && !window.confirm("替换此来源中的全部发票原文？" + invoiceOtherDraftWarning(draft))) return;
+	if (request.operation === "replace" && !await requestConfirmation("替换此来源中的全部发票原文？" + invoiceOtherDraftWarning(draft))) return;
 	await commitInvoice(draft, request);
 }
 
@@ -8992,7 +9011,7 @@ function renderTemplateSettings() {
 	settingsPages(source, "SourcePage", settings.page);
 	document.querySelector("#settingsSourcePage").closest("label").firstElementChild.textContent = "来源";
 	const write = async (operation, order = 0) => {
-		if (operation === "replace" && !window.confirm("替换模板内容？当前文档中引用此模板的页面将同步更新。")) return;
+		if (operation === "replace" && !await requestConfirmation("替换模板内容？当前文档中引用此模板的页面将同步更新。")) return;
 		const selected = settings.selected;
 		if (operation === "add") settings.selected = entries.length;
 		if (!await commitSettings("ofdgoChangeTemplate", operation, ["add", "replace"].includes(operation) ? Number(settingsValue("SourcePage")) : settings.page, entry?.ID || "", settingsValue("Name"), ["bind", "order"].includes(operation) ? settingsValue("BindingOrder") : settingsValue("TemplateOrder"), order)) settings.selected = selected;
@@ -9605,7 +9624,7 @@ async function previewManagedResource() {
 	}
 	const item = resourceManager.selected;
 	if (!item?.file) return;
-	if (state.doc.encryption?.encrypted && !window.confirm("资源将按明文读取，是否继续？")) return;
+	if (state.doc.encryption?.encrypted && !await requestConfirmation("资源将按明文读取，是否继续？")) return;
 	releaseResourcePreview();
 	const sequence = resourceManager.sequence, openSeq = state.openSeq;
 	let result;
@@ -9701,7 +9720,7 @@ async function downloadResource(attachment, api, label) {
 	if (!state.doc || document.body.hasAttribute("data-busy")) {
 		return;
 	}
-	if (state.doc.encryption?.encrypted && !window.confirm(`${label}将按明文下载，是否继续？`)) return;
+	if (state.doc.encryption?.encrypted && !await requestConfirmation(`${label}将按明文下载，是否继续？`)) return;
 	const openSeq = state.openSeq;
 	const originalDocument = state.doc;
 	state.exporting = true;
@@ -10059,7 +10078,7 @@ async function signDocument(event) {
 		el.signStatus.textContent = "请选择证书、私钥和信任根";
 		return;
 	}
-	if (el.signMode.value === "replace" && !window.confirm("替换现有签名，是否继续？")) return;
+	if (el.signMode.value === "replace" && !await requestConfirmation("替换现有签名，是否继续？")) return;
 	let key;
 	const keyPassword = new TextEncoder().encode(el.signKeyPassword.value);
 	const files = Object.fromEntries(["Key", "Certificate", "Roots", "Intermediates", "Seal"].map(name => [name, Array.from(el[`sign${name}`].files || [])]));
@@ -10561,7 +10580,7 @@ async function runBatch() {
 							options.credentials = await unlock;
 							if (!options.credentials) throw new DOMException("已取消解锁", "AbortError");
 							const preservesEncryption = err.code === "pdfPassword" && format.value === "pdf" && compression.mode !== 0 && !options.pages;
-							if (!preservesEncryption && !window.confirm("转换结果将不保留原加密，是否继续？")) throw new DOMException("已取消转换", "AbortError");
+							if (!preservesEncryption && (!await requestConfirmation("转换结果将不保留原加密，是否继续？", null) || batch.canceled)) throw new DOMException("已取消转换", "AbortError");
 						}
 					}
 				} catch (err) {
@@ -10643,7 +10662,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 	if (saving && !state.editorInfo && !state.ofdBytes) {
 		return;
 	}
-	if (!saving && state.doc.encryption?.encrypted && !window.confirm("此格式将输出明文，是否继续？")) return;
+	if (!saving && state.doc.encryption?.encrypted && !await requestConfirmation("此格式将输出明文，是否继续？")) return;
 	const format = saving ? { value: "ofd", label: "OFD", extension: "ofd", mime: "application/ofd" } : exportFormatInfo(value);
 	if (!format) {
 		return;
@@ -11817,7 +11836,7 @@ async function activateOpenActions() {
 				const surface = pageView.pageShell(state.pageIndex)?.querySelector(".page-surface");
 				const target = pageLinkTarget(link, info, surface, task);
 				if (!target) continue;
-				if ((target.external || link.attachment) && !window.confirm(link.attachment
+				if ((target.external || link.attachment) && !await requestConfirmation(link.attachment
 					? `文档请求下载附件，是否继续？\n${link.fileName || ""}` : `文档请求打开链接，是否继续？\n${target.href}`)) return;
 				task.navigating = !!link.dest;
 				if (await target.activate() === false) return;
