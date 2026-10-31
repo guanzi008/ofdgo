@@ -7552,10 +7552,10 @@ function renderInvoiceSettings() {
 	const choices = candidates.map(entry => [entry.key, entry.invoice.number || entry.invoice.code || `${entry.invoice.kind} · ${entry.index + 1}`]);
 	if (invoicePanel.drafts.has("new")) choices.push(["new", "新建"]);
 	if (choices.length) settingsSelect(context, "发票", "InvoiceEntry", choices, invoicePanel.key, value => { invoicePanel.key = value; loadDocumentSettings(); });
-	const actions = document.createElement("div");
-	actions.className = "invoice-actions";
-	context.append(actions);
 	if (state.editing) {
+		const actions = document.createElement("div");
+		actions.className = "invoice-actions";
+		context.append(actions);
 		settingsButton("新建", newInvoiceDraft, false, "InvoiceNew", actions);
 		settingsButton("导入", () => readInvoiceFile(async text => {
 			const value = await newInvoiceDraft();
