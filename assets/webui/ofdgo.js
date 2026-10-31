@@ -508,7 +508,6 @@ const el = {
 	createImageQueue: document.querySelector("#createImageQueue"),
 	createImageList: document.querySelector("#createImageList"),
 	createImageAdd: document.querySelector("#createImageAdd"),
-	createImageCount: document.querySelector("#createImageCount"),
 	createImageOrder: document.querySelector("#createImageOrder"),
 	createPortrait: document.querySelector("#createPortrait"),
 	createLandscape: document.querySelector("#createLandscape"),
@@ -1681,6 +1680,7 @@ el.createMode.addEventListener("change", () => {
 });
 el.createSize.addEventListener("change", applyCreatePaper);
 for (const input of [el.createWidth, el.createHeight]) input.addEventListener("input", () => updateCreateDirection(true));
+el.createMargin.addEventListener("input", updateCreateImagePreviews);
 for (const radio of [el.createPortrait, el.createLandscape]) radio.addEventListener("change", () => {
 	[el.createWidth.value, el.createHeight.value] = [el.createHeight.value, el.createWidth.value];
 	updateCreateDirection();
@@ -3886,6 +3886,7 @@ function updateCreateDirection(matchPaper = false) {
 	el.createLandscape.checked = valid && width > height;
 	el.createPortrait.disabled = el.createLandscape.disabled = !valid || width === height || el.createWidth.disabled;
 	if (matchPaper) el.createSize.value = Object.entries(createPaperSizes).find(([, [w, h]]) => Math.min(width, height) === w && Math.max(width, height) === h)?.[0] || "custom";
+	updateCreateImagePreviews();
 }
 
 function releaseCreateImages(tab) {
@@ -3963,7 +3964,6 @@ function renderCreateImages() {
 	const focused = el.createImageList.contains(document.activeElement);
 	el.createImageList.replaceChildren();
 	for (const input of el.createImageOrder.querySelectorAll("input")) input.checked = input.value === queue.order;
-	el.createImageCount.textContent = String(queue.entries.length);
 	if (!queue.entries.some(entry => entry.id === queue.selected)) queue.selected = queue.entries[0]?.id ?? null;
 	queue.observer = new IntersectionObserver(items => {
 		for (const item of items) if (item.isIntersecting && isForegroundDocument(tab)) {
@@ -4000,10 +4000,39 @@ function renderCreateImages() {
 }
 
 function showCreateImagePreview(entry, row) {
-	const image = document.createElement("img");
+	const paper = document.createElement("span"), image = document.createElement("img");
+	paper.className = "create-image-paper";
 	image.src = entry.url;
 	image.draggable = false;
-	row.querySelector(".create-image-preview").replaceChildren(image);
+	paper.append(image);
+	row.querySelector(".create-image-preview").replaceChildren(paper);
+	layoutCreateImagePreview(entry, row);
+}
+
+function updateCreateImagePreviews() {
+	const queue = state.createImageQueue;
+	if (!queue) return;
+	const entries = new Map(queue.entries.map(entry => [entry.id, entry]));
+	for (const row of el.createImageList.children) {
+		const entry = entries.get(Number(row.dataset.imageId));
+		if (entry?.url && row.querySelector(".create-image-paper")) layoutCreateImagePreview(entry, row);
+	}
+}
+
+function layoutCreateImagePreview(entry, row) {
+	const paper = row.querySelector(".create-image-paper"), image = paper.firstElementChild;
+	const margin = Number(el.createMargin.value), follow = el.createSize.value === "image";
+	const width = follow ? entry.width + 2 * margin : Number(el.createWidth.value);
+	const height = follow ? entry.height + 2 * margin : Number(el.createHeight.value);
+	const valid = Number.isFinite(width + height + margin) && margin >= 0 && width > 2 * margin && height > 2 * margin;
+	paper.hidden = !valid;
+	if (!valid) return;
+	const scale = 46 / Math.max(width, height);
+	const fit = follow ? 1 : Math.min((width - 2 * margin) / entry.width, (height - 2 * margin) / entry.height);
+	paper.style.width = `${width * scale}px`;
+	paper.style.height = `${height * scale}px`;
+	image.style.width = `${entry.width * fit * scale}px`;
+	image.style.height = `${entry.height * fit * scale}px`;
 }
 
 async function loadCreateImagePreview(tab, queue, entry) {
@@ -4014,6 +4043,11 @@ async function loadCreateImagePreview(tab, queue, entry) {
 		const source = entry.file instanceof Blob ? entry.file : new Blob([await entry.file.arrayBuffer()]);
 		if (tab.state.createImageQueue !== queue || !queue.entries.includes(entry)) return;
 		bitmap = await createImageBitmap(source, { resizeWidth: 64 });
+		if (tab.closed || tab.state.createImageQueue !== queue || !queue.entries.includes(entry)) return;
+		const size = await callTabWASM(tab, "ofdgoImagePageSize", new Uint8Array(await source.arrayBuffer()));
+		if (tab.state.createImageQueue !== queue || !queue.entries.includes(entry)) return;
+		entry.width = size.width;
+		entry.height = size.height;
 		const canvas = document.createElement("canvas"), scale = Math.min(64 / bitmap.width, 64 / bitmap.height, 1);
 		canvas.width = Math.max(1, Math.round(bitmap.width * scale));
 		canvas.height = Math.max(1, Math.round(bitmap.height * scale));

@@ -1666,10 +1666,6 @@ button:not(:disabled):hover {
 }
 
 .create-images-row {
-	display: grid;
-	grid-template-columns: minmax(0, 1fr) auto;
-	align-items: center;
-	gap: 4px;
 	margin-bottom: 12px;
 }
 
@@ -1683,12 +1679,6 @@ button:not(:disabled):hover {
 	.create-image-actions {
 		grid-template-columns: repeat(3, minmax(0, 1fr));
 	}
-}
-
-#createImageCount {
-	align-self: start;
-	line-height: var(--control-height);
-	color: var(--text-muted);
 }
 
 #createImageQueue {
@@ -1765,11 +1755,22 @@ button:not(:disabled):hover {
 	font-size: 11px;
 }
 
-.create-image-preview img {
-	display: block;
-	max-width: 100%;
-	max-height: 100%;
+.create-image-paper {
+	display: grid;
+	place-items: center;
+	box-sizing: border-box;
 	background: #fff;
+	box-shadow: 0 0 0 1px var(--line);
+}
+
+.create-image-paper img {
+	display: block;
+	width: 100%;
+	height: 100%;
+}
+
+.create-image-paper[hidden] {
+	display: none;
 }
 
 .create-image-details {

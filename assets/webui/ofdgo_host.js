@@ -478,7 +478,7 @@ class BrowserEngine {
 			"ofdgoLoadPDF", "ofdgoDocumentInfo", "ofdgoDocumentVersions", "ofdgoDocumentNavigation", "ofdgoOpenLinks", "ofdgoOutlineLinks", "ofdgoRenderBackends", "ofdgoSVGFontData",
 			"ofdgoSearchPage", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences", "ofdgoResourceTargets",
 			"ofdgoResourceLocations", "ofdgoFontPreview", "ofdgoFontFaces", "ofdgoFontFace", "ofdgoMatchFontFiles",
-			"ofdgoImages", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoPackageDocuments", "ofdgoVerifySignatures",
+			"ofdgoImages", "ofdgoImagePageSize", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoPackageDocuments", "ofdgoVerifySignatures",
 			"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoExportInvoice", "ofdgoValidateInvoice",
 			"ofdgoActionList", "ofdgoPageSettings", "ofdgoReadAnnotation", "ofdgoPreviewSignatureSeal",
 			"ofdgoExportFormats", "ofdgoOutputFormats", "ofdgoParsePageRange", "ofdgoExportPage", "ofdgoExportDocument",

@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/xiaoqidun/ofdgo"
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // sessionTextCacheBytes 限制会话文字索引的内存预算
@@ -1622,7 +1623,7 @@ func (e *businessEngine) checkDocument(name string) error {
 		return nil
 	}
 	switch name {
-	case "ofdgoFontFaces", "ofdgoFontMenu", "ofdgoFontPreferenceOrder", "ofdgoFontFace", "ofdgoCheckTextFont":
+	case "ofdgoFontFaces", "ofdgoFontMenu", "ofdgoFontPreferenceOrder", "ofdgoFontFace", "ofdgoCheckTextFont", "ofdgoImagePageSize":
 		return nil
 	case "ofdgoDiscardObjects", "ofdgoExportObjects", "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoPageTextString", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
 		return nil
@@ -6260,6 +6261,30 @@ func (e *businessEngine) importImages(args []platformValue) (any, error) {
 	return editorPageInfo{info, position}, err
 }
 
+// imagePageSize 读取图片建页使用的物理尺寸和方向，不改变文档状态
+// 入参: args 图片数据
+// 返回: any 图片宽高，单位为毫米, error 错误信息
+func (e *businessEngine) imagePageSize(args []platformValue) (any, error) {
+	data, err := e.bytesFromJS(args[0])
+	if err != nil {
+		return nil, err
+	}
+	ctx := e.operationContext()
+	config, format, err := baseimage.DecodeConfigDataContext(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	metadata, err := baseimage.PageMetadataContext(ctx, data, format, 96)
+	if err != nil {
+		return nil, err
+	}
+	width, height := float64(config.Width)*25.4/metadata.XDPI, float64(config.Height)*25.4/metadata.YDPI
+	if metadata.Orientation >= 5 {
+		width, height = height, width
+	}
+	return successResult(map[string]any{"width": width, "height": height}), nil
+}
+
 // createDocument 新建单页文档
 // 入参: args 标题、纸张宽高和注解设置
 // 返回: any 文档信息, error 错误信息
@@ -8111,6 +8136,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoFontFace":               e.fontFace,
 		"ofdgoCreateDocument":         e.createDocument,
 		"ofdgoImportImages":           e.importImages,
+		"ofdgoImagePageSize":          e.imagePageSize,
 		"ofdgoEditDocument":           e.editDocument,
 		"ofdgoUpdateInfo":             e.updateInfo,
 		"ofdgoChangeAttachment":       e.changeAttachment,
