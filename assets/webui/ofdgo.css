@@ -2096,13 +2096,15 @@ button:not(:disabled):hover {
 
 .form-unit {
 	display: grid;
-	grid-template-columns: minmax(0, 1fr) 2em;
+	grid-template-columns: minmax(0, 1fr) auto;
 	align-items: center;
+	min-width: 0;
 	gap: 8px;
 }
 
 .form-unit > span {
 	color: var(--text-muted);
+	white-space: nowrap;
 }
 
 #objectLinkFields .object-link-target {
