@@ -330,6 +330,26 @@ export class DocumentDialogs {
 	}
 }
 
+export function dropdownIsOpen(list) {
+	return typeof list.showPopover === "function" ? list.matches(":popover-open") : list.dataset.dropdownOpen === "true";
+}
+
+export function showDropdown(list) {
+	if (typeof list.showPopover === "function") list.showPopover();
+	else {
+		list.classList.add("dropdown-fallback");
+		list.dataset.dropdownOpen = "true";
+	}
+}
+
+export function hideDropdown(list) {
+	if (typeof list.hidePopover === "function") list.hidePopover();
+	else {
+		list.classList.add("dropdown-fallback");
+		delete list.dataset.dropdownOpen;
+	}
+}
+
 export function positionDropdown(list, anchor, fit = false) {
 	const rect = anchor.getBoundingClientRect(), viewport = window.visualViewport;
 	const left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0;
@@ -420,7 +440,7 @@ export class SelectPicker {
 		(select.closest("dialog") || document.body).append(this.list);
 		this.render();
 		if (!this.select) return;
-		this.list.showPopover();
+		showDropdown(this.list);
 		this.position();
 		if (!this.select) return;
 		this.activate(this.active);
@@ -460,7 +480,7 @@ export class SelectPicker {
 		}
 		const selected = this.options.findIndex(({ option, disabled }) => !disabled && option === (changed ? select.selectedOptions[0] : previous));
 		this.activate(selected < 0 ? this.options.findIndex(({ disabled }) => !disabled) : selected);
-		if (this.list.matches(":popover-open")) this.position();
+		if (dropdownIsOpen(this.list)) this.position();
 	}
 
 	watch() {
@@ -482,7 +502,7 @@ export class SelectPicker {
 		this.active = index;
 		for (const row of this.list.querySelectorAll(".dropdown-option")) {
 			row.dataset.selected = String(Number(row.dataset.index) === index);
-			if (row.dataset.selected === "true" && this.list.matches(":popover-open")) row.scrollIntoView({ block: "nearest" });
+			if (row.dataset.selected === "true" && dropdownIsOpen(this.list)) row.scrollIntoView({ block: "nearest" });
 		}
 	}
 
@@ -504,7 +524,7 @@ export class SelectPicker {
 		this.observer = null;
 		cancelAnimationFrame(this.frame);
 		this.frame = 0;
-		this.list.hidePopover();
+		hideDropdown(this.list);
 		this.list.remove();
 		this.list.replaceChildren();
 		this.select = null;
