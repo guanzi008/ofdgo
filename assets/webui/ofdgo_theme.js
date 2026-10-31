@@ -30,6 +30,13 @@
 			report(error);
 		});
 	}
+	async function flush() {
+		let current;
+		do {
+			current = pending;
+			await current;
+		} while (current !== pending);
+	}
 	function set(value) {
 		mode = value;
 		apply();
@@ -48,7 +55,7 @@
 		mode = ["light", "dark"].includes(event.newValue) ? event.newValue : "system";
 		apply();
 	});
-	window.ofdgoTheme = {set, connect(value, onError) {
+	window.ofdgoTheme = {set, flush, connect(value, onError) {
 		host = value;
 		report = onError;
 		const select = document.querySelector("#titleBarMaterial");

@@ -2727,6 +2727,7 @@ async function closeWorkspace() {
 }
 
 async function closeApplicationWindow() {
+	await window.ofdgoTheme.flush();
 	window.removeEventListener("beforeunload", warnUnsaved);
 	window.removeEventListener("beforeunload", warnBatch);
 	let closed = false;

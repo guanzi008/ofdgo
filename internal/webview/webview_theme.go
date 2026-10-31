@@ -160,7 +160,7 @@ func titleBarMaterial(value string) guigo.TitleBarMaterial {
 	material := guigo.TitleBarSolid
 	switch value {
 	case "mica":
-		material = guigo.TitleBarMicaAlt
+		material = guigo.TitleBarMica
 	case "acrylic":
 		material = guigo.TitleBarAcrylic
 	}
