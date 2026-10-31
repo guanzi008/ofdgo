@@ -1691,7 +1691,7 @@ el.createImageAdd.addEventListener("click", () => {
 });
 el.createImages.addEventListener("change", addCreateImages);
 el.createImages.addEventListener("cancel", () => { createImagePicker = null; });
-el.createImageOrder.addEventListener("change", () => { state.createImageQueue.order = el.createImageOrder.value; sortCreateImages(); });
+el.createImageOrder.addEventListener("change", event => { state.createImageQueue.order = event.target.value; sortCreateImages(); });
 el.createImageList.addEventListener("click", event => {
 	const row = event.target.closest("[data-image-id]");
 	if (!row || state.imageImporting) return;
@@ -3855,7 +3855,8 @@ function updateCreateOptions() {
 	el.createSize.querySelector('[value="image"]').disabled = !images;
 	el.createImageQueue.hidden = !images || !state.createImageQueue?.entries.length;
 	el.createPanel.classList.toggle("create-images", images);
-	el.createImageAdd.disabled = el.createImageOrder.disabled = busy;
+	el.createImageAdd.disabled = busy;
+	for (const input of el.createImageOrder.querySelectorAll("input")) input.disabled = busy;
 	const dimensions = !images || el.createSize.value !== "image";
 	toggle("createDimensions", dimensions);
 	toggle("createDirectionRow", dimensions);
@@ -3960,7 +3961,7 @@ function renderCreateImages() {
 	const top = el.createImageList.scrollTop;
 	const focused = el.createImageList.contains(document.activeElement);
 	el.createImageList.replaceChildren();
-	el.createImageOrder.value = queue.order;
+	for (const input of el.createImageOrder.querySelectorAll("input")) input.checked = input.value === queue.order;
 	el.createImageCount.textContent = String(queue.entries.length);
 	if (!queue.entries.some(entry => entry.id === queue.selected)) queue.selected = queue.entries[0]?.id ?? null;
 	queue.observer = new IntersectionObserver(items => {

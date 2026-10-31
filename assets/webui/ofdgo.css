@@ -1846,6 +1846,26 @@ button:not(:disabled):hover {
 	outline-offset: 2px;
 }
 
+#createImageOrder {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(6em, 1fr));
+	gap: 4px;
+}
+
+#createImageOrder span {
+	border-left: 1px solid var(--line);
+	border-radius: var(--radius-control);
+	white-space: nowrap;
+}
+
+#createImageOrder input:not(:disabled):not(:checked) + span:hover {
+	background: var(--hover-fill);
+}
+
+#createImageOrder input:disabled + span {
+	opacity: 0.48;
+}
+
 .info-rows textarea,
 .gradient-stop-row input[type="number"],
 .structure-attribute > input,
