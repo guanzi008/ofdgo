@@ -13086,6 +13086,7 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab()) {
 	const operation = operationRequest(tab);
+	if (!busy && operation) tab.preparationBusy = true;
 	busy ||= Boolean(tab.editTask || operation);
 	if (operation?.preparing && operation.progress) ({text, percent} = operation.progress);
 	const resumeSearch = tab.busy && !busy && tab.state.searchPaused;

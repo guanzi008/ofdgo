@@ -1622,6 +1622,8 @@ func (e *businessEngine) checkDocument(name string) error {
 		return nil
 	}
 	switch name {
+	case "ofdgoFontFaces", "ofdgoFontMenu", "ofdgoFontPreferenceOrder", "ofdgoFontFace", "ofdgoCheckTextFont":
+		return nil
 	case "ofdgoDiscardObjects", "ofdgoExportObjects", "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoPageTextString", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
 		return nil
 	default:
