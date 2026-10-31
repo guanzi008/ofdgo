@@ -824,11 +824,14 @@ class NativeHost {
 			event.preventDefault();
 			try {
 				const files = (await this.call("open", {multiple:input.multiple, directory:input.webkitdirectory, accept:input.accept})).map(value => new NativeFile(value));
-				if (!files.length) return;
+				if (!files.length) { input.dispatchEvent(new Event("cancel", {bubbles:true})); return; }
 				setInputFiles(input, files);
 				input.dispatchEvent(new Event("input", {bubbles:true}));
 				input.dispatchEvent(new Event("change", {bubbles:true}));
-			} catch (error) { if (error.name !== "AbortError") onError(error); }
+			} catch (error) {
+				if (error.name === "AbortError") input.dispatchEvent(new Event("cancel", {bubbles:true}));
+				else onError(error);
+			}
 		}, true);
 	}
 
