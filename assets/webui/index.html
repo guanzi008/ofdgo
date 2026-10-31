@@ -361,7 +361,10 @@
 				<div id="createImageQueue" hidden>
 					<div id="createImageList" class="create-image-list"></div>
 				</div>
-				<div id="createSizeRow" class="form-row"><label for="createSize">纸张</label><select id="createSize"><option value="image" hidden disabled>随图</option><option value="a4" selected>A4</option><option value="a3">A3</option><option value="a5">A5</option><option value="custom">自定</option></select></div>
+				<div class="create-paper-options">
+					<div id="createSizeRow" class="form-row"><label for="createSize">纸张</label><select id="createSize"><option value="image" hidden disabled>随图</option><option value="a4" selected>A4</option><option value="a3">A3</option><option value="a5">A5</option><option value="custom">自定</option></select></div>
+					<div id="createMarginRow" class="form-row" hidden><label for="createMargin">边距</label><div class="form-unit"><input id="createMargin" type="number" value="0" min="0" step="any" required disabled><span>mm</span></div></div>
+				</div>
 				<div id="createDirectionRow" class="form-row"><span>方向</span><div class="form-options"><label><input id="createPortrait" type="radio" name="direction" value="portrait" checked><span>竖向</span></label><label><input id="createLandscape" type="radio" name="direction" value="landscape"><span>横向</span></label></div></div>
 				<div id="createDimensions" class="form-pair">
 					<div class="form-row">
@@ -373,7 +376,6 @@
 						<div class="form-unit"><input id="createHeight" type="number" value="297" min="1" step="any" required><span>mm</span></div>
 					</div>
 				</div>
-				<div id="createMarginRow" class="form-row" hidden><label for="createMargin">边距</label><div class="form-unit"><input id="createMargin" type="number" value="0" min="0" step="any" required disabled><span>mm</span></div></div>
 				<div id="createPositionRow" class="form-row" hidden><label for="createPosition">位置</label><select id="createPosition" disabled><option value="before">页前</option><option value="after" selected>页后</option><option value="first">开头</option><option value="last">末尾</option></select></div>
 				<div class="form-actions">
 					<div id="createStatus" class="form-status"></div>
