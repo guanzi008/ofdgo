@@ -1668,11 +1668,7 @@ button:not(:disabled):hover {
 .create-images .create-paper-options {
 	display: grid;
 	grid-template-columns: repeat(2, minmax(0, 1fr));
-	column-gap: 4px;
-}
-
-.create-images-row {
-	margin-bottom: 12px;
+	column-gap: 12px;
 }
 
 .create-image-actions {
@@ -3451,7 +3447,6 @@ button.outline-link:hover {
 .navigation-tabs[hidden],
 .page-selection-tools[hidden],
 .form-row[hidden],
-.create-images-row[hidden],
 .form-pair[hidden],
 .form-actions > [hidden],
 .document-actions > [hidden],
