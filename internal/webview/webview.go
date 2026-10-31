@@ -112,6 +112,7 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 		return err
 	}
 	options.TitleBarColors = themeColors(h.theme.Dark)
+	options.TitleBarMaterial = titleBarMaterial(h.theme.Material)
 	data, err := json.Marshal(paths)
 	if err != nil {
 		return err
@@ -437,7 +438,7 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 	flag := func(key string) bool { value, _ := args[key].(bool); return value }
 	switch name {
 	case "appearance":
-		return nil, h.setTheme(applicationTheme{Mode: text("mode"), Dark: flag("dark")})
+		return nil, h.setTheme(applicationTheme{Mode: text("mode"), Dark: flag("dark"), Material: text("material")})
 	case "print.capabilities", "print.dialog", "print.printers", "print.query", "print.properties", "print":
 		h.mu.Lock()
 		window := h.window

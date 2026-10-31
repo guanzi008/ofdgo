@@ -1685,6 +1685,7 @@ button:not(:disabled):hover {
 .gradient-stop-row input[type="number"],
 .structure-attribute > input,
 .print-options select,
+.appearance-material select,
 .form-row input[type="text"],
 .form-row input[type="password"],
 .form-row input[type="number"],
@@ -4944,6 +4945,18 @@ audio.page-media {
 	.appearance-dialog .association-row {
 		gap: 8px;
 	}
+}
+
+.appearance-material:not([hidden]) {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin-top: 16px;
+}
+
+.appearance-material select {
+	width: 120px;
 }
 
 .appearance-themes {

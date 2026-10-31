@@ -19,18 +19,21 @@ package webview
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/xiaoqidun/guigo"
 	webuiassets "github.com/xiaoqidun/ofdgo/assets/webui"
 )
 
-// applicationTheme 保存应用主题偏好及最后一次解析的系统外观
+// applicationTheme 保存主题、标题材质及最后一次解析的系统外观
 type applicationTheme struct {
-	Mode string `json:"mode"`
-	Dark bool   `json:"dark"`
+	Mode     string `json:"mode"`
+	Dark     bool   `json:"dark"`
+	Material string `json:"material"`
 }
 
 // themeColors 返回应用对应外观的原生标题栏配色
@@ -46,7 +49,7 @@ func themeColors(dark bool) guigo.TitleBarColors {
 // loadTheme 在创建窗口前读取用户目录中的主题偏好
 // 返回: error 读取或解析错误
 func (h *Host) loadTheme() error {
-	h.theme = applicationTheme{Mode: "system"}
+	h.theme = applicationTheme{Mode: "system", Material: "mica"}
 	data, err := os.ReadFile(h.themePath)
 	if os.IsNotExist(err) {
 		return nil
@@ -69,6 +72,9 @@ func (a applicationTheme) validate() error {
 	if a.Mode == "light" && a.Dark || a.Mode == "dark" && !a.Dark {
 		return fmt.Errorf("主题配色无效")
 	}
+	if a.Material != "solid" && a.Material != "mica" && a.Material != "acrylic" {
+		return fmt.Errorf("标题材质无效")
+	}
 	return nil
 }
 
@@ -80,18 +86,24 @@ func (h *Host) themeIndex() ([]byte, error) {
 		return nil, err
 	}
 	h.themeMu.Lock()
-	mode := h.theme.Mode
+	mode, material := h.theme.Mode, h.theme.Material
 	h.themeMu.Unlock()
 	if mode == "" {
 		mode = "system"
 	}
-	return bytes.Replace(data, []byte(`<html lang="zh-CN">`), []byte(`<html lang="zh-CN" data-theme-mode="`+mode+`">`), 1), nil
+	materials := []string{"solid"}
+	for _, choice := range []string{"mica", "acrylic"} {
+		if titleBarMaterial(choice) != guigo.TitleBarSolid {
+			materials = append(materials, choice)
+		}
+	}
+	return bytes.Replace(data, []byte(`<html lang="zh-CN">`), []byte(`<html lang="zh-CN" data-theme-mode="`+mode+`" data-titlebar-choice="`+material+`" data-titlebar-materials="`+strings.Join(materials, ",")+`">`), 1), nil
 }
 
-// setTheme 串行保存应用偏好并同步当前窗口配色
+// setTheme 串行更新窗口配色及材质，成功保存后确认应用偏好
 // 入参: value 已解析的主题偏好
 // 返回: error 校验、持久化或窗口更新错误
-func (h *Host) setTheme(value applicationTheme) error {
+func (h *Host) setTheme(value applicationTheme) (err error) {
 	if err := value.validate(); err != nil {
 		return err
 	}
@@ -102,6 +114,18 @@ func (h *Host) setTheme(value applicationTheme) error {
 	h.mu.Unlock()
 	if window == nil {
 		return fmt.Errorf("窗口尚未就绪")
+	}
+	previous := h.theme
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, window.SetTitleBarMaterial(titleBarMaterial(previous.Material)), window.SetTitleBarColors(themeColors(previous.Dark)))
+		}
+	}()
+	if err = window.SetTitleBarMaterial(titleBarMaterial(value.Material)); err != nil {
+		return err
+	}
+	if err = window.SetTitleBarColors(themeColors(value.Dark)); err != nil {
+		return err
 	}
 	if h.theme != value {
 		data, err := json.Marshal(value)
@@ -126,5 +150,22 @@ func (h *Host) setTheme(value applicationTheme) error {
 		}
 		h.theme = value
 	}
-	return window.SetTitleBarColors(themeColors(value.Dark))
+	return nil
+}
+
+// titleBarMaterial 将应用偏好转换为当前平台支持的原生材质
+// 入参: value 材质偏好
+// 返回: guigo.TitleBarMaterial 可用的标题栏材质
+func titleBarMaterial(value string) guigo.TitleBarMaterial {
+	material := guigo.TitleBarSolid
+	switch value {
+	case "mica":
+		material = guigo.TitleBarMicaAlt
+	case "acrylic":
+		material = guigo.TitleBarAcrylic
+	}
+	if !guigo.SupportsTitleBarMaterial(material) {
+		return guigo.TitleBarSolid
+	}
+	return material
 }

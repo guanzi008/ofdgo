@@ -60,8 +60,8 @@ github.com/tdewolff/parse/v2 v2.8.16 h1:bLk5svUOQRkW/Y2SJ+DeENSIkZBcTIkq+Atyv5D8
 github.com/tdewolff/parse/v2 v2.8.16/go.mod h1:XdsoSFThlVIRIajAuqz1evNY7bagZS8LBOPA3aVopwQ=
 github.com/tdewolff/test v1.0.12 h1:7F21DqIajswxuche0geHdrUZRCWE4oko4b7bcmkkrxk=
 github.com/tdewolff/test v1.0.12/go.mod h1:XPuWBzvdUzhCuxWO1ojpXsyzsA5bFoS3tO/Q3kFuTG8=
-github.com/xiaoqidun/guigo v0.0.0-20261030153939-c39abf593a0f h1:wek1tEiTjf0i5eT6w6ILJLEPwdXP+TaH3qtRBOO1xeI=
-github.com/xiaoqidun/guigo v0.0.0-20261030153939-c39abf593a0f/go.mod h1:bXz+dPMVntPIVwePTTuMXt8Q0z1YoUGuROQSsXyUEfY=
+github.com/xiaoqidun/guigo v0.0.0-20261031023018-a9906e2ff59e h1:kSMo+IlFgsZSTH0QYOfkhZcpMNxzLSlmOrFmMAVSo+Y=
+github.com/xiaoqidun/guigo v0.0.0-20261031023018-a9906e2ff59e/go.mod h1:bXz+dPMVntPIVwePTTuMXt8Q0z1YoUGuROQSsXyUEfY=
 github.com/xiaoqidun/j2kgo v1.0.2 h1:OAjjEOfaBaQzBNcj9wx+eM68UI5pewR6SzNZa1R1DIw=
 github.com/xiaoqidun/j2kgo v1.0.2/go.mod h1:DCwAfuDzCDYqUiAlZ7BDwigTjaXw7o9L1FtEma/D1aA=
 github.com/xiaoqidun/jbig2 v1.1.8 h1:dERPW7F8gs18a/DOD9gXHR3fP1Vl6KhCNsLnq5l3BIo=
