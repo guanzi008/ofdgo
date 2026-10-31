@@ -963,11 +963,15 @@ button:not(:disabled):hover {
 }
 
 .pages-icon {
-	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 3h18M3 12h18M3 21h18'/%3E%3C/svg%3E") center / contain no-repeat;
+	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4h18M3 12h18M3 20h18'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
 .info-icon {
 	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 11v6M12 7h.01'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+.toolbar :is(.close-icon, .new-icon, .edit-icon, .convert-icon) {
+	mask-size: 15px 15px;
 }
 
 .toolbar-space {
@@ -4797,11 +4801,6 @@ audio.page-media {
 	background-color: transparent;
 }
 
-.editor-toolbar > .editor-group > #textAlign {
-	border-color: var(--line);
-	background-color: var(--input);
-}
-
 .page-surface,
 .thumb-paper,
 .print-preview-page img,
@@ -4993,8 +4992,7 @@ audio.page-media {
 	margin: 0;
 }
 
-select:not(:disabled):hover,
-#textAlign:not(:disabled):hover {
+select:not(:disabled):hover {
 	background-color: var(--hover);
 }
 
