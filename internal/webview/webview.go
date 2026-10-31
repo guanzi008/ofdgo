@@ -1214,8 +1214,8 @@ func windowOptions(dataDir string) (guigo.Options, error) {
 		return guigo.Options{}, err
 	}
 	material := guigo.TitleBarSolid
-	if guigo.SupportsTitleBarMaterial(guigo.TitleBarMica) {
-		material = guigo.TitleBarMica
+	if guigo.SupportsTitleBarMaterial(guigo.TitleBarAcrylic) {
+		material = guigo.TitleBarAcrylic
 	}
 	return guigo.Options{
 		AppID:            appID,

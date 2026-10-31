@@ -455,12 +455,18 @@
 					</nav>
 					<div class="appearance-content">
 						<section data-appearance-page="theme">
-							<div class="appearance-themes">
+							<div class="appearance-choices">
 								<button type="button" data-theme-choice="system"><span class="theme-system-icon"></span><span>系统</span></button>
 								<button type="button" data-theme-choice="light"><span class="theme-light-icon"></span><span>浅色</span></button>
 								<button type="button" data-theme-choice="dark"><span class="theme-dark-icon"></span><span>深色</span></button>
 							</div>
-							<label class="appearance-material" hidden><span>标题材质</span><select id="titleBarMaterial"><option value="solid">纯色</option><option value="mica">云母</option><option value="acrylic">亚克力</option></select></label>
+							<div class="appearance-material" hidden>
+								<div class="appearance-choices">
+									<button type="button" data-material-choice="solid"><span class="material-solid-icon"></span><span>纯色</span></button>
+									<button type="button" data-material-choice="acrylic"><span class="material-acrylic-icon"></span><span>亚克力</span></button>
+									<button type="button" data-material-choice="mica"><span class="material-mica-icon"></span><span>云母</span></button>
+								</div>
+							</div>
 						</section>
 						<section id="associationSection" data-appearance-page="association" hidden>
 							<div class="association-row" data-scope="user"><span>当前用户</span><span class="association-state"></span><div class="association-actions"><button class="small-button" type="button" data-action="register">注册</button><button class="small-button" type="button" data-action="remove">撤销</button></div></div>

@@ -49,7 +49,7 @@ func themeColors(dark bool) guigo.TitleBarColors {
 // loadTheme 在创建窗口前读取用户目录中的主题偏好
 // 返回: error 读取或解析错误
 func (h *Host) loadTheme() error {
-	h.theme = applicationTheme{Mode: "system", Material: "mica"}
+	h.theme = applicationTheme{Mode: "system", Material: "acrylic"}
 	data, err := os.ReadFile(h.themePath)
 	if os.IsNotExist(err) {
 		return nil
@@ -92,7 +92,7 @@ func (h *Host) themeIndex() ([]byte, error) {
 		mode = "system"
 	}
 	materials := []string{"solid"}
-	for _, choice := range []string{"mica", "acrylic"} {
+	for _, choice := range []string{"acrylic", "mica"} {
 		if titleBarMaterial(choice) != guigo.TitleBarSolid {
 			materials = append(materials, choice)
 		}
