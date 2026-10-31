@@ -92,6 +92,7 @@ function createDocumentState() {
 		createInsert: false,
 		createPackage: false,
 		createDocumentAt: null,
+		createImageQueue: null,
 		documentManagement: null,
 		versionManagement: null,
 		infoDocumentIndex: null,
@@ -190,6 +191,8 @@ function createDocumentState() {
 }
 
 let state = createDocumentState();
+let createImagePicker = null;
+const createPaperSizes = { a4: [210, 297], a3: [297, 420], a5: [148, 210] };
 
 const el = {
 	appearanceButton: document.querySelector("#appearanceButton"),
@@ -502,6 +505,16 @@ const el = {
 	createTitle: document.querySelector("#createTitle"),
 	createMode: document.querySelector("#createMode"),
 	createImages: document.querySelector("#createImages"),
+	createImageQueue: document.querySelector("#createImageQueue"),
+	createImageList: document.querySelector("#createImageList"),
+	createImageAdd: document.querySelector("#createImageAdd"),
+	createImageCount: document.querySelector("#createImageCount"),
+	createImageOrder: document.querySelector("#createImageOrder"),
+	createImageUp: document.querySelector("#createImageUp"),
+	createImageDown: document.querySelector("#createImageDown"),
+	createImageRemove: document.querySelector("#createImageRemove"),
+	createPortrait: document.querySelector("#createPortrait"),
+	createLandscape: document.querySelector("#createLandscape"),
 	createSize: document.querySelector("#createSize"),
 	createMargin: document.querySelector("#createMargin"),
 	createPosition: document.querySelector("#createPosition"),
@@ -1664,9 +1677,82 @@ el.createCancel.addEventListener("click", () => state.imageImporting ? cancelExp
 el.createPanel.addEventListener("cancel", event => {
 	if (state.imageImporting) { event.preventDefault(); cancelExport(); }
 });
-el.createPanel.addEventListener("close", () => { el.createImages.value = ""; });
-el.createMode.addEventListener("change", updateCreateOptions);
-el.createSize.addEventListener("change", updateCreateOptions);
+el.createPanel.addEventListener("close", () => { releaseCreateImages(documentTab()); el.createImages.value = ""; el.createImageList.replaceChildren(); });
+el.createMode.addEventListener("change", () => {
+	el.createSize.value = el.createMode.value === "images" ? "image" : "a4";
+	applyCreatePaper();
+});
+el.createSize.addEventListener("change", applyCreatePaper);
+for (const input of [el.createWidth, el.createHeight]) input.addEventListener("input", () => updateCreateDirection(true));
+for (const radio of [el.createPortrait, el.createLandscape]) radio.addEventListener("change", () => {
+	[el.createWidth.value, el.createHeight.value] = [el.createHeight.value, el.createWidth.value];
+	updateCreateDirection();
+});
+el.createImageAdd.addEventListener("click", () => {
+	createImagePicker = { tab: documentTab(), queue: state.createImageQueue };
+	el.createImages.click();
+});
+el.createImages.addEventListener("change", addCreateImages);
+el.createImages.addEventListener("cancel", () => { createImagePicker = null; });
+el.createImageOrder.addEventListener("change", () => { state.createImageQueue.order = el.createImageOrder.value; sortCreateImages(); });
+el.createImageUp.addEventListener("click", () => moveCreateImage(-1));
+el.createImageDown.addEventListener("click", () => moveCreateImage(1));
+el.createImageRemove.addEventListener("click", removeCreateImage);
+el.createImageList.addEventListener("click", event => {
+	const row = event.target.closest("[data-image-id]");
+	if (row) { state.createImageQueue.selected = Number(row.dataset.imageId); updateCreateImageSelection(); }
+});
+el.createImageList.addEventListener("keydown", event => {
+	const row = event.target.closest("[data-image-id]"), queue = state.createImageQueue;
+	if (!row || event.ctrlKey || event.metaKey || event.shiftKey) return;
+	const index = queue.entries.findIndex(entry => entry.id === Number(row.dataset.imageId));
+	if (["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+		event.preventDefault();
+		queue.selected = queue.entries[index].id;
+		if (event.altKey && event.key.startsWith("Arrow")) moveCreateImage(event.key === "ArrowUp" ? -1 : 1);
+		else {
+			const next = event.key === "Home" ? 0 : event.key === "End" ? queue.entries.length - 1 : Math.max(0, Math.min(queue.entries.length - 1, index + (event.key === "ArrowUp" ? -1 : 1)));
+			queue.selected = queue.entries[next].id;
+			updateCreateImageSelection();
+		}
+		focusCreateImage();
+	} else if (event.key === "Delete" && !event.altKey) {
+		event.preventDefault();
+		queue.selected = queue.entries[index].id;
+		removeCreateImage();
+		focusCreateImage();
+	}
+});
+el.createImageList.addEventListener("dragstart", event => {
+	const row = event.target.closest("[data-image-id]");
+	if (!row || state.imageImporting) { event.preventDefault(); return; }
+	state.createImageQueue.drag = Number(row.dataset.imageId);
+	event.dataTransfer.effectAllowed = "move";
+	event.dataTransfer.setData("application/x-ofdgo-image", row.dataset.imageId);
+});
+el.createImageList.addEventListener("dragover", event => {
+	if (state.createImageQueue?.drag == null || !event.dataTransfer.types.includes("application/x-ofdgo-image")) return;
+	event.preventDefault();
+	event.dataTransfer.dropEffect = "move";
+	const row = event.target.closest("[data-image-id]");
+	for (const item of el.createImageList.children) delete item.dataset.drop;
+	if (row) row.dataset.drop = event.clientY < row.getBoundingClientRect().top + row.offsetHeight / 2 ? "before" : "after";
+});
+el.createImageList.addEventListener("drop", event => {
+	const queue = state.createImageQueue, row = event.target.closest("[data-image-id]");
+	if (queue?.drag == null || !event.dataTransfer.types.includes("application/x-ofdgo-image")) return;
+	event.preventDefault();
+	const from = queue.entries.findIndex(entry => entry.id === queue.drag);
+	let to = row ? queue.entries.findIndex(entry => entry.id === Number(row.dataset.imageId)) + (row.dataset.drop === "after" ? 1 : 0) : queue.entries.length;
+	if (to > from) to--;
+	queue.selected = queue.drag;
+	queue.drag = null;
+	reorderCreateImage(from, to);
+});
+el.createImageList.addEventListener("dragend", () => {
+	if (state.createImageQueue) state.createImageQueue.drag = null;
+	for (const row of el.createImageList.children) delete row.dataset.drop;
+});
 el.createForm.addEventListener("submit", createDocument);
 editorClick(el.insertTextButton, toggleTextTool);
 editorClick(el.insertImageButton, () => openInsertPanel());
@@ -2860,6 +2946,10 @@ function detachDocumentView() {
 		state.searchRunning = false;
 	}
 	tab.localFonts = fontManager.localFonts;
+	if (state.createImageQueue) {
+		state.createImageQueue.observer?.disconnect();
+		state.createImageQueue.drag = null;
+	}
 	tab.status = el.statusText.textContent;
 	advanceDocumentSequence();
 	state.pageSeq++;
@@ -2932,6 +3022,7 @@ function attachDocumentTab(tab) {
 	el.ofdInput.value = "";
 	canvasEditor.pendingSelection = tab.view?.selection || null;
 	documentDialogs?.setOwner(tab);
+	if (el.createPanel.open && state.createImageQueue) renderCreateImages();
 	workspace.resourceView = resourceElements.Panel.open ? resourceManager : null;
 	pageView.setContinuous(state.continuous);
 	pageView.updatePanControl();
@@ -3053,6 +3144,7 @@ async function mountDocumentTab(tab) {
 
 async function releaseDocumentTab(tab) {
 	if (tab.closed) return;
+	releaseCreateImages(tab);
 	const clipboard = workspace.objectClipboard;
 	if (clipboard?.tab === tab) {
 		const prepared = await prepareObjectClipboard(clipboard, tab);
@@ -3734,14 +3826,18 @@ function openCreatePanel(insert = false, packageDocument = false) {
 		return;
 	}
 	el.createForm.reset();
+	releaseCreateImages(documentTab());
+	state.createImageQueue = { entries: [], selected: null, next: 0, order: "name-asc", drag: null, observer: null, task: Promise.resolve() };
 	state.createInsert = insert === true;
 	state.createPackage = packageDocument === true;
 	el.createTitle.textContent = state.createInsert ? "插入页面" : state.createPackage ? "新增文档" : "新建文档";
 	state.createDocumentAt = state.createPackage ? managedDocumentIndex() + 1 : null;
 	el.createMode.value = state.createInsert ? "images" : "blank";
+	el.createSize.value = state.createInsert ? "image" : "a4";
 	el.createSubmit.textContent = state.createInsert ? "插入" : state.createPackage ? "新增" : "新建";
 	el.createCancel.disabled = false;
 	updateCreateOptions();
+	renderCreateImages();
 	el.createStatus.textContent = "";
 	el.createPanel.showModal();
 }
@@ -3753,21 +3849,187 @@ function updateCreateOptions() {
 	el.createName.closest(".form-row").hidden = Boolean(state.createInsert);
 	el.createName.disabled = busy || Boolean(state.createInsert);
 	el.createMode.disabled = busy;
-	for (const [id, input] of [["createImagesRow", el.createImages], ["createSizeRow", el.createSize], ["createMarginRow", el.createMargin]]) {
+	for (const [id, input] of [["createImagesRow", el.createImages], ["createMarginRow", el.createMargin]]) {
 		toggle(id, images);
 		input.disabled = busy || !images;
 	}
-	el.createImages.required = images;
-	const custom = !images || el.createSize.value === "custom";
-	toggle("createDimensions", custom);
-	el.createWidth.disabled = el.createHeight.disabled = busy || !custom;
+	el.createSize.disabled = busy;
+	el.createSize.querySelector('[value="image"]').hidden = !images;
+	el.createSize.querySelector('[value="image"]').disabled = !images;
+	el.createImageQueue.hidden = !images || !state.createImageQueue?.entries.length;
+	el.createPanel.classList.toggle("create-images", images);
+	el.createImageAdd.disabled = el.createImageOrder.disabled = busy;
+	const dimensions = !images || el.createSize.value !== "image";
+	toggle("createDimensions", dimensions);
+	toggle("createDirectionRow", dimensions);
+	el.createWidth.disabled = el.createHeight.disabled = busy || !dimensions;
 	toggle("createPositionRow", Boolean(state.createInsert));
 	el.createPosition.disabled = busy || !state.createInsert;
-	el.createSubmit.disabled = busy;
+	el.createSubmit.disabled = busy || images && !state.createImageQueue?.entries.length;
+	updateCreateDirection();
+	updateCreateImageSelection();
+}
+
+function applyCreatePaper() {
+	const paper = createPaperSizes[el.createSize.value];
+	if (paper) {
+		const [width, height] = el.createLandscape.checked ? [...paper].reverse() : paper;
+		el.createWidth.value = width;
+		el.createHeight.value = height;
+	}
+	updateCreateOptions();
+}
+
+function updateCreateDirection(matchPaper = false) {
+	const width = Number(el.createWidth.value), height = Number(el.createHeight.value);
+	const valid = width > 0 && height > 0;
+	el.createPortrait.checked = valid && width < height;
+	el.createLandscape.checked = valid && width > height;
+	el.createPortrait.disabled = el.createLandscape.disabled = !valid || width === height || el.createWidth.disabled;
+	if (matchPaper) el.createSize.value = Object.entries(createPaperSizes).find(([, [w, h]]) => Math.min(width, height) === w && Math.max(width, height) === h)?.[0] || "custom";
+}
+
+function releaseCreateImages(tab) {
+	const queue = tab.state.createImageQueue;
+	if (!queue) return;
+	queue.observer?.disconnect();
+	for (const entry of queue.entries) if (entry.url) URL.revokeObjectURL(entry.url);
+	queue.entries.length = 0;
+	tab.state.createImageQueue = null;
+}
+
+function addCreateImages() {
+	const { tab, queue } = createImagePicker || { tab: documentTab(), queue: state.createImageQueue };
+	createImagePicker = null;
+	const files = [...el.createImages.files];
+	el.createImages.value = "";
+	if (tab.closed || !queue || tab.state.createImageQueue !== queue) return;
+	for (const file of files) queue.entries.push({ id: queue.next++, file, url: null, previewed: false });
+	sortCreateImages(queue);
+	if (isForegroundDocument(tab)) updateCreateOptions();
+}
+
+function sortCreateImages(queue = state.createImageQueue) {
+	const order = queue.order;
+	if (order !== "custom") queue.entries.sort((a, b) => {
+		const value = order.startsWith("name") ? a.file.name.localeCompare(b.file.name, undefined, { numeric: true }) : order.startsWith("time") ? a.file.lastModified - b.file.lastModified : a.id - b.id;
+		return (order.endsWith("desc") ? -value : value) || a.id - b.id;
+	});
+	if (queue === state.createImageQueue) renderCreateImages();
+}
+
+function updateCreateImageSelection() {
+	const queue = state.createImageQueue;
+	const index = queue?.entries.findIndex(entry => entry.id === queue.selected) ?? -1;
+	el.createImageUp.disabled = state.imageImporting || index <= 0;
+	el.createImageDown.disabled = state.imageImporting || index < 0 || index === queue.entries.length - 1;
+	el.createImageRemove.disabled = state.imageImporting || index < 0;
+	for (const row of el.createImageList.children) {
+		row.dataset.selected = String(Number(row.dataset.imageId) === queue?.selected);
+		row.tabIndex = row.dataset.selected === "true" ? 0 : -1;
+		row.disabled = state.imageImporting;
+		row.draggable = !state.imageImporting;
+	}
+}
+
+function focusCreateImage() {
+	(el.createImageList.querySelector('[data-selected="true"]') || el.createImageAdd).focus();
+}
+
+function reorderCreateImage(from, to) {
+	const queue = state.createImageQueue;
+	if (from < 0 || to < 0 || to >= queue.entries.length) return;
+	if (from !== to) {
+		queue.entries.splice(to, 0, queue.entries.splice(from, 1)[0]);
+		queue.order = "custom";
+	}
+	renderCreateImages();
+}
+
+function moveCreateImage(direction) {
+	const queue = state.createImageQueue, index = queue.entries.findIndex(entry => entry.id === queue.selected);
+	reorderCreateImage(index, index + direction);
+}
+
+function removeCreateImage() {
+	const queue = state.createImageQueue, index = queue.entries.findIndex(entry => entry.id === queue.selected);
+	if (index < 0) return;
+	const [entry] = queue.entries.splice(index, 1);
+	if (entry.url) URL.revokeObjectURL(entry.url);
+	queue.selected = queue.entries[Math.min(index, queue.entries.length - 1)]?.id ?? null;
+	renderCreateImages();
+	updateCreateOptions();
+}
+
+function renderCreateImages() {
+	const tab = documentTab(), queue = state.createImageQueue;
+	queue.observer?.disconnect();
+	const top = el.createImageList.scrollTop;
+	const focused = el.createImageList.contains(document.activeElement);
+	el.createImageList.replaceChildren();
+	el.createImageOrder.value = queue.order;
+	el.createImageCount.textContent = String(queue.entries.length);
+	if (!queue.entries.some(entry => entry.id === queue.selected)) queue.selected = queue.entries[0]?.id ?? null;
+	queue.observer = new IntersectionObserver(items => {
+		for (const item of items) if (item.isIntersecting && isForegroundDocument(tab)) {
+			queue.observer.unobserve(item.target);
+			const entry = queue.entries.find(entry => entry.id === Number(item.target.dataset.imageId));
+			queue.task = queue.task.then(() => loadCreateImagePreview(tab, queue, entry));
+		}
+	}, { root: el.createImageList, rootMargin: "64px" });
+	for (const [index, entry] of queue.entries.entries()) {
+		const row = document.createElement("button"), number = document.createElement("span"), preview = document.createElement("span"), details = document.createElement("span");
+		row.type = "button";
+		row.className = "create-image-entry";
+		row.dataset.imageId = entry.id;
+		row.title = entry.file.name;
+		number.textContent = String(index + 1);
+		preview.className = "create-image-preview";
+		preview.textContent = entry.file.name.split(".").at(-1).toUpperCase();
+		details.className = "create-image-details";
+		const name = document.createElement("span"), time = document.createElement("time");
+		name.textContent = entry.file.name;
+		time.textContent = new Date(entry.file.lastModified).toLocaleString();
+		details.append(name, time);
+		row.append(number, preview, details);
+		el.createImageList.append(row);
+		if (entry.url) showCreateImagePreview(entry, row);
+		else if (!entry.previewed) queue.observer.observe(row);
+	}
+	el.createImageList.scrollTop = top;
+	updateCreateImageSelection();
+	if (focused) focusCreateImage();
+}
+
+function showCreateImagePreview(entry, row) {
+	const image = document.createElement("img");
+	image.src = entry.url;
+	image.draggable = false;
+	row.querySelector(".create-image-preview").replaceChildren(image);
+}
+
+async function loadCreateImagePreview(tab, queue, entry) {
+	if (!entry || entry.previewed || tab.state.createImageQueue !== queue || !queue.entries.includes(entry)) return;
+	entry.previewed = true;
+	let bitmap;
+	try {
+		bitmap = await createImageBitmap(entry.file, { resizeWidth: 64 });
+		const canvas = document.createElement("canvas"), scale = Math.min(64 / bitmap.width, 64 / bitmap.height, 1);
+		canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+		canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+		canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+		const blob = await new Promise(resolve => canvas.toBlob(resolve));
+		if (tab.state.createImageQueue !== queue || !queue.entries.includes(entry)) return;
+		entry.url = URL.createObjectURL(blob);
+		if (isForegroundDocument(tab)) {
+			const current = el.createImageList.querySelector(`[data-image-id="${entry.id}"]`);
+			if (current) showCreateImagePreview(entry, current);
+		}
+	} catch {} finally { bitmap?.close(); }
 }
 
 function imagePageRequest() {
-	const files = [...el.createImages.files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+	const files = state.createImageQueue.entries.map(entry => entry.file);
 	const size = el.createSize.value;
 	return [files, {
 		Width: size === "image" ? 0 : Number(el.createWidth.value),
@@ -3778,14 +4040,21 @@ function imagePageRequest() {
 
 async function createDocument(event) {
 	event.preventDefault();
+	const owner = documentTab();
 	if (state.createPackage) {
 		if (await changeDocument("ofdgoChangeDocument", null, "add", el.createName.value.trim() || "未命名",
-			Number(el.createWidth.value), Number(el.createHeight.value), state.createDocumentAt)) el.createPanel.close();
+			Number(el.createWidth.value), Number(el.createHeight.value), state.createDocumentAt)) {
+			releaseCreateImages(owner);
+			documentDialogs.closeFor(owner, el.createPanel);
+		}
 		return;
 	}
 	if (state.createInsert) {
 		const at = { before: state.pageIndex, after: state.pageIndex + 1, first: 0, last: state.doc.pageCount }[el.createPosition.value];
-		if (await changeDocument("ofdgoImportImages", null, ...imagePageRequest(), at, "", state.renderAnnotations)) el.createPanel.close();
+		if (await changeDocument("ofdgoImportImages", null, ...imagePageRequest(), at, "", state.renderAnnotations)) {
+			releaseCreateImages(owner);
+			documentDialogs.closeFor(owner, el.createPanel);
+		}
 		return;
 	}
 	if (workspace.closing) {
