@@ -1665,14 +1665,29 @@ button:not(:disabled):hover {
 	width: 600px;
 }
 
-.create-image-actions {
-	display: flex;
+.create-images-row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
 	align-items: center;
-	gap: 8px;
+	gap: 4px;
+	margin-bottom: 12px;
+}
+
+.create-image-actions {
+	display: grid;
+	grid-template-columns: repeat(6, minmax(0, 1fr));
+	gap: 4px;
+}
+
+@media (max-width: 600px) {
+	.create-image-actions {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
 }
 
 #createImageCount {
-	margin-left: auto;
+	align-self: start;
+	line-height: var(--control-height);
 	color: var(--text-muted);
 }
 
@@ -1847,9 +1862,7 @@ button:not(:disabled):hover {
 }
 
 #createImageOrder {
-	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(6em, 1fr));
-	gap: 4px;
+	display: contents;
 }
 
 #createImageOrder span {
@@ -3427,6 +3440,8 @@ button.outline-link:hover {
 .navigation-tabs[hidden],
 .page-selection-tools[hidden],
 .form-row[hidden],
+.create-images-row[hidden],
+#createImageOrder[hidden],
 .form-pair[hidden],
 .form-actions > [hidden],
 .document-actions > [hidden],

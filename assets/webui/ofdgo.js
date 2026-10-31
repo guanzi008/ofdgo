@@ -3854,6 +3854,7 @@ function updateCreateOptions() {
 	el.createSize.querySelector('[value="image"]').hidden = !images;
 	el.createSize.querySelector('[value="image"]').disabled = !images;
 	el.createImageQueue.hidden = !images || !state.createImageQueue?.entries.length;
+	el.createImageOrder.hidden = el.createImageQueue.hidden;
 	el.createPanel.classList.toggle("create-images", images);
 	el.createImageAdd.disabled = busy;
 	for (const input of el.createImageOrder.querySelectorAll("input")) input.disabled = busy;
