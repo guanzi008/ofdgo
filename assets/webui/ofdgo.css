@@ -1692,14 +1692,10 @@ button:not(:disabled):hover {
 .create-image-entry {
 	position: relative;
 	display: grid;
-	grid-template-columns: 3ch 48px minmax(0, 1fr);
+	grid-template-columns: minmax(0, 1fr) auto;
 	align-items: center;
-	gap: 8px;
 	width: 100%;
-	padding: 6px 8px;
-	border: 0;
 	border-bottom: 1px solid var(--line);
-	text-align: left;
 }
 
 .create-image-entry:last-child {
@@ -1711,7 +1707,24 @@ button:not(:disabled):hover {
 	color: var(--accent-strong);
 }
 
-.create-image-entry:focus-visible {
+.create-image-select {
+	display: grid;
+	grid-template-columns: 3ch 48px minmax(0, 1fr);
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+	padding: 6px 8px;
+	border: 0;
+	background: transparent;
+	color: inherit;
+	text-align: left;
+}
+
+.create-image-entry .remove-button {
+	margin-right: 8px;
+}
+
+.create-image-select:focus-visible {
 	outline-offset: -2px;
 }
 
@@ -1747,18 +1760,12 @@ button:not(:disabled):hover {
 .create-image-details {
 	display: grid;
 	min-width: 0;
-	gap: 4px;
 }
 
 .create-image-details > span {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-}
-
-.create-image-details > time {
-	color: var(--text-muted);
-	font-size: 12px;
 }
 
 .encryption-current {

@@ -510,9 +510,6 @@ const el = {
 	createImageAdd: document.querySelector("#createImageAdd"),
 	createImageCount: document.querySelector("#createImageCount"),
 	createImageOrder: document.querySelector("#createImageOrder"),
-	createImageUp: document.querySelector("#createImageUp"),
-	createImageDown: document.querySelector("#createImageDown"),
-	createImageRemove: document.querySelector("#createImageRemove"),
 	createPortrait: document.querySelector("#createPortrait"),
 	createLandscape: document.querySelector("#createLandscape"),
 	createSize: document.querySelector("#createSize"),
@@ -1695,12 +1692,12 @@ el.createImageAdd.addEventListener("click", () => {
 el.createImages.addEventListener("change", addCreateImages);
 el.createImages.addEventListener("cancel", () => { createImagePicker = null; });
 el.createImageOrder.addEventListener("change", () => { state.createImageQueue.order = el.createImageOrder.value; sortCreateImages(); });
-el.createImageUp.addEventListener("click", () => moveCreateImage(-1));
-el.createImageDown.addEventListener("click", () => moveCreateImage(1));
-el.createImageRemove.addEventListener("click", removeCreateImage);
 el.createImageList.addEventListener("click", event => {
 	const row = event.target.closest("[data-image-id]");
-	if (row) { state.createImageQueue.selected = Number(row.dataset.imageId); updateCreateImageSelection(); }
+	if (!row || state.imageImporting) return;
+	state.createImageQueue.selected = Number(row.dataset.imageId);
+	if (event.target.closest(".remove-button")) removeCreateImage();
+	else updateCreateImageSelection();
 });
 el.createImageList.addEventListener("keydown", event => {
 	const row = event.target.closest("[data-image-id]"), queue = state.createImageQueue;
@@ -3920,20 +3917,16 @@ function sortCreateImages(queue = state.createImageQueue) {
 
 function updateCreateImageSelection() {
 	const queue = state.createImageQueue;
-	const index = queue?.entries.findIndex(entry => entry.id === queue.selected) ?? -1;
-	el.createImageUp.disabled = state.imageImporting || index <= 0;
-	el.createImageDown.disabled = state.imageImporting || index < 0 || index === queue.entries.length - 1;
-	el.createImageRemove.disabled = state.imageImporting || index < 0;
 	for (const row of el.createImageList.children) {
 		row.dataset.selected = String(Number(row.dataset.imageId) === queue?.selected);
-		row.tabIndex = row.dataset.selected === "true" ? 0 : -1;
-		row.disabled = state.imageImporting;
+		row.querySelector(".create-image-select").tabIndex = row.dataset.selected === "true" ? 0 : -1;
+		for (const button of row.querySelectorAll("button")) button.disabled = state.imageImporting;
 		row.draggable = !state.imageImporting;
 	}
 }
 
 function focusCreateImage() {
-	(el.createImageList.querySelector('[data-selected="true"]') || el.createImageAdd).focus();
+	(el.createImageList.querySelector('[data-selected="true"] .create-image-select') || el.createImageAdd).focus();
 }
 
 function reorderCreateImage(from, to) {
@@ -3978,20 +3971,23 @@ function renderCreateImages() {
 		}
 	}, { root: el.createImageList, rootMargin: "64px" });
 	for (const [index, entry] of queue.entries.entries()) {
-		const row = document.createElement("button"), number = document.createElement("span"), preview = document.createElement("span"), details = document.createElement("span");
-		row.type = "button";
+		const row = document.createElement("div"), select = document.createElement("button"), remove = document.createElement("button"), number = document.createElement("span"), preview = document.createElement("span"), details = document.createElement("span");
 		row.className = "create-image-entry";
 		row.dataset.imageId = entry.id;
-		row.title = entry.file.name;
+		select.type = remove.type = "button";
+		select.className = "create-image-select";
+		select.title = entry.file.name;
+		remove.className = "icon-button remove-button";
+		remove.title = "移除";
 		number.textContent = String(index + 1);
 		preview.className = "create-image-preview";
 		preview.textContent = entry.file.name.split(".").at(-1).toUpperCase();
 		details.className = "create-image-details";
-		const name = document.createElement("span"), time = document.createElement("time");
+		const name = document.createElement("span");
 		name.textContent = entry.file.name;
-		time.textContent = new Date(entry.file.lastModified).toLocaleString();
-		details.append(name, time);
-		row.append(number, preview, details);
+		details.append(name);
+		select.append(number, preview, details);
+		row.append(select, remove);
 		el.createImageList.append(row);
 		if (entry.url) showCreateImagePreview(entry, row);
 		else if (!entry.previewed) queue.observer.observe(row);
@@ -4013,7 +4009,9 @@ async function loadCreateImagePreview(tab, queue, entry) {
 	entry.previewed = true;
 	let bitmap;
 	try {
-		bitmap = await createImageBitmap(entry.file, { resizeWidth: 64 });
+		const source = entry.file instanceof Blob ? entry.file : new Blob([await entry.file.arrayBuffer()]);
+		if (tab.state.createImageQueue !== queue || !queue.entries.includes(entry)) return;
+		bitmap = await createImageBitmap(source, { resizeWidth: 64 });
 		const canvas = document.createElement("canvas"), scale = Math.min(64 / bitmap.width, 64 / bitmap.height, 1);
 		canvas.width = Math.max(1, Math.round(bitmap.width * scale));
 		canvas.height = Math.max(1, Math.round(bitmap.height * scale));

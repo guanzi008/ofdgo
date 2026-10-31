@@ -1,3 +1,5 @@
+import { setInputFiles } from "./ofdgo_util.js";
+
 let engineModule = null;
 let engineScheduler = null;
 let engineSequence = 0;
@@ -823,11 +825,7 @@ class NativeHost {
 			try {
 				const files = (await this.call("open", {multiple:input.multiple, directory:input.webkitdirectory, accept:input.accept})).map(value => new NativeFile(value));
 				if (!files.length) return;
-				const transfer = new DataTransfer();
-				for (const file of files) transfer.items.add(new File([], file.name, {type:file.type}));
-				delete input.files;
-				input.files = transfer.files;
-				Object.defineProperty(input, "files", {configurable:true, get:() => input.value ? files : []});
+				setInputFiles(input, files);
 				input.dispatchEvent(new Event("input", {bubbles:true}));
 				input.dispatchEvent(new Event("change", {bubbles:true}));
 			} catch (error) { if (error.name !== "AbortError") onError(error); }

@@ -226,6 +226,7 @@ func (s *fileStore) file(id string) (map[string]any, error) {
 	}
 	handle := s.descriptor(id)
 	size := int64(len(entry.data))
+	var modified int64
 	if entry.data == nil {
 		file, err := basefile.Open(entry.path)
 		if err != nil {
@@ -237,11 +238,12 @@ func (s *fileStore) file(id string) (map[string]any, error) {
 			return nil, err
 		}
 		size = info.Size()
+		modified = info.ModTime().UnixMilli()
 		id = rand.Text()
 		entry = &fileEntry{path: entry.path, name: entry.name, file: file}
 		s.entries[id] = entry
 	}
-	return map[string]any{"nativeFile": id, "name": entry.name, "size": size, "url": "/__native/data/" + id, "handle": handle}, nil
+	return map[string]any{"nativeFile": id, "name": entry.name, "size": size, "lastModified": modified, "url": "/__native/data/" + id, "handle": handle}, nil
 }
 
 // resolve 按授权标识读取文件并保持随机读取句柄

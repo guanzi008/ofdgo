@@ -1,3 +1,12 @@
+export function setInputFiles(input, files) {
+	const view = input.ownerDocument.defaultView, transfer = new view.DataTransfer();
+	const native = files.some(file => !(file instanceof view.File));
+	for (const file of files) transfer.items.add(file instanceof view.File ? file : new view.File([], file.name, {type: file.type}));
+	delete input.files;
+	input.files = transfer.files;
+	if (native) Object.defineProperty(input, "files", {configurable: true, get: () => input.value ? files : []});
+}
+
 export class DocumentDialogs {
 	constructor({ document: root = document, targets = [], titlebar = null } = {}) {
 		Object.assign(this, { document: root, targets, titlebar, owner: null, records: new Map(), tabs: new Map(), released: new WeakSet(), inert: new Map(), styles: new Map() });
@@ -258,9 +267,7 @@ export class DocumentDialogs {
 			if (item.value !== undefined && node.tagName !== "SELECT") node.value = item.value;
 			for (const key of ["checked", "indeterminate", "selected"]) if (item[key] !== undefined) node[key] = item[key];
 			if (item.files !== undefined) {
-				const transfer = new this.document.defaultView.DataTransfer();
-				for (const file of item.files) transfer.items.add(file);
-				node.files = transfer.files;
+				setInputFiles(node, item.files);
 			}
 			if (item.selectionStart != null && typeof node.setSelectionRange === "function") node.setSelectionRange(item.selectionStart, item.selectionEnd, item.selectionDirection);
 			node.scrollTop = item.scrollTop;
