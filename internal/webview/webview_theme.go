@@ -164,7 +164,7 @@ func windowMaterial(value string) guigo.WindowMaterial {
 	material := guigo.WindowSolid
 	switch value {
 	case "mica":
-		material = guigo.WindowMica
+		material = guigo.WindowMicaAlt
 	case "acrylic":
 		material = guigo.WindowAcrylic
 	}
