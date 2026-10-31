@@ -3,7 +3,7 @@
 	const preference = matchMedia("(prefers-color-scheme: dark)");
 	const key = "ofdgo.theme";
 	let mode = root.dataset.themeMode || "system";
-	let material = root.dataset.titlebarChoice || "acrylic";
+	let material = root.dataset.windowChoice || "acrylic";
 	let host = null, report = null, pending = Promise.resolve(), revision = 0, committed = null;
 	if (!root.dataset.themeMode) {
 		try { mode = localStorage.getItem(key) || "system"; } catch {}
@@ -57,7 +57,7 @@
 	window.ofdgoTheme = {set, flush, connect(value, onError) {
 		host = value;
 		report = onError;
-		const materials = (root.dataset.titlebarMaterials || "").split(",");
+		const materials = (root.dataset.windowMaterials || "").split(",");
 		if (host && materials.length > 1) {
 			document.querySelector(".appearance-material").hidden = false;
 			for (const button of document.querySelectorAll("[data-material-choice]")) {

@@ -29,7 +29,7 @@ import (
 	webuiassets "github.com/xiaoqidun/ofdgo/assets/webui"
 )
 
-// applicationTheme 保存主题、标题材质及最后一次解析的系统外观
+// applicationTheme 保存主题、窗口材质及最后一次解析的系统外观
 type applicationTheme struct {
 	Mode     string `json:"mode"`
 	Dark     bool   `json:"dark"`
@@ -73,7 +73,7 @@ func (a applicationTheme) validate() error {
 		return fmt.Errorf("主题配色无效")
 	}
 	if a.Material != "solid" && a.Material != "mica" && a.Material != "acrylic" {
-		return fmt.Errorf("标题材质无效")
+		return fmt.Errorf("窗口材质无效")
 	}
 	return nil
 }
@@ -93,11 +93,15 @@ func (h *Host) themeIndex() ([]byte, error) {
 	}
 	materials := []string{"solid"}
 	for _, choice := range []string{"acrylic", "mica"} {
-		if titleBarMaterial(choice) != guigo.TitleBarSolid {
+		if windowMaterial(choice) != guigo.WindowSolid {
 			materials = append(materials, choice)
 		}
 	}
-	return bytes.Replace(data, []byte(`<html lang="zh-CN">`), []byte(`<html lang="zh-CN" data-theme-mode="`+mode+`" data-titlebar-choice="`+material+`" data-titlebar-materials="`+strings.Join(materials, ",")+`">`), 1), nil
+	background := ""
+	if windowMaterial(material) != guigo.WindowSolid {
+		background = " data-window-material"
+	}
+	return bytes.Replace(data, []byte(`<html lang="zh-CN">`), []byte(`<html lang="zh-CN" data-theme-mode="`+mode+`" data-window-choice="`+material+`" data-window-materials="`+strings.Join(materials, ",")+`"`+background+`>`), 1), nil
 }
 
 // setTheme 串行更新窗口配色及材质，成功保存后确认应用偏好
@@ -118,10 +122,10 @@ func (h *Host) setTheme(value applicationTheme) (err error) {
 	previous := h.theme
 	defer func() {
 		if err != nil {
-			err = errors.Join(err, window.SetTitleBarMaterial(titleBarMaterial(previous.Material)), window.SetTitleBarColors(themeColors(previous.Dark)))
+			err = errors.Join(err, window.SetWindowMaterial(windowMaterial(previous.Material)), window.SetTitleBarColors(themeColors(previous.Dark)))
 		}
 	}()
-	if err = window.SetTitleBarMaterial(titleBarMaterial(value.Material)); err != nil {
+	if err = window.SetWindowMaterial(windowMaterial(value.Material)); err != nil {
 		return err
 	}
 	if err = window.SetTitleBarColors(themeColors(value.Dark)); err != nil {
@@ -153,19 +157,19 @@ func (h *Host) setTheme(value applicationTheme) (err error) {
 	return nil
 }
 
-// titleBarMaterial 将应用偏好转换为当前平台支持的原生材质
+// windowMaterial 将应用偏好转换为当前平台支持的原生材质
 // 入参: value 材质偏好
-// 返回: guigo.TitleBarMaterial 可用的标题栏材质
-func titleBarMaterial(value string) guigo.TitleBarMaterial {
-	material := guigo.TitleBarSolid
+// 返回: guigo.WindowMaterial 可用的窗口材质
+func windowMaterial(value string) guigo.WindowMaterial {
+	material := guigo.WindowSolid
 	switch value {
 	case "mica":
-		material = guigo.TitleBarMica
+		material = guigo.WindowMica
 	case "acrylic":
-		material = guigo.TitleBarAcrylic
+		material = guigo.WindowAcrylic
 	}
-	if !guigo.SupportsTitleBarMaterial(material) {
-		return guigo.TitleBarSolid
+	if !guigo.SupportsWindowMaterial(material) {
+		return guigo.WindowSolid
 	}
 	return material
 }

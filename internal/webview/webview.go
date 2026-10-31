@@ -112,7 +112,7 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 		return err
 	}
 	options.TitleBarColors = themeColors(h.theme.Dark)
-	options.TitleBarMaterial = titleBarMaterial(h.theme.Material)
+	options.WindowMaterial = windowMaterial(h.theme.Material)
 	data, err := json.Marshal(paths)
 	if err != nil {
 		return err
@@ -1213,23 +1213,23 @@ func windowOptions(dataDir string) (guigo.Options, error) {
 	if err != nil {
 		return guigo.Options{}, err
 	}
-	material := guigo.TitleBarSolid
-	if guigo.SupportsTitleBarMaterial(guigo.TitleBarAcrylic) {
-		material = guigo.TitleBarAcrylic
+	material := guigo.WindowSolid
+	if guigo.SupportsWindowMaterial(guigo.WindowAcrylic) {
+		material = guigo.WindowAcrylic
 	}
 	return guigo.Options{
-		AppID:            appID,
-		Title:            "OFDGo - OFD编辑器",
-		TitleBar:         guigo.TitleBarContent,
-		TitleBarColors:   themeColors(false),
-		TitleBarMaterial: material,
-		Icon:             icon,
-		Width:            1440,
-		Height:           900,
-		MinWidth:         360,
-		MinHeight:        240,
-		Center:           true,
-		Maximized:        true,
-		UserDataDir:      dataDir,
+		AppID:          appID,
+		Title:          "OFDGo - OFD编辑器",
+		TitleBar:       guigo.TitleBarContent,
+		TitleBarColors: themeColors(false),
+		WindowMaterial: material,
+		Icon:           icon,
+		Width:          1440,
+		Height:         900,
+		MinWidth:       360,
+		MinHeight:      240,
+		Center:         true,
+		Maximized:      true,
+		UserDataDir:    dataDir,
 	}, nil
 }

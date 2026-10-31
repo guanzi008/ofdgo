@@ -203,10 +203,26 @@
 	user-select: none;
 }
 
-:root[data-titlebar-material],
-:root[data-titlebar-material] body,
-:root[data-titlebar-material] .document-titlebar {
+:root[data-window-material],
+:root[data-window-material] body,
+:root[data-window-material] .document-titlebar {
 	background: transparent;
+}
+
+:root[data-window-material] :is(.toolbar-frame, .editor-toolbar, .app-footer, .document-tab[data-selected="true"]) {
+	background: color-mix(in srgb, var(--bar-bg) 65%, transparent);
+}
+
+:root[data-window-material] .toolbar-frame > .toolbar {
+	background: transparent;
+}
+
+:root[data-window-material] :is(.page-list-panel, .meta-panel) {
+	background: color-mix(in srgb, var(--panel) 70%, transparent);
+}
+
+:root[data-window-material] .viewer-panel {
+	background-color: color-mix(in srgb, var(--canvas) 50%, transparent);
 }
 
 .document-titlebar::before {
