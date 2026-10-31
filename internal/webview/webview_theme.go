@@ -72,7 +72,7 @@ func (a applicationTheme) validate() error {
 	if a.Mode == "light" && a.Dark || a.Mode == "dark" && !a.Dark {
 		return fmt.Errorf("主题配色无效")
 	}
-	if a.Material != "solid" && a.Material != "mica" && a.Material != "acrylic" {
+	if a.Material != "solid" && a.Material != "mica-alt" && a.Material != "acrylic" {
 		return fmt.Errorf("窗口材质无效")
 	}
 	return nil
@@ -92,7 +92,7 @@ func (h *Host) themeIndex() ([]byte, error) {
 		mode = "system"
 	}
 	materials := []string{"solid"}
-	for _, choice := range []string{"acrylic", "mica"} {
+	for _, choice := range []string{"acrylic", "mica-alt"} {
 		if windowMaterial(choice) != guigo.WindowSolid {
 			materials = append(materials, choice)
 		}
@@ -163,7 +163,7 @@ func (h *Host) setTheme(value applicationTheme) (err error) {
 func windowMaterial(value string) guigo.WindowMaterial {
 	material := guigo.WindowSolid
 	switch value {
-	case "mica":
+	case "mica-alt":
 		material = guigo.WindowMicaAlt
 	case "acrylic":
 		material = guigo.WindowAcrylic
