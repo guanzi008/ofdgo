@@ -49,6 +49,15 @@
 	--warning-line: #ded0a6;
 	--success-line: #bdd8cc;
 	--backdrop: rgb(31 36 40 / 18%);
+	--control-fill: var(--input);
+	--panel-fill: var(--panel);
+	--well-fill: var(--base);
+	--canvas-fill: var(--canvas);
+	--popup-fill: var(--popup);
+	--hover-fill: var(--hover);
+	--selected-fill: var(--selected);
+	--danger-fill: var(--danger-soft);
+	--warning-fill: var(--warning-soft);
 	--dropdown-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23263238' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m5 9 7 7 7-7'/%3E%3C/svg%3E");
 }
 
@@ -156,7 +165,7 @@
 	align-items: safe center;
 	padding: 12px;
 	overflow: hidden;
-	background: var(--canvas);
+	background: var(--canvas-fill);
 	border: 1px solid var(--line);
 }
 
@@ -203,6 +212,31 @@
 	user-select: none;
 }
 
+:root[data-window-material] {
+	--control-fill: color-mix(in srgb, var(--input) 45%, transparent);
+	--panel-fill: color-mix(in srgb, var(--panel) 65%, transparent);
+	--well-fill: color-mix(in srgb, var(--base) 45%, transparent);
+	--canvas-fill: color-mix(in srgb, var(--canvas) 50%, transparent);
+	--popup-fill: color-mix(in srgb, var(--popup) 90%, transparent);
+	--hover-fill: color-mix(in srgb, var(--hover) 70%, transparent);
+	--selected-fill: color-mix(in srgb, var(--selected) 85%, transparent);
+	--danger-fill: color-mix(in srgb, var(--danger-soft) 85%, transparent);
+	--warning-fill: color-mix(in srgb, var(--warning-soft) 85%, transparent);
+}
+
+:root[data-window-material] :is(input:focus, textarea:focus, select:focus, .font-picker:focus-within, .editor-number:focus-within, .page-control:focus-within) {
+	--control-fill: color-mix(in srgb, var(--input) 75%, transparent);
+}
+
+:root[data-window-material] :is(.form-dialog, .font-listbox, .dropdown-list, .progress-panel) {
+	backdrop-filter: blur(16px);
+}
+
+:root[data-window-material] :is(.convert-table th, .resource-heading) {
+	background: var(--popup-fill);
+	backdrop-filter: blur(16px);
+}
+
 :root[data-window-material],
 :root[data-window-material] body,
 :root[data-window-material] .document-titlebar {
@@ -222,7 +256,7 @@
 }
 
 :root[data-window-material] .viewer-panel {
-	background-color: color-mix(in srgb, var(--canvas) 50%, transparent);
+	background-color: var(--canvas-fill);
 }
 
 .document-titlebar::before {
@@ -374,7 +408,7 @@ option {
 
 button {
 	border: 1px solid var(--line-strong);
-	background: var(--input);
+	background: var(--control-fill);
 	color: var(--text);
 	cursor: pointer;
 	transition: border-color 0.16s ease, background-color 0.16s ease, color 0.16s ease;
@@ -460,7 +494,7 @@ a:focus-visible {
 	padding: 0 20px 0 6px;
 	border: 1px solid var(--line-strong);
 	border-radius: var(--radius-control);
-	background: var(--input);
+	background: var(--control-fill);
 	color: var(--text);
 	background-image: var(--dropdown-arrow);
 	background-position: right 5px center;
@@ -510,7 +544,7 @@ a:focus-visible {
 	min-width: 0;
 	height: var(--control-height);
 	border: 1px solid var(--line);
-	background: var(--input);
+	background: var(--control-fill);
 }
 
 .editor-number:focus-within {
@@ -575,7 +609,7 @@ a:focus-visible {
 .text-format-shadow { text-shadow: 2px 2px 1px #888; }
 
 .editor-group:has(#textFont) [data-pressed="mixed"] {
-	background: var(--hover);
+	background: var(--hover-fill);
 	box-shadow: inset 0 -3px var(--text-muted);
 }
 
@@ -586,8 +620,8 @@ a:focus-visible {
 	border-radius: var(--radius-control);
 }
 
-.text-highlight:has([data-pressed="true"]) { background: var(--selected); }
-.text-highlight:has([data-pressed="mixed"]) { background: var(--hover); box-shadow: inset 0 -3px var(--text-muted); }
+.text-highlight:has([data-pressed="true"]) { background: var(--selected-fill); }
+.text-highlight:has([data-pressed="mixed"]) { background: var(--hover-fill); box-shadow: inset 0 -3px var(--text-muted); }
 .editor-group:has(#textFont) .text-highlight [data-pressed="mixed"] { box-shadow: none; }
 .text-highlight .button { min-width: 0; border-radius: var(--radius-control) 0 0 var(--radius-control); }
 .text-highlight .button span { border-bottom: 3px solid var(--highlight-color, #ffff00); }
@@ -603,7 +637,7 @@ a:focus-visible {
 	background: var(--dropdown-arrow) center / 10px 10px no-repeat;
 }
 
-.text-highlight .color-input:not(:disabled):hover { background-color: var(--hover); }
+.text-highlight .color-input:not(:disabled):hover { background-color: var(--hover-fill); }
 .text-highlight .color-input::-webkit-color-swatch { opacity: 0; }
 .text-highlight .color-input::-moz-color-swatch { opacity: 0; }
 
@@ -616,7 +650,7 @@ a:focus-visible {
 	min-width: 0;
 	height: var(--control-height);
 	border: 1px solid var(--line);
-	background: var(--input);
+	background: var(--control-fill);
 }
 
 .font-picker #textFont {
@@ -660,7 +694,7 @@ a:focus-visible {
 	margin: 0;
 	padding: 4px;
 	border: 1px solid var(--line);
-	background: var(--popup);
+	background: var(--popup-fill);
 	color: var(--text);
 	box-shadow: var(--shadow-flyout);
 	overflow-y: auto;
@@ -702,12 +736,12 @@ a:focus-visible {
 
 .font-listbox .font-option:not([data-disabled="true"]):not([data-selected="true"]):hover,
 .dropdown-list .dropdown-option:not([data-disabled="true"]):not([data-selected="true"]):hover {
-	background: var(--hover);
+	background: var(--hover-fill);
 }
 
 .font-listbox [data-selected="true"],
 .dropdown-list [data-selected="true"] {
-	background: var(--selected);
+	background: var(--selected-fill);
 	color: var(--accent-strong);
 }
 
@@ -873,13 +907,13 @@ a:focus-visible {
 
 button:not(:disabled):hover {
 	border-color: transparent;
-	background: var(--hover);
+	background: var(--hover-fill);
 }
 
 .button[data-pressed="true"],
 .icon-button[data-pressed="true"] {
 	border-color: transparent;
-	background: var(--selected);
+	background: var(--selected-fill);
 	color: var(--accent-strong);
 }
 
@@ -896,7 +930,7 @@ button:not(:disabled):hover {
 }
 
 .remove-button:not(:disabled):hover {
-	background: var(--danger-soft);
+	background: var(--danger-fill);
 	color: var(--danger);
 }
 
@@ -1020,7 +1054,7 @@ button:not(:disabled):hover {
 	padding: 0 7px;
 	border: 1px solid var(--line);
 	border-radius: var(--radius-control);
-	background: var(--input);
+	background: var(--control-fill);
 	color: var(--text-muted);
 	text-align: center;
 	font-variant-numeric: tabular-nums;
@@ -1059,7 +1093,7 @@ button:not(:disabled):hover {
 	padding: 0 4px;
 	border: 1px solid var(--line);
 	border-radius: var(--radius-control);
-	background: var(--input);
+	background: var(--control-fill);
 	color: var(--text);
 }
 
@@ -1125,7 +1159,7 @@ button:not(:disabled):hover {
 	padding: 0;
 	border: 1px solid var(--line);
 	border-radius: var(--radius-dialog);
-	background: var(--popup);
+	background: var(--popup-fill);
 	color: var(--text);
 	box-shadow: var(--shadow-soft);
 	font-size: 14px;
@@ -1264,7 +1298,7 @@ button:not(:disabled):hover {
 	min-height: 0;
 	overflow: auto;
 	border: 1px solid var(--line);
-	background: var(--input);
+	background: var(--control-fill);
 }
 
 .convert-table table {
@@ -1285,7 +1319,7 @@ button:not(:disabled):hover {
 	position: sticky;
 	top: 0;
 	z-index: 1;
-	background: var(--base);
+	background: var(--well-fill);
 	font-weight: 500;
 }
 
@@ -1319,7 +1353,7 @@ button:not(:disabled):hover {
 	font: inherit;
 	border: 1px solid var(--line);
 	border-radius: var(--radius-control);
-	background: var(--input);
+	background: var(--control-fill);
 	color: inherit;
 }
 
@@ -1441,7 +1475,7 @@ button:not(:disabled):hover {
 
 #convertButton[data-running] {
 	color: var(--accent-strong);
-	background: var(--selected);
+	background: var(--selected-fill);
 }
 
 @media (max-width: 700px) {
@@ -1669,7 +1703,7 @@ button:not(:disabled):hover {
 	justify-content: center;
 	height: var(--control-height);
 	border: 1px solid var(--line);
-	background: var(--input);
+	background: var(--control-fill);
 }
 
 .form-options label + label span {
@@ -1687,7 +1721,7 @@ button:not(:disabled):hover {
 }
 
 .form-options input:checked + span {
-	background: var(--selected);
+	background: var(--selected-fill);
 	color: var(--accent-strong);
 	box-shadow: 0 0 0 1px var(--accent) inset;
 }
@@ -1713,7 +1747,7 @@ button:not(:disabled):hover {
 	padding: 0 6px;
 	border: 1px solid var(--line);
 	border-radius: var(--radius-control);
-	background: var(--input);
+	background: var(--control-fill);
 	color: var(--text);
 }
 
@@ -1857,7 +1891,7 @@ button:not(:disabled):hover {
 	padding: 3px;
 	border: 1px solid var(--line);
 	border-radius: var(--radius-control);
-	background: var(--input);
+	background: var(--control-fill);
 	cursor: pointer;
 }
 
@@ -1893,14 +1927,14 @@ button:not(:disabled):hover {
 	border: 0;
 	border-right: 1px solid var(--line);
 	border-radius: calc(var(--radius-control) - 1px) 0 0 calc(var(--radius-control) - 1px);
-	background: var(--panel);
+	background: var(--panel-fill);
 	color: var(--text);
 	font: inherit;
 	cursor: pointer;
 }
 
 .form-row input[type="file"]::file-selector-button:hover {
-	background: var(--selected);
+	background: var(--selected-fill);
 	color: var(--accent-strong);
 }
 
@@ -2010,7 +2044,7 @@ body[data-hide-meta] .meta-panel {
 	min-height: 0;
 	padding: 12px;
 	border-right: 1px solid var(--line);
-	background: var(--panel);
+	background: var(--panel-fill);
 	overflow: auto;
 	font-size: 13px;
 	line-height: 1.5;
@@ -2101,7 +2135,7 @@ body[data-hide-meta] .meta-panel {
 	height: 28px;
 	padding: 0 6px;
 	border: 1px solid var(--line);
-	background-color: var(--input);
+	background-color: var(--control-fill);
 	color: var(--text);
 	font-size: 12px;
 }
@@ -2128,7 +2162,7 @@ body[data-hide-meta] .meta-panel {
 	position: sticky;
 	top: 0;
 	z-index: 1;
-	background: var(--base);
+	background: var(--well-fill);
 	border-bottom: 1px solid var(--line);
 }
 
@@ -2175,7 +2209,7 @@ body[data-hide-meta] .meta-panel {
 	width: 100%;
 	border: 0;
 	border-bottom: 1px solid var(--line);
-	background: var(--input);
+	background: var(--control-fill);
 	color: inherit;
 	font: inherit;
 	cursor: pointer;
@@ -2194,7 +2228,7 @@ body[data-hide-meta] .meta-panel {
 }
 
 .resource-option[data-selected="true"] {
-	background: var(--selected);
+	background: var(--selected-fill);
 	color: var(--accent-strong);
 }
 
@@ -2746,7 +2780,7 @@ body[data-hide-meta] .meta-panel {
 }
 
 #importDocuments label:hover {
-	background: var(--selected);
+	background: var(--selected-fill);
 }
 
 #importDocuments input {
@@ -2764,7 +2798,7 @@ body[data-hide-meta] .meta-panel {
 
 .document-entry:hover,
 .document-entry[data-selected="true"] {
-	background: var(--selected);
+	background: var(--selected-fill);
 }
 
 .document-entry[data-selected="true"] {
@@ -2850,7 +2884,7 @@ body[data-hide-meta] .meta-panel {
 	min-width: 0;
 	padding-left: 6px;
 	border: 1px solid var(--line);
-	background-color: var(--input);
+	background-color: var(--control-fill);
 	color: var(--text);
 	font: inherit;
 }
@@ -2926,7 +2960,7 @@ body[data-hide-meta] .meta-panel {
 	padding: 0 6px;
 	border: 1px solid var(--line);
 	border-radius: var(--radius-control);
-	background: var(--input);
+	background: var(--control-fill);
 	color: var(--text);
 	font-size: 13px;
 	appearance: none;
@@ -2974,7 +3008,7 @@ body[data-hide-meta] .meta-panel {
 }
 
 .search-result[data-current="true"] {
-	background: var(--selected);
+	background: var(--selected-fill);
 }
 
 .search-page {
@@ -2985,7 +3019,7 @@ body[data-hide-meta] .meta-panel {
 }
 
 .search-result mark {
-	background: var(--selected);
+	background: var(--selected-fill);
 	color: var(--accent-strong);
 }
 
@@ -3040,7 +3074,7 @@ body[data-hide-meta] .meta-panel {
 }
 
 button.outline-link:hover {
-	background: var(--selected);
+	background: var(--selected-fill);
 	color: var(--accent-strong);
 }
 
@@ -3108,7 +3142,7 @@ button.outline-link:hover {
 
 .page-list-item:not(:disabled):hover {
 	border-color: var(--line-strong);
-	background: var(--hover);
+	background: var(--hover-fill);
 }
 
 .page-list-item[data-current],
@@ -3128,7 +3162,7 @@ button.outline-link:hover {
 .page-list-item[data-pressed="true"],
 .page-list-item[data-pressed="true"]:hover {
 	border-color: transparent;
-	background: var(--selected);
+	background: var(--selected-fill);
 	color: var(--accent-strong);
 }
 
@@ -3271,7 +3305,7 @@ button.outline-link:hover {
 	padding: 10px 12px;
 	border: 1px solid var(--line);
 	border-radius: var(--radius-dialog);
-	background: var(--popup);
+	background: var(--popup-fill);
 	box-shadow: var(--shadow-flyout);
 	transform: translateX(-50%);
 	backdrop-filter: blur(8px);
@@ -3587,7 +3621,7 @@ button.outline-link:hover {
 }
 
 .outline-link.selected {
-	background: var(--selected);
+	background: var(--selected-fill);
 	color: var(--accent);
 }
 
@@ -4032,7 +4066,7 @@ audio.page-media {
 	padding: 0 7px;
 	border: 1px solid var(--line);
 	border-radius: var(--radius-control);
-	background: var(--base);
+	background: var(--well-fill);
 	color: var(--text-secondary);
 	font-size: 12px;
 	text-align: center;
@@ -4051,7 +4085,7 @@ audio.page-media {
 	gap: 6px;
 	padding: 9px;
 	border: 1px solid var(--line);
-	background: var(--input);
+	background: var(--control-fill);
 	transition: border-color 0.16s ease, background-color 0.16s ease;
 }
 
@@ -4059,27 +4093,27 @@ audio.page-media {
 .signature-row:hover,
 .font-row:hover {
 	border-color: var(--line-strong);
-	background: var(--input);
+	background: var(--control-fill);
 }
 
 .doc-font-row.missing {
 	border-color: var(--danger-line);
-	background: var(--danger-soft);
+	background: var(--danger-fill);
 }
 
 .doc-font-row.fallback {
 	border-color: var(--warning-line);
-	background: var(--warning-soft);
+	background: var(--warning-fill);
 }
 
 .signature-row.valid {
 	border-color: var(--success-line);
-	background: var(--selected);
+	background: var(--selected-fill);
 }
 
 .signature-row.invalid {
 	border-color: var(--danger-line);
-	background: var(--danger-soft);
+	background: var(--danger-fill);
 }
 
 .doc-font-head,
@@ -4187,7 +4221,7 @@ audio.page-media {
 	justify-content: center;
 	min-width: 30px;
 	padding: 3px 6px;
-	background: var(--base);
+	background: var(--well-fill);
 	color: var(--text-muted);
 	font-size: 12px;
 	line-height: 1.35;
@@ -4207,18 +4241,18 @@ audio.page-media {
 .font-badge.embedded,
 .font-badge.matched,
 .font-badge.valid {
-	background: var(--selected);
+	background: var(--selected-fill);
 	color: var(--accent-strong);
 }
 
 .font-badge.fallback {
-	background: var(--warning-soft);
+	background: var(--warning-fill);
 	color: var(--warning);
 }
 
 .font-badge.missing,
 .font-badge.invalid {
-	background: var(--danger-soft);
+	background: var(--danger-fill);
 	color: var(--danger);
 }
 
@@ -4411,7 +4445,7 @@ audio.page-media {
 	margin: 0 0 8px;
 	padding: 7px 8px;
 	border: 1px solid var(--line);
-	background: var(--input);
+	background: var(--control-fill);
 	color: var(--text-muted);
 	font-size: 12px;
 	line-height: 1.35;
@@ -4424,7 +4458,7 @@ audio.page-media {
 	gap: 6px;
 	padding: 6px;
 	border: 1px solid var(--line);
-	background: var(--input);
+	background: var(--control-fill);
 }
 
 .font-main {
@@ -4456,7 +4490,7 @@ audio.page-media {
 	height: 26px;
 	padding: 0 6px;
 	border: 1px solid var(--line);
-	background: var(--input);
+	background: var(--control-fill);
 	color: var(--text);
 	font-size: 12px;
 }
@@ -4469,7 +4503,7 @@ audio.page-media {
 	height: 26px;
 	padding: 0 6px;
 	border: 1px solid var(--line);
-	background: var(--panel);
+	background: var(--panel-fill);
 	color: var(--text-muted);
 	font-size: 12px;
 	text-align: center;
@@ -4790,12 +4824,12 @@ audio.page-media {
 
 .toolbar button:not(:disabled):hover,
 .editor-toolbar button:not(:disabled):hover {
-	background: var(--hover);
+	background: var(--hover-fill);
 }
 
 .toolbar [data-pressed="true"],
 .editor-toolbar [data-pressed="true"] {
-	background: var(--selected);
+	background: var(--selected-fill);
 	color: var(--accent-strong);
 }
 
@@ -4938,7 +4972,7 @@ audio.page-media {
 	padding: 12px 16px;
 	overflow-y: auto;
 	border-right: 1px solid var(--line);
-	background: var(--panel);
+	background: var(--panel-fill);
 }
 
 .appearance-navigation button {
@@ -4952,7 +4986,7 @@ audio.page-media {
 }
 
 .appearance-navigation button[data-selected="true"] {
-	background: var(--selected);
+	background: var(--selected-fill);
 	color: var(--accent-strong);
 }
 
@@ -4987,7 +5021,7 @@ audio.page-media {
 	gap: 3px;
 	padding: 3px;
 	border-radius: calc(var(--radius-control) + 3px);
-	background: var(--base);
+	background: var(--well-fill);
 }
 
 .appearance-choices button {
@@ -5013,7 +5047,7 @@ audio.page-media {
 }
 
 .appearance-choices [data-pressed="true"] {
-	background: var(--input);
+	background: var(--control-fill);
 	color: var(--accent);
 	border-color: var(--line);
 	box-shadow: 0 1px 4px #0001;
@@ -5028,7 +5062,7 @@ audio.page-media {
 }
 
 select:not(:disabled):hover {
-	background-color: var(--hover);
+	background-color: var(--hover-fill);
 }
 
 select:not([multiple]):not([size]) {
