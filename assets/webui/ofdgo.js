@@ -1786,7 +1786,7 @@ document.querySelector("#signPick").addEventListener("click", openSealPosition);
 el.viewerPanel.addEventListener("pointerdown", beginSealDrag, true);
 el.viewerPanel.addEventListener("pointerdown", pickResourceObject, true);
 document.addEventListener("keydown", event => {
-	if (!resourceManager.pick || el.objectPicker.open) return;
+	if (!resourceManager.pick || el.objectPicker.open || el.confirmPanel.open) return;
 	if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); finishResourcePick(); return; }
 	if (event.target.closest?.("input, textarea, select")) return;
 	if (event.key !== "Tab") { event.preventDefault(); event.stopImmediatePropagation(); }
@@ -2042,7 +2042,7 @@ function editorShortcutTarget(target) {
 }
 
 function handleKeyDown(event) {
-	if (sealPreview) {
+	if (sealPreview && !el.confirmPanel.open) {
 		if (event.key === "Escape") { event.preventDefault(); finishSealPosition(); }
 		return;
 	}
