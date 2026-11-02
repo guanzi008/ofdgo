@@ -2,6 +2,7 @@
 .vscode/
 .devcontainer/
 releases/
+dist/
 go.work
 go.work.sum
 *.exe
