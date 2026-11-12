@@ -87,6 +87,31 @@ set GOARCH=amd64
 go build -o ofdgo_windows_amd64.exe -trimpath -ldflags "-H windowsgui -s -w -buildid=" ./cmd/webview
 ```
 
+## 桌面安装包
+
+我维护了下面几种系统的 deb，窗口使用[这个 GUIGo 分支](https://github.com/guanzi008/guigo)。
+
+| 系统 | 架构 |
+| --- | --- |
+| UOS 20 | loongarch64 |
+| AOSC OS | loongarch64 |
+| Deepin 25 | amd64、arm64、loong64 |
+| 麒麟 V10 | arm64、loongarch64 |
+
+下载对应的包后安装：
+
+```shell
+sudo apt install ./ofdgo_*_uos20_loongarch64.deb      # UOS 20
+sudo oma install ./ofdgo_*_aosc_loongarch64.deb       # AOSC OS
+sudo apt install ./ofdgo_*_deepin25_loong64.deb       # Deepin 25
+sudo apt install ./ofdgo_*_deepin25_arm64.deb         # Deepin 25 ARM64
+sudo apt install ./ofdgo_*_deepin25_amd64.deb         # Deepin 25 amd64
+sudo apt install ./ofdgo_*_kylinv10_arm64.deb          # 麒麟 V10 ARM64
+sudo apt install ./ofdgo_*_kylinv10_loongarch64.deb    # 麒麟 V10 龙芯
+```
+
+安装后从应用菜单打开 OFDGo，或运行 `ofdgo 文件.ofd`。构建命令和包内文件见 [`debian/README.md`](debian/README.md)。
+
 # 安装引擎
 ```shell
 go get -u github.com/xiaoqidun/ofdgo

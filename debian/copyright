@@ -1,0 +1,22 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: OFDGo
+Source: https://github.com/xiaoqidun/ofdgo
+
+Files: *
+Copyright: 2025-2026 肖其顿 (XIAO QI DUN)
+License: Apache-2.0
+ Full license text: /usr/share/doc/ofdgo/LICENSE
+
+Files: debian/*
+Copyright: 2026 guanzi008 <245205080@qq.com>
+License: Apache-2.0
+ Full license text: /usr/share/doc/ofdgo/LICENSE
+
+Comment: The desktop executable includes GUIGo by 肖其顿 (XIAO QI DUN).
+ Source: https://github.com/xiaoqidun/guigo
+ License: Apache-2.0
+
+Files: debian/legacy-webkit/runtime.js debian/legacy-webkit/dialog.css
+Copyright: See debian/legacy-webkit/NOTICE for the individual libraries and authors.
+License: MIT and BSD-3-clause
+ Full license texts: /usr/share/doc/ofdgo/legacy-webkit-NOTICE

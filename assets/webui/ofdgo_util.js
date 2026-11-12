@@ -118,7 +118,28 @@ export class VirtualList {
 }
 
 export function setInputFiles(input, files) {
-	const view = input.ownerDocument.defaultView, transfer = new view.DataTransfer();
+	const view = input.ownerDocument.defaultView;
+	let transfer;
+	try { transfer = new view.DataTransfer(); }
+	catch {
+		let selected = files;
+		let required = input.required;
+		const message = input.validationMessage || "请选择一个文件";
+		const validate = () => input.setCustomValidity(required && !selected.length ? message : "");
+		input.removeAttribute("required");
+		Object.defineProperty(input, "required", {configurable: true, get: () => required,
+			set: value => { required = Boolean(value); validate(); }});
+		Object.defineProperty(input, "files", {configurable: true, get: () => selected});
+		Object.defineProperty(input, "value", {configurable: true,
+			get: () => selected.length ? `C:\\fakepath\\${selected[0].name}` : "",
+			set: value => {
+				if (value !== "") throw new view.DOMException("Cannot set a file input value", "InvalidStateError");
+				selected = [];
+				validate();
+			}});
+		validate();
+		return;
+	}
 	const native = files.some(file => !(file instanceof view.File));
 	for (const file of files) transfer.items.add(file instanceof view.File ? file : new view.File([], file.name, {type: file.type}));
 	delete input.files;
@@ -160,6 +181,7 @@ export class DocumentDialogs {
 
 	register(panel, { shared = true, persistent = false } = {}) {
 		if (this.records.has(panel)) return panel;
+		if (typeof panel.show !== "function") globalThis.ofdgoLegacy?.registerDialog(panel);
 		const record = { show: panel.show.bind(panel), showModal: panel.showModal.bind(panel), close: panel.close.bind(panel), owner: null, application: false, shared, clicks: new WeakMap(), initial: shared && !persistent ? this.snapshot(panel) : null };
 		this.records.set(panel, record);
 		panel.showModal = panel.show = () => this.openFor(this.owner, panel);
@@ -449,6 +471,26 @@ export class DocumentDialogs {
 	}
 }
 
+export function dropdownIsOpen(list) {
+	return typeof list.showPopover === "function" ? list.matches(":popover-open") : list.dataset.dropdownOpen === "true";
+}
+
+export function showDropdown(list) {
+	if (typeof list.showPopover === "function") list.showPopover();
+	else {
+		list.classList.add("dropdown-fallback");
+		list.dataset.dropdownOpen = "true";
+	}
+}
+
+export function hideDropdown(list) {
+	if (typeof list.hidePopover === "function") list.hidePopover();
+	else {
+		list.classList.add("dropdown-fallback");
+		delete list.dataset.dropdownOpen;
+	}
+}
+
 export function positionDropdown(list, anchor, fit = false) {
 	const rect = anchor.getBoundingClientRect(), viewport = window.visualViewport;
 	const left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0;
@@ -539,7 +581,7 @@ export class SelectPicker {
 		(select.closest("dialog") || document.body).append(this.list);
 		this.render();
 		if (!this.select) return;
-		this.list.showPopover();
+		showDropdown(this.list);
 		this.position();
 		if (!this.select) return;
 		this.activate(this.active);
@@ -579,7 +621,7 @@ export class SelectPicker {
 		}
 		const selected = this.options.findIndex(({ option, disabled }) => !disabled && option === (changed ? select.selectedOptions[0] : previous));
 		this.activate(selected < 0 ? this.options.findIndex(({ disabled }) => !disabled) : selected);
-		if (this.list.matches(":popover-open")) this.position();
+		if (dropdownIsOpen(this.list)) this.position();
 	}
 
 	watch() {
@@ -601,7 +643,7 @@ export class SelectPicker {
 		this.active = index;
 		for (const row of this.list.querySelectorAll(".dropdown-option")) {
 			row.dataset.selected = String(Number(row.dataset.index) === index);
-			if (row.dataset.selected === "true" && this.list.matches(":popover-open")) row.scrollIntoView({ block: "nearest" });
+			if (row.dataset.selected === "true" && dropdownIsOpen(this.list)) row.scrollIntoView({ block: "nearest" });
 		}
 	}
 
@@ -623,7 +665,7 @@ export class SelectPicker {
 		this.observer = null;
 		cancelAnimationFrame(this.frame);
 		this.frame = 0;
-		this.list.hidePopover();
+		hideDropdown(this.list);
 		this.list.remove();
 		this.list.replaceChildren();
 		this.select = null;

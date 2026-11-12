@@ -1,0 +1,29 @@
+@supports not (color: color-mix(in srgb, white, black)) {
+    :root {
+        --popup-line: var(--line);
+        --control-fill: var(--input);
+        --panel-fill: var(--panel);
+        --well-fill: var(--base);
+        --canvas-fill: var(--canvas);
+        --popup-fill: var(--popup);
+        --hover-fill: var(--hover);
+        --selected-fill: var(--selected);
+        --danger-fill: var(--danger-soft);
+        --warning-fill: var(--warning-soft);
+    }
+}
+
+@supports not (aspect-ratio: 1) {
+    .page-list.virtual-pages > .page-list-item { display: block; }
+    .page-list.virtual-pages .thumb-paper { height: calc(100% - 52px); }
+    .page-list.virtual-pages .thumb-label,
+    .page-list.virtual-pages .thumb-size { display: block; margin-top: 6px; }
+    .page-list.virtual-pages.grouped-pages .thumb-paper {
+        height: var(--thumb-paper-height);
+        margin-left: auto;
+        margin-right: auto;
+    }
+    .page-control { display: inline-flex; }
+    .page-control input { width: 4ch; flex: 0 0 4ch; }
+    .page-control span { margin: 0 3px; }
+}

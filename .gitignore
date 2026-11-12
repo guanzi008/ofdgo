@@ -2,8 +2,10 @@
 .vscode/
 .devcontainer/
 releases/
+dist/
 go.work
 go.work.sum
 *.exe
 *.exe~
 assets/webui/wasm/ofdgo.wasm
+debian/legacy-webkit/node_modules/
