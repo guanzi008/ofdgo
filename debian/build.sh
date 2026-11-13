@@ -9,7 +9,13 @@ case "$target" in
     uos20)
         system=uos
         depends='libc6 (>= 2.28), libgtk-3-0, libwebkit2gtk-4.0-37'
-        go_bin=${LOONGSON_GO:-"$HOME/sdk/go1.26.4-abi1.0/bin/go"}
+        case "$arch" in
+            loongarch64) go_bin=${LOONGSON_GO:-"$HOME/sdk/go1.26.4-abi1.0/bin/go"} ;;
+            arm64)
+                go_bin=${UOS_GO:-go}
+                depends='libc6 (>= 2.28), libgtk-3-0, libwebkit2gtk-4.0-37 (>= 2.28)'
+                ;;
+        esac
         ;;
     aosc)
         system=aosc
@@ -42,7 +48,7 @@ esac
 
 case "$target:$arch" in
     uos20:loongarch64|aosc:loongarch64|deepin25:loong64|kylinv10:loongarch64) go_arch=loong64 ;;
-    deepin25:arm64|kylinv10:arm64) go_arch=arm64 ;;
+    uos20:arm64|deepin25:arm64|kylinv10:arm64) go_arch=arm64 ;;
     deepin25:amd64) go_arch=amd64 ;;
     *)
         echo "不支持的系统和架构：$target / $arch" >&2
@@ -52,8 +58,13 @@ esac
 
 . /etc/os-release
 if [ "${ID:-}" != "$system" ]; then
-    echo "当前系统是 ${ID:-unknown}，需要 $system" >&2
-    exit 1
+    case "$target:$arch:${ID:-}:${VERSION_ID:-}" in
+        uos20:arm64:debian:10) ;;
+        *)
+            echo "当前系统是 ${ID:-unknown}，需要 $system" >&2
+            exit 1
+            ;;
+    esac
 fi
 if [ "$(dpkg --print-architecture)" != "$arch" ]; then
     echo "当前 dpkg 架构是 $(dpkg --print-architecture)，需要 $arch" >&2
@@ -61,6 +72,10 @@ if [ "$(dpkg --print-architecture)" != "$arch" ]; then
 fi
 if ! command -v "$go_bin" >/dev/null 2>&1; then
     echo "找不到 Go：$go_bin" >&2
+    exit 1
+fi
+if [ "$target:$arch" = uos20:arm64 ] && [ "$(getconf GNU_LIBC_VERSION)" != 'glibc 2.28' ]; then
+    echo "UOS 20 ARM64 需要 glibc 2.28 构建环境" >&2
     exit 1
 fi
 
@@ -78,7 +93,7 @@ cleanup() {
 trap cleanup EXIT
 chmod 755 "$stage"
 
-if [ "$target" = kylinv10 ]; then
+if [ "$target" = kylinv10 ] || [ "$target:$arch" = uos20:arm64 ]; then
     legacy_source=$(mktemp -d "${TMPDIR:-/tmp}/ofdgo-webkit.XXXXXXXX")
     git -c safe.directory="$repo" -C "$repo" archive HEAD | tar -xf - -C "$legacy_source"
     (

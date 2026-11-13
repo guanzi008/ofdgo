@@ -93,7 +93,7 @@ go build -o ofdgo_windows_amd64.exe -trimpath -ldflags "-H windowsgui -s -w -bui
 
 | 系统 | 架构 |
 | --- | --- |
-| UOS 20 | loongarch64 |
+| UOS 20 | arm64、loongarch64 |
 | AOSC OS | loongarch64 |
 | Deepin 25 | amd64、arm64、loong64 |
 | 麒麟 V10 | arm64、loongarch64 |
@@ -102,6 +102,7 @@ go build -o ofdgo_windows_amd64.exe -trimpath -ldflags "-H windowsgui -s -w -bui
 
 ```shell
 sudo apt install ./ofdgo_*_uos20_loongarch64.deb      # UOS 20
+sudo apt install ./ofdgo_*_uos20_arm64.deb            # UOS 20 ARM64
 sudo oma install ./ofdgo_*_aosc_loongarch64.deb       # AOSC OS
 sudo apt install ./ofdgo_*_deepin25_loong64.deb       # Deepin 25
 sudo apt install ./ofdgo_*_deepin25_arm64.deb         # Deepin 25 ARM64
