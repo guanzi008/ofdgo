@@ -31,11 +31,11 @@ case "$target" in
         system=kylin
         case "$arch" in
             loongarch64)
-                depends='libc6 (>= 2.28), libgtk-3-0, libwebkit2gtk-4.0-37 (>= 2.38.6)'
+                depends='libc6 (>= 2.28), libgtk-3-0, libwebkit2gtk-4.0-37 (>= 2.38.6), shared-mime-info'
                 go_bin=${LOONGSON_GO:-"$HOME/sdk/go1.26.4-abi1.0/bin/go"}
                 ;;
             arm64)
-                depends='libc6 (>= 2.31), libgtk-3-0, libwebkit2gtk-4.0-37'
+                depends='libc6 (>= 2.31), libgtk-3-0, libwebkit2gtk-4.0-37, shared-mime-info'
                 go_bin=${KYLIN_GO:-go}
                 ;;
         esac
