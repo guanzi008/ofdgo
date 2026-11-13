@@ -13,7 +13,7 @@ esbuild.buildSync({
     legalComments: "inline"
 });
 fs.copyFileSync(require.resolve("dialog-polyfill/dist/dialog-polyfill.css"), path.join(__dirname, "dialog.css"));
-const packages = ["core-js", "abortcontroller-polyfill", "@ungap/structured-clone", "resize-observer-polyfill", "dialog-polyfill", "wicg-inert", "event-target-shim", "@formatjs/intl-locale", "@formatjs/intl-segmenter", "@formatjs/intl-localematcher", "@formatjs/intl-getcanonicallocales", "@formatjs/intl-supportedvaluesof", "@formatjs/fast-memoize"];
+const packages = ["core-js", "abortcontroller-polyfill", "@ungap/structured-clone", "resize-observer-polyfill", "dialog-polyfill", "wicg-inert", "event-target-shim", "unicode-segmenter"];
 let notices = "OFDGo legacy WebKit compatibility libraries\n";
 for (const name of packages) {
     let root = path.dirname(require.resolve(name));

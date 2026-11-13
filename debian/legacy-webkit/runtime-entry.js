@@ -1,6 +1,11 @@
-import "core-js/stable";
-import "@formatjs/intl-locale/polyfill.js";
-import "@formatjs/intl-segmenter/polyfill.js";
+import "core-js/actual/array/at";
+import "core-js/actual/array/find-last";
+import "core-js/actual/string/at";
+import "core-js/actual/string/replace-all";
+import "core-js/actual/typed-array/at";
+import "core-js/actual/object/from-entries";
+import "core-js/actual/promise/all-settled";
+import "unicode-segmenter/intl-polyfill";
 import "abortcontroller-polyfill/dist/polyfill-patch-fetch";
 import "wicg-inert";
 import structuredClonePolyfill from "@ungap/structured-clone";

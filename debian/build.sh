@@ -64,8 +64,8 @@ if ! command -v "$go_bin" >/dev/null 2>&1; then
     exit 1
 fi
 
-version=${OFDGO_BUILD_VERSION:-$(git -c safe.directory="$repo" -C "$repo" show -s --format=%cd-%h --date=format:%Y%m%d HEAD^)}
-package_version="$version+$target.${OFDGO_PACKAGE_REVISION:-1}"
+version=${OFDGO_BUILD_VERSION:-$(cat "$repo/debian/upstream-version")}
+package_version="$version+$target.${OFDGO_PACKAGE_REVISION:-2}"
 output_dir=${OFDGO_DIST_DIR:-"$repo/dist"}
 output="$output_dir/ofdgo_${version}_${target}_${arch}.deb"
 stage=$(mktemp -d "${TMPDIR:-/tmp}/ofdgo-deb.XXXXXXXX")

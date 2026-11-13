@@ -1,7 +1,5 @@
 {
   "dependencies": {
-    "@formatjs/intl-locale": "5.4.3",
-    "@formatjs/intl-segmenter": "12.3.2",
     "@ungap/structured-clone": "1.3.0",
     "abortcontroller-polyfill": "1.7.8",
     "core-js": "3.47.0",
@@ -9,11 +7,13 @@
     "esbuild": "0.25.12",
     "event-target-shim": "6.0.2",
     "resize-observer-polyfill": "1.5.1",
-    "wicg-inert": "3.1.3"
+    "wicg-inert": "3.1.3",
+    "unicode-segmenter": "0.17.3"
   },
   "name": "ofdgo-legacy-webkit",
   "private": true,
   "scripts": {
-    "build": "node build-runtime.cjs"
+    "build": "node build-runtime.cjs",
+    "test": "node test-runtime.cjs"
   }
 }
