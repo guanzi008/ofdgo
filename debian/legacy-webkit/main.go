@@ -54,7 +54,7 @@ func prepare() error {
 	if err != nil {
 		return err
 	}
-	for from, to := range map[string]string{"runtime.js": "ofdgo_legacy.js", "dialog.css": "ofdgo_legacy_dialog.css", "fallback.css": "ofdgo_legacy.css"} {
+	for from, to := range map[string]string{"loader.js": "ofdgo_legacy_loader.js", "runtime.js": "ofdgo_legacy.js", "dialog.css": "ofdgo_legacy_dialog.css", "fallback.css": "ofdgo_legacy.css"} {
 		data, err := os.ReadFile(filepath.Join("debian", "legacy-webkit", from))
 		if err != nil {
 			return err
@@ -68,7 +68,7 @@ func prepare() error {
 	if err != nil {
 		return err
 	}
-	embed = []byte(strings.ReplaceAll(string(embed), "//go:embed index.html ", "//go:embed ofdgo_legacy.js ofdgo_legacy_dialog.css ofdgo_legacy.css index.html "))
+	embed = []byte(strings.ReplaceAll(string(embed), "//go:embed index.html ", "//go:embed ofdgo_legacy_loader.js ofdgo_legacy.js ofdgo_legacy_dialog.css ofdgo_legacy.css index.html "))
 	if err = os.WriteFile(embedPath, embed, 0644); err != nil {
 		return err
 	}
@@ -77,9 +77,9 @@ func prepare() error {
 	if err != nil {
 		return err
 	}
-	html := strings.Replace(string(index), "<script src=\"./ofdgo_theme.js\"></script>", "<script src=\"./ofdgo_legacy.js\"></script>\n\t<script src=\"./ofdgo_theme.js\"></script>", 1)
+	html := strings.Replace(string(index), "<script src=\"./ofdgo_theme.js\"></script>", "<script src=\"./ofdgo_legacy_loader.js\"></script>\n\t<script src=\"./ofdgo_theme.js\"></script>", 1)
 	html = strings.Replace(html, "<link rel=\"stylesheet\" href=\"./ofdgo.css\">", "<link rel=\"stylesheet\" href=\"./ofdgo_legacy_dialog.css\">\n\t<link rel=\"stylesheet\" href=\"./ofdgo.css\">\n\t<link rel=\"stylesheet\" href=\"./ofdgo_legacy.css\">", 1)
-	if !strings.Contains(html, "ofdgo_legacy.js") {
+	if !strings.Contains(html, "ofdgo_legacy_loader.js") {
 		return fmt.Errorf("missing WebUI script entry")
 	}
 	return os.WriteFile(indexPath, []byte(html), 0644)

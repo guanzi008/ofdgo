@@ -14,6 +14,6 @@
   "private": true,
   "scripts": {
     "build": "node build-runtime.cjs",
-    "test": "node test-runtime.cjs"
+    "test": "node test-runtime.cjs && node test-loader.cjs"
   }
 }

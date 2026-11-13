@@ -80,6 +80,10 @@ if [ "$target:$arch" = uos20:arm64 ] && [ "$(getconf GNU_LIBC_VERSION)" != 'glib
 fi
 
 version=${OFDGO_BUILD_VERSION:-$(cat "$repo/debian/upstream-version")}
+build_tags=guigo_gtk3
+if [ "$target:$arch" = kylinv10:arm64 ]; then
+    build_tags="$build_tags,ofdgo_kylin"
+fi
 package_version="$version+$target.${OFDGO_PACKAGE_REVISION:-2}"
 output_dir=${OFDGO_DIST_DIR:-"$repo/dist"}
 output="$output_dir/ofdgo_${version}_${target}_${arch}.deb"
@@ -119,7 +123,7 @@ install -Dm755 "$repo/debian/postrm" "$stage/DEBIAN/postrm"
 (
     cd "$build_repo"
     GOWORK=off GOTOOLCHAIN=local CGO_ENABLED=1 GOOS=linux GOARCH="$go_arch" \
-        "$go_bin" build -tags guigo_gtk3 -buildvcs=false -o "$stage/usr/bin/ofdgo" -trimpath \
+        "$go_bin" build -tags "$build_tags" -buildvcs=false -o "$stage/usr/bin/ofdgo" -trimpath \
         -ldflags "-s -w -buildid= -X github.com/xiaoqidun/ofdgo/internal/build.Version=$version" \
         ./cmd/webview
 )

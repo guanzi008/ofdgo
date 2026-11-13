@@ -17,6 +17,8 @@
 
 UOS 20 ARM64 使用 glibc 2.28 构建，也可使用 Debian 10 ARM64 作为兼容构建环境。
 
-麒麟 V10、UOS 20 ARM64 构建时会在临时源码目录中转换前端语法，并加入所需的浏览器兼容脚本。麒麟龙芯包需要 2403 更新中的 WebKit 2.38.6 或更新版。兼容脚本及生成工具放在 `debian/legacy-webkit/`；重新生成时运行 `npm ci --ignore-scripts` 和 `node build-runtime.cjs`。
+麒麟 V10、UOS 20 ARM64 构建时会在临时源码目录中转换前端语法，兼容脚本只在浏览器缺少所需 API 时加载。麒麟龙芯包需要 2403 更新中的 WebKit 2.38.6 或更新版。兼容脚本及生成工具放在 `debian/legacy-webkit/`；重新生成时运行 `npm ci --ignore-scripts` 和 `node build-runtime.cjs`。
+
+麒麟 ARM64 包默认使用软件合成，避免部分驱动下的启动白屏。需要启用合成时可运行 `WEBKIT_DISABLE_COMPOSITING_MODE=0 ofdgo`。
 
 包内安装 `/usr/bin/ofdgo`、桌面入口、图标及 OFD 文件类型。`Maintainer` 是这个分支的维护者，原作者和许可见包内 `copyright`、`NOTICE` 和 `LICENSE`。
