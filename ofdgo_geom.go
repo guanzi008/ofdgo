@@ -15,13 +15,18 @@
 package ofdgo
 
 import (
+	"cmp"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
 
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
+
+// maxCompressedFloats 限制单个带g数组展开后的最大元素数量
+const maxCompressedFloats = 1 << 20
 
 // IdentityMatrix 单位矩阵
 var IdentityMatrix = Matrix{1, 0, 0, 1, 0, 0}
@@ -48,7 +53,7 @@ func ParseBox(s string) (Box, error) {
 			return Box{}, fmt.Errorf("invalid box: %s", s)
 		}
 		value, err := strconv.ParseFloat(part, 64)
-		if err != nil {
+		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
 			return Box{}, fmt.Errorf("invalid box: %s", s)
 		}
 		values[i] = value
@@ -67,12 +72,6 @@ func MatrixFromValues(values [6]float64) Matrix {
 	return Matrix{a: values[0], b: values[1], c: values[2], d: values[3], e: values[4], f: values[5]}
 }
 
-// Values 返回a、b、c、d、e、f的独立副本，保留原始浮点精度
-// 返回: [6]float64 矩阵分量
-func (m Matrix) Values() [6]float64 {
-	return [6]float64{m.a, m.b, m.c, m.d, m.e, m.f}
-}
-
 // NewMatrix 解析CTM字符串
 // 入参: s 字符串
 // 返回: Matrix 矩阵对象
@@ -86,6 +85,19 @@ func NewMatrix(s string) Matrix {
 		c: floats[2], d: floats[3],
 		e: floats[4], f: floats[5],
 	}
+}
+
+// TranslationMatrix 构造平移矩阵
+// 入参: x X轴偏移, y Y轴偏移
+// 返回: Matrix 平移矩阵
+func TranslationMatrix(x, y float64) Matrix {
+	return MatrixFromValues(basegeom.TranslationMatrix(x, y).Values())
+}
+
+// Values 返回a、b、c、d、e、f的独立副本，保留原始浮点精度
+// 返回: [6]float64 矩阵分量
+func (m Matrix) Values() [6]float64 {
+	return [6]float64{m.a, m.b, m.c, m.d, m.e, m.f}
 }
 
 // Multiply 矩阵乘法 (m * o)
@@ -125,13 +137,6 @@ func (m Matrix) Invert() (Matrix, bool) {
 	return MatrixFromValues(result.Values()), true
 }
 
-// TranslationMatrix 构造平移矩阵
-// 入参: x X轴偏移, y Y轴偏移
-// 返回: Matrix 平移矩阵
-func TranslationMatrix(x, y float64) Matrix {
-	return MatrixFromValues(basegeom.TranslationMatrix(x, y).Values())
-}
-
 // YScale 获取Y轴缩放比例
 // 返回: float64 缩放比例
 func (m Matrix) YScale() float64 {
@@ -167,6 +172,9 @@ func parseFloatsWithG(s string) []float64 {
 	gFlag := false
 	gCount := 0
 	for p := range strings.FieldsSeq(s) {
+		if len(result) >= maxCompressedFloats {
+			break
+		}
 		if p == "g" {
 			gFlag = true
 			continue
@@ -174,17 +182,19 @@ func parseFloatsWithG(s string) []float64 {
 		if gFlag {
 			var err error
 			gCount, err = strconv.Atoi(p)
-			if err != nil {
+			if err != nil || gCount < 0 {
 				gCount = 0
 			}
 			gFlag = false
 			continue
 		}
 		if gCount > 0 {
-			v, _ := strconv.ParseFloat(p, 64)
-			result = slices.Grow(result, gCount)
-			for j := 0; j < gCount; j++ {
-				result = append(result, v)
+			if v, err := strconv.ParseFloat(p, 64); err == nil {
+				count := min(gCount, maxCompressedFloats-len(result))
+				result = slices.Grow(result, count)
+				for j := 0; j < count; j++ {
+					result = append(result, v)
+				}
 			}
 			gCount = 0
 		} else {
@@ -212,4 +222,16 @@ func parseInts(s string) []int {
 		}
 	}
 	return result
+}
+
+// parsePageAreaBox 按OFD页面区域回退规则解析正有限尺寸的页面边界框
+// 入参: area 页面区域声明
+// 返回: Box 页面边界框, error 解析或尺寸无效错误
+func parsePageAreaBox(area PageArea) (Box, error) {
+	raw := cmp.Or(strings.TrimSpace(area.PhysicalBox), strings.TrimSpace(area.ApplicationBox), strings.TrimSpace(area.ContentBox), "0 0 210 297")
+	box, err := ParseBox(raw)
+	if err != nil || box.W <= 0 || box.H <= 0 {
+		return Box{}, fmt.Errorf("invalid page box: %s", raw)
+	}
+	return box, nil
 }

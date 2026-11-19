@@ -117,36 +117,6 @@ export class VirtualList {
 	}
 }
 
-export function setInputFiles(input, files) {
-	const view = input.ownerDocument.defaultView;
-	let transfer;
-	try { transfer = new view.DataTransfer(); }
-	catch {
-		let selected = files;
-		let required = input.required;
-		const message = input.validationMessage || "请选择一个文件";
-		const validate = () => input.setCustomValidity(required && !selected.length ? message : "");
-		input.removeAttribute("required");
-		Object.defineProperty(input, "required", {configurable: true, get: () => required,
-			set: value => { required = Boolean(value); validate(); }});
-		Object.defineProperty(input, "files", {configurable: true, get: () => selected});
-		Object.defineProperty(input, "value", {configurable: true,
-			get: () => selected.length ? `C:\\fakepath\\${selected[0].name}` : "",
-			set: value => {
-				if (value !== "") throw new view.DOMException("Cannot set a file input value", "InvalidStateError");
-				selected = [];
-				validate();
-			}});
-		validate();
-		return;
-	}
-	const native = files.some(file => !(file instanceof view.File));
-	for (const file of files) transfer.items.add(file instanceof view.File ? file : new view.File([], file.name, {type: file.type}));
-	delete input.files;
-	input.files = transfer.files;
-	if (native) Object.defineProperty(input, "files", {configurable: true, get: () => input.value ? files : []});
-}
-
 export class DocumentDialogs {
 	constructor({ document: root = document, targets = [], titlebar = null } = {}) {
 		Object.assign(this, { document: root, targets, titlebar, owner: null, records: new Map(), tabs: new Map(), released: new WeakSet(), inert: new Map(), styles: new Map() });
@@ -175,14 +145,24 @@ export class DocumentDialogs {
 			event.stopPropagation();
 			this.cancel(panel);
 		}, true);
-		this.backdrop.addEventListener("pointerdown", event => { event.preventDefault(); this.focus(); });
+		this.backdrop.addEventListener("pointerdown", event => {
+			event.preventDefault();
+			this.backdropTarget = this.current()?.stack.at(-1) || null;
+			if (!this.backdropTarget || !this.records.get(this.backdropTarget)?.backdropClose) this.focus();
+		});
+		this.backdrop.addEventListener("click", () => {
+			const top = this.current()?.stack.at(-1);
+			const target = this.backdropTarget;
+			this.backdropTarget = null;
+			if (top && top === target && this.records.get(top)?.backdropClose) this.cancel(top);
+		});
 		root.defaultView.addEventListener("resize", () => this.paint());
 	}
 
-	register(panel, { shared = true, persistent = false } = {}) {
+	register(panel, { shared = true, persistent = false, backdropClose = false } = {}) {
 		if (this.records.has(panel)) return panel;
 		if (typeof panel.show !== "function") globalThis.ofdgoLegacy?.registerDialog(panel);
-		const record = { show: panel.show.bind(panel), showModal: panel.showModal.bind(panel), close: panel.close.bind(panel), owner: null, application: false, shared, clicks: new WeakMap(), initial: shared && !persistent ? this.snapshot(panel) : null };
+		const record = { show: panel.show.bind(panel), showModal: panel.showModal.bind(panel), close: panel.close.bind(panel), owner: null, application: false, shared, backdropClose, clicks: new WeakMap(), initial: shared && !persistent ? this.snapshot(panel) : null };
 		this.records.set(panel, record);
 		panel.showModal = panel.show = () => this.openFor(this.owner, panel);
 		panel.close = value => {
@@ -271,11 +251,15 @@ export class DocumentDialogs {
 		const state = this.current(tab), entry = state?.entries.get(panel);
 		if (!state?.stack.includes(panel)) return;
 		const visible = tab === this.owner;
+		const record = this.records.get(panel);
 		if (visible) {
 			this.unpaint();
 			if (value !== undefined) panel.returnValue = String(value);
 			panel.removeAttribute("open");
-			if (this.records.get(panel).initial) entry.snapshot = this.snapshot(panel);
+			if (record.initial) entry.snapshot = this.snapshot(panel);
+		} else if (record.initial) {
+			entry.snapshot = record.initial;
+			entry.updates = [];
 		}
 		const result = value === undefined ? visible ? panel.returnValue : entry.snapshot?.returnValue ?? panel.returnValue : String(value);
 		state.stack = state.stack.filter(value => value !== panel);
@@ -288,6 +272,15 @@ export class DocumentDialogs {
 			this.focus();
 		}
 		resolve?.(result);
+	}
+
+	detachOther(panel, owner = this.owner) {
+		for (const [tab, state] of this.tabs) {
+			if (tab === owner || !state.stack.includes(panel)) continue;
+			state.stack = state.stack.filter(value => value !== panel);
+			const entry = state.entries.get(panel);
+			if (entry) { entry.setup = []; entry.updates = []; }
+		}
 	}
 
 	cancel(panel, value) {
@@ -362,9 +355,9 @@ export class DocumentDialogs {
 		if (state) state.stack.length = 0;
 	}
 
-	showApplication(panel) {
+	showApplication(panel, { allowStacked = false } = {}) {
 		this.register(panel);
-		if ([...this.tabs.values()].some(state => state.stack.includes(panel))) throw new Error("Document dialog is already in use");
+		if (allowStacked ? this.current()?.stack.includes(panel) : [...this.tabs.values()].some(state => state.stack.includes(panel))) throw new Error("Document dialog is already in use");
 		const record = this.records.get(panel);
 		record.application = true;
 		try { record.showModal(); }
@@ -469,53 +462,6 @@ export class DocumentDialogs {
 		if (selection?.anchor?.isConnected && selection.focus?.isConnected) this.document.getSelection().setBaseAndExtent(selection.anchor, selection.start, selection.focus, selection.end);
 		if (restore) for (const item of this.current().entries.get(panel)?.snapshot?.nodes || []) { item.node.scrollTop = item.scrollTop; item.node.scrollLeft = item.scrollLeft; }
 	}
-}
-
-export function dropdownIsOpen(list) {
-	return typeof list.showPopover === "function" ? list.matches(":popover-open") : list.dataset.dropdownOpen === "true";
-}
-
-export function showDropdown(list) {
-	if (typeof list.showPopover === "function") list.showPopover();
-	else {
-		list.classList.add("dropdown-fallback");
-		list.dataset.dropdownOpen = "true";
-	}
-}
-
-export function hideDropdown(list) {
-	if (typeof list.hidePopover === "function") list.hidePopover();
-	else {
-		list.classList.add("dropdown-fallback");
-		delete list.dataset.dropdownOpen;
-	}
-}
-
-export function positionDropdown(list, anchor, fit = false) {
-	const rect = anchor.getBoundingClientRect(), viewport = window.visualViewport;
-	const left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0;
-	const width = viewport?.width || window.innerWidth, height = viewport?.height || window.innerHeight;
-	if (rect.right <= left || rect.left >= left + width || rect.bottom <= top || rect.top >= top + height) return false;
-	const below = top + height - rect.bottom - 12, above = rect.top - top - 12;
-	const limit = Math.min(280, Math.max(below, above));
-	if (limit < 20) return false;
-	const minimum = Math.min(rect.width, width - 16);
-	Object.assign(list.style, { width: fit ? "max-content" : `${minimum}px`, minWidth: `${minimum}px`, maxWidth: `${width - 16}px`, maxHeight: `${limit}px` });
-	const size = list.getBoundingClientRect();
-	Object.assign(list.style, { left: `${Math.max(left + 8, Math.min(rect.left, left + width - size.width - 8))}px`,
-		top: `${below >= size.height || below >= above ? rect.bottom + 4 : rect.top - size.height - 4}px` });
-	return true;
-}
-
-export function bindDropdownPointer(list, choose) {
-	list.addEventListener("pointerdown", event => {
-		if (event.pointerType !== "touch" && event.target.closest("[data-index]")) event.preventDefault();
-	});
-	list.addEventListener("mousedown", event => { if (event.target.closest("[data-index]")) event.preventDefault(); });
-	list.addEventListener("click", event => {
-		const option = event.target.closest("[data-index]");
-		if (option) choose(Number(option.dataset.index));
-	});
 }
 
 export class SelectPicker {
@@ -715,4 +661,91 @@ export class SelectPicker {
 		event.preventDefault();
 		event.stopImmediatePropagation();
 	}
+}
+
+export function setInputFiles(input, files) {
+	const view = input.ownerDocument.defaultView;
+	let transfer;
+	try { transfer = new view.DataTransfer(); }
+	catch {
+		let selected = files;
+		let required = input.required;
+		const message = input.validationMessage || "请选择一个文件";
+		const validate = () => input.setCustomValidity(required && !selected.length ? message : "");
+		input.removeAttribute("required");
+		Object.defineProperty(input, "required", {configurable: true, get: () => required,
+			set: value => { required = Boolean(value); validate(); }});
+		Object.defineProperty(input, "files", {configurable: true, get: () => selected});
+		Object.defineProperty(input, "value", {configurable: true,
+			get: () => selected.length ? `C:\\fakepath\\${selected[0].name}` : "",
+			set: value => {
+				if (value !== "") throw new view.DOMException("Cannot set a file input value", "InvalidStateError");
+				selected = [];
+				validate();
+			}});
+		validate();
+		return;
+	}
+	const native = files.some(file => !(file instanceof view.File));
+	for (const file of files) transfer.items.add(file instanceof view.File ? file : new view.File([], file.name, {type: file.type}));
+	delete input.files;
+	input.files = transfer.files;
+	if (native) Object.defineProperty(input, "files", {configurable: true, get: () => input.value ? files : []});
+}
+
+export function dropdownIsOpen(list) {
+	return typeof list.showPopover === "function" ? list.matches(":popover-open") : list.dataset.dropdownOpen === "true";
+}
+
+export function showDropdown(list) {
+	if (typeof list.showPopover === "function") list.showPopover();
+	else {
+		list.classList.add("dropdown-fallback");
+		list.dataset.dropdownOpen = "true";
+	}
+}
+
+export function hideDropdown(list) {
+	if (typeof list.hidePopover === "function") list.hidePopover();
+	else {
+		list.classList.add("dropdown-fallback");
+		delete list.dataset.dropdownOpen;
+	}
+}
+
+export function positionDropdown(list, anchor, fit = false) {
+	const rect = anchor.getBoundingClientRect(), viewport = window.visualViewport;
+	const left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0;
+	const width = viewport?.width || window.innerWidth, height = viewport?.height || window.innerHeight;
+	if (rect.right <= left || rect.left >= left + width || rect.bottom <= top || rect.top >= top + height) return false;
+	const below = top + height - rect.bottom - 12, above = rect.top - top - 12;
+	const limit = Math.min(280, Math.max(below, above));
+	if (limit < 20) return false;
+	const minimum = Math.min(rect.width, width - 16);
+	Object.assign(list.style, { width: fit ? "max-content" : `${minimum}px`, minWidth: `${minimum}px`, maxWidth: `${width - 16}px`, maxHeight: `${limit}px` });
+	const size = list.getBoundingClientRect();
+	Object.assign(list.style, { left: `${Math.max(left + 8, Math.min(rect.left, left + width - size.width - 8))}px`,
+		top: `${below >= size.height || below >= above ? rect.bottom + 4 : rect.top - size.height - 4}px` });
+	return true;
+}
+
+export function bindDropdownPointer(list, choose) {
+	list.addEventListener("pointerdown", event => {
+		if (event.pointerType !== "touch" && event.target.closest("[data-index]")) event.preventDefault();
+	});
+	list.addEventListener("mousedown", event => { if (event.target.closest("[data-index]")) event.preventDefault(); });
+	list.addEventListener("click", event => {
+		const option = event.target.closest("[data-index]");
+		if (option) choose(Number(option.dataset.index));
+	});
+}
+
+export function randomID() {
+	if (typeof crypto?.randomUUID === "function") return crypto.randomUUID();
+	const bytes = new Uint8Array(16);
+	crypto.getRandomValues(bytes);
+	bytes[6] = bytes[6] & 0x0f | 0x40;
+	bytes[8] = bytes[8] & 0x3f | 0x80;
+	const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }

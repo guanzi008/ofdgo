@@ -26,11 +26,17 @@ import (
 	"unicode/utf8"
 )
 
-// 公文标引类型标识
+// structureTypeOfficial 公文标引类型标识
 const structureTypeOfficial = "od"
 
-// 2013版电子公文标引命名空间
+// structureTypeInvoice 电子发票标引类型标识
+const structureTypeInvoice = "fp"
+
+// structureNamespaceEGov2013 2013版电子公文标引命名空间
 const structureNamespaceEGov2013 = "http://www.nits.org.cn/eGovDoc/2013"
+
+// structureNamespaceEInvoice2016 2016版电子发票标引命名空间
+const structureNamespaceEInvoice2016 = "http://www.edrm.org.cn/schema/e-invoice/2016"
 
 // Structure 保存自定义标引入口及结构树，单个文件解析失败时通过Error报告，不影响其他标引
 // CanBind表示已识别标引引用规则，包括公文、富文本及发票标引，具体节点和目标仍由绑定接口校验
@@ -113,6 +119,115 @@ func (r *Reader) StructureContext(ctx context.Context) ([]Structure, error) {
 	return result, nil
 }
 
+// StructureTargets 按标引顺序定位指定节点及其后代引用，每个目标页面只遍历一次
+// 入参: index 标引清单索引, path 相对根节点的子节点索引，均从0开始
+// 返回: []StructureTarget 原文和页面范围，缺失引用单独报告, error 解析或渲染错误
+func (r *Renderer) StructureTargets(index int, path []int) ([]StructureTarget, error) {
+	return r.StructureTargetsContext(context.Background(), index, path)
+}
+
+// StructureTargetsContext 仅读取所选标引，在当前文档和版本内定位目标，不搜索其他文档的同名图元
+// 入参: ctx 取消上下文, index 标引清单索引, path 子节点索引路径
+// 返回: []StructureTarget 有序目标, error 解析、渲染或取消错误
+func (r *Renderer) StructureTargetsContext(ctx context.Context, index int, path []int) ([]StructureTarget, error) {
+	tags, err := r.Reader.CustomTagsContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if index < 0 || index >= len(tags) {
+		return nil, fmt.Errorf("custom tag structure not found: %d", index)
+	}
+	structure, err := r.Reader.readStructureContext(ctx, tags[index])
+	if err != nil {
+		return nil, err
+	}
+	node := structure.Root
+	for _, i := range path {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if i < 0 || i >= len(node.Children) {
+			return nil, fmt.Errorf("custom tag node not found")
+		}
+		node = &node.Children[i]
+	}
+	var references []StructureReference
+	var collect func(*StructureNode) error
+	collect = func(node *StructureNode) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		references = append(references, node.References...)
+		for i := range node.Children {
+			if err := collect(&node.Children[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := collect(node); err != nil {
+		return nil, err
+	}
+	if len(references) == 0 {
+		return nil, ctx.Err()
+	}
+	doc, err := r.Reader.DocContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pages := signaturePageNumbers(doc)
+	var result []StructureTarget
+	for _, ref := range references {
+		page, _ := resourceValue(pages, ref.PageID)
+		for _, id := range ref.ObjectIDs {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			result = append(result, StructureTarget{Page: page, PageID: ref.PageID, ID: id})
+		}
+	}
+	byPage := make(map[int]map[string]*StructureTarget)
+	for i := range result {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		target := &result[i]
+		if target.Page == 0 {
+			target.Error = "custom tag page not found"
+			continue
+		}
+		if byPage[target.Page] == nil {
+			byPage[target.Page] = make(map[string]*StructureTarget)
+		}
+		byPage[target.Page][editorResourceID(target.ID)] = target
+		target.Error = "custom tag object not found"
+	}
+	view := *r
+	view.RenderAnnotations, view.pageContext = true, ctx
+	for page, targets := range byPage {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		content, err := r.Reader.PageContentByIndexContext(ctx, page-1)
+		if err != nil {
+			return nil, err
+		}
+		visitor := &structureVisitor{ctx: ctx, renderer: &view, targets: targets}
+		if err := view.WalkPage(content, visitor); err != nil {
+			return nil, err
+		}
+	}
+	for i, target := range result {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if source := byPage[target.Page][editorResourceID(target.ID)]; source != nil {
+			result[i] = *source
+		}
+	}
+	return result, nil
+}
+
 // readStructureContext 读取单个标引文件，解析失败时保留入口信息及原始错误
 // 入参: ctx 取消上下文, tag 标引入口
 // 返回: Structure 标引结构, error 文件读取、解析或取消错误
@@ -126,7 +241,8 @@ func (r *Reader) readStructureContext(ctx context.Context, tag CustomTag) (Struc
 		return item, fmt.Errorf("read custom tag %s: %w", tag.FileLoc, err)
 	}
 	item.CanBind = structureOfficial(tag, item.Root.Namespace) || structureInvoiceReferences(item.Root)
-	item.Internal = tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace && item.Root.Namespace == richTextNamespace && item.Root.Name == "RichText"
+	item.Internal = tag.TypeID == textTagType && tag.NameSpace == textNamespace && item.Root.Namespace == textNamespace && item.Root.Name == "Text"
+	item.Internal = item.Internal || tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace && item.Root.Namespace == richTextNamespace && item.Root.Name == "RichText"
 	item.Internal = item.Internal || tag.TypeID == invoiceTagType && tag.NameSpace == invoiceNamespace && item.Root.Namespace == invoiceNamespace && item.Root.Name == "Invoice"
 	return item, nil
 }
@@ -243,19 +359,34 @@ func parseStructure(ctx context.Context, data []byte, tag CustomTag) (*Structure
 // 入参: root 标引根节点
 // 返回: bool 是否为纯对象引用发票
 func structureInvoiceReferences(root *StructureNode) bool {
-	if root == nil || root.Name != "root" || root.Namespace != ofdNamespace2016 {
+	if root == nil {
 		return false
 	}
-	known, refs := false, 0
-	for _, child := range root.Children {
-		known = known || child.Name == "InvoiceNo" && child.Namespace == ofdNamespace2016
-	}
-	var check func(*StructureNode) bool
-	check = func(node *StructureNode) bool {
-		if node.Namespace != ofdNamespace2016 {
+	ns := root.Namespace
+	var known bool
+	switch ns {
+	case ofdNamespace2016:
+		if root.Name != "root" {
 			return false
 		}
-		if node.Name == "ObjectRef" {
+		for _, child := range root.Children {
+			known = known || child.Name == "InvoiceNo" && child.Namespace == ofdNamespace2016
+		}
+	case structureNamespaceEInvoice2016, InvoiceStandardEDRM2019:
+		if root.Name != "eInvoice" && root.Name != "root" {
+			return false
+		}
+		known = root.Name == "eInvoice"
+		for _, child := range root.Children {
+			known = known || child.Name == "InvoiceNo" && child.Namespace == ns
+		}
+	default:
+		return false
+	}
+	refs := 0
+	var check func(*StructureNode) bool
+	check = func(node *StructureNode) bool {
+		if node.Name == "ObjectRef" && (node.Namespace == ns || node.Namespace == ofdNamespace2016) {
 			page := ""
 			for _, attr := range node.Attributes {
 				if attr.Name == "PageRef" && attr.Namespace == "" {
@@ -273,6 +404,9 @@ func structureInvoiceReferences(root *StructureNode) bool {
 			}
 			refs++
 			return true
+		}
+		if node.Namespace != ns {
+			return false
 		}
 		if node.Name == "ObjectData" {
 			return len(node.Children) == 0
@@ -312,6 +446,9 @@ func (r *Reader) structureReferenceTags(ctx context.Context, tags []CustomTag) (
 // 入参: tag 标引入口, namespace 内容根节点命名空间
 // 返回: bool 是否使用公文引用规则
 func structureOfficial(tag CustomTag, namespace string) bool {
+	if tag.TypeID == textTagType && tag.NameSpace == textNamespace && namespace == textNamespace {
+		return true
+	}
 	if tag.TypeID == invoiceTagType && tag.NameSpace == invoiceNamespace && namespace == invoiceNamespace {
 		return true
 	}
@@ -322,7 +459,7 @@ func structureOfficial(tag CustomTag, namespace string) bool {
 		return true
 	}
 	if tag.TypeID == structureTypeOfficial {
-		return true
+		return strings.TrimSpace(tag.NameSpace) == "" || tag.NameSpace == namespace
 	}
 	if tag.NameSpace != namespace {
 		return false
@@ -340,115 +477,6 @@ func structureOfficial(tag CustomTag, namespace string) bool {
 // 返回: []string 图元标识
 func structureObjectIDs(value string) []string {
 	return strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\r' || r == '\t' })
-}
-
-// StructureTargets 按标引顺序定位指定节点及其后代引用，每个目标页面只遍历一次
-// 入参: index 标引清单索引, path 相对根节点的子节点索引，均从0开始
-// 返回: []StructureTarget 原文和页面范围，缺失引用单独报告, error 解析或渲染错误
-func (r *Renderer) StructureTargets(index int, path []int) ([]StructureTarget, error) {
-	return r.StructureTargetsContext(context.Background(), index, path)
-}
-
-// StructureTargetsContext 仅读取所选标引，在当前文档和版本内定位目标，不搜索其他文档的同名图元
-// 入参: ctx 取消上下文, index 标引清单索引, path 子节点索引路径
-// 返回: []StructureTarget 有序目标, error 解析、渲染或取消错误
-func (r *Renderer) StructureTargetsContext(ctx context.Context, index int, path []int) ([]StructureTarget, error) {
-	tags, err := r.Reader.CustomTagsContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if index < 0 || index >= len(tags) {
-		return nil, fmt.Errorf("custom tag structure not found: %d", index)
-	}
-	structure, err := r.Reader.readStructureContext(ctx, tags[index])
-	if err != nil {
-		return nil, err
-	}
-	node := structure.Root
-	for _, i := range path {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if i < 0 || i >= len(node.Children) {
-			return nil, fmt.Errorf("custom tag node not found")
-		}
-		node = &node.Children[i]
-	}
-	var references []StructureReference
-	var collect func(*StructureNode) error
-	collect = func(node *StructureNode) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		references = append(references, node.References...)
-		for i := range node.Children {
-			if err := collect(&node.Children[i]); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := collect(node); err != nil {
-		return nil, err
-	}
-	if len(references) == 0 {
-		return nil, ctx.Err()
-	}
-	doc, err := r.Reader.DocContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	pages := signaturePageNumbers(doc)
-	var result []StructureTarget
-	for _, ref := range references {
-		page, _ := resourceValue(pages, ref.PageID)
-		for _, id := range ref.ObjectIDs {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			result = append(result, StructureTarget{Page: page, PageID: ref.PageID, ID: id})
-		}
-	}
-	byPage := make(map[int]map[string]*StructureTarget)
-	for i := range result {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		target := &result[i]
-		if target.Page == 0 {
-			target.Error = "custom tag page not found"
-			continue
-		}
-		if byPage[target.Page] == nil {
-			byPage[target.Page] = make(map[string]*StructureTarget)
-		}
-		byPage[target.Page][editorResourceID(target.ID)] = target
-		target.Error = "custom tag object not found"
-	}
-	view := *r
-	view.RenderAnnotations, view.pageContext = true, ctx
-	for page, targets := range byPage {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		content, err := r.Reader.PageContentByIndexContext(ctx, page-1)
-		if err != nil {
-			return nil, err
-		}
-		visitor := &structureVisitor{ctx: ctx, renderer: &view, targets: targets}
-		if err := view.WalkPage(content, visitor); err != nil {
-			return nil, err
-		}
-	}
-	for i, target := range result {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if source := byPage[target.Page][editorResourceID(target.ID)]; source != nil {
-			result[i] = *source
-		}
-	}
-	return result, nil
 }
 
 // encodeStructureNode 编码有界标引子树，引用由ObjectRef节点表达，不重复编码派生References字段

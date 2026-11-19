@@ -15,17 +15,17 @@
 package ofdgo
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
+
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
-	"math"
-	"strings"
 )
 
 // PositionedGlyph 保存页面坐标字形与对应原文区间
 type PositionedGlyph struct {
 	Path       GeometryPath
-	Underline  GeometryPath
 	Start, End int
 }
 
@@ -38,6 +38,13 @@ type PositionedText struct {
 	Matrix Matrix
 }
 
+// PositionText 定位文字、字形与搜索范围，不依赖页面输出后端
+// 入参: object 文字对象, state 继承状态
+// 返回: *PositionedText 定位结果, error 字体或几何错误
+func (r *Renderer) PositionText(object TextObject, state RenderState) (*PositionedText, error) {
+	return r.positionText(object, state, false)
+}
+
 // glyphOutlineKey 区分字体、字形与毫米字号
 type glyphOutlineKey struct {
 	digest [32]byte
@@ -46,18 +53,21 @@ type glyphOutlineKey struct {
 	size   float64
 }
 
-// PositionText 定位文字、字形与搜索范围，不依赖页面输出后端
-// 入参: object 文字对象, state 继承状态
-// 返回: *PositionedText 定位结果, error 字体或几何错误
-func (r *Renderer) PositionText(object TextObject, state RenderState) (*PositionedText, error) {
-	return r.positionText(object, state, false)
-}
-
 // positionText 提取原文，按需计算字形与搜索范围
 // 入参: object 文字对象, state 继承状态, contentOnly 仅提取原文
 // 返回: *PositionedText 定位结果, error 字体或几何错误
 func (r *Renderer) positionText(object TextObject, state RenderState, contentOnly bool) (*PositionedText, error) {
-	result := &PositionedText{Run: TextRun{ID: object.ID, Text: object.Text()}}
+	defaults := r.drawParamDefaults(object.DrawParam, state.Defaults)
+	size := object.Size
+	if size == 0 && defaults != nil && defaults.Size > 0 {
+		size = defaults.Size
+	}
+	if size == 0 {
+		size = 3.5
+	}
+	effectiveObj := object
+	effectiveObj.Size = size
+	result := &PositionedText{Run: TextRun{ID: object.ID, Text: effectiveObj.Text()}}
 	if !contentOnly {
 		result.Run.Boxes = make([]Box, len([]rune(result.Run.Text)))
 	}
@@ -75,23 +85,12 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 	if err != nil {
 		return nil, err
 	}
-	defaults := r.drawParamDefaults(object.DrawParam, state.Defaults)
-	size := object.Size
-	if size == 0 && defaults != nil {
-		size = defaults.Size
-	}
-	if size == 0 {
-		size = 3.5
-	}
-	if object.VScale != 0 {
-		size *= object.VScale
-	}
 	horizontal := object.HScale
 	if horizontal == 0 {
 		horizontal = 1
 	}
 	id := object.Font
-	if id == "" && defaults != nil {
+	if id == "" && defaults != nil && defaults.Font != "" {
 		id = defaults.Font
 	}
 	prepared, err := r.PrepareFont(id)
@@ -125,27 +124,32 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 	if err != nil {
 		return nil, err
 	}
-	weight, italic := object.Weight, object.Italic
-	if defaults != nil {
-		if weight == 0 {
-			weight = defaults.Weight
-		}
-		italic = italic || defaults.Italic
+	weight := object.Weight
+	if weight == 0 && !object.WeightSet && defaults != nil && (defaults.Weight > 0 || defaults.WeightSet) {
+		weight = defaults.Weight
+	}
+	italic := object.Italic
+	if !object.ItalicSet && !italic && defaults != nil && defaults.Italic {
+		italic = true
 	}
 	bold := weight >= 700
-	if definition := r.Reader.fontDefinition(id); definition != nil {
+	if definition := r.fontDefinition(id); definition != nil {
 		bold = bold && !definition.Bold
-		if definition.FontFile == "" && basefont.NoSyntheticBold(definition.FontName, definition.FamilyName) {
+		if basefont.NoSyntheticBold(definition.FontName, definition.FamilyName) {
 			bold = false
 		}
 		italic = italic && !definition.Italic
+	}
+	if bold && preparedFontBold(prepared, metrics) {
+		bold = false
 	}
 	ascent, descent, _ := metrics.VerticalMetrics()
 	unit := size / float64(metrics.UnitsPerEm())
 	recoverBaseline := len(object.TextCode) > 0 && object.TextCode[0].Y == ""
 	object.TextCode = textCodeOrigins(object.TextCode, float64(ascent)*unit)
+	effectiveObj.TextCode = object.TextCode
 	if recoverBaseline {
-		if text := object.Text(); text != result.Run.Text {
+		if text := effectiveObj.Text(); text != result.Run.Text {
 			result.Run.Text = text
 			if !contentOnly {
 				result.Run.Boxes = make([]Box, len([]rune(text)))
@@ -160,21 +164,20 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 	angle := float64(object.CharDirection) * math.Pi / 180
 	rotate := Matrix{a: math.Cos(angle), b: math.Sin(angle), c: -math.Sin(angle), d: math.Cos(angle)}
 	glyphLinear := Matrix{a: linear.a, b: linear.b, c: linear.c, d: linear.d}.Multiply(rotate)
-	lines := newTextLineScanner(object)
+	lines := newTextLineScanner(effectiveObj)
 	for _, code := range object.TextCode {
 		if lines.next(code) {
 			textOffset++
 		}
 		runes := textCodeRunes(code.Value)
-		glyphs := textCodeGlyphs(runes, transforms, codeOffset)
-		spans := textGlyphSpans(runes, transforms, codeOffset)
+		var glyphs []textGlyph
+		var spans [][2]int
 		if code.Index != "" {
-			runes = r.parseIndexRunes(code.Index, id)
-			glyphs = textRuneGlyphs(runes)
-			spans = make([][2]int, len(glyphs))
-			for i := range spans {
-				spans[i] = [2]int{0, 1}
-			}
+			glyphs = r.parseIndexGlyphs(code.Index, id)
+			spans = indexGlyphSpans(len(glyphs))
+		} else {
+			glyphs = textCodeGlyphs(runes, transforms, codeOffset)
+			spans = textGlyphSpans(runes, transforms, codeOffset)
 		}
 		ids := make([]uint16, len(glyphs))
 		for i, glyph := range glyphs {
@@ -192,7 +195,7 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 		if err != nil {
 			return nil, err
 		}
-		positioner := NewTextPositioner(code)
+		positioner := NewTextPositioner(code, object.ReadDirection)
 		for i, gid := range ids {
 			if i%64 == 0 && r.pageContext != nil {
 				if err := r.pageContext.Err(); err != nil {
@@ -243,17 +246,6 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 			}
 			span := spans[i]
 			item := PositionedGlyph{Path: placed, Start: textOffset + span[0], End: textOffset + span[1]}
-			if strings.Contains(object.Decoration, "Underline") {
-				line := GeometryPath{{Verb: GeometryMove, End: Point{Y: size * 0.1}}, {Verb: GeometryLine, End: Point{X: width * scaleX, Y: size * 0.1}}}
-				line, err = geometry.Stroke(line, StrokeOptions{Width: size * 0.05})
-				if err != nil {
-					return nil, err
-				}
-				item.Underline, err = geometry.Transform(line, TranslationMatrix(x, y).Multiply(glyphLinear))
-				if err != nil {
-					return nil, err
-				}
-			}
 			for j := item.Start; j < item.End; j++ {
 				result.Run.Boxes[j] = unionTextBox(result.Run.Boxes[j], box)
 			}
@@ -282,7 +274,7 @@ func (r *Renderer) preparedMetrics(prepared *PreparedFont) (FontMetrics, error) 
 	key := prepared.digest
 	return r.fontMetrics.load(r.pageContext, key, func() (FontMetrics, int, error) {
 		metrics, err := r.backends.Fonts.OpenFont(prepared.Data)
-		return metrics, len(prepared.Data)*2 + 256, err
+		return metrics, len(prepared.Data) + 512, err
 	})
 }
 
@@ -372,22 +364,6 @@ func (r *Renderer) preparedOutlines(prepared *PreparedFont, metrics FontMetrics,
 	return result, nil
 }
 
-// renderObjectMatrix 统一边界、局部变换与父变换的组合顺序
-// 入参: boundary 对象边界, local 局部矩阵, state 继承状态
-// 返回: Matrix 页面矩阵, Matrix 不含边界平移的组合矩阵
-func renderObjectMatrix(boundary string, local Matrix, state RenderState) (Matrix, Matrix) {
-	box, _ := ParseBox(boundary)
-	linear := local
-	if state.Parent != nil {
-		linear = state.Parent.Multiply(local)
-	}
-	matrix := TranslationMatrix(box.X, box.Y).Multiply(linear)
-	if state.BoundaryInCTM && state.Parent != nil {
-		matrix = state.Parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(local)
-	}
-	return matrix, linear
-}
-
 // objectGeometryClip 合并对象外接矩形、显式裁剪和父裁剪
 // 入参: clips 对象裁剪, boundary 边界, local 局部矩阵, state 继承状态
 // 返回: *GeometryPath 页面裁剪, error 几何错误
@@ -412,17 +388,31 @@ func (r *Renderer) objectGeometryClip(clips *Clips, boundary string, local Matri
 	}
 	matrix, _ := renderObjectMatrix(boundary, local, state)
 	if !clips.usesObjectMatrix() {
-		box, _ := ParseBox(boundary)
-		matrix = TranslationMatrix(box.X, box.Y)
-		if state.BoundaryInCTM && state.Parent != nil {
-			matrix = state.Parent.Multiply(matrix)
-		}
+		matrix, _ = renderObjectMatrix(boundary, IdentityMatrix, state)
 	}
 	geometry, err := r.Geometry()
 	if err != nil {
 		return nil, err
 	}
 	return geometry.Clip(r, clips, matrix, clip)
+}
+
+// imageBorderClip 计算图像边框裁剪，保留父裁剪与显式Clips但豁免图像自身Boundary裁剪
+// 入参: clips 对象裁剪, boundary 图像边界, local 局部矩阵, state 继承状态
+// 返回: *GeometryPath 页面裁剪, error 几何错误
+func (r *Renderer) imageBorderClip(clips *Clips, boundary string, local Matrix, state RenderState) (*GeometryPath, error) {
+	if clips == nil {
+		return state.Clip, nil
+	}
+	matrix, _ := renderObjectMatrix(boundary, local, state)
+	if !clips.usesObjectMatrix() {
+		matrix, _ = renderObjectMatrix(boundary, IdentityMatrix, state)
+	}
+	geometry, err := r.Geometry()
+	if err != nil {
+		return nil, err
+	}
+	return geometry.Clip(r, clips, matrix, state.Clip)
 }
 
 // addGeometrySpan 以公共几何语义收集文字选择区域，保留旋转和斜切
@@ -468,4 +458,50 @@ func (run *TextRun) addGeometrySpan(geometry GeometryBackend, start, end int, bo
 	}
 	run.Spans = append(run.Spans, TextSpan{Start: start, End: end, Matrix: matrix.Values()})
 	return nil
+}
+
+// renderObjectMatrix 统一边界、局部变换与父变换的组合顺序
+// 入参: boundary 对象边界, local 局部矩阵, state 继承状态
+// 返回: Matrix 页面矩阵, Matrix 不含边界平移的组合矩阵
+func renderObjectMatrix(boundary string, local Matrix, state RenderState) (Matrix, Matrix) {
+	box, _ := ParseBox(boundary)
+	linear := local
+	if state.Parent != nil {
+		linear = state.Parent.Multiply(local)
+	}
+	matrix := TranslationMatrix(box.X, box.Y).Multiply(linear)
+	if state.BoundaryInCTM && state.Parent != nil {
+		matrix = state.Parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(local)
+	}
+	return matrix, linear
+}
+
+// sfntTablesBold 依据字体自身OS/2字重与head粗体标志判定是否本身已是粗体
+// 入参: tables OpenType字表映射
+// 返回: bool 字体本身是否为粗体
+func sfntTablesBold(tables map[string][]byte) bool {
+	if os2 := tables["OS/2"]; len(os2) >= 6 && binary.BigEndian.Uint16(os2[4:6]) >= 700 {
+		return true
+	}
+	if head := tables["head"]; len(head) >= 46 && binary.BigEndian.Uint16(head[44:46])&1 != 0 {
+		return true
+	}
+	return false
+}
+
+// preparedFontBold 读取已准备字体的OpenType表以判定字库本身是否为粗体
+// 入参: prepared 已准备字体, metrics 字体度量
+// 返回: bool 字体本身是否为粗体
+func preparedFontBold(prepared *PreparedFont, metrics FontMetrics) bool {
+	if sfnt, ok := metrics.(*sfntFontMetrics); ok && sfnt != nil && sfnt.SFNT != nil {
+		return sfntTablesBold(sfnt.Tables)
+	}
+	if prepared == nil || len(prepared.Data) == 0 {
+		return false
+	}
+	tables, err := basefont.FileTables(prepared.Data, 0)
+	if err != nil {
+		return false
+	}
+	return sfntTablesBold(tables)
 }

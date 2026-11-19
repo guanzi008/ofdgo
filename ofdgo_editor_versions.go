@@ -87,7 +87,7 @@ func (e *Editor) SelectVersionContext(ctx context.Context, id string) error {
 	}
 	before := e.transactionSnapshot()
 	next := *e
-	if err := next.adoptDocumentReader(ctx, view); err != nil {
+	if err := next.adoptDocumentReader(ctx, view, nil); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -585,6 +585,9 @@ func (r *Reader) retireVersionFiles(ctx context.Context, candidates map[string]b
 		r.Zip = &zip.Reader{Comment: r.Zip.Comment, File: slices.DeleteFunc(slices.Clone(r.Zip.File), func(file *zip.File) bool {
 			return candidates[cleanPackagePath(file.Name)]
 		})}
+	}
+	if src := r.encryptedSource(); src != nil {
+		r.setEncryptedSource(src.omit(candidates))
 	}
 	return nil
 }

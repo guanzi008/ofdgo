@@ -35,31 +35,6 @@ type editorGeneratedReferences struct {
 	objects map[string]bool
 }
 
-// editorVectorUsage 保存自产矢量资源的引用快照，内容和路径变化时失效
-type editorVectorUsage struct {
-	name   string
-	digest [32]byte
-	refs   *editorResourceRefs
-}
-
-// editorReferenceScan 按XML事件收集资源、字体用字和图元编号，未知内容保持完整扫描
-type editorReferenceScan struct {
-	ctx        context.Context
-	refs       *editorResourceRefs
-	objects    map[string]bool
-	graphicIDs map[string]bool
-	name       string
-	base       string
-	stack      []string
-	fonts      []*editorFontUsage
-	text       strings.Builder
-	richText   strings.Builder
-	resource   bool
-	capture    bool
-	safe       bool
-	seen       bool
-}
-
 // matches 判断条目仍为本次编码结果，空条目与暂存占位不混用
 // 入参: data 当前条目数据
 // 返回: bool 是否可以复用本次引用
@@ -77,6 +52,13 @@ func (r editorGeneratedReferences) stagedLeaf(data []byte) bool {
 	return r.staged != nil && data == nil && r.refs != nil && len(r.refs.files) == 0
 }
 
+// editorVectorUsage 保存自产矢量资源的引用快照，内容和路径变化时失效
+type editorVectorUsage struct {
+	name   string
+	digest [32]byte
+	refs   *editorResourceRefs
+}
+
 // matches 核对资源路径和完整内容摘要，不以切片地址判断内容
 // 入参: name 当前资源路径, data 当前资源内容
 // 返回: bool 是否仍可使用编码时的引用
@@ -84,29 +66,24 @@ func (u *editorVectorUsage) matches(name string, data []byte) bool {
 	return u != nil && u.name == name && u.digest == sha256.Sum256(data)
 }
 
-// generatedVectorReferences 合并未改变的自产矢量引用，不修改调用方集合
-// 入参: parts 输出条目, generated 本次已知引用
-// 返回: map[string]editorGeneratedReferences 本次可复用引用
-func (e *Editor) generatedVectorReferences(parts map[string][]byte, generated map[string]editorGeneratedReferences) map[string]editorGeneratedReferences {
-	copied := false
-	for _, resource := range e.resources {
-		if e.output != nil && e.output.ctx.Err() != nil {
-			return generated
-		}
-		data, ok := parts[resource.name]
-		if !ok || !resource.usage.matches(resource.name, data) {
-			continue
-		}
-		if !copied {
-			generated = maps.Clone(generated)
-			if generated == nil {
-				generated = make(map[string]editorGeneratedReferences)
-			}
-			copied = true
-		}
-		generated[resource.name] = editorGeneratedReferences{data: data, refs: resource.usage.refs}
-	}
-	return generated
+// editorReferenceScan 按XML事件收集资源、字体用字和图元编号，未知内容保持完整扫描
+type editorReferenceScan struct {
+	ctx               context.Context
+	refs              *editorResourceRefs
+	objects           map[string]bool
+	graphicIDs        map[string]bool
+	name              string
+	base              string
+	stack             []string
+	fonts             []*editorFontUsage
+	text              strings.Builder
+	richText          strings.Builder
+	currentCustomTag  CustomTag
+	resource          bool
+	capture           bool
+	externalCustomTag bool
+	safe              bool
+	seen              bool
 }
 
 // vectorUsage 保留完整且限额内的自产矢量引用，超限时保存流程重新扫描
@@ -129,6 +106,18 @@ func (s *editorReferenceScan) vectorUsage(data []byte) *editorVectorUsage {
 	return &editorVectorUsage{name: s.name, digest: sha256.Sum256(data), refs: s.refs}
 }
 
+// customTagsDepth 返回栈内合法CustomTags容器的深度索引，不存在时返回-1
+// 返回: int 栈内CustomTags索引
+func (s *editorReferenceScan) customTagsDepth() int {
+	if len(s.stack) > 0 && s.stack[0] == "CustomTags" {
+		return 0
+	}
+	if len(s.stack) > 1 && s.stack[0] == "Document" && s.stack[1] == "CustomTags" {
+		return 1
+	}
+	return -1
+}
+
 // accept 共用读取和自产页面的引用判断，不将对象自身标识视为引用
 // 入参: token 已解析或已编码的XML事件
 // 返回: bool 是否仍可完整判断引用
@@ -141,15 +130,24 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 	}
 	switch token := token.(type) {
 	case xml.StartElement:
+		plain := token.Name.Space == textNamespace
 		rich := token.Name.Space == richTextNamespace
 		known := classifyOFDNamespace(token.Name.Space) != ofdXMLUnknown
-		if rich {
+		if plain {
+			known = len(s.stack) == 0 && token.Name.Local == "Text" || len(s.stack) == 1 && s.stack[0] == "Text" && token.Name.Local == "ObjectRef"
+		} else if rich {
 			known = len(s.stack) == 0 && token.Name.Local == "RichText" || len(s.stack) == 1 && s.stack[0] == "RichText" && token.Name.Local == "ObjectRef"
-		} else if len(s.stack) > 0 && s.stack[0] == "RichText" {
+		} else if len(s.stack) > 0 && (s.stack[0] == "RichText" || s.stack[0] == "Text") {
 			known = false
 		}
-		if len(s.stack) > 0 && s.stack[0] == "CustomTags" {
-			known = known && (len(s.stack) == 1 && token.Name.Local == "CustomTag" || len(s.stack) == 2 && s.stack[1] == "CustomTag" && (token.Name.Local == "FileLoc" || token.Name.Local == "SchemaLoc"))
+		if token.Name.Local == "CustomTags" {
+			known = known && (len(s.stack) == 0 || len(s.stack) == 1 && s.stack[0] == "Document")
+		}
+		ctDepth := s.customTagsDepth()
+		if ctDepth >= 0 {
+			known = known && (len(s.stack) == ctDepth+1 && token.Name.Local == "CustomTag" || len(s.stack) == ctDepth+2 && s.stack[ctDepth+1] == "CustomTag" && (token.Name.Local == "FileLoc" || token.Name.Local == "SchemaLoc"))
+		} else if token.Name.Local == "CustomTag" {
+			known = false
 		}
 		if !known {
 			s.safe = false
@@ -169,10 +167,14 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 					namespace = attr.Value
 				}
 			}
-			if kind != richTextTagType || namespace != richTextNamespace {
+			tag := CustomTag{TypeID: kind, NameSpace: namespace}
+			internalFontSafe := kind == textTagType && namespace == textNamespace || kind == richTextTagType && namespace == richTextNamespace
+			if !internalFontSafe && !isKnownResourceSafeTagMeta(tag) {
 				s.safe = false
 				return false
 			}
+			s.currentCustomTag = tag
+			s.externalCustomTag = !internalFontSafe
 		}
 		if len(s.stack) == 0 {
 			if s.seen {
@@ -207,11 +209,11 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			}
 		}
 		for _, attr := range token.Attr {
-			if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" || attr.Name.Local == "xmlns:ofd" || attr.Name.Space == XMLNamespace || textMetadataAttribute(token.Name, attr) {
+			if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" || attr.Name.Local == "xmlns:ofd" || attr.Name.Space == XMLNamespace {
 				continue
 			}
-			custom := len(s.stack) == 0 && token.Name.Local == "CustomTags" || len(s.stack) > 0 && s.stack[0] == "CustomTags"
-			if attr.Name.Space != "" || rich && (token.Name.Local != "ObjectRef" || attr.Name.Local != "PageRef") || custom && (token.Name.Local != "CustomTag" || attr.Name.Local != "TypeID" && attr.Name.Local != "NameSpace") {
+			custom := token.Name.Local == "CustomTags" || ctDepth >= 0
+			if attr.Name.Space != "" || (rich || plain) && (token.Name.Local != "ObjectRef" || attr.Name.Local != "PageRef") || custom && (token.Name.Local != "CustomTag" || attr.Name.Local != "TypeID" && attr.Name.Local != "NameSpace") {
 				s.safe = false
 				return false
 			}
@@ -243,6 +245,12 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 					usage.unsafe = true
 				}
 			}
+			if token.Name.Local == "TextCode" && attr.Name.Local == "Index" && attr.Value != "" && usage != nil {
+				if err := usage.index(s.ctx, attr.Value); err != nil {
+					s.safe = false
+					return false
+				}
+			}
 		}
 		s.stack = append(s.stack, token.Name.Local)
 		s.fonts = append(s.fonts, usage)
@@ -252,7 +260,7 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			s.capture = true
 		}
 	case xml.CharData:
-		if len(s.stack) == 1 && s.stack[0] == "RichText" {
+		if len(s.stack) == 1 && (s.stack[0] == "RichText" || s.stack[0] == "Text") {
 			s.richText.Write(token)
 		}
 		if len(s.stack) == 0 && len(bytes.Trim(token, " \t\r\n")) != 0 {
@@ -263,11 +271,31 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			s.text.Write(token)
 		}
 	case xml.EndElement:
-		if len(s.stack) == 3 && s.stack[0] == "CustomTags" && token.Name.Local == "SchemaLoc" && strings.TrimSpace(s.text.String()) != "" {
+		ctDepth := s.customTagsDepth()
+		if ctDepth >= 0 && len(s.stack) == ctDepth+3 && s.stack[ctDepth+1] == "CustomTag" && token.Name.Local == "SchemaLoc" {
+			schema := strings.TrimSpace(s.text.String())
+			if schema != "" {
+				if !s.externalCustomTag {
+					s.safe = false
+					return false
+				}
+				s.currentCustomTag.SchemaLoc = schema
+			}
+		}
+		if ctDepth >= 0 && len(s.stack) == ctDepth+3 && s.stack[ctDepth+1] == "CustomTag" && token.Name.Local == "FileLoc" {
+			if target := cleanPackagePath(resolveResourcePath(s.name, s.base, s.text.String())); target != "" {
+				s.refs.addCustomTagFile(target, s.currentCustomTag)
+			}
+		}
+		if ctDepth >= 0 && len(s.stack) == ctDepth+2 && token.Name.Local == "CustomTag" {
+			s.currentCustomTag = CustomTag{}
+			s.externalCustomTag = false
+		}
+		if len(s.stack) == 1 && s.stack[0] == "RichText" && !richTextMetadataFontSafe(s.richText.String()) {
 			s.safe = false
 			return false
 		}
-		if len(s.stack) == 1 && s.stack[0] == "RichText" && !richTextMetadataFontSafe(s.richText.String()) {
+		if len(s.stack) == 1 && s.stack[0] == "Text" && !textMetadataFontSafe(s.richText.String()) {
 			s.safe = false
 			return false
 		}
@@ -277,7 +305,11 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 		}
 		s.refs.reference(s.name, s.base, token.Name.Local, s.text.String(), s.resource)
 		if len(s.stack) >= 2 {
-			s.fileReference(s.stack[0], s.stack[len(s.stack)-2], token.Name.Local, "", s.text.String())
+			root := s.stack[0]
+			if ctDepth >= 0 && len(s.stack) == ctDepth+3 {
+				root = "CustomTags"
+			}
+			s.fileReference(root, s.stack[len(s.stack)-2], token.Name.Local, "", s.text.String())
 		}
 		if len(s.stack) == 3 && s.stack[0] == "DocVersion" && s.stack[1] == "FileList" && token.Name.Local == "File" {
 			if name := editorResourceLocation(s.name, "", s.text.String()); name != "" {
@@ -318,7 +350,7 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 // fileReference 按节点位置记录结构文件与原始数据，版本清单不改变文件用途
 // 入参: root 根节点, parent 父节点, name 节点名称, attribute 属性名称, value 引用路径
 func (s *editorReferenceScan) fileReference(root, parent, name, attribute, value string) {
-	if root == "DocVersion" && parent == "FileList" && name == "File" || strings.TrimSpace(value) == "" {
+	if root == "DocVersion" && parent == "FileList" && name == "File" || root == "CustomTags" && parent == "CustomTag" && name == "FileLoc" || strings.TrimSpace(value) == "" {
 		return
 	}
 	kind := packageReference(root, parent, name, attribute)
@@ -329,6 +361,31 @@ func (s *editorReferenceScan) fileReference(root, parent, name, attribute, value
 		s.refs.roles = make(map[string]int)
 	}
 	s.refs.roles[resolveResourcePath(s.name, s.base, value)] |= kind
+}
+
+// generatedVectorReferences 合并未改变的自产矢量引用，不修改调用方集合
+// 入参: parts 输出条目, generated 本次已知引用
+// 返回: map[string]editorGeneratedReferences 本次可复用引用
+func (e *Editor) generatedVectorReferences(parts map[string][]byte, generated map[string]editorGeneratedReferences) map[string]editorGeneratedReferences {
+	copied := false
+	for _, resource := range e.resources {
+		if e.output != nil && e.output.ctx.Err() != nil {
+			return generated
+		}
+		data, ok := parts[resource.name]
+		if !ok || !resource.usage.matches(resource.name, data) {
+			continue
+		}
+		if !copied {
+			generated = maps.Clone(generated)
+			if generated == nil {
+				generated = make(map[string]editorGeneratedReferences)
+			}
+			copied = true
+		}
+		generated[resource.name] = editorGeneratedReferences{data: data, refs: resource.usage.refs}
+	}
+	return generated
 }
 
 // merge 合并本次编码已确认的引用，不共享字体用字的可变集合
@@ -359,6 +416,12 @@ func (r *editorResourceRefs) merge(other *editorResourceRefs) {
 	for id, usage := range other.fonts {
 		r.fontUsage(id).merge(usage, false)
 	}
+	for target, tags := range other.customTagFiles {
+		for _, tag := range tags {
+			r.addCustomTagFile(target, tag)
+		}
+	}
+	r.fontUnsafe = r.fontUnsafe || other.fontUnsafe
 }
 
 // referenceToken 记录自产OFD事件，编码会替换的字符使本页回到完整扫描
@@ -390,46 +453,6 @@ func (x *ofdXML) referenceToken(token xml.Token) {
 		x.references = nil
 		x.checkContext()
 	}
-}
-
-// referenceElement 收集已知叶节点的引用，其他结构仍完整扫描
-// 入参: name 元素名称, value 已编码的子树内容
-func (x *ofdXML) referenceElement(name string, value any) {
-	if x.references == nil || x.err != nil {
-		return
-	}
-	var attrs ofdAttrs
-	switch value := value.(type) {
-	case *Dest:
-		if value == nil {
-			return
-		}
-		attrs.add("PageID", value.PageID)
-	case ShdColor:
-		attrs.add("ColorSpace", value.ColorSpace)
-	case *ShdColor:
-		if value == nil {
-			return
-		}
-		attrs.add("ColorSpace", value.ColorSpace)
-	case *Sound:
-		if value == nil {
-			return
-		}
-		attrs.add("ResourceID", value.ResourceID)
-	case *Movie:
-		if value == nil {
-			return
-		}
-		attrs.add("ResourceID", value.ResourceID)
-	case *GotoBookmark, *URI, *GotoA:
-	default:
-		x.references.safe = false
-		x.references = nil
-		return
-	}
-	x.referenceToken(xml.StartElement{Name: xml.Name{Local: "ofd:" + name}, Attr: attrs})
-	x.referenceToken(xml.EndElement{Name: xml.Name{Local: "ofd:" + name}})
 }
 
 // editorReferenceTextSafe 判断XML编码是否保持引用文本的Unicode值

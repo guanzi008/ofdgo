@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/xml"
+	"errors"
 	"hash/crc32"
 	"image"
 	"io"
@@ -34,16 +35,6 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// 与PDFGo共用输出压缩模式和有损压缩等级
-const (
-	CompressionUnchanged = pdfgo.CompressionUnchanged
-	CompressionLossless  = pdfgo.CompressionLossless
-	CompressionLossy     = pdfgo.CompressionLossy
-	CompressionLight     = pdfgo.CompressionLight
-	CompressionMedium    = pdfgo.CompressionMedium
-	CompressionStrong    = pdfgo.CompressionStrong
-)
-
 // outputOptimizationBufferLimit 限制压缩时的单个输出缓冲，单位为字节
 const outputOptimizationBufferLimit = 64 << 20
 
@@ -53,8 +44,22 @@ var outputDeflaters = make(chan *flate.Writer, 2)
 // CompressionMode 选择原始、无损或有损输出策略
 type CompressionMode = pdfgo.CompressionMode
 
+// 与PDFGo共用输出压缩模式
+const (
+	CompressionUnchanged = pdfgo.CompressionUnchanged
+	CompressionLossless  = pdfgo.CompressionLossless
+	CompressionLossy     = pdfgo.CompressionLossy
+)
+
 // CompressionLevel 选择轻压、均衡或强压，仅用于有损模式
 type CompressionLevel = pdfgo.CompressionLevel
+
+// 与PDFGo共用有损压缩等级
+const (
+	CompressionLight  = pdfgo.CompressionLight
+	CompressionMedium = pdfgo.CompressionMedium
+	CompressionStrong = pdfgo.CompressionStrong
+)
 
 // CompressionOptions 配置输出压缩，原始模式沿用现有输出策略，不额外优化
 // Quality和MaxDPI为零时按Level使用预设，不改变页面尺寸或整页导出精度
@@ -64,17 +69,124 @@ type CompressionOptions = pdfgo.CompressionOptions
 // WriteOptions 配置OFD输出副本，不修改编辑资源和撤销记录
 type WriteOptions struct{ Compression CompressionOptions }
 
+// WriteToWithOptions 按压缩策略写出OFD，签名文档不额外改写资源内容
+// 入参: ctx 取消上下文, writer 输出流, options 输出配置
+// 返回: int64 已写入字节数, error 错误信息
+func (e *Editor) WriteToWithOptions(ctx context.Context, writer io.Writer, options WriteOptions) (int64, error) {
+	if err := sameOutputFile(e.sourceFile, writer); err != nil {
+		return 0, err
+	}
+	snapshot, err := e.outputSnapshot(ctx, options)
+	if err != nil {
+		return 0, err
+	}
+	defer snapshot.output.release()
+	var count int64
+	return snapshot.WriteTo(convertWriter{ctx: ctx, writer: writer, count: &count})
+}
+
+// WritePagesTo 按指定顺序另存页面，仅为所选页面准备资源和压缩计划
+// 保留关联资源、目录、注释和签章外观，生成新文档标识，不改变原文档和撤销记录
+// 签章外观不代表原签名在导出文档中仍有效，页码不可重复或为空
+// 入参: ctx 取消上下文, writer 输出流, indexes 零基页码, options 输出配置
+// 返回: int64 已写入字节数, error 错误信息
+func (e *Editor) WritePagesTo(ctx context.Context, writer io.Writer, indexes []int, options WriteOptions) (int64, error) {
+	if err := sameOutputFile(e.sourceFile, writer); err != nil {
+		return 0, err
+	}
+	ctx = e.runtimeResources.context(ctx)
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := options.Compression.Validate(); err != nil {
+		return 0, err
+	}
+	snapshot := *e
+	snapshot.OnWriteProgress = editorProgress(e.OnWriteProgress).withContext(ctx)
+	snapshot.output = &outputOptimization{ctx: ctx, options: options.Compression}
+	defer snapshot.output.release()
+	var count int64
+	return snapshot.writePagesTo(convertWriter{ctx: ctx, writer: writer, count: &count}, indexes)
+}
+
+// WritePagesToOutput 通过输出事务原子另存指定页面，取消或失败时自动回滚事务
+// 入参: ctx 取消上下文, target 保存目标, indexes 零基页码, options 输出配置
+// 返回: int64 已写入字节数, error 错误信息
+func (e *Editor) WritePagesToOutput(ctx context.Context, target Output, indexes []int, options WriteOptions) (n int64, err error) {
+	if target == nil {
+		return 0, ErrSaveTarget
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	tx, err := target.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, tx.Abort())
+		}
+	}()
+	n, err = e.WritePagesTo(ctx, tx, indexes, options)
+	if err != nil {
+		return n, err
+	}
+	if err = ctx.Err(); err != nil {
+		return n, err
+	}
+	return n, tx.Commit()
+}
+
+// WithCompression 设置导出策略，不修改文档资源和渲染缓存
+// 入参: options 压缩配置，写出时校验
+// 返回: RendererOption 渲染器配置
+func WithCompression(options CompressionOptions) RendererOption {
+	return func(r *Renderer) { r.Compression = options }
+}
+
 // outputOptimization 保存单次写出的配置、图片路径及压缩进度，复用压缩器
 type outputOptimization struct {
-	ctx        context.Context
-	options    CompressionOptions
-	images     map[string]bool
-	sizes      map[string]image.Point
-	protected  bool
-	completed  int
-	deflater   *flate.Writer
-	resources  *editorResourceSelection
-	references *renderCache[editorScanKey, editorScanValue]
+	ctx            context.Context
+	options        CompressionOptions
+	images         map[string]bool
+	sizes          map[string]image.Point
+	protected      bool
+	protectedDocs  map[int]bool
+	protectedFiles map[string]bool
+	completed      int
+	deflater       *flate.Writer
+	resources      *editorResourceSelection
+	references     *renderCache[editorScanKey, editorScanValue]
+}
+
+// compressor 获取当前输出独占的压缩器，重置后不复用上一次编码状态
+// 入参: writer 编码目标
+// 返回: *flate.Writer 压缩器
+func (o *outputOptimization) compressor(writer io.Writer) *flate.Writer {
+	if o.deflater == nil {
+		select {
+		case o.deflater = <-outputDeflaters:
+		default:
+			o.deflater, _ = flate.NewWriter(writer, flate.BestCompression)
+			return o.deflater
+		}
+	}
+	o.deflater.Reset(writer)
+	return o.deflater
+}
+
+// release 释放输出目标并归还压缩器，池满时由运行时回收
+func (o *outputOptimization) release() {
+	if o.deflater == nil {
+		return
+	}
+	o.deflater.Reset(io.Discard)
+	select {
+	case outputDeflaters <- o.deflater:
+	default:
+	}
+	o.deflater = nil
 }
 
 // outputCompressionBuffer 限制候选ZIP编码，不能缩小时终止本次压缩
@@ -95,40 +207,6 @@ func (b *outputCompressionBuffer) Write(data []byte) (int, error) {
 	return b.buffer.Write(data)
 }
 
-// WriteToWithOptions 按压缩策略写出OFD，签名文档不额外改写资源内容
-// 入参: ctx 取消上下文, writer 输出流, options 输出配置
-// 返回: int64 已写入字节数, error 错误信息
-func (e *Editor) WriteToWithOptions(ctx context.Context, writer io.Writer, options WriteOptions) (int64, error) {
-	snapshot, err := e.outputSnapshot(ctx, options)
-	if err != nil {
-		return 0, err
-	}
-	defer snapshot.output.release()
-	var count int64
-	return snapshot.WriteTo(convertWriter{ctx: ctx, writer: writer, count: &count})
-}
-
-// WritePagesTo 按指定顺序另存页面，仅为所选页面准备资源和压缩计划
-// 保留关联资源、目录、注释和签章外观，生成新文档标识，不改变原文档和撤销记录
-// 签章外观不代表原签名在导出文档中仍有效，页码不可重复或为空
-// 入参: ctx 取消上下文, writer 输出流, indexes 零基页码, options 输出配置
-// 返回: int64 已写入字节数, error 错误信息
-func (e *Editor) WritePagesTo(ctx context.Context, writer io.Writer, indexes []int, options WriteOptions) (int64, error) {
-	ctx = e.runtimeResources.context(ctx)
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if err := options.Compression.Validate(); err != nil {
-		return 0, err
-	}
-	snapshot := *e
-	snapshot.OnWriteProgress = editorProgress(e.OnWriteProgress).withContext(ctx)
-	snapshot.output = &outputOptimization{ctx: ctx, options: options.Compression}
-	defer snapshot.output.release()
-	var count int64
-	return snapshot.writePagesTo(convertWriter{ctx: ctx, writer: writer, count: &count}, indexes)
-}
-
 // outputSnapshot 创建只读输出配置，原签名存在时仅调整ZIP封装
 // 入参: ctx 取消上下文, options 输出配置
 // 返回: *Editor 输出快照, error 配置或资源错误
@@ -147,11 +225,13 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 		return &snapshot, nil
 	}
 	if e.source != nil {
-		protected, err := e.source.reader.hasOutputSignatures(ctx)
+		protectedDocs, protectedFiles, protected, err := e.source.reader.outputSignatureProtection(ctx)
 		if err != nil {
 			return nil, err
 		}
 		snapshot.output.protected = protected
+		snapshot.output.protectedDocs = protectedDocs
+		snapshot.output.protectedFiles = protectedFiles
 		if protected {
 			return &snapshot, nil
 		}
@@ -162,7 +242,7 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 			return nil, err
 		}
 		defer reader.Close()
-		snapshot.output.images, snapshot.output.sizes, err = reader.compressionImagePlan(ctx, options.Compression)
+		snapshot.output.images, snapshot.output.sizes, err = reader.compressionImagePlanProtected(ctx, options.Compression, snapshot.output.protectedDocs, snapshot.output.protectedFiles)
 		if err != nil {
 			return nil, err
 		}
@@ -322,6 +402,152 @@ func (r *Reader) hasOutputSignatures(ctx context.Context) (bool, error) {
 		}
 	}
 	return false, ctx.Err()
+}
+
+// outputSignatureProtection 细化多文档包的签名保护范围，未签名子文档允许正常压缩
+// 入参: ctx 取消上下文
+// 返回: map[int]bool 受签名文档索引, map[string]bool 受保护文件路径, bool 是否整包受保护, error 取消错误
+func (r *Reader) outputSignatureProtection(ctx context.Context) (map[int]bool, map[string]bool, bool, error) {
+	if r == nil || r.OFD == nil {
+		return nil, nil, false, ctx.Err()
+	}
+	var protectedDocs map[int]bool
+	for index, body := range r.OFD.DocBody {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, false, err
+		}
+		if body.Signatures != "" {
+			if protectedDocs == nil {
+				protectedDocs = make(map[int]bool)
+			}
+			protectedDocs[index] = true
+		}
+	}
+	if len(protectedDocs) == 0 {
+		return nil, nil, false, ctx.Err()
+	}
+	if len(protectedDocs) == len(r.OFD.DocBody) {
+		return protectedDocs, nil, true, ctx.Err()
+	}
+	protectedFiles := make(map[string]bool)
+	signedRefs := make(map[string]bool)
+	for docIndex := range protectedDocs {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, false, err
+		}
+		body := r.OFD.DocBody[docIndex]
+		sigListPath := cleanPackagePath(resolveResourcePath("OFD.xml", "", body.Signatures))
+		sigListData, err := r.readFileViewContext(ctx, sigListPath)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, false, ctx.Err()
+			}
+			return protectedDocs, nil, true, nil
+		}
+		var sigs Signatures
+		if err := xml.Unmarshal(sigListData, &sigs); err != nil {
+			return protectedDocs, nil, true, nil
+		}
+		protectedFiles[sigListPath] = true
+		signedRefs[sigListPath] = true
+		for _, item := range sigs.List {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, false, err
+			}
+			sigPath := cleanPackagePath(resolveResourcePath(sigListPath, "", item.BaseLoc))
+			sigData, err := r.readFileViewContext(ctx, sigPath)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, nil, false, ctx.Err()
+				}
+				return protectedDocs, nil, true, nil
+			}
+			var sigFile SignatureFile
+			if err := xml.Unmarshal(sigData, &sigFile); err != nil {
+				return protectedDocs, nil, true, nil
+			}
+			protectedFiles[sigPath] = true
+			signedRefs[sigPath] = true
+			if sigFile.SignedValue != "" {
+				target := cleanPackagePath(resolveResourcePath(sigPath, "", sigFile.SignedValue))
+				protectedFiles[target] = true
+				signedRefs[target] = true
+			}
+			if sigFile.SignedInfo.Seal.BaseLoc != "" {
+				target := cleanPackagePath(resolveResourcePath(sigPath, "", sigFile.SignedInfo.Seal.BaseLoc))
+				protectedFiles[target] = true
+				signedRefs[target] = true
+			}
+			for _, ref := range sigFile.SignedInfo.References.Reference {
+				if ref.FileRef == "" {
+					continue
+				}
+				target := cleanPackagePath(resolveResourcePath(sigPath, "", ref.FileRef))
+				protectedFiles[target] = true
+				signedRefs[target] = true
+			}
+		}
+		entry, err := r.documentEntryContext(ctx, docIndex)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, false, ctx.Err()
+			}
+			return protectedDocs, nil, true, nil
+		}
+		deps, structures, err := r.versionDependencies(ctx, entry, nil, nil)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, false, ctx.Err()
+			}
+			return protectedDocs, nil, true, nil
+		}
+		for dep := range deps {
+			protectedFiles[cleanPackagePath(dep)] = true
+		}
+		for name := range structures {
+			clean := cleanPackagePath(name)
+			if !signedRefs[clean] {
+				continue
+			}
+			data, err := r.readFileViewContext(ctx, clean)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, nil, false, ctx.Err()
+				}
+				return protectedDocs, nil, true, nil
+			}
+			root, err := parseEditorXMLContext(ctx, data)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, nil, false, ctx.Err()
+				}
+				return protectedDocs, nil, true, nil
+			}
+			if root.name.Local != "Res" {
+				continue
+			}
+			baseLoc := root.attr("BaseLoc")
+			for _, group := range root.children {
+				for _, node := range group.children {
+					for _, field := range [2]string{"FontFile", "MediaFile"} {
+						child := node.child(field)
+						if child == nil {
+							continue
+						}
+						var value string
+						if err := xml.Unmarshal(data[child.start:child.end], &value); err != nil {
+							return protectedDocs, nil, true, nil
+						}
+						target := editorResourceLocation(clean, baseLoc, value)
+						if target != "" && !signedRefs[target] {
+							return protectedDocs, nil, true, nil
+						}
+					}
+				}
+			}
+		}
+	}
+	return protectedDocs, protectedFiles, false, ctx.Err()
 }
 
 // writeOutputEntry 优化ZIP编码，保留资源名称及条目的未压缩字节
@@ -548,13 +774,6 @@ func (e *Editor) writeOutputFile(archive *zip.Writer, file *zip.File, buffer []b
 	return editorProgress(e.OnWriteProgress).report("compress", e.output.completed, 0)
 }
 
-// WithCompression 设置导出策略，不修改文档资源和渲染缓存
-// 入参: options 压缩配置，写出时校验
-// 返回: RendererOption 渲染器配置
-func WithCompression(options CompressionOptions) RendererOption {
-	return func(r *Renderer) { r.Compression = options }
-}
-
 // writeCompressedImage 优化已经编码的图片，再交付调用方输出流
 // 入参: writer 输出流, data 图片数据
 // 返回: error 优化或写入错误
@@ -577,33 +796,4 @@ func (r *Renderer) outputContext() context.Context {
 		return r.OutputContext
 	}
 	return context.Background()
-}
-
-// compressor 获取当前输出独占的压缩器，重置后不复用上一次编码状态
-// 入参: writer 编码目标
-// 返回: *flate.Writer 压缩器
-func (o *outputOptimization) compressor(writer io.Writer) *flate.Writer {
-	if o.deflater == nil {
-		select {
-		case o.deflater = <-outputDeflaters:
-		default:
-			o.deflater, _ = flate.NewWriter(writer, flate.BestCompression)
-			return o.deflater
-		}
-	}
-	o.deflater.Reset(writer)
-	return o.deflater
-}
-
-// release 释放输出目标并归还压缩器，池满时由运行时回收
-func (o *outputOptimization) release() {
-	if o.deflater == nil {
-		return
-	}
-	o.deflater.Reset(io.Discard)
-	select {
-	case outputDeflaters <- o.deflater:
-	default:
-	}
-	o.deflater = nil
 }

@@ -25,11 +25,38 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// PDFDestination 获取当前文档的PDF运行时定位语义，坐标单位为毫米
+// 返回值独立于阅读器；普通OFD及保存为OFD再打开的文档不返回PDF目标
+// 入参: dest 当前文档动作中的目标
+// 返回: pdfgo.DestinationTarget 页面左上原点的定位目标, bool 是否来自PDF导入快照
+func (r *Reader) PDFDestination(dest Dest) (pdfgo.DestinationTarget, bool) {
+	if d := r.pdfDestinations; d != nil && d.root == r.documentRoot {
+		target, ok := d.targets[pdfDestinationKey(dest)]
+		return target, ok
+	}
+	return pdfgo.DestinationTarget{}, false
+}
+
 // pdfEmbeddedFile 保存目标路径的容器与原始文件，阅读器按需打开
 type pdfEmbeddedFile struct {
 	reader *pdfgo.Reader
 	file   *pdfgo.FileSpecification
 	data   []byte
+}
+
+// pdfDestinations 保存PDF导入文档的运行时目标语义，不写入OFD包
+type pdfDestinations struct {
+	root    string
+	targets map[Dest]pdfgo.DestinationTarget
+}
+
+// clone 复制定位信息，避免增量导入及编辑影响已交付的阅读快照
+// 返回: *pdfDestinations 独立定位信息
+func (d *pdfDestinations) clone() *pdfDestinations {
+	if d == nil {
+		return nil
+	}
+	return &pdfDestinations{root: d.root, targets: maps.Clone(d.targets)}
 }
 
 // annotations 将链接、静态注解和表单外观按页面顺序转换为OFD对象
@@ -247,7 +274,7 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			}
 			annotation.Dictionary = field
 			if field["FT"] == pdfgo.Name("Sig") && field["V"] != nil {
-				err = p.signatureWidget(ctx, page, annotation)
+				err = p.signatureWidget(ctx, page, annotation, strict)
 			} else {
 				err = p.formWidget(ctx, page, annotation, strict)
 			}
@@ -315,7 +342,6 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 				return err
 			}
 		}
-
 		b := annotation.Rect
 		box := pdfBounds([]pdfgo.Point{p.matrix.Apply(pdfgo.Point{X: b.XMin, Y: b.YMin}), p.matrix.Apply(pdfgo.Point{X: b.XMax, Y: b.YMax})})
 		region, err := p.linkRegion(annotation, box)
@@ -371,10 +397,19 @@ func (p *pdfImporter) linkRegion(annotation pdfgo.Annotation, box Box) (*Region,
 			}
 			points[index] = p.matrix.Apply(pdfgo.Point{X: x, Y: y})
 		}
+		cross := func(a, b, c pdfgo.Point) float64 {
+			return (b.X-a.X)*(c.Y-a.Y) - (b.Y-a.Y)*(c.X-a.X)
+		}
+		d1, d2 := cross(points[1], points[2], points[3]), cross(points[1], points[2], points[0])
+		d3, d4 := cross(points[3], points[0], points[1]), cross(points[3], points[0], points[2])
+		if (d1 > 0 && d2 < 0 || d1 < 0 && d2 > 0) && (d3 > 0 && d4 < 0 || d3 < 0 && d4 > 0) {
+			points[2], points[3] = points[3], points[2]
+		}
 		area := RegionArea{Start: pdfNumbers(points[0].X-box.X, points[0].Y-box.Y)}
 		for _, point := range points[1:] {
 			area.Command = append(area.Command, RegionCommand{Type: "Line", Point1: pdfNumbers(point.X-box.X, point.Y-box.Y)})
 		}
+		area.Command = append(area.Command, RegionCommand{Type: "Close"})
 		region.Area = append(region.Area, area)
 	}
 	return region, nil
@@ -808,33 +843,6 @@ func (p *pdfImporter) embeddedLinkAction(object pdfgo.Object, strict bool) (*Act
 	}
 	p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF embedded link target retained as attachment; destination inside attached PDF not transferred to OFD"})
 	return &Action{Event: "CLICK", GotoA: &GotoA{AttachID: id, NewWindow: action.NewWindow}}, nil, nil
-}
-
-// pdfDestinations 保存PDF导入文档的运行时目标语义，不写入OFD包
-type pdfDestinations struct {
-	root    string
-	targets map[Dest]pdfgo.DestinationTarget
-}
-
-// clone 复制定位信息，避免增量导入及编辑影响已交付的阅读快照
-// 返回: *pdfDestinations 独立定位信息
-func (d *pdfDestinations) clone() *pdfDestinations {
-	if d == nil {
-		return nil
-	}
-	return &pdfDestinations{root: d.root, targets: maps.Clone(d.targets)}
-}
-
-// PDFDestination 获取当前文档的PDF运行时定位语义，坐标单位为毫米
-// 返回值独立于阅读器；普通OFD及保存为OFD再打开的文档不返回PDF目标
-// 入参: dest 当前文档动作中的目标
-// 返回: pdfgo.DestinationTarget 页面左上原点的定位目标, bool 是否来自PDF导入快照
-func (r *Reader) PDFDestination(dest Dest) (pdfgo.DestinationTarget, bool) {
-	if d := r.pdfDestinations; d != nil && d.root == r.documentRoot {
-		target, ok := d.targets[pdfDestinationKey(dest)]
-		return target, ok
-	}
-	return pdfgo.DestinationTarget{}, false
 }
 
 // setPDFDestination 保存PDF目标到导入文档的运行时索引

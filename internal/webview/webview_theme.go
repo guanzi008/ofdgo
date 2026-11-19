@@ -36,33 +36,6 @@ type applicationTheme struct {
 	Material string `json:"material"`
 }
 
-// themeColors 返回应用对应外观的原生标题栏配色
-// 入参: dark 是否使用深色
-// 返回: guigo.TitleBarColors 标题栏配色
-func themeColors(dark bool) guigo.TitleBarColors {
-	if dark {
-		return guigo.TitleBarColors{Background: "#20272b", Foreground: "#e0e7eb", InactiveBackground: "#242b30", InactiveForeground: "#9aa8b1"}
-	}
-	return guigo.TitleBarColors{Background: "#e8edee", Foreground: "#263238", InactiveBackground: "#eef1f3", InactiveForeground: "#728087"}
-}
-
-// loadTheme 在创建窗口前读取用户目录中的主题偏好
-// 返回: error 读取或解析错误
-func (h *Host) loadTheme() error {
-	h.theme = applicationTheme{Mode: "system", Material: "solid"}
-	data, err := os.ReadFile(h.themePath)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(data, &h.theme); err != nil {
-		return err
-	}
-	return h.theme.validate()
-}
-
 // validate 检查应用主题及解析后的配色是否一致
 // 返回: error 偏好错误
 func (a applicationTheme) validate() error {
@@ -74,6 +47,34 @@ func (a applicationTheme) validate() error {
 	}
 	if a.Material != "solid" && a.Material != "mica-alt" && a.Material != "acrylic" {
 		return fmt.Errorf("窗口材质无效")
+	}
+	return nil
+}
+
+// themeColors 返回应用对应外观的原生标题栏配色
+// 入参: dark 是否使用深色
+// 返回: guigo.TitleBarColors 标题栏配色
+func themeColors(dark bool) guigo.TitleBarColors {
+	if dark {
+		return guigo.TitleBarColors{Background: "#20272b", Foreground: "#e0e7eb", InactiveBackground: "#242b30", InactiveForeground: "#9aa8b1"}
+	}
+	return guigo.TitleBarColors{Background: "#e8edee", Foreground: "#263238", InactiveBackground: "#eef1f3", InactiveForeground: "#728087"}
+}
+
+// loadTheme 在创建窗口前读取用户目录中的主题偏好
+// 返回: error 读取错误
+func (h *Host) loadTheme() error {
+	h.theme = applicationTheme{Mode: "system", Material: "solid"}
+	data, err := os.ReadFile(h.themePath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var theme applicationTheme
+	if json.Unmarshal(data, &theme) == nil && theme.validate() == nil {
+		h.theme = theme
 	}
 	return nil
 }

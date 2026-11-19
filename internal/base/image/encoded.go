@@ -33,20 +33,15 @@ import (
 // EncodedImage 保留PNG或JPEG原始编码，首次读取像素时解码
 // Bytes返回只读数据，Image返回共享只读像素，解码错误由Image返回
 type EncodedImage struct {
-	data     []byte
-	format   string
-	config   image.Config
-	profile  []byte
-	pngColor *pngColor
-	result   atomic.Pointer[encodedImageResult]
-	mu       sync.Mutex
-	pending  chan struct{}
-}
-
-// encodedImageResult 保存已完成的像素解码结果，不保存取消或超时错误
-type encodedImageResult struct {
-	image image.Image
-	err   error
+	data       []byte
+	format     string
+	config     image.Config
+	profile    []byte
+	colorSpace *pdfgo.ColorSpace
+	pngColor   *pngColor
+	result     atomic.Pointer[encodedImageResult]
+	mu         sync.Mutex
+	pending    chan struct{}
 }
 
 // NewEncodedImage 校验PNG或JPEG头信息后复制输入，不解码像素
@@ -129,6 +124,23 @@ func (img *EncodedImage) ImageContext(ctx context.Context) (image.Image, error) 
 	}
 }
 
+// At 返回像素颜色，解码失败时返回透明色，绘制前应通过Image检查错误
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.Color 像素颜色
+func (img *EncodedImage) At(x, y int) color.Color {
+	decoded, err := img.Image()
+	if err != nil {
+		return color.Transparent
+	}
+	return decoded.At(x, y)
+}
+
+// encodedImageResult 保存已完成的像素解码结果，不保存取消或超时错误
+type encodedImageResult struct {
+	image image.Image
+	err   error
+}
+
 // decodeContext 执行本次解码，退出时唤醒等待方，只缓存完整结果及稳定错误
 // 入参: ctx 取消上下文, pending 本次解码的完成通知
 // 返回: image.Image 只读像素, error 解码或取消错误
@@ -139,19 +151,7 @@ func (img *EncodedImage) decodeContext(ctx context.Context, pending chan struct{
 		close(pending)
 		img.mu.Unlock()
 	}()
-	pixels, _, err := image.Decode(contextInput{ReadCloser: io.NopCloser(bytes.NewReader(img.data)), ctx: ctx})
-	if err == nil && (img.format == "jpeg" || img.profile != nil) {
-		var profile *pdfgo.ColorSpace
-		if img.profile != nil {
-			profile, err = pdfgo.NewICCColorSpace(img.profile)
-		}
-		if err == nil {
-			pixels, err = jpegDisplayImage(ctx, pixels, profile)
-		}
-	}
-	if err == nil && img.pngColor != nil {
-		pixels, err = applyImageColorProfile(ctx, pixels, img.pngColor.space, img.pngColor.linearSRGB)
-	}
+	pixels, err := img.decodePixels(ctx)
 	if cancelErr := ctx.Err(); cancelErr != nil {
 		return nil, cancelErr
 	}
@@ -162,15 +162,41 @@ func (img *EncodedImage) decodeContext(ctx context.Context, pending chan struct{
 	return pixels, err
 }
 
-// At 返回像素颜色，解码失败时返回透明色，绘制前应通过Image检查错误
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.Color 像素颜色
-func (img *EncodedImage) At(x, y int) color.Color {
-	decoded, err := img.Image()
-	if err != nil {
-		return color.Transparent
+// decodeTransient 返回已缓存结果或执行单次临时解码，不将未压缩像素写入长期缓存
+// 入参: ctx 取消上下文
+// 返回: image.Image 解码像素, error 解码或取消错误
+func (img *EncodedImage) decodeTransient(ctx context.Context) (image.Image, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	return decoded.At(x, y)
+	if result := img.result.Load(); result != nil {
+		return result.image, result.err
+	}
+	pixels, err := img.decodePixels(ctx)
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		return nil, cancelErr
+	}
+	return pixels, err
+}
+
+// decodePixels 解码底层字节流并按需执行色彩空间转换
+// 入参: ctx 取消上下文
+// 返回: image.Image 解码像素, error 解码或色彩错误
+func (img *EncodedImage) decodePixels(ctx context.Context) (image.Image, error) {
+	pixels, _, err := image.Decode(contextInput{ReadCloser: io.NopCloser(bytes.NewReader(img.data)), ctx: ctx})
+	if err == nil && (img.format == "jpeg" || img.profile != nil) {
+		profile := img.colorSpace
+		if profile == nil && img.profile != nil {
+			profile, err = pdfgo.NewICCColorSpace(img.profile)
+		}
+		if err == nil {
+			pixels, err = jpegDisplayImage(ctx, pixels, profile)
+		}
+	}
+	if err == nil && img.pngColor != nil {
+		pixels, err = applyImageColorProfile(ctx, pixels, img.pngColor.space, img.pngColor.linearSRGB)
+	}
+	return pixels, err
 }
 
 // newEncodedImage 接管编码数据并读取头信息
@@ -205,6 +231,20 @@ func newEncodedImageContext(ctx context.Context, data []byte) (*EncodedImage, er
 		img.profile, img.pngColor, err = pngColorProfile(ctx, data)
 		if err != nil {
 			return nil, err
+		}
+	}
+	if isEightBitRGBModel(config.ColorModel) {
+		if img.profile != nil {
+			if space, profileErr := pdfgo.NewICCColorSpace(img.profile); profileErr == nil {
+				if isEquivalentSRGBSpace(space, false) {
+					img.profile = nil
+				} else {
+					img.colorSpace = space
+				}
+			}
+		}
+		if img.pngColor != nil && isEquivalentSRGBSpace(img.pngColor.space, img.pngColor.linearSRGB) {
+			img.pngColor = nil
 		}
 	}
 	return img, nil

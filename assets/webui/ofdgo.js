@@ -2,11 +2,12 @@ import { SVG_NAMESPACE, CanvasEditor, canEditObject, editTextValue, richTextMode
 import { FontManager, FontPicker } from "./ofdgo_font.js";
 import { nativeHost, createEngineWorker, engineLimits, documentBytes, saveFilePicker, directoryPicker } from "./ofdgo_host.js";
 import { PrintDialog } from "./ofdgo_print.js";
-import { DocumentDialogs, SelectPicker, VirtualList } from "./ofdgo_util.js";
+import { DocumentDialogs, SelectPicker, VirtualList, randomID } from "./ofdgo_util.js";
 import { MM_TO_PX, SCROLL_SEGMENT_SIZE, createPageView } from "./ofdgo_view.js";
 
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
 const DEFAULT_IMAGE_DPI = 300;
+const SEARCH_MATCH_LIMIT = 10000;
 const OBJECT_CLIPBOARD_TYPE = "application/x-ofdgo-objects";
 const RESOURCE_KINDS = [["Font", "字体"], ["Image", "图片"], ["Audio", "音频"], ["Video", "视频"], ["Attachment", "附件"], ["ColorSpace", "色彩"], ["DrawParam", "样式"]];
 const SETTINGS_KINDS = [["bookmarks", "书签"], ["actions", "动作"], ["templates", "模板"], ["layers", "图层"], ["extensions", "扩展"]];
@@ -22,18 +23,24 @@ const STATUS = {
 };
 const wasmRequests = new Map();
 const metaContents = new WeakMap();
-const batch = { items: [], formats: [], running: false, canceled: false, workers: new Set(), requests: new Map(), sequence: 0, progress: null, jobs: [], credentials: Promise.resolve() };
+const pageIndexes = new WeakMap();
+const batch = { items: [], formats: [], running: false, canceled: false, workers: new Set(), requests: new Map(), sequence: 0, progress: null, jobs: [], activeJobs: new Set(), counts: { completed: 0, done: 0, failed: 0 }, progressFrame: 0, renderFrame: 0, range: [-1, -1], rowHeight: 56, credentialType: "password", credentials: Promise.resolve() };
 const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Compression", "FontRow", "FontMode", "Destination", "DPIRow", "DPI", "DPIValue", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
 const fontBinding = { font: null, choices: [], sequence: 0 };
 const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name", "SourceRow", "Source", "File", "Hint", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#fontBinding${name}`)]));
 const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Tabs", "List", "Empty", "Reference", "ReferenceGroup", "Actions", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "BindingActions", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
-let resourceManager = createResourceManager();
 const settingsElements = Object.fromEntries(["Button", "Panel", "Form", "Title", "Tabs", "Context", "Content", "Actions", "Status"].map(name => [name, document.querySelector(`#settings${name}`)]));
-let settings = createSettings();
-let invoicePanel = createInvoicePanel();
 const invoiceDocuments = new WeakMap();
 const invoiceReferenceStandard = "http://www.ofdspec.org/2016";
+const createPaperSizes = { a4: [210, 297], a3: [297, 420], a5: [148, 210] };
+const sealPosition = Object.fromEntries(["Layer", "Stamp", "Image"].map(name => [name, document.querySelector(`#signPosition${name}`)]));
+const workspace = { tabs: [], active: null, sequence: 0, nextID: 0, switching: false, closing: false, objectClipboard: null, textClipboard: null, batchCredentials: null };
+const busyControls = new Set();
 
+let resourceManager = createResourceManager();
+let settings = createSettings();
+let invoicePanel = createInvoicePanel();
+let state = createDocumentState();
 let remoteDownload = null;
 let wasmWorker = null;
 let wasmRequestID = 0;
@@ -42,160 +49,9 @@ let credentialRequest = null;
 let documentDialogs = null;
 let confirmationTask = Promise.resolve();
 let cancelPageTouch = null;
-
-const workspace = { tabs: [], active: null, sequence: 0, nextID: 0, switching: false, closing: false, objectClipboard: null, textClipboard: null };
-const busyControls = new Set();
-
-function createResourceManager() {
-	return { kind: "Font", scope: "", views: new Map(), items: [], filteredItems: [], start: -1, end: -1, selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
-}
-
-function createSettings() {
-	return { kind: "bookmarks", locked: false, views: new Map(), sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false, invoice: false };
-}
-
-function createInvoicePanel() {
-	return { tab: "basic", views: new Map(), entries: [], formats: [], drafts: new Map(), key: "", result: null };
-}
-
-function createDocumentState() {
-	return {
-		conversionWarnings: [],
-		annotationEdit: null,
-		annotationCreate: null,
-		ready: false,
-		wasmExited: false,
-		wasmSeq: 0,
-		wasmRecovering: false,
-		wasmRecoveries: 0,
-		exporting: false,
-		saving: false,
-		saveRequestID: 0,
-		signing: false,
-		signCanceled: false,
-		exportRequestID: 0,
-		editing: false,
-		selectObjects: true,
-		dirty: false,
-		editorInfo: null,
-		editorViews: new Map(),
-		savedRevision: null,
-		saveHandle: null,
-		saveStamp: null,
-		packageDirty: false,
-		encryptionDirty: false,
-		insertObject: null,
-		importPageCount: 0,
-		importDocumentCount: 0,
-		importDocumentMode: false,
-		importEncrypted: false,
-		importing: false,
-		imageImporting: false,
-		createInsert: false,
-		createPackage: false,
-		createDocumentAt: null,
-		createImageQueue: null,
-		documentManagement: null,
-		versionManagement: null,
-		infoDocumentIndex: null,
-		pageSelection: new Set(),
-		pageSelectionAnchor: null,
-		pageMultiSelect: false,
-		pageTouchPointer: null,
-		outlineSelection: null,
-		outlineSeq: 0,
-		openActionEnabled: false,
-		openActionDocument: false,
-		openActionPage: null,
-		openActionTask: null,
-		openActionFrame: 0,
-		outlineAction: "add",
-		styleOriginal: null,
-		objectClipboardToken: null,
-		styleClipboard: null,
-		objectDistribution: null,
-		outlineExpanded: new Map(),
-		textFonts: [],
-		textFontID: null,
-		textFontInitialized: false,
-		textFontInitializing: null,
-		textDefaults: { type: "TextObject", size: 16 * 25.4 / 72, color: "#000000", wrap: true, align: "left", paragraphHeight: 0, letterSpacing: 0 },
-		ofdBytes: null,
-		sourcePDF: false,
-		pdfComplete: false,
-		fileName: "ofdgo.ofd",
-		openSeq: 0,
-		pageSeq: 0,
-		searchSeq: 0,
-		searchQuery: "",
-		searchMatches: [],
-		searchIndex: -1,
-		searchRunning: false,
-		searchNext: 0,
-		searchPaused: false,
-		searchTruncated: false,
-		navigationScroll: new Map(),
-		annotationFilter: {scope: null, query: "", kind: ""},
-		fontSyncPending: false,
-		fontCatalogLoading: false,
-		fontFacesLoading: false,
-		fontRenderPending: false,
-		fontSyncing: false,
-		doc: null,
-		pageIndex: 0,
-		pageNavigation: null,
-		scale: 1,
-		rotation: 0,
-		panMode: false,
-		pan: null,
-		fitMode: "width",
-		continuous: false,
-		pageLayoutPreference: 1,
-		get pageLayout() {
-			return this.doc?.pageCount > 1 ? this.pageLayoutPreference : 1;
-		},
-		renderAnnotations: true,
-		renderBackend: "canvas",
-		renderMode: "svg",
-		renderDPI: DEFAULT_IMAGE_DPI,
-		pageCache: new Map(),
-		mediaPlayers: new Map(),
-		svgFonts: new Map(),
-		svgFontLoads: new Map(),
-		svgImages: new Map(),
-		selectedPages: new Set(),
-		documentSelection: null,
-		pageInFlight: new Map(),
-		pageLoadSeq: 0,
-		pageRenderQueue: [],
-		pagePrefetchIndex: null,
-		pagePrefetchDirection: 1,
-		pageRenderRunning: false,
-		pageRenderWorkers: 0,
-		pagePresentQueue: new Map(),
-		pagePresentFrame: 0,
-		pageObserver: null,
-		visiblePages: new Set(),
-		scrollFrame: 0,
-		pageWindow: null,
-		thumbnailWindow: null,
-		thumbnailFrame: 0,
-		pageDragIndex: null,
-		pageListCurrent: null,
-		thumbnailObserver: null,
-		visibleThumbnails: new Set(),
-		exportFormats: [],
-		exportPages: null,
-		exportBackdrop: false,
-		encryptionChanged: false,
-		showPages: !COMPACT_LAYOUT.matches,
-		showMeta: !COMPACT_LAYOUT.matches,
-	};
-}
-
-let state = createDocumentState();
 let createImagePicker = null;
-const createPaperSizes = { a4: [210, 297], a3: [297, 420], a5: [148, 210] };
+let aboutBackdrop = false;
+let sealPreview = null;
 
 const el = {
 	appearanceButton: document.querySelector("#appearanceButton"),
@@ -229,6 +85,16 @@ const el = {
 	signHeight: document.querySelector("#signHeight"),
 	signMode: document.querySelector("#signMode"),
 	signLock: document.querySelector("#signLock"),
+	signEncryptionFields: document.querySelector("#signEncryptionFields"),
+	signEncryptionType: document.querySelector("#signEncryptionType"),
+	signEncryptionUserRow: document.querySelector("#signEncryptionUserRow"),
+	signEncryptionUser: document.querySelector("#signEncryptionUser"),
+	signEncryptionPasswordRow: document.querySelector("#signEncryptionPasswordRow"),
+	signEncryptionPassword: document.querySelector("#signEncryptionPassword"),
+	signEncryptionConfirmRow: document.querySelector("#signEncryptionConfirmRow"),
+	signEncryptionConfirm: document.querySelector("#signEncryptionConfirm"),
+	signEncryptionCertificatesRow: document.querySelector("#signEncryptionCertificatesRow"),
+	signEncryptionCertificates: document.querySelector("#signEncryptionCertificates"),
 	signStatus: document.querySelector("#signStatus"),
 	signCancel: document.querySelector("#signCancel"),
 	verifyButton: document.querySelector("#verifyButton"),
@@ -240,6 +106,7 @@ const el = {
 	verifyTokens: document.querySelector("#verifyTokens"),
 	verifyCRLs: document.querySelector("#verifyCRLs"),
 	verifyOCSP: document.querySelector("#verifyOCSP"),
+	verifyTime: document.querySelector("#verifyTime"),
 	verifyRequireTime: document.querySelector("#verifyRequireTime"),
 	verifyRequireRevocation: document.querySelector("#verifyRequireRevocation"),
 	verifyStatus: document.querySelector("#verifyStatus"),
@@ -252,6 +119,8 @@ const el = {
 	securitySchemeRow: document.querySelector("#securitySchemeRow"),
 	encryptSaveButton: document.querySelector("#encryptSaveButton"),
 	credentialsPanel: document.querySelector("#credentialsPanel"),
+	credentialsFileRow: document.querySelector("#credentialsFileRow"),
+	credentialsFile: document.querySelector("#credentialsFile"),
 	credentialsType: document.querySelector("#credentialsType"),
 	credentialsTypeRow: document.querySelector("#credentialsTypeRow"),
 	credentialsUserRow: document.querySelector("#credentialsUserRow"),
@@ -610,6 +479,10 @@ const el = {
 	searchPrev: document.querySelector("#searchPrev"),
 	searchNext: document.querySelector("#searchNext"),
 	searchResults: document.querySelector("#searchResults"),
+	searchPager: document.querySelector("#searchPager"),
+	searchPagePrev: document.querySelector("#searchPagePrev"),
+	searchPageNext: document.querySelector("#searchPageNext"),
+	searchPageInfo: document.querySelector("#searchPageInfo"),
 	metaPanel: document.querySelector(".meta-panel"),
 	renderVectorButton: document.querySelector("#renderVectorButton"),
 	renderRasterButton: document.querySelector("#renderRasterButton"),
@@ -655,6 +528,13 @@ const el = {
 	structureAttributes: document.querySelector("#structureAttributes"),
 	structureBinding: document.querySelector("#structureBinding"),
 	structureReferences: document.querySelector("#structureReferences"),
+	structureSource: document.querySelector("#structureSource"),
+	structureXMLTypeRow: document.querySelector("#structureXMLTypeRow"),
+	structureXMLType: document.querySelector("#structureXMLType"),
+	structureXMLNamespaceRow: document.querySelector("#structureXMLNamespaceRow"),
+	structureXMLNamespace: document.querySelector("#structureXMLNamespace"),
+	structureXMLFile: document.querySelector("#structureXMLFile"),
+	structureXML: document.querySelector("#structureXML"),
 	structureStatus: document.querySelector("#structureStatus"),
 	structureSubmit: document.querySelector("#structureSubmit"),
 	signatureSummary: document.querySelector("#signatureSummary"),
@@ -680,40 +560,13 @@ const el = {
 	annotationDetail: document.querySelector("#annotationDetail"),
 	docFontList: document.querySelector("#docFontList"),
 	docFontSummary: document.querySelector("#docFontSummary"),
+	embedAllFontsButton: document.querySelector("#embedAllFontsButton"),
+	externalizeAllFontsButton: document.querySelector("#externalizeAllFontsButton"),
 	availableFontSummary: document.querySelector("#availableFontSummary"),
 	fontPermissionHint: document.querySelector("#fontPermissionHint"),
 	fontList: document.querySelector("#fontList"),
 	statusText: document.querySelector("#statusText"),
 };
-
-function createPrintDialog(tab) {
-	const panel = el.printPanel.cloneNode(true);
-	el.printPanel.remove();
-	documentDialogs.register(panel, {shared:false});
-	return new PrintDialog({
-		panel,
-		nativeHost,
-		show: panel => documentDialogs.openFor(tab, panel),
-		download: (bytes, mime, name) => nativeHost ? nativeHost.download(bytes, mime, name) : downloadBytes(bytes, mime, name),
-		cancel: tab => {
-			for (const [id, request] of wasmRequests) if (request.tab === tab && ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF"].includes(request.name)) cancelOperation(id);
-		},
-	});
-}
-
-async function openPrintPanel() {
-	const tab = documentTab(), content = documentContentKey(state);
-	if (!tab.state.doc || !tab.state.ready || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
-	const current = () => isForegroundDocument(tab) && content === documentContentKey(state);
-	if (!await canvasEditor.commitNudge() || !current() || !await canvasEditor.commitText() || !current()
-		|| !await canvasEditor.commitCrop() || !current() || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
-	tab.print ||= createPrintDialog(tab);
-	tab.print.open({tab, document:documentEntryKey(tab.state.doc.documents?.[tab.state.doc.documentIndex || 0]), call:(name, ...args) => callTabWASM(tab, name, ...args), page:tab.state.pageIndex,
-		selection:tab.state.pageSelection.size ? selectedPageIndexes() : [], annotations:tab.state.renderAnnotations,
-		name:tab.state.fileName || tab.state.doc.title || "OFDGo"});
-}
-
-el.printButton.addEventListener("click", openPrintPanel);
 
 const fontManager = new FontManager({
 	host: nativeHost,
@@ -725,8 +578,8 @@ const selectPicker = new SelectPicker(() => fontPicker.prepareCommit());
 const textFormatButtons = [...document.querySelectorAll("[data-text-format]")];
 const textBackground = document.querySelector("#textBackground");
 const editorInputs = new Map();
-const annotationFields = Object.fromEntries(["CreateForm", "CreateCancel", "Content", "Old", "Font", "Text", "TextRow", "Image", "ImageRow", "Author", "LinkKind", "Address", "AddressRow", "Target", "TargetRow", "X", "Y", "Width", "Height", "Angle", "Opacity", "Tile", "Placement", "PlacementLabel", "Pick", "Scope", "Pages"].map(key => [key, document.querySelector(`#annotation${key}`)]));
-el.editorTools.addEventListener("scroll", () => fontPicker.position());
+const annotationFields = Object.fromEntries(["CreateForm", "CreateCancel", "Content", "Old", "Font", "Text", "TextRow", "Image", "ImageRow", "Author", "LinkKind", "Address", "AddressRow", "Target", "TargetRow", "X", "Y", "Width", "Height", "Angle", "Opacity", "Tile", "Gap", "GapRow", "Placement", "PlacementLabel", "Pick", "Scope", "Pages"].map(key => [key, document.querySelector(`#annotation${key}`)]));
+const annotationList = new VirtualList(el.annotationsList, createAnnotationRow);
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	textControls: [el.appearanceButton, el.appearancePanel, el.textAlign, el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, el.textLineHeight, el.textSpacing, el.textWrap, el.paragraphButton, el.paragraphPanel, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.saveAsButton, el.fontInput, document.querySelector("#textReflow")],
@@ -845,8 +698,225 @@ const pageView = createPageView({
 	updateControls, updateEditorTools, wasmRequests,
 });
 
+function createResourceManager() {
+	return { kind: "Font", scope: "", views: new Map(), items: [], filteredItems: [], start: -1, end: -1, selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
+}
+
+function createSettings() {
+	return { kind: "bookmarks", locked: false, views: new Map(), sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false, invoice: false };
+}
+
+function createInvoicePanel() {
+	return { tab: "basic", views: new Map(), entries: [], formats: [], drafts: new Map(), key: "", result: null };
+}
+
+function createDocumentState() {
+	return {
+		conversionWarnings: [],
+		annotationEdit: null,
+		annotationCreate: null,
+		ready: false,
+		wasmExited: false,
+		wasmSeq: 0,
+		wasmRecovering: false,
+		wasmRecoveries: 0,
+		exporting: false,
+		saving: false,
+		saveRequestID: 0,
+		signing: false,
+		signCanceled: false,
+		exportRequestID: 0,
+		editing: false,
+		selectObjects: true,
+		dirty: false,
+		editorInfo: null,
+		editorViews: new Map(),
+		savedRevision: null,
+		saveHandle: null,
+		saveStamp: null,
+		encryptionDirty: false,
+		savedEncrypted: false,
+		editorSyncPending: false,
+		insertObject: null,
+		importPageCount: 0,
+		importDocumentCount: 0,
+		importDocumentMode: false,
+		importEncrypted: false,
+		importing: false,
+		imageImporting: false,
+		createInsert: false,
+		createPackage: false,
+		createDocumentAt: null,
+		createImageQueue: null,
+		documentManagement: null,
+		versionManagement: null,
+		infoDocumentIndex: null,
+		pageSelection: new Set(),
+		pageSelectionAnchor: null,
+		pageMultiSelect: false,
+		pageTouchPointer: null,
+		outlineSelection: null,
+		outlineSeq: 0,
+		openActionEnabled: false,
+		openActionDocument: false,
+		openActionPage: null,
+		openActionTask: null,
+		openActionFrame: 0,
+		outlineAction: "add",
+		styleOriginal: null,
+		objectClipboardToken: null,
+		styleClipboard: null,
+		objectDistribution: null,
+		outlineExpanded: new Map(),
+		textFonts: [],
+		textFontID: null,
+		textFontInitialized: false,
+		textFontInitializing: null,
+		textDefaults: { type: "TextObject", size: 16 * 25.4 / 72, color: "#000000", wrap: true, align: "left", paragraphHeight: 0, letterSpacing: 0 },
+		ofdBytes: null,
+		sourcePDF: false,
+		pdfComplete: false,
+		fileName: "ofdgo.ofd",
+		openSeq: 0,
+		pageSeq: 0,
+		searchSeq: 0,
+		searchQuery: "",
+		searchMatches: [],
+		searchIndex: -1,
+		searchResultPage: 0,
+		searchRunning: false,
+		searchNext: 0,
+		searchPaused: false,
+		searchTruncated: false,
+		outlinesDirty: false,
+		importFile: null,
+		exportCancel: null,
+		navigationScroll: new Map(),
+		annotationFilter: {scope: null, query: "", kind: ""},
+		fontSyncPending: false,
+		fontCatalogLoading: false,
+		fontFacesLoading: false,
+		fontRenderPending: false,
+		fontSyncing: false,
+		doc: null,
+		pageIndex: 0,
+		pageNavigation: null,
+		scale: 1,
+		rotation: 0,
+		panMode: false,
+		pan: null,
+		fitMode: "width",
+		continuous: false,
+		pageLayoutPreference: 1,
+		get pageLayout() {
+			return this.doc?.pageCount > 1 ? this.pageLayoutPreference : 1;
+		},
+		renderAnnotations: true,
+		renderBackend: "canvas",
+		renderMode: "svg",
+		renderDPI: DEFAULT_IMAGE_DPI,
+		pageCache: new Map(),
+		mediaPlayers: new Map(),
+		svgFonts: new Map(),
+		svgFontLoads: new Map(),
+		svgImages: new Map(),
+		selectedPages: new Set(),
+		documentSelection: null,
+		pageInFlight: new Map(),
+		pageLoadSeq: 0,
+		pageRenderQueue: [],
+		pagePrefetchIndex: null,
+		pagePrefetchDirection: 1,
+		pageRenderRunning: false,
+		pageRenderWorkers: 0,
+		pagePresentQueue: new Map(),
+		pagePresentFrame: 0,
+		pageObserver: null,
+		visiblePages: new Set(),
+		scrollFrame: 0,
+		pageWindow: null,
+		thumbnailWindow: null,
+		thumbnailFrame: 0,
+		pageDragIndex: null,
+		pageListCurrent: null,
+		thumbnailObserver: null,
+		visibleThumbnails: new Set(),
+		exportFormats: [],
+		exportPages: null,
+		exportBackdrop: false,
+		encryptionChanged: false,
+		showPages: !COMPACT_LAYOUT.matches,
+		showMeta: !COMPACT_LAYOUT.matches,
+	};
+}
+
+function activeNativeIDs(skipTab = null) {
+	const ids = new Set();
+	const collect = value => {
+		if (!value || typeof value !== "object") return;
+		if (value.nativeFile) ids.add(value.nativeFile);
+		if (value.nativeHandle) ids.add(value.nativeHandle);
+		if (value.handle?.nativeHandle) ids.add(value.handle.nativeHandle);
+	};
+	for (const tab of workspace.tabs) {
+		if (tab === skipTab || tab.closed) continue;
+		collect(tab.state.ofdBytes);
+		collect(tab.state.saveHandle);
+		collect(tab.state.importFile);
+		for (const entry of tab.state.createImageQueue?.entries || []) collect(entry.file);
+	}
+	for (const item of batch.items) collect(item.file);
+	return ids;
+}
+
+function releaseNative(value, skipTab = null) {
+	if (!nativeHost || !value) return Promise.resolve();
+	return nativeHost.release(value, { exclude: activeNativeIDs(skipTab) });
+}
+
+function releaseFormFiles(form) {
+	if (!nativeHost || !form) return Promise.resolve();
+	const files = [];
+	for (const input of form.querySelectorAll('input[type="file"]')) {
+		if (input.files?.length) files.push(...input.files);
+	}
+	return releaseNative(files);
+}
+
+function createPrintDialog(tab) {
+	const panel = el.printPanel.cloneNode(true);
+	el.printPanel.remove();
+	documentDialogs.register(panel, {shared:false});
+	return new PrintDialog({
+		panel,
+		nativeHost,
+		show: panel => documentDialogs.openFor(tab, panel),
+		savePicker: options => nativeHost || window.showSaveFilePicker ? saveFilePicker(options) : null,
+		release: value => releaseNative(value),
+		download: (bytes, mime, name) => nativeHost ? nativeHost.download(bytes, mime, name) : downloadBytes(bytes, mime, name),
+		cancel: tab => {
+			for (const [id, request] of wasmRequests) if (request.tab === tab && ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF"].includes(request.name)) cancelOperation(id);
+		},
+	});
+}
+
+async function openPrintPanel() {
+	const tab = documentTab(), content = documentContentKey(state);
+	if (!tab.state.doc || !tab.state.ready || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
+	const current = () => isForegroundDocument(tab) && content === documentContentKey(state);
+	if (!await canvasEditor.commitNudge() || !current() || !await canvasEditor.commitText() || !current()
+		|| !await canvasEditor.commitCrop() || !current() || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
+	tab.print ||= createPrintDialog(tab);
+	tab.print.open({tab, document:documentEntryKey(tab.state.doc.documents?.[tab.state.doc.documentIndex || 0]), call:(name, ...args) => callTabWASM(tab, name, ...args), page:tab.state.pageIndex,
+		selection:tab.state.pageSelection.size ? selectedPageIndexes() : [], annotations:tab.state.renderAnnotations,
+		name:tab.state.fileName || tab.state.doc.title || "OFDGo"});
+}
+
+el.printButton.addEventListener("click", openPrintPanel);
+el.editorTools.addEventListener("scroll", () => fontPicker.position());
+
 function updatePendingChanges() {
-	setDirty(state.packageDirty || state.encryptionDirty || Boolean(state.editorInfo) && (state.editorInfo.revision !== state.savedRevision
+	setDirty(state.encryptionDirty || Boolean(state.editorInfo) && (state.editorInfo.revision !== state.savedRevision
 		|| canvasEditor.textChanged() || canvasEditor.cropChanged() || canvasEditor.nudgeChanged()));
 }
 
@@ -996,8 +1066,14 @@ for (const [button, action] of [[resourceElements.Bind, "bind"], [resourceElemen
 }
 resourceElements.File.addEventListener("change", () => resourceTask(async () => {
 	const request = resourceManager.fileAction, file = resourceElements.File.files[0];
-	if (!file || !request || request.sequence !== state.openSeq || !state.editing) return;
-	await changeManagedResource(request.action, request.item, file);
+	if (!file) return;
+	try {
+		if (!request || request.sequence !== state.openSeq || !state.editing) return;
+		await changeManagedResource(request.action, request.item, file);
+	} finally {
+		resourceElements.File.value = "";
+		await releaseNative(file);
+	}
 }));
 for (const dialog of [fontBindingElements.Panel, el.attachmentDialog]) {
 	dialog.addEventListener("close", () => { if (resourceElements.Panel.open) resourceTask(loadManagedResources); });
@@ -1154,7 +1230,11 @@ el.annotationTool.addEventListener("change", async () => {
 });
 annotationFields.CreateCancel.addEventListener("click", () => el.annotationCreate.close());
 el.annotationCreate.addEventListener("close", () => {
-	if (!state.annotationCreate?.picking) state.annotationCreate = null;
+	if (!state.annotationCreate?.picking) {
+		releaseNative(Array.from(annotationFields.Image.files || []));
+		annotationFields.Image.value = "";
+		state.annotationCreate = null;
+	}
 });
 annotationFields.Content.addEventListener("change", updateAnnotationFields);
 annotationFields.Height.addEventListener("input", () => { state.annotationCreate.height = annotationFields.Height.value; });
@@ -1180,7 +1260,7 @@ annotationFields.CreateForm.addEventListener("submit", async event => {
 	const image = entry.kind === "stamp" || entry.kind === "watermark" && value("Content") === "image";
 	let font = null, data = null;
 	try {
-		if (image) data = new Uint8Array(await annotationFields.Image.files[0].arrayBuffer());
+		if (image) data = await normalizeImageBytes(annotationFields.Image.files[0]);
 		if (entry.kind === "watermark" && !image || entry.kind === "replace" && value("Font") === "current") {
 			const choice = state.textDefaults.fontChoice || state.textFonts[Number(fontPicker.value)];
 			if (!choice || choice.disabled) throw new Error("请先选择可用字体");
@@ -1193,6 +1273,7 @@ annotationFields.CreateForm.addEventListener("submit", async event => {
 			uri: value("Address"), target: value("LinkKind") === "page" ? Number(value("Target")) : 0,
 			x: Number(value("X")), y: Number(value("Y")), width: entry.kind === "note" ? 5 : Number(value("Width")), height: entry.kind === "note" ? 5 : Number(value("Height")),
 			angle: Number(value("Angle")), alpha: Math.round((100 - Number(value("Opacity"))) * 255 / 100), tile: value("Tile") === "tile",
+			...(entry.kind === "watermark" && value("Tile") === "tile" ? { gap: Number(value("Gap")) } : {}),
 			area: entry.kind === "watermark" && value("Placement") === "custom" ? entry.area : null,
 			size: state.textDefaults.size, color: state.textDefaults.color };
 		if (entry.kind === "link" && entry.item) {
@@ -1353,12 +1434,15 @@ el.importPanel.addEventListener("cancel", event => {
 	if (state.importing) { event.preventDefault(); cancelExport(); }
 });
 el.importPanel.addEventListener("close", () => {
+	const previous = state.importFile;
+	state.importFile = null;
 	state.importPageCount = 0;
 	state.importDocumentCount = 0;
 	state.importDocumentMode = false;
 	state.importEncrypted = false;
+	releaseNative(previous);
 	el.importForm.reset();
-	if (state.ready) callWASM("ofdgoLoadImport", null).catch(err => showError(err, false));
+	if (state.ready) callWASM("ofdgoClearImport").catch(() => {});
 });
 el.importFile.addEventListener("change", loadImportFile);
 el.importRange.addEventListener("change", () => {
@@ -1538,12 +1622,36 @@ document.querySelector("#structureSelection").addEventListener("click", () => {
 	const page = state.doc.pages[items[0].index];
 	addStructureReference({ pageId: page.id, objectIds: items.map(item => item.id) });
 });
+el.structureXMLFile.addEventListener("change", async () => {
+	const file = el.structureXMLFile.files?.[0];
+	if (!file) return;
+	try {
+		el.structureXML.value = await file.text();
+		el.structureStatus.textContent = "";
+	} catch (err) {
+		el.structureStatus.textContent = err.message;
+	} finally {
+		el.structureXMLFile.value = "";
+		await releaseNative(file);
+	}
+});
 el.structureForm.addEventListener("submit", async event => {
 	event.preventDefault();
 	if (!state.editing || document.body.hasAttribute("data-busy")) return;
 	const index = Number(el.structureEntry.value), path = JSON.parse(el.structureNodeSelect.value || "[]");
-	if (state.doc.structures?.[index]?.internal) return;
-	const action = index < 0 ? "create" : el.structureAction.value;
+	if (index >= 0 && state.doc.structures?.[index]?.internal) return;
+	const action = index === -2 ? "importXML" : index < 0 ? "create" : el.structureAction.value;
+	el.structureStatus.textContent = "";
+	if (action === "importXML" || action === "updateXML") {
+		const xml = el.structureXML.value;
+		if (!xml.trim()) { el.structureStatus.textContent = "请输入源码"; el.structureXML.focus(); return; }
+		const payload = action === "importXML"
+			? { action, typeId: el.structureXMLType.value, namespace: el.structureXMLNamespace.value, xml }
+			: { action, index, xml };
+		const saved = await changeDocument("ofdgoChangeStructure", null, JSON.stringify(payload));
+		if (saved) el.structureDialog.close();
+		return;
+	}
 	let original = state.doc.structures?.[index]?.root;
 	for (const part of path) original = original?.children?.[part];
 	const text = action === "update" && original?.text?.replace(/\r\n?/g, "\n") === el.structureText.value
@@ -1552,7 +1660,6 @@ el.structureForm.addEventListener("submit", async event => {
 		attributes: [...el.structureAttributes.children].map(row => ({ name: row.querySelector('[name="name"]').value, namespace: row.querySelector('[name="namespace"]').value, value: row.querySelector('[name="value"]').value })) };
 	const references = [...el.structureReferences.children].map(row => ({ pageId: row.querySelector('[name="page"]').value,
 		objectIds: row.querySelector('[name="ids"]').value.split(/[,\s]+/u).filter(Boolean) })).filter(ref => ref.objectIds.length);
-	el.structureStatus.textContent = "";
 	const saved = await changeDocument("ofdgoChangeStructure", null, JSON.stringify({ action, index, path, typeId: el.structureType.value, node, references }));
 	if (saved) el.structureDialog.close();
 });
@@ -1584,7 +1691,6 @@ el.pageForm.addEventListener("submit", async (event) => {
 });
 el.aboutButton.addEventListener("click", openAboutPanel);
 el.associationSection.addEventListener("click", changeFileAssociation);
-let aboutBackdrop = false;
 el.aboutPanel.addEventListener("pointerdown", event => { aboutBackdrop = event.target === el.aboutPanel; });
 el.aboutPanel.addEventListener("click", event => {
 	if (aboutBackdrop && event.target === el.aboutPanel) el.aboutPanel.close();
@@ -1593,10 +1699,50 @@ el.aboutPanel.addEventListener("click", event => {
 el.ofdButton.addEventListener("click", openOFDFile);
 el.closeButton.addEventListener("pointerdown", event => event.preventDefault());
 el.closeButton.addEventListener("click", () => closeDocument().catch(error => showError(error, false)));
-batchElements.Button.addEventListener("click", () => { updateBatchControls(); batchElements.Panel.showModal(); });
+batchElements.Button.addEventListener("click", () => {
+	documentDialogs?.detachOther(batchElements.Panel);
+	updateBatchControls();
+	batchElements.Panel.showModal();
+	renderBatchList(true);
+});
+batchElements.List.addEventListener("change", event => {
+	const row = event.target.closest("tr[data-batch-index]");
+	const item = row ? batch.items[Number(row.dataset.batchIndex)] : null;
+	if (!item || batch.running) return;
+	if (event.target.matches("input")) item.pages = event.target.value;
+	else if (event.target.matches("select")) item.format = event.target.value;
+	else return;
+	item.details = [];
+	if (row.nextElementSibling?.classList.contains("convert-details")) row.nextElementSibling.remove();
+	batchStatus(item, "pending", "待转");
+	batchElements.Status.textContent = "";
+	batchElements.Progress.value = 0;
+	updateBatchControls();
+});
+batchElements.List.addEventListener("click", event => {
+	const button = event.target.closest(".remove-button");
+	if (!button || batch.running) return;
+	const row = button.closest("tr[data-batch-index]");
+	const index = row ? Number(row.dataset.batchIndex) : -1;
+	if (index < 0 || index >= batch.items.length) return;
+	const [removed] = batch.items.splice(index, 1);
+	releaseNative(removed?.file);
+	renderBatchList(true);
+});
+batchElements.List.closest(".convert-table").addEventListener("scroll", () => {
+	if (batch.items.length <= 80 || batch.renderFrame) return;
+	batch.renderFrame = requestAnimationFrame(() => { batch.renderFrame = 0; renderBatchList(false); });
+});
 batchElements.Add.addEventListener("click", () => batchElements.Input.click());
 batchElements.Input.addEventListener("change", () => { addBatchFiles(batchElements.Input.files); batchElements.Input.value = ""; });
-batchElements.Clear.addEventListener("click", () => { batch.items = []; renderBatchList(); batchElements.Status.textContent = ""; batchElements.Progress.value = 0; });
+batchElements.Clear.addEventListener("click", () => {
+	const files = batch.items.map(item => item.file);
+	batch.items = [];
+	releaseNative(files);
+	renderBatchList();
+	batchElements.Status.textContent = "";
+	batchElements.Progress.value = 0;
+});
 batchElements.Format.addEventListener("change", updateBatchControls);
 batchElements.DPI.addEventListener("change", updateBatchControls);
 batchElements.Close.addEventListener("click", () => batchElements.Panel.close());
@@ -1643,6 +1789,7 @@ fontBindingElements.File.addEventListener("change", async () => {
 			fontBindingElements.Status.textContent = faces.length > 1 ? "请选择字体" : "";
 		});
 	} catch (err) { update(() => { fontBindingElements.Status.textContent = err.message; }); }
+	finally { await releaseNative(file); }
 });
 fontBindingElements.Form.addEventListener("submit", async event => {
 	event.preventDefault();
@@ -1760,7 +1907,11 @@ el.createForm.addEventListener("submit", createDocument);
 editorClick(el.insertTextButton, toggleTextTool);
 editorClick(el.insertImageButton, () => openInsertPanel());
 el.insertCancel.addEventListener("click", () => el.insertPanel.close());
-el.insertPanel.addEventListener("close", () => { state.insertObject = null; });
+el.insertPanel.addEventListener("close", () => {
+	releaseNative(Array.from(el.insertImage.files || []));
+	el.insertImage.value = "";
+	state.insertObject = null;
+});
 el.insertForm.addEventListener("submit", insertObject);
 el.textFontAdd.addEventListener("click", () => openFontFile(el.fontInput));
 el.saveButton.addEventListener("click", () => exportFile(true, null, "ofd", false));
@@ -1768,22 +1919,29 @@ el.saveAsButton.addEventListener("click", () => exportFile(true, null, "ofd", tr
 editorClick(el.encryptSaveButton, openEncryptionPanel);
 el.signButton.addEventListener("click", () => {
 	if (!state.doc || document.body.hasAttribute("data-busy")) return;
+	releaseFormFiles(el.signForm);
 	el.signForm.reset();
 	el.signPages.value = state.editing && state.pageSelection.size ? selectedPageRange() : String(state.pageIndex + 1);
 	el.signStatus.textContent = "";
 	updateSignPlacement();
+	updateSignEncryption();
 	el.signPanel.showModal();
 });
 el.signSeal.addEventListener("change", updateSignPlacement);
 el.signPlacement.addEventListener("change", updateSignPlacement);
+el.signEncryptionType.addEventListener("change", updateSignEncryption);
 el.signCancel.addEventListener("click", () => state.signing ? cancelSigning() : el.signPanel.close());
 el.signPanel.addEventListener("cancel", event => {
 	if (state.signing) { event.preventDefault(); cancelSigning(); }
 });
-el.signPanel.addEventListener("close", () => { if (!el.signPanel.open && !sealPreview) el.signForm.reset(); });
+el.signPanel.addEventListener("close", () => {
+	if (!el.signPanel.open && !sealPreview) {
+		releaseFormFiles(el.signForm);
+		el.signForm.reset();
+		updateSignEncryption();
+	}
+});
 el.signForm.addEventListener("submit", signDocument);
-const sealPosition = Object.fromEntries(["Layer", "Stamp", "Image"].map(name => [name, document.querySelector(`#signPosition${name}`)]));
-let sealPreview = null;
 document.querySelector("#signPick").addEventListener("click", openSealPosition);
 el.viewerPanel.addEventListener("pointerdown", beginSealDrag, true);
 el.viewerPanel.addEventListener("pointerdown", pickResourceObject, true);
@@ -1803,7 +1961,12 @@ el.verifyButton.addEventListener("click", () => {
 	el.verifyPanel.showModal();
 });
 el.verifyCancel.addEventListener("click", () => el.verifyPanel.close());
-el.verifyPanel.addEventListener("close", () => { if (!el.verifyPanel.open) el.verifyForm.reset(); });
+el.verifyPanel.addEventListener("close", () => {
+	if (!el.verifyPanel.open) {
+		releaseFormFiles(el.verifyForm);
+		el.verifyForm.reset();
+	}
+});
 el.verifyForm.addEventListener("submit", verifyDocument);
 el.credentialsCancel.addEventListener("click", () => finishCredentials(null));
 el.credentialsPanel.addEventListener("cancel", event => { event.preventDefault(); finishCredentials(null); });
@@ -1837,7 +2000,6 @@ el.togglePagesButton.addEventListener("click", () => toggleSidebar("pages"));
 el.toggleMetaButton.addEventListener("click", () => toggleSidebar("meta"));
 el.pagesTab.addEventListener("click", () => showNavigation(el.pagesTab));
 el.annotationsTab.addEventListener("click", () => showNavigation(el.annotationsTab));
-const annotationList = new VirtualList(el.annotationsList, createAnnotationRow);
 el.annotationsList.addEventListener("scroll", () => {
 	if (!el.annotationsPanel.hidden && annotationList.view === state.annotationSummary?.view) state.annotationFilter.top = el.annotationsList.scrollTop;
 });
@@ -1856,11 +2018,7 @@ document.querySelector("#objectActionsButton").addEventListener("click", async (
 	if ((el.objectLinkKind.value !== original.kind || el.objectLinkAddress.value !== original.address || el.objectLinkPage.value !== original.page)
 		&& !await requestConfirmation("链接尚未应用，放弃链接更改？")) return;
 	syncObjectLink(item);
-	settings.scope = "object";
-	settings.kind = "actions";
-	await openDocumentSettings();
-	settings.locked = true;
-	settingsElements.Tabs.hidden = true;
+	await openDocumentSettings(false, { locked: true, scope: "object", kind: "actions" });
 });
 el.outlinesTab.addEventListener("click", () => showNavigation(el.outlinesTab));
 el.searchTab.addEventListener("click", () => focusSearch());
@@ -1885,6 +2043,8 @@ el.searchForm.addEventListener("submit", (event) => {
 el.searchInput.addEventListener("input", () => resetSearch(false));
 el.searchPrev.addEventListener("click", () => selectSearchMatch(Math.max(0, state.searchIndex) - 1));
 el.searchNext.addEventListener("click", () => selectSearchMatch(state.searchIndex + 1));
+el.searchPagePrev.addEventListener("click", () => changeSearchResultPage(-1));
+el.searchPageNext.addEventListener("click", () => changeSearchResultPage(1));
 document.addEventListener("keydown", handleKeyDown);
 document.addEventListener("keydown", event => {
 	if (event.key === "Tab") el.viewerPanel.classList.add("keyboard-focus");
@@ -1893,7 +2053,15 @@ document.addEventListener("pointerdown", () => el.viewerPanel.classList.remove("
 el.fontAddButton.addEventListener("click", () => openFontFile(el.fontInput));
 el.fontDirectoryButton.addEventListener("click", () => openFontFile(el.fontDirectoryInput));
 el.localFontButton.addEventListener("click", loadLocalFonts);
-el.ofdInput.addEventListener("change", async () => { await Promise.all(Array.from(el.ofdInput.files, file => openOFD(file))); });
+el.embedAllFontsButton.addEventListener("click", () => processAllFonts(1));
+el.externalizeAllFontsButton.addEventListener("click", () => processAllFonts(2));
+el.ofdInput.addEventListener("change", async () => {
+	const files = Array.from(el.ofdInput.files || []);
+	el.ofdInput.value = "";
+	await Promise.all(files.map(async file => {
+		if (!await openOFD(file)) await releaseNative(file);
+	}));
+});
 el.fontInput.addEventListener("change", openSelectedFonts);
 el.fontDirectoryInput.addEventListener("change", openSelectedFonts);
 el.prevButton.addEventListener("click", () => pageView.renderPage(pageView.pageGroupStart() - state.pageLayout));
@@ -1912,8 +2080,7 @@ el.pageLayoutButton.addEventListener("click", pageView.togglePageLayout);
 el.annotationButton.addEventListener("click", toggleAnnotations);
 document.addEventListener("copy", copySelection);
 document.addEventListener("cut", copySelection);
-el.viewerPanel.addEventListener("paste", pasteEditorContent);
-el.editorTools.addEventListener("paste", pasteEditorContent);
+document.addEventListener("paste", pasteEditorContent);
 document.addEventListener("selectionchange", syncSelection);
 el.exportFormat.addEventListener("change", () => updateDPIControl());
 el.outputCompression.addEventListener("change", () => {
@@ -1982,6 +2149,13 @@ el.navigationContent.addEventListener("scroll", () => {
 		pageView.syncThumbnailWindow();
 	});
 });
+new ResizeObserver(() => {
+	if (!state.doc || el.pageList.hidden || !state.showPages || state.thumbnailFrame) return;
+	state.thumbnailFrame = requestAnimationFrame(() => {
+		state.thumbnailFrame = 0;
+		pageView.syncThumbnailWindow();
+	});
+}).observe(el.navigationContent);
 for (const [viewport, current] of [[el.viewerPanel, () => state.pageWindow], [el.navigationContent, () => el.pageList.hidden ? null : state.thumbnailWindow]]) {
 	viewport.addEventListener("wheel", event => {
 		const view = current();
@@ -2125,8 +2299,9 @@ function handleKeyDown(event) {
 	if (!state.doc) {
 		return;
 	}
-	if (state.editing && !event.shiftKey && el.editorTools.contains(target) && editorShortcutTarget(target)
-		&& (key === "Delete" || key === "F2")) {
+	if (state.editing && !event.shiftKey && editorShortcutTarget(target)
+		&& (el.editorTools.contains(target) && (key === "Delete" || key === "Backspace" || key === "F2")
+			|| !el.viewerPanel.contains(target) && (key === "Delete" || key === "Backspace"))) {
 		canvasEditor.keyDown(event, true);
 		return;
 	}
@@ -2650,6 +2825,9 @@ async function loadImportFile() {
 	const tab = documentTab(), state = tab.state;
 	const callWASM = (name, ...args) => callTabWASM(tab, name, ...args);
 	const file = el.importFile.files[0];
+	const previous = state.importFile;
+	state.importFile = file || null;
+	if (previous && previous !== file) releaseNative(previous);
 	const openSeq = state.openSeq;
 	state.importPageCount = 0;
 	state.importDocumentCount = 0;
@@ -2660,10 +2838,16 @@ async function loadImportFile() {
 	setBusy(true);
 	try {
 		const data = file ? await documentBytes(file) : null;
-		if (openSeq !== state.openSeq) return;
-		const info = data ? await openWithCredentials(null, openSeq, data, true, false, tab) : await callWASM("ofdgoLoadImport", null);
+		if (openSeq !== state.openSeq) {
+			if (state.importFile === file) state.importFile = null;
+			await releaseNative(file);
+			return;
+		}
+		const info = data ? await openWithCredentials(null, openSeq, data, true, false, tab) : (await callWASM("ofdgoClearImport"), null);
 		if (openSeq !== state.openSeq || !el.importPanel.open) {
-			await callWASM("ofdgoLoadImport", null);
+			await callWASM("ofdgoClearImport").catch(() => {});
+			if (state.importFile === file) state.importFile = null;
+			await releaseNative(file);
 			return;
 		}
 		state.importPageCount = info?.pageCount || 0;
@@ -2794,6 +2978,11 @@ async function closeWorkspace() {
 		if (workspace.tabs.some(tab => tab.opening || tab.state.exporting) && !await requestConfirmation("文档正在处理，是否取消并退出？", null)) return;
 		const activeDirty = state.dirty || canvasEditor.textChanged() || canvasEditor.cropChanged() || canvasEditor.nudgeChanged();
 		const dirty = activeDirty || workspace.tabs.some(tab => tab.state.dirty);
+		if (dirty && !workspace.switching && !workspace.tabs.some(tab => tab.closing)) {
+			for (const panel of [el.aboutPanel, el.appearancePanel, el.objectPicker, ...(!state.annotationEdit ? [el.annotationNote] : []), ...(!batch.running ? [batchElements.Panel] : [])]) {
+				if (panel.open) panel.close();
+			}
+		}
 		if (dirty && (workspace.switching || workspace.tabs.some(tab => tab.closing) || formDialogOpen() || (activeDirty && document.body.hasAttribute("data-busy")))) {
 			setStatus("操作正在进行，请完成或取消后关闭");
 			return;
@@ -2933,8 +3122,10 @@ function detachDocumentView() {
 	if (sealPreview) finishSealPosition(true);
 	if (resourceElements.Panel.open) rememberResourceView();
 	documentDialogs?.suspend(tab);
-	tab.credentials = credentialRequest;
-	credentialRequest = null;
+	if (!credentialRequest?.batch) {
+		tab.credentials = credentialRequest;
+		credentialRequest = null;
+	}
 	tab.fontBinding = {...fontBinding};
 	tab.attachmentEdit = el.attachmentDialog.attachmentEdit;
 	for (const face of state.svgFonts.values()) document.fonts.delete(face);
@@ -3009,7 +3200,7 @@ function attachDocumentTab(tab) {
 	resourceManager = tab.resources;
 	settings = tab.settings;
 	invoicePanel = tab.invoice;
-	credentialRequest = tab.credentials || null;
+	if (!credentialRequest?.batch) credentialRequest = tab.credentials || null;
 	Object.assign(fontBinding, tab.fontBinding || {font: null, choices: [], sequence: fontBinding.sequence + 1});
 	wasmWorker = tab.worker;
 	wasmWorker?.setForeground?.(true);
@@ -3039,6 +3230,7 @@ function attachDocumentTab(tab) {
 	pageView.updatePanControl();
 	pageView.trimWorkspaceCaches();
 	renderDocumentTabs();
+	notifyCredentialsAvailable();
 }
 
 async function openEmptyDocumentTab() {
@@ -3125,7 +3317,7 @@ async function mountDocumentTab(tab) {
 			state.documentSelection = null;
 			canvasEditor.pendingSelection = null;
 		}
-		await openDocument({ doc: state.wasmExited ? undefined : state.doc, pageIndex: state.pageIndex, fitMode: state.fitMode || "free", scale: state.scale,
+		await openDocument({ doc: state.wasmExited ? undefined : state.doc, documentIndex: state.doc.documentIndex, versionID: state.doc.documentVersion, pageIndex: state.pageIndex, fitMode: state.fitMode || "free", scale: state.scale,
 			skipAutoFonts: !tab.initialLoad, keepSearch: !tab.refreshPending, keepCache: !tab.refreshPending, restoreTab: !tab.initialLoad, resetScroll: Boolean(tab.initialLoad), openSeq });
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
 		tab.configurePending = false;
@@ -3189,8 +3381,11 @@ async function releaseDocumentTab(tab) {
 	tab.settings.drafts.clear();
 	tab.invoice.views.clear();
 	tab.invoice.drafts.clear();
-	if (nativeHost) await nativeHost.release(tab.state.ofdBytes);
+	const nativeResources = [tab.state.ofdBytes, tab.state.saveHandle, tab.state.importFile];
 	tab.state.ofdBytes = null;
+	tab.state.saveHandle = null;
+	tab.state.importFile = null;
+	await releaseNative(nativeResources, tab);
 	tab.state.doc = null;
 	tab.localFonts = [];
 	tab.view = null;
@@ -3261,11 +3456,13 @@ async function requestCloseAction(title, message, save, tab = documentTab()) {
 
 async function confirmDocumentClose(tab = documentTab()) {
 	const state = tab.state;
-	if (state.dirty || canvasEditor.input || canvasEditor.nudge || canvasEditor.nudgeCommit || canvasEditor.crop) {
-		const action = await requestCloseAction("关闭文档", "文档尚未保存", state.saveHandle ? "保存" : "另存");
+	const pendingEdit = isForegroundDocument(tab) && (canvasEditor.input || canvasEditor.nudge || canvasEditor.nudgeCommit || canvasEditor.crop);
+	if (state.dirty || pendingEdit) {
+		const action = await requestCloseAction("关闭文档", "文档尚未保存", state.saveHandle ? "保存" : "另存", tab);
 		if (tab.closed || action === "cancel") return false;
 		if (action === "save") {
 			if (!isForegroundDocument(tab) && !await activateDocumentTab(tab)) return false;
+			if (!isForegroundDocument(tab)) return false;
 			if (!await exportFile(true, null, "ofd", false)) return false;
 			if (state.dirty) return false;
 		}
@@ -3299,7 +3496,7 @@ async function closeFile(tab = documentTab(), keepTab = false) {
 			const action = await requestCloseAction("关闭文档", "文档正在处理，是否取消并关闭？", null, tab);
 			if (action !== "discard" || tab.closed) return;
 		}
-		if (tab.state.dirty || tab === workspace.active && (canvasEditor.input || canvasEditor.crop || canvasEditor.nudge)) {
+		if (tab.state.dirty || tab === workspace.active && (canvasEditor.input || canvasEditor.crop || canvasEditor.nudge || canvasEditor.nudgeCommit)) {
 			if (tab !== workspace.active && !await activateDocumentTab(tab)) return;
 			if (!await confirmDocumentClose(tab) || tab.closed || workspace.closing) return;
 		}
@@ -3335,7 +3532,7 @@ async function closeFile(tab = documentTab(), keepTab = false) {
 function setEditorInfo(doc) {
 	state.editorInfo = { revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
 		pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || [] };
-	setDirty(state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision);
+	setDirty(state.encryptionDirty || doc.revision !== state.savedRevision);
 }
 
 async function openVersionManagement() {
@@ -3455,10 +3652,8 @@ async function switchReadingVersion(id) {
 	if (state.saving) return;
 	if (!state.doc || state.editing || !state.ready || state.exporting || document.body.hasAttribute("data-busy")) return;
 	if (id === (state.doc.documentVersion || "")) return true;
-	const dirty = state.dirty;
 	const originalDocument = state.doc;
 	const view = tab.view;
-	const before = state.editorInfo ? editorLocation() : null, revision = state.editorInfo?.revision;
 	let openSeq = state.openSeq;
 	tab.editTask = true;
 	setBusy(true, "正在切换版本", null, "", tab);
@@ -3468,12 +3663,7 @@ async function switchReadingVersion(id) {
 		openSeq = state.openSeq = workspace.sequence = Math.max(workspace.sequence, state.openSeq) + 1;
 		state.objectClipboardToken = state.styleClipboard = null;
 		delete state.textDefaults.fontChoice;
-		if (state.editorInfo) {
-			if (!dirty) state.savedRevision = doc.revision;
-			state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
-				pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
-			state.dirty = state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision;
-		}
+		if (state.editorInfo) state.editorSyncPending = true;
 		state.doc = doc;
 		if (!isForegroundDocument(tab)) {
 			state.pageCache.clear();
@@ -3485,18 +3675,8 @@ async function switchReadingVersion(id) {
 		canvasEditor.clear();
 		canvasEditor.setTool("");
 		updateTextFonts(null, true);
-		if (state.editorInfo) {
-			if (!dirty) state.savedRevision = doc.revision;
-			setEditorInfo(doc);
-		}
-		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true, clearSelection: true,
+		await openDocument({ doc, openSeq, keepLocalFonts: true, resetScroll: true, clearSelection: true,
 			fitMode: state.fitMode, scale: state.scale, activateActions: true });
-		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return true;
-		if (before) {
-			rememberEditorView(before, revision);
-			const view = state.editorViews.get(doc.revision);
-			if (view) view.reading = true;
-		}
 		return true;
 	} catch (error) {
 		if (!tab.closed && tab.state === state) {
@@ -3543,8 +3723,9 @@ async function exportManagedVersion() {
 	state.exporting = true;
 	setBusy(true, "正在另存版本", null, "", tab);
 	manager.status = el.versionStatus.textContent = "正在另存版本";
+	let file = null;
 	try {
-		const file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({suggestedName: name, types: [{description: "OFD", accept: {"application/ofd": [".ofd"]}}]}) : null;
+		file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({suggestedName: name, types: [{description: "OFD", accept: {"application/ofd": [".ofd"]}}]}) : null;
 		if (tab.closed || tab.state !== state || state.doc !== originalDocument || wasmSeq !== state.wasmSeq) return;
 		const result = await callTabWASM(tab, "ofdgoExportVersion", entry.id, file);
 		if (tab.closed || tab.state !== state || wasmSeq !== state.wasmSeq) return;
@@ -3562,6 +3743,7 @@ async function exportManagedVersion() {
 			if (isForegroundDocument(tab) && state.versionManagement === manager) el.versionStatus.textContent = manager.status;
 		}
 	} finally {
+		await releaseNative(file);
 		state.exporting = false;
 		state.exportRequestID = 0;
 		setBusy(false, "", 0, "", tab);
@@ -3685,37 +3867,47 @@ async function switchDocument(index) {
 	if (!isForegroundDocument(tab) || document.body.hasAttribute("data-busy")) return;
 	let openSeq = state.openSeq;
 	const originalDocument = state.doc;
+	const source = state.ofdBytes;
+	let adopted = false;
 	tab.editTask = true;
 	setBusy(true, "正在切换文档", null, "", tab);
 	try {
+		const prevRevision = state.editorInfo?.revision;
 		const doc = await callTabWASM(tab, "ofdgoSelectDocument", index);
 		if (tab.closed || tab.state !== state || state.doc !== originalDocument) return;
 		openSeq = state.openSeq = workspace.sequence = Math.max(workspace.sequence, state.openSeq) + 1;
-		const source = state.ofdBytes;
-		state.packageDirty ||= state.dirty;
-		state.savedRevision = doc.revision;
-		state.editorViews.clear();
+		if (!state.editing) state.editorViews.clear();
 		state.objectClipboardToken = state.styleClipboard = null;
 		delete state.textDefaults.fontChoice;
-		state.ofdBytes = null;
-		state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
-			pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
-		state.dirty = state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision;
+		if (state.editorInfo) {
+			if (state.editing) {
+				adopted = true;
+				state.editorSyncPending = false;
+				state.ofdBytes = null;
+				if (prevRevision === state.savedRevision) {
+					state.savedRevision = doc.revision;
+					state.editorViews.set(doc.revision, { reading: true });
+				}
+				state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
+					pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
+				state.dirty = state.encryptionDirty || doc.revision !== state.savedRevision;
+				updateWorkspaceDirty();
+			} else {
+				state.editorSyncPending = true;
+			}
+		}
 		state.doc = doc;
 		if (!isForegroundDocument(tab)) {
 			state.pageCache.clear();
 			state.pageIndex = 0;
 			tab.view = null;
 			await refreshDocumentTab(tab);
-			if (nativeHost) await nativeHost.release(source);
 			return;
 		}
 		canvasEditor.clear();
 		canvasEditor.setTool("");
 		updateTextFonts(null, true);
-		setEditorInfo(doc);
-		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true, clearSelection: true, fitMode: state.fitMode, scale: state.scale, activateActions: true });
-		if (nativeHost) await nativeHost.release(source);
+		await openDocument({ doc, openSeq, keepLocalFonts: true, resetScroll: true, clearSelection: true, fitMode: state.fitMode, scale: state.scale, activateActions: true });
 	} catch (error) {
 		if (!tab.closed && tab.state === state && state.doc === originalDocument) {
 			tab.status = error.message;
@@ -3726,6 +3918,7 @@ async function switchDocument(index) {
 			showError(error, false);
 		}
 	} finally {
+		if (nativeHost && adopted) await releaseNative(source);
 		tab.editTask = false;
 		setBusy(false, "", 0, "", tab);
 	}
@@ -3754,7 +3947,7 @@ async function toggleEditor() {
 	const tab = documentTab(), state = tab.state;
 	const callWASM = (name, ...args) => callTabWASM(tab, name, ...args);
 	if (!state.doc || !state.ready || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
-	if (state.editorInfo) {
+	if (state.editorInfo && (state.editing || !state.editorSyncPending)) {
 		const wasmSeq = state.wasmSeq;
 		const current = () => !tab.closed && tab.state === state && isForegroundDocument(tab) && wasmSeq === state.wasmSeq;
 		if (!await canvasEditor.commitText() || !current()) return;
@@ -3797,21 +3990,26 @@ async function toggleEditor() {
 	let adopted = false;
 	setBusy(true, "正在准备编辑", null, "正在准备编辑", tab);
 	try {
+		const prevRevision = state.editorInfo?.revision;
 		const doc = await callWASM("ofdgoEditDocument", pageIndex);
 		if (tab.closed || state.doc !== originalDocument) return;
 		adopted = true;
-		state.savedRevision = doc.revision;
-		state.editorViews.clear();
+		if (!state.editorInfo || prevRevision === state.savedRevision) state.savedRevision = doc.revision;
+		state.editorSyncPending = false;
+		if (!state.editorInfo) state.editorViews.clear();
+		else if (prevRevision !== undefined && prevRevision !== doc.revision && state.savedRevision === doc.revision) state.editorViews.set(doc.revision, { reading: true });
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) {
 			state.doc = doc;
 			state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
 				pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
+			state.dirty = state.encryptionDirty || doc.revision !== state.savedRevision;
 			state.editing = true;
 			state.ofdBytes = null;
 			state.selectObjects = true;
 			state.conversionWarnings = [];
 			state.objectClipboardToken = state.styleClipboard = null;
 			state.pageCache.clear();
+			updateWorkspaceDirty();
 			await refreshDocumentTab(tab);
 			return;
 		}
@@ -3831,7 +4029,7 @@ async function toggleEditor() {
 	} catch (err) {
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) showError(err, false);
 	} finally {
-		if (nativeHost && adopted) await nativeHost.release(source);
+		if (nativeHost && adopted) await releaseNative(source);
 		setBusy(false, "", 0, "", tab);
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) {
 			updateControls();
@@ -3921,9 +4119,14 @@ function releaseCreateImages(tab) {
 	const queue = tab.state.createImageQueue;
 	if (!queue) return;
 	queue.observer?.disconnect();
-	for (const entry of queue.entries) if (entry.url) URL.revokeObjectURL(entry.url);
+	const files = [];
+	for (const entry of queue.entries) {
+		if (entry.url) URL.revokeObjectURL(entry.url);
+		if (entry.file) files.push(entry.file);
+	}
 	queue.entries.length = 0;
 	tab.state.createImageQueue = null;
+	releaseNative(files);
 }
 
 function addCreateImages() {
@@ -3931,7 +4134,10 @@ function addCreateImages() {
 	createImagePicker = null;
 	const files = [...el.createImages.files];
 	el.createImages.value = "";
-	if (tab.closed || !queue || tab.state.createImageQueue !== queue) return;
+	if (tab.closed || !queue || tab.state.createImageQueue !== queue) {
+		releaseNative(files);
+		return;
+	}
 	for (const file of files) queue.entries.push({ id: queue.next++, file, url: null, previewed: false });
 	sortCreateImages(queue);
 	if (isForegroundDocument(tab)) updateCreateOptions();
@@ -3980,6 +4186,7 @@ function removeCreateImage() {
 	if (index < 0) return;
 	const [entry] = queue.entries.splice(index, 1);
 	if (entry.url) URL.revokeObjectURL(entry.url);
+	releaseNative(entry.file);
 	queue.selected = queue.entries[Math.min(index, queue.entries.length - 1)]?.id ?? null;
 	renderCreateImages();
 	updateCreateOptions();
@@ -4206,7 +4413,7 @@ function editAnnotationDetails(item) {
 function openObjectPicker(items = canvasEditor.pageItems(state.pageIndex)) {
 	el.objectPickerTitle.textContent = "选择对象";
 	el.objectPickerList.replaceChildren();
-	const labels = { TextObject: "文字", PathObject: "图形", ImageObject: "图片", CompositeObject: "组合", CompositeGraphicUnit: "组合", Annotation: "注解" };
+	const labels = { TextObject: "文字", PathObject: "图形", ImageObject: "图片", CompositeObject: "组合", CompositeGraphicUnit: "组合", Annotation: "注解", Signature: "签章" };
 	const kinds = { Path: "批注", Stamp: "印章", Watermark: "水印", Link: "链接", Highlight: "高亮" };
 	for (const item of [...items].reverse()) {
 		const button = document.createElement("button");
@@ -4245,6 +4452,7 @@ function openAnnotationCreate(kind, index, box = null, item = null, info = null)
 	annotationFields.Width.value = box?.width || width;
 	annotationFields.Angle.value = kind === "watermark" ? -30 : 0;
 	annotationFields.Opacity.value = kind === "watermark" ? 80 : 0;
+	annotationFields.Gap.value = "10";
 	annotationFields.Old.replaceChildren(...(info?.texts || []).map(text => new Option(text, text)));
 	if (kind === "replace") annotationFields.Text.value = info?.texts[0] || "";
 	el.annotationCreateStatus.textContent = "";
@@ -4304,6 +4512,7 @@ function updateAnnotationFields() {
 		for (const key of ["X", "Y"]) annotationFields[key].closest(".form-row").hidden = true;
 		annotationFields.Pages.closest(".form-row").hidden = annotationFields.Scope.value !== "custom";
 		const tile = annotationFields.Tile.value === "tile";
+		annotationFields.GapRow.hidden = !tile;
 		annotationFields.PlacementLabel.textContent = tile ? "范围" : "位置";
 		annotationFields.Placement.options[0].textContent = tile ? "整页" : "居中";
 		annotationFields.Placement.options[1].textContent = tile ? "选区" : "指定";
@@ -4332,7 +4541,7 @@ async function editCanvasObject(item, point = null) {
 			if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
 			const faces = new Map();
 			for (const font of data.fonts) {
-				faces.set(font.id, await new FontFace(`ofdgo-selection-${crypto.randomUUID()}`, font.bytes, fontFaceStyle(font.bytes)).load());
+				faces.set(font.id, await new FontFace(`ofdgo-selection-${randomID()}`, font.bytes, fontFaceStyle(font.bytes)).load());
 			}
 			if (!isForegroundDocument(tab) || openSeq !== state.openSeq || canvasEditor.selected !== item || !item.node.isConnected) return;
 			const face = faces.get(data.item.font);
@@ -4605,7 +4814,7 @@ async function loadRichText(item, firstFace, tab = documentTab(), firstData = nu
 	await Promise.all(Array.from({ length: Math.min(4, pending.length) }, async () => {
 		while (pending.length) {
 			const id = pending.shift(), data = id === item.font && firstFace ? null : resources.get(id);
-			const face = data ? await new FontFace(`ofdgo-rich-${crypto.randomUUID()}`, data, fontFaceStyle(data)).load() : firstFace;
+			const face = data ? await new FontFace(`ofdgo-rich-${randomID()}`, data, fontFaceStyle(data)).load() : firstFace;
 			if (tab.closed || wasmSeq !== tab.state.wasmSeq) throw new Error("文档已更改");
 			faces.set(id, face);
 		}
@@ -4750,7 +4959,7 @@ async function validateRichText(item, model, width, fonts = []) {
 			prepared.push({ key: id, data: recovered.data });
 			if (isForegroundDocument(tab) && editing?.rich && canvasEditor.input === editing) {
 				const rich = editing.rich;
-				const face = await new FontFace(`ofdgo-recovered-${crypto.randomUUID()}`, recovered.data, fontFaceStyle(recovered.data)).load();
+				const face = await new FontFace(`ofdgo-recovered-${randomID()}`, recovered.data, fontFaceStyle(recovered.data)).load();
 				if (tab.closed || !isForegroundDocument(tab) || openSeq !== state.openSeq || canvasEditor.input !== editing) throw error;
 				rich.imports.set(id, recovered.data);
 				rich.choices.set(id, recovered.choice);
@@ -4823,7 +5032,7 @@ async function beginCanvasText(index, box, surface, page) {
 		const item = { ...state.textDefaults, ...box, wrap: Boolean(box.wrap),
 			index, page, surface, node, text: "", draft: true, fontData: data };
 		const model = { ...richTextModel(item), autoWidth: !box.wrap };
-		const key = font.embedded ? font.id.slice(9) : `temp-font-${crypto.randomUUID()}`;
+		const key = font.embedded ? font.id.slice(9) : `temp-font-${randomID()}`;
 		const embedded = font.embedded && state.doc?.fonts?.some(font => font.id === key && font.embedded);
 		model.runs[0].format.font = key;
 		canvasEditor.editText(item, face, null, { model, faces: new Map([[key, face]]), fonts: embedded ? [] : [{ key, data }], resources: new Map([[key, data]]) });
@@ -5011,7 +5220,7 @@ async function prepareTextFaces(tab, runs, font, key, value, rich) {
 		if (index < 0 && font) index = group.indexOf(target);
 		if (index < 0) throw new Error("此字体没有对应款式");
 		const selected = group[index], identity = textFontIdentity(selected);
-		if (!prepared.has(identity)) prepared.set(identity, { choice: selected, key: selected.richKey || (selected.embedded ? selected.id.slice(9) : `temp-font-${crypto.randomUUID()}`), data: await read(selected), text: "" });
+		if (!prepared.has(identity)) prepared.set(identity, { choice: selected, key: selected.richKey || (selected.embedded ? selected.id.slice(9) : `temp-font-${randomID()}`), data: await read(selected), text: "" });
 		const entry = prepared.get(identity);
 		entry.text += run.text;
 		changes.set(textFontStyleKey(from), { from, to: { font: entry.key,
@@ -5036,7 +5245,7 @@ async function prepareTextFaces(tab, runs, font, key, value, rich) {
 			if (!recovered) throw error;
 		}
 		if (!current()) throw new Error("文档已更改");
-		if (rich) entry.face = await new FontFace(`ofdgo-edit-font-${crypto.randomUUID()}`, entry.data, fontFaceStyle(entry.data)).load();
+		if (rich) entry.face = await new FontFace(`ofdgo-edit-font-${randomID()}`, entry.data, fontFaceStyle(entry.data)).load();
 	}
 	return { changes: [...changes.values()], prepared: [...prepared.values()], fonts: [...prepared.values()].filter(entry => !entry.choice.embedded).map(({ key, data, text }) => ({ key, data, text })) };
 }
@@ -5136,6 +5345,25 @@ async function changeTextFace(font, key, value) {
 	finally { if (editing?.fontTask === task) editing.fontTask = null; }
 }
 
+async function normalizeImageBytes(file) {
+	const type = (file.type || "").toLowerCase();
+	const name = (file.name || "").toLowerCase();
+	if (type === "image/webp" || type === "image/gif" || /\.(webp|gif)$/.test(name)) {
+		const bitmap = await createImageBitmap(file);
+		try {
+			const canvas = document.createElement("canvas");
+			canvas.width = bitmap.width;
+			canvas.height = bitmap.height;
+			canvas.getContext("2d").drawImage(bitmap, 0, 0);
+			const blob = await new Promise((resolve, reject) => canvas.toBlob(result => result ? resolve(result) : reject(new Error("图片转换失败")), "image/png"));
+			return new Uint8Array(await blob.arrayBuffer());
+		} finally {
+			bitmap.close();
+		}
+	}
+	return new Uint8Array(await file.arrayBuffer());
+}
+
 async function insertObject(event) {
 	event.preventDefault();
 	const tab = documentTab(), state = tab.state;
@@ -5156,7 +5384,7 @@ async function insertObject(event) {
 	tab.editTask = true;
 	setBusy(true, "", 0, "", tab);
 	try {
-		const data = new Uint8Array(await file.arrayBuffer());
+		const data = await normalizeImageBytes(file);
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) {
 			return;
 		}
@@ -5169,7 +5397,7 @@ async function insertObject(event) {
 			state.doc = doc;
 			state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
 				pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
-			state.dirty = state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision;
+			state.dirty = state.encryptionDirty || doc.revision !== state.savedRevision;
 			state.pageCache.clear();
 			await refreshDocumentTab(tab);
 			return;
@@ -5434,13 +5662,14 @@ async function changeDocument(name, item, ...args) {
 	const restoring = name === "ofdgoUndo" || name === "ofdgoRedo";
 	const { scrollLeft, scrollTop } = el.viewerPanel;
 	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages" || name === "ofdgoImportDocuments";
-	const changingFont = name === "ofdgoChangeFontBinding";
+	const changingFont = name === "ofdgoChangeFontBinding" || name === "ofdgoProcessFonts";
 	tab.editTask = true;
 	let refreshManagement = false;
 	state.imageImporting = name === "ofdgoImportImages";
 	if (importing) state.importing = true;
-	setBusy(true, importing ? name === "ofdgoImportDocuments" ? "正在导入文档" : "正在导入页面" : "", null);
-	const progressTimer = changingFont ? window.setTimeout(() => {
+	if (name === "ofdgoProcessFonts") state.fontProcessResult = null;
+	setBusy(true, importing ? name === "ofdgoImportDocuments" ? "正在导入文档" : "正在导入页面" : name === "ofdgoProcessFonts" ? args[0] === 2 ? "正在外置字体" : "正在嵌入字体" : "", null);
+	const progressTimer = name === "ofdgoChangeFontBinding" ? window.setTimeout(() => {
 		if (openSeq === state.openSeq && document.body.hasAttribute("data-busy")) {
 			el.progressPanel.hidden = false;
 			setProgress("正在处理字体", null);
@@ -5460,7 +5689,7 @@ async function changeDocument(name, item, ...args) {
 		const members = item?.items ? [...item.items].sort((a, b) => a.order - b.order) : item ? [item] : [];
 		const scoped = members.some(member => member.scoped);
 		const ids = item ? Array.isArray(item.id) && !item.items ? item.id : members.map(member => member.id) : [];
-		const annotated = !scoped && ids.some(id => id.startsWith("annotation:"));
+		const annotated = !scoped && ids.some(id => id.startsWith("annotation:") || id.startsWith("signature:"));
 		const inserting = ["ofdgoInsertShape", "ofdgoInsertText", "ofdgoInsertImage", "ofdgoInsertInk"].includes(name) || name === "ofdgoSaveRichText" && !item;
 		const editingAnnotation = name === "ofdgoWriteAnnotation" && Boolean(state.annotationCreate?.item);
 		const scopedRichText = scoped && name === "ofdgoSaveRichText";
@@ -5483,13 +5712,14 @@ async function changeDocument(name, item, ...args) {
 				tab.state.doc = doc;
 				tab.state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
 					pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
-				tab.state.dirty = state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision;
+				tab.state.dirty = state.encryptionDirty || doc.revision !== state.savedRevision;
 				tab.state.pageCache.clear();
 				await refreshDocumentTab(tab);
 			}
 			return;
 		}
 		if (name === "ofdgoChangeInvoice") invoicePanel.result = doc.invoiceResult;
+		if (name === "ofdgoProcessFonts") state.fontProcessResult = doc.fontChanges || [];
 		if (doc.revision === state.editorInfo?.revision && !(name === "ofdgoSaveRichText" && canvasEditor.input?.refreshPending)) {
 			return true;
 		}
@@ -5510,7 +5740,7 @@ async function changeDocument(name, item, ...args) {
 		const sameDocument = previousDocument?.id && previousDocument.id === nextDocument?.id && state.doc.documentIndex === doc.documentIndex;
 		const documentChanged = (state.doc.documentVersion || "") !== (doc.documentVersion || "")
 			|| previousDocument?.id !== nextDocument?.id || previousDocument?.root !== nextDocument?.root
-			&& !(sameDocument && (name === "ofdgoChangeFontBinding" || restoring));
+			&& !(sameDocument && (changingFont || restoring));
 		const packageChanged = documentChanged || name === "ofdgoChangeDocument" || name === "ofdgoImportDocuments" || restoring
 			&& JSON.stringify(doc.documents?.map(entry => [entry.root, entry.id])) !== JSON.stringify(state.doc.documents?.map(entry => [entry.root, entry.id]));
 		if (packageChanged) {
@@ -5532,7 +5762,7 @@ async function changeDocument(name, item, ...args) {
 			state.ofdBytes = null;
 			setEditorInfo(doc);
 			openSeq = advanceDocumentSequence();
-			await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: documentChanged, clearSelection: true,
+			await openDocument({ doc, openSeq, keepLocalFonts: documentChanged, skipAutoFonts: !documentChanged, resetScroll: documentChanged, clearSelection: true,
 				pageIndex: documentChanged ? 0 : state.pageIndex, fitMode: state.fitMode, scale: state.scale });
 			if (openSeq === state.openSeq) {
 				if (!restoring) rememberEditorView(before, revision);
@@ -5601,7 +5831,7 @@ async function changeDocument(name, item, ...args) {
 		}
 	} catch (err) {
 		refreshManagement = false;
-		if (name === "ofdgoChangeFontBinding") err.message = fontBindingError(err.message);
+		if (changingFont) err.message = fontBindingError(err.message);
 		if (name === "ofdgoChangeInvoice") err.message = invoiceIssues([err.message]);
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) {
 			if (name === "ofdgoSaveRichText" && canvasEditor.input?.saving) {
@@ -5866,6 +6096,7 @@ function syncLayoutMode(event) {
 }
 
 function resizeViewer() {
+	pageView.scrollbarWidth();
 	if (state.doc) {
 		pageView.syncThumbnailWindow();
 		pageView.applyFit(false);
@@ -5876,6 +6107,7 @@ function resizeViewer() {
 }
 
 async function boot() {
+	pageView.scrollbarWidth();
 	window.ofdgoTheme.connect(nativeHost, error => showError(error, false));
 	el.appearanceButton.addEventListener("click", () => {
 		el.associationMessage.hidden = true;
@@ -5886,7 +6118,7 @@ async function boot() {
 	for (const button of el.appearancePanel.querySelectorAll("[data-theme-choice]")) button.addEventListener("click", () => window.ofdgoTheme.set(button.dataset.themeChoice));
 	documentDialogs = new DocumentDialogs({document, titlebar: el.documentTitleBar,
 		targets: () => [...document.body.children].filter(node => node !== el.documentTitleBar)});
-	for (const panel of document.querySelectorAll("dialog.form-dialog")) if (panel !== el.printPanel) documentDialogs.register(panel, {persistent: panel === batchElements.Panel});
+	for (const panel of document.querySelectorAll("dialog.form-dialog")) if (panel !== el.printPanel) documentDialogs.register(panel, {persistent: panel === batchElements.Panel, backdropClose: panel === el.exportPanel});
 	documentDialogs.setOwner(documentTab());
 	const openSeq = state.openSeq;
 	setBusy(true, "正在准备引擎", 8, STATUS.engine);
@@ -5963,9 +6195,15 @@ async function openNativeDocument(file) {
 
 async function openNativeFiles(files, launch = false) {
 	if (launch) {
-		for (const file of files) {
-			while (workspace.closing || workspace.switching || batchElements.Panel.open || documentDialogs?.applicationOpen()) await new Promise(resolve => setTimeout(resolve, 100));
-			void openNativeDocument(file).catch(error => showError(error, !state.doc));
+		for (let i = 0; i < files.length; i++) {
+			while (!workspace.closing && (workspace.switching || batchElements.Panel.open || documentDialogs?.applicationOpen())) {
+				await new Promise(resolve => setTimeout(resolve, 100));
+			}
+			if (workspace.closing) {
+				await nativeHost.discardFiles(files.slice(i));
+				return;
+			}
+			await openNativeDocument(files[i]);
 		}
 		return;
 	}
@@ -6031,17 +6269,24 @@ async function applicationChecksum(path, options) {
 }
 
 function watchApplicationUpdates(checksum) {
+	const cooldown = 6 * 60 * 60 * 1000;
 	let checking = false;
 	let retry = false;
+	let lastChecked = 0;
 	async function check(force = false) {
+		const manual = force === true;
 		if (checking) {
-			if (force === true) retry = true;
+			if (manual) retry = true;
 			return;
 		}
 		if (document.hidden || !nativeHost && !navigator.onLine) {
 			return;
 		}
+		if (!manual && lastChecked && Date.now() - lastChecked < cooldown) {
+			return;
+		}
 		checking = true;
+		lastChecked = Date.now();
 		try {
 			if (!nativeHost && !checksum) {
 				if (!navigator.serviceWorker.controller) return;
@@ -6325,6 +6570,11 @@ async function loadWASM(tab = documentTab()) {
 					setProgress(label, data.total ? data.completed / data.total * 100 : null);
 					if (data.phase === "commit") el.importCancel.disabled = el.cancelExportButton.disabled = true;
 				}
+			} else if (data.type === "fonts") {
+				if (visible && wasmRequests.get(data.id)?.openSeq === state.openSeq) {
+					const label = state.fontProcessMode === 2 ? "正在外置字体" : "正在嵌入字体";
+					setProgress(data.total ? `${label} · ${data.completed} / ${data.total}` : label, data.total ? data.completed / data.total * 100 : null);
+				}
 			} else if (data.type === "ready") {
 				state.ready = true;
 				tab.rejectLoad = null;
@@ -6404,6 +6654,7 @@ async function recoverWASM() {
 	try {
 		await openDocument({
 			pageIndex: state.pageIndex,
+			documentIndex: state.doc?.documentIndex,
 			versionID: state.doc?.documentVersion,
 			fitMode: state.fitMode || "width",
 			scale: state.scale,
@@ -6581,8 +6832,8 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 		const source = tab.state.ofdBytes;
 		if (!accepted && tab.worker) {
 			await markWASMExited(tab.state.wasmSeq, null, tab);
-			if (nativeHost) await nativeHost.release(source);
 			tab.state.ofdBytes = null;
+			await releaseNative(source, tab);
 		}
 	}
 	return accepted;
@@ -6598,11 +6849,13 @@ async function openSelectedFonts(event) {
 		return;
 	}
 	const input = event.currentTarget;
-	const files = Array.from(input.files || []).filter((file) => (
-		!input.webkitdirectory || /\.(ttf|otf|ttc)$/i.test(file.name)
+	const allFiles = Array.from(input.files || []);
+	const files = allFiles.filter((file) => (
+		!input.webkitdirectory || /\.(ttf|otf|ttc|otc)$/i.test(file.name)
 	));
 	input.value = "";
 	if (!files.length) {
+		await releaseNative(allFiles);
 		setStatus("暂无字体文件");
 		return;
 	}
@@ -6630,6 +6883,7 @@ async function openSelectedFonts(event) {
 		tab.status = err.message;
 		if (isForegroundDocument(tab)) showError(err, false);
 	} finally {
+		await releaseNative(allFiles);
 		tab.fontTask = false;
 		setBusy(false, "", 0, "", tab);
 	}
@@ -6688,7 +6942,7 @@ async function requestLocalFontsBeforeOpen() {
 	}
 }
 
-async function autoLoadDocumentLocalFonts(openSeq, tab = documentTab()) {
+async function autoLoadDocumentLocalFonts(openSeq, tab = documentTab(), append = false) {
 	const state = tab.state;
 	if (!state.doc?.fonts?.some((font) => !font.embedded) || !fontManager.canReadLocal() || fontManager.permission === "denied") {
 		return false;
@@ -6699,7 +6953,7 @@ async function autoLoadDocumentLocalFonts(openSeq, tab = documentTab()) {
 		if (tab.closed || openSeq !== state.openSeq) {
 			return false;
 		}
-		return await loadDocumentLocalFonts(available, openSeq, tab);
+		return await loadDocumentLocalFonts(available, openSeq, tab, append);
 	} catch (err) {
 		tab.status = err?.name === "NotAllowedError" ? "系统字体未授权" : String(err.message || err);
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) setStatus(tab.status);
@@ -6707,12 +6961,13 @@ async function autoLoadDocumentLocalFonts(openSeq, tab = documentTab()) {
 	}
 }
 
-async function loadDocumentLocalFonts(available, openSeq, tab = documentTab()) {
+async function loadDocumentLocalFonts(available, openSeq, tab = documentTab(), append = false) {
 	const state = tab.state, wasmSeq = state.wasmSeq, doc = state.doc;
 	const current = () => !tab.closed && wasmSeq === state.wasmSeq && doc === state.doc && (openSeq === undefined || openSeq === state.openSeq);
 	if (!current()) return false;
 	const docFonts = state.doc?.fonts || [];
 	if (!docFonts.length || docFonts.every((font) => font.embedded)) {
+		if (append) return false;
 		tab.localFonts = [];
 		tab.status = docFonts.length ? "字体均已内嵌" : "暂无文档字体";
 		if (isForegroundDocument(tab)) {
@@ -6727,11 +6982,17 @@ async function loadDocumentLocalFonts(available, openSeq, tab = documentTab()) {
 	if (!current()) {
 		return false;
 	}
+	const baseFonts = append ? (isForegroundDocument(tab) ? fontManager.localFonts : tab.localFonts) : [];
+	const existing = new Set(baseFonts.map(font => font.name));
+	const pending = selected.filter(item => !existing.has(fontManager.localName(item)));
+	if (append && !pending.length) {
+		return false;
+	}
 	const emptyStatus = available.length === 0 ? "暂无系统字体" : "暂无匹配字体";
-	const fonts = [];
-	for (let i = 0; i < selected.length; i += 1) {
-		setProgress(`正在读取字体 · ${i + 1} / ${selected.length}`, 20 + Math.round(i / selected.length * 60), "", tab);
-		const item = selected[i];
+	const fonts = [...baseFonts];
+	for (let i = 0; i < pending.length; i += 1) {
+		setProgress(`正在读取字体 · ${i + 1} / ${pending.length}`, 20 + Math.round(i / pending.length * 60), "", tab);
+		const item = pending[i];
 		const data = await fontManager.read(item);
 		if (!current()) {
 			return false;
@@ -6746,7 +7007,7 @@ async function loadDocumentLocalFonts(available, openSeq, tab = documentTab()) {
 		updateFontSummary();
 		renderFontList();
 	} else tab.configurePending = true;
-	return fonts.length > 0;
+	return pending.length > 0;
 }
 
 async function selectLocalFonts(fonts, tab = documentTab()) {
@@ -6947,22 +7208,18 @@ function renderFontList() {
 		const row = document.createElement("div");
 		row.className = "font-row";
 		row.dataset.fontId = font.id;
-
 		const source = document.createElement("span");
 		source.className = "font-source";
 		source.textContent = fontSourceText(font.source);
-
 		const enabled = document.createElement("input");
 		enabled.type = "checkbox";
 		enabled.checked = font.enabled;
 		enabled.title = "启用字体";
-
 		const enabledText = document.createElement("span");
 		enabledText.textContent = font.enabled ? "启用" : "停用";
 		enabled.addEventListener("change", async () => {
 			await changeFont(font, { enabled: enabled.checked });
 		});
-
 		const name = document.createElement("input");
 		name.className = "font-name-input";
 		name.value = font.name;
@@ -6975,15 +7232,12 @@ function renderFontList() {
 			}
 			await changeFont(font, { name: next });
 		});
-
 		const main = document.createElement("div");
 		main.className = "font-main";
 		main.append(source, name);
-
 		const toggle = document.createElement("label");
 		toggle.className = "font-toggle";
 		toggle.append(enabled, enabledText);
-
 		const remove = document.createElement("button");
 		remove.className = "icon-button remove-button font-delete";
 		remove.type = "button";
@@ -6991,11 +7245,9 @@ function renderFontList() {
 		remove.addEventListener("click", async () => {
 			await changeFont(font);
 		});
-
 		const actions = document.createElement("div");
 		actions.className = "font-actions";
 		actions.append(toggle, remove);
-
 		row.append(main, actions);
 		fragment.append(row);
 	}
@@ -7046,44 +7298,100 @@ function updateCredentialsType() {
 	el.credentialsKeyPassword.value = "";
 }
 
+const credentialWaiters = [];
+
+function notifyCredentialsAvailable() {
+	for (const resolve of credentialWaiters.splice(0)) resolve();
+}
+
 function finishCredentials(credentials) {
 	const request = credentialRequest;
-	if (request?.tab) request.tab.credentialType = el.credentialsType.value;
+	if (!request) return;
+	if (request.batch) batch.credentialType = el.credentialsType.value;
+	else if (request.tab) request.tab.credentialType = el.credentialsType.value;
 	credentialRequest = null;
-	if (request?.tab) request.tab.credentials = null;
+	if (request.batch) {
+		if (workspace.batchCredentials === request) workspace.batchCredentials = null;
+	} else if (request.tab && request.tab.credentials === request) {
+		request.tab.credentials = null;
+	}
 	el.credentialsPassword.value = "";
 	el.credentialsUser.value = "";
 	el.credentialsCertificate.value = el.credentialsKey.value = "";
 	el.credentialsKeyPassword.value = "";
-	if (el.credentialsPanel.open) el.credentialsPanel.close();
-	if (request && !request.tab?.closed && (request.tab?.opening || request.openSeq === state.openSeq || request.tab === workspace.active)) request.resolve(credentials);
-	else {
-		credentials?.password.fill(0);
-		credentials?.key?.fill(0);
-		credentials?.keyPassword?.fill(0);
-		request?.resolve(null);
-	}
+	el.credentialsFile.textContent = "";
+	el.credentialsFile.title = "";
+	el.credentialsFileRow.hidden = true;
+	const wasOpen = el.credentialsPanel.open;
+	if (wasOpen) el.credentialsPanel.close();
+	const complete = () => {
+		const valid = request.batch ? !batch.canceled : !request.tab?.closed && (request.tab?.opening || request.openSeq === state.openSeq || request.tab === workspace.active);
+		if (valid) request.resolve(credentials);
+		else {
+			credentials?.password?.fill(0);
+			credentials?.key?.fill(0);
+			credentials?.keyPassword?.fill(0);
+			request.resolve(null);
+		}
+		if (!credentialRequest && !workspace.batchCredentials) credentialRequest = documentTab().credentials || null;
+		notifyCredentialsAvailable();
+	};
+	if (wasOpen && request.batch && documentDialogs) el.credentialsPanel.addEventListener("close", complete, { once: true });
+	else complete();
 }
 
-function requestCredentials(code, openSeq, pdf = false, tab = documentTab()) {
-	return new Promise(resolve => {
-		const request = { resolve, openSeq, tab };
-		tab.credentials?.resolve(null);
-		tab.credentials = request;
-		const setup = () => {
-			credentialRequest = request;
-			el.credentialsTypeRow.hidden = pdf;
-			el.credentialsUserRow.hidden = pdf;
-			el.credentialsType.value = pdf ? "password" : tab.credentialType || "password";
-			el.credentialsUser.value = "";
-			updateCredentialsType();
-			el.credentialsStatus.textContent = code === "invalidCredentials" ? "解锁失败，请重试" : "";
-			el.progressPanel.hidden = true;
-		};
-		if (documentDialogs) documentDialogs.openFor(tab, el.credentialsPanel, setup);
-		else { setup(); el.credentialsPanel.showModal(); }
-		if (isForegroundDocument(tab)) (el.credentialsType.value === "certificate" ? el.credentialsCertificate : el.credentialsPassword).focus();
-	});
+function prepareCredentialsDialog(request, code, pdf, fileName, type) {
+	credentialRequest = request;
+	el.credentialsFileRow.hidden = !fileName;
+	el.credentialsFile.textContent = fileName;
+	el.credentialsFile.title = fileName;
+	el.credentialsTypeRow.hidden = pdf;
+	el.credentialsUserRow.hidden = pdf;
+	el.credentialsType.value = pdf ? "password" : type || "password";
+	el.credentialsUser.value = "";
+	updateCredentialsType();
+	el.credentialsStatus.textContent = code === "invalidCredentials" ? "解锁失败，请重试" : "";
+}
+
+async function requestCredentials(code, openSeq, pdf = false, tab = documentTab(), fileName = tab.state?.fileName || "") {
+	let resolveRequest;
+	const promise = new Promise(resolve => { resolveRequest = resolve; });
+	const request = { resolve: resolveRequest, openSeq, tab };
+	tab.credentials?.resolve(null);
+	tab.credentials = request;
+	while (isForegroundDocument(tab) && (workspace.batchCredentials || credentialRequest?.batch)) {
+		await new Promise(resolve => credentialWaiters.push(resolve));
+		if (tab.closed || tab.credentials !== request) {
+			resolveRequest(null);
+			return promise;
+		}
+	}
+	const setup = () => {
+		prepareCredentialsDialog(request, code, pdf, fileName, tab.credentialType);
+		el.progressPanel.hidden = true;
+	};
+	if (documentDialogs) documentDialogs.openFor(tab, el.credentialsPanel, setup);
+	else { setup(); el.credentialsPanel.showModal(); }
+	if (isForegroundDocument(tab)) (el.credentialsType.value === "certificate" ? el.credentialsCertificate : el.credentialsPassword).focus();
+	return promise;
+}
+
+async function requestBatchCredentials(code, pdf = false, fileName = "") {
+	while (!batch.canceled) {
+		if (workspace.batchCredentials || credentialRequest || el.credentialsPanel.open || documentDialogs?.current()?.stack.includes(el.credentialsPanel)) {
+			await new Promise(resolve => credentialWaiters.push(resolve));
+			continue;
+		}
+		return new Promise(resolve => {
+			const request = { resolve, batch: true };
+			workspace.batchCredentials = request;
+			prepareCredentialsDialog(request, code, pdf, fileName, batch.credentialType);
+			if (documentDialogs) documentDialogs.showApplication(el.credentialsPanel, { allowStacked: true });
+			else el.credentialsPanel.showModal();
+			(el.credentialsType.value === "certificate" ? el.credentialsCertificate : el.credentialsPassword).focus();
+		});
+	}
+	return null;
 }
 
 async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, importing = false, pdf = false, tab = documentTab()) {
@@ -7091,6 +7399,7 @@ async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, import
 	const callWASM = (name, ...args) => callTabWASM(tab, name, ...args);
 	pdf ||= !importing && state.sourcePDF;
 	const current = () => !tab.closed && (Boolean(tab.opening) || openSeq === state.openSeq);
+	const fileName = importing ? data?.name || "" : state.fileName || data?.name || "";
 	let credentials = null;
 	try {
 		while (current()) {
@@ -7098,17 +7407,23 @@ async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, import
 				if (pdf) {
 					state.pdfComplete = false;
 					tab.pdfTask = null;
-					return await callWASM("ofdgoOpenPDF", data, fonts, credentials?.password || null, state.renderAnnotations);
+					const result = await callWASM("ofdgoOpenPDF", data, fonts, credentials?.password || null, state.renderAnnotations);
+					state.savedEncrypted = Boolean(result.encryption?.encrypted);
+					state.editorSyncPending = false;
+					return result;
 				}
-				return importing ? await callWASM("ofdgoLoadImport", data?.nativeFile ? data : data.slice(), credentials)
-					: await callWASM("ofdgoOpen", data, fonts, state.renderAnnotations, credentials);
+				if (importing) return await callWASM("ofdgoLoadImport", data?.nativeFile ? data : data.slice(), credentials);
+				const result = await callWASM("ofdgoOpen", data, fonts, state.renderAnnotations, credentials);
+				state.savedEncrypted = Boolean(result.encryption?.encrypted);
+				state.editorSyncPending = false;
+				return result;
 			} catch (err) {
 				if (!current() || !(pdf ? err.code === "pdfPassword" : ["credentialsRequired", "invalidCredentials"].includes(err.code))) throw err;
 				const code = pdf ? credentials ? "invalidCredentials" : "credentialsRequired" : err.code;
 				credentials?.password.fill(0);
 				credentials?.key?.fill(0);
 				credentials?.keyPassword?.fill(0);
-				credentials = await requestCredentials(code, openSeq, pdf, tab);
+				credentials = await requestCredentials(code, openSeq, pdf, tab, fileName);
 				if (!credentials || !current()) {
 					const canceled = new Error("打开已取消");
 					canceled.name = "AbortError";
@@ -7136,6 +7451,7 @@ async function openDocument(options = {}) {
 	}
 	const openSeq = options.openSeq || advanceDocumentSequence();
 	const initialActions = options.activateActions && state.sourcePDF && !state.editing;
+	if (openSeq === state.openSeq && isForegroundDocument(tab)) el.pageFrame.style.visibility = "";
 	const previewPosition = options.previewScroll && state.pageWindow ? pageView.pageWindowAnchor(state.pageWindow) : null;
 	const viewport = options.keepPreview ? el.viewerPanel.getBoundingClientRect() : null;
 	const previewIDs = viewport ? [...state.visiblePages].filter((index) => {
@@ -7150,7 +7466,7 @@ async function openDocument(options = {}) {
 	if (openSeq !== state.openSeq) {
 		return;
 	}
-	const resetLocalFonts = !options.skipAutoFonts;
+	const resetLocalFonts = !options.skipAutoFonts && !options.keepLocalFonts;
 	if (!options.keepSearch) resetSearch();
 	if (resetLocalFonts) {
 		fontManager.localFonts = [];
@@ -7178,6 +7494,10 @@ async function openDocument(options = {}) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
+		if (options.documentIndex !== undefined && options.documentIndex !== (doc.documentIndex || 0)) {
+			doc = await callWASM("ofdgoSelectDocument", options.documentIndex);
+			if (openSeq !== state.openSeq) return;
+		}
 		if (options.versionID !== undefined && options.versionID !== (doc.documentVersion || "")) {
 			doc = await callWASM("ofdgoSelectVersion", options.versionID);
 			if (openSeq !== state.openSeq) return;
@@ -7197,7 +7517,7 @@ async function openDocument(options = {}) {
 			pageView.setContinuous(window.matchMedia("(max-width: 640px)").matches);
 		}
 		state.fitMode = options.fitMode || (state.pageLayout > 1 || !state.continuous && pageCount === 1 ? "height" : "width");
-		if (!options.skipAutoFonts && await autoLoadDocumentLocalFonts(openSeq)) {
+		if (!options.skipAutoFonts && await autoLoadDocumentLocalFonts(openSeq, tab, Boolean(options.keepLocalFonts))) {
 			if (openSeq !== state.openSeq) {
 				return;
 			}
@@ -7219,7 +7539,7 @@ async function openDocument(options = {}) {
 		const pageFonts = state.sourcePDF && !nativeHost && !state.editorInfo ? await fontManager.files(fontManager.records()) : fonts;
 		if (state.editing) await initializeTextFont(tab);
 		if (openSeq !== state.openSeq) return;
-		tab.worker.configurePages?.(!state.editorInfo && !doc.encrypted && state.ofdBytes ? {
+		tab.worker.configurePages?.(!state.editorInfo && !doc.encryption?.encrypted && state.ofdBytes ? {
 			file: state.ofdBytes, fonts: pageFonts, pdf: state.sourcePDF, fontNames: state.sourcePDF ? [...fontManager.localEntries().keys()] : [], annotations: state.renderAnnotations, document: doc.documentIndex, version: doc.documentVersion
 		} : null);
 		if (options.keepPreview) {
@@ -7315,7 +7635,7 @@ async function openDocument(options = {}) {
 		}
 		showError(err, true);
 	} finally {
-		if (initialActions && openSeq === state.openSeq && isForegroundDocument(tab)) el.pageFrame.style.visibility = "";
+		if (openSeq === state.openSeq && isForegroundDocument(tab)) el.pageFrame.style.visibility = "";
 		if (openSeq === state.openSeq || !isForegroundDocument(tab)) setBusy(false, "", 0, "", tab);
 	}
 }
@@ -7374,10 +7694,10 @@ async function loadDocumentDetails(openSeq, details) {
 				const missingFonts = info.fonts?.some(font => font.used > 0 && font.status === "missing" && !knownFonts.has(font.id));
 				Object.assign(state.doc, info, { detailsPending: false, detailsError: "" });
 				renderMeta();
-				if (missingFonts && fontManager.permission === "granted" && !state.editorInfo && !document.body.hasAttribute("data-busy")) {
+				if (missingFonts && fontManager.permission === "granted" && !document.body.hasAttribute("data-busy")) {
 					setBusy(true);
 					try {
-						if (await autoLoadDocumentLocalFonts(openSeq, tab) && openSeq === state.openSeq) await applyFontChange(tab);
+						if (await autoLoadDocumentLocalFonts(openSeq, tab, true) && openSeq === state.openSeq) await applyFontChange(tab);
 					} finally {
 						setBusy(false, "", 0, "", tab);
 					}
@@ -7615,7 +7935,7 @@ function settingsValue(id) {
 	return field?.type === "checkbox" ? field.checked : field?.value ?? "";
 }
 
-async function openDocumentSettings(invoice = false) {
+async function openDocumentSettings(invoice = false, options = {}) {
 	if (!state.doc || !state.ready || state.exporting || document.body.hasAttribute("data-busy")) return;
 	if (resourceManager.pick?.settings) { finishResourcePick(); return; }
 	invoicePanel.drafts.clear();
@@ -7635,8 +7955,12 @@ async function openDocumentSettings(invoice = false) {
 	settings.views.clear();
 	settings.view = "";
 	settings.resource = null;
-	settings.locked = false;
+	settings.locked = Boolean(options.locked);
+	if (options.scope) settings.scope = options.scope;
+	if (options.kind) settings.kind = options.kind;
 	if (!SETTINGS_KINDS.some(([key]) => key === settings.kind) || settings.kind === "actions" && !state.editing) settings.kind = "bookmarks";
+	settingsElements.Tabs.hidden = settings.locked;
+	if (settings.locked) settingsElements.Tabs.replaceChildren();
 	settingsElements.Panel.showModal();
 	await loadDocumentSettings();
 }
@@ -8481,6 +8805,8 @@ function readInvoiceFile(accept) {
 			await accept(text);
 		} catch (error) {
 			if (isForegroundDocument(tab)) settingsElements.Status.textContent = error.message;
+		} finally {
+			await releaseNative(file);
 		}
 	});
 	input.click();
@@ -8927,10 +9253,12 @@ async function writeStyleResource(kind) {
 		value.Type = settingsValue("ColorType");
 		value.BitsPerComponent = Number(settingsValue("Bits"));
 		value.Palette = settingsValue("Palette").split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-		const file = document.querySelector("#settingsProfile").files[0];
+		const profileInput = document.querySelector("#settingsProfile");
+		const file = profileInput.files[0];
 		if (file) {
 			try { profile = new Uint8Array(await file.arrayBuffer()); }
 			catch (error) { if (isForegroundDocument(tab) && sequence === settings.sequence && openSeq === state.openSeq) settingsElements.Status.textContent = error.message; return; }
+			finally { profileInput.value = ""; await releaseNative(file); }
 			if (!isForegroundDocument(tab) || sequence !== settings.sequence || openSeq !== state.openSeq || resource !== settings.resource || open !== settingsElements.Panel.open) return;
 		}
 		else if (settingsValue("ClearProfile")) profile = new Uint8Array();
@@ -9708,6 +10036,7 @@ function downloadAttachment(attachment) {
 el.attachmentCancel.addEventListener("click", () => el.attachmentDialog.close());
 el.attachmentDialog.addEventListener("cancel", event => { if (el.attachmentForm.inert) event.preventDefault(); });
 el.attachmentDialog.addEventListener("close", () => {
+	releaseFormFiles(el.attachmentForm);
 	el.attachmentForm.reset();
 	delete el.attachmentDialog.attachmentEdit;
 });
@@ -9765,8 +10094,9 @@ async function downloadResource(attachment, api, label) {
 	state.exporting = true;
 	updateControls();
 	setBusy(true, `正在读取${label}`, null, `正在读取${label}`, tab);
+	let file = null;
 	try {
-		const file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({ suggestedName: attachment.fileName }) : null;
+		file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({ suggestedName: attachment.fileName }) : null;
 		if (tab.closed || state.doc !== originalDocument) {
 			return;
 		}
@@ -9788,6 +10118,7 @@ async function downloadResource(attachment, api, label) {
 			}
 		}
 	} finally {
+		await releaseNative(file);
 		state.exporting = false;
 		state.exportRequestID = 0;
 		setBusy(false, "", 0, "", tab);
@@ -9866,7 +10197,7 @@ async function applyEncryption(event) {
 		el.encryptionStatus.textContent = "请选择接收者证书";
 		return;
 	}
-	const status = mode === "none" ? "保存后将解密" : mode !== encryptionMode() ? "保存后将加密"
+	const status = mode === "none" ? state.savedEncrypted ? "保存后将解密" : "已取消加密" : mode !== encryptionMode() ? "保存后将加密"
 		: mode === "password" ? "保存后将改密" : "保存后将生效";
 	const options = mode === "none" ? null : { password: new TextEncoder().encode(el.encryptionPassword.value), userName: el.encryptionUser.value.trim() };
 	const certificates = Array.from(el.encryptionCertificates.files || []);
@@ -9878,10 +10209,11 @@ async function applyEncryption(event) {
 		const doc = await callTabWASM(tab, "ofdgoSetEncryption", options);
 		if (!valid()) return;
 		if (!state.editorInfo) state.savedRevision = doc.revision;
-		state.encryptionDirty = true;
+		state.encryptionDirty = state.savedEncrypted || Boolean(doc.encryption?.encrypted);
 		state.editorInfo = { revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
 			pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || [] };
-		state.dirty = state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision;
+		if (!state.editing) state.editorSyncPending = true;
+		state.dirty = state.encryptionDirty || doc.revision !== state.savedRevision;
 		state.doc.encryption = doc.encryption;
 		state.ofdBytes = null;
 		tab.status = status;
@@ -9912,6 +10244,7 @@ async function encryptionRecipients(files) {
 }
 
 function clearEncryptionForm() {
+	releaseFormFiles(el.encryptionForm);
 	el.encryptionForm.inert = false;
 	el.encryptionPassword.value = "";
 	el.encryptionConfirm.value = "";
@@ -10022,9 +10355,7 @@ async function openSealPosition() {
 }
 
 function sealPointer(event) {
-	const preview = sealPreview;
-	const point = pagePoint(event.clientX, event.clientY, preview.surface.getBoundingClientRect(), preview.page, state.rotation);
-	return {x:preview.page.x + point.x, y:preview.page.y + point.y};
+	return pagePoint(event.clientX, event.clientY, sealPreview.surface.getBoundingClientRect(), sealPreview.page, state.rotation);
 }
 
 function beginSealDrag(event) {
@@ -10063,9 +10394,9 @@ function moveSealDrag(event) {
 		height = width * count / preview.ratio;
 	}
 	const x = dx < 0 ? start.x - width : start.x, y = dy < 0 ? start.y - height : start.y;
-	preview.box = {x:preview.mode === "seam" ? page.x + page.width - x - width : x, y, width:width * count, height};
+	preview.box = {x:preview.mode === "seam" ? page.width - x - width : x, y, width:width * count, height};
 	sealPosition.Stamp.hidden = false;
-	Object.assign(sealPosition.Stamp.style, {left:`${(x-page.x)/page.width*100}%`, top:`${(y-page.y)/page.height*100}%`, width:`${width/page.width*100}%`, height:`${height/page.height*100}%`});
+	Object.assign(sealPosition.Stamp.style, {left:`${x/page.width*100}%`, top:`${y/page.height*100}%`, width:`${width/page.width*100}%`, height:`${height/page.height*100}%`});
 	Object.assign(sealPosition.Image.style, {width:`${count*100}%`, left:`${preview.mode === "seam" ? -preview.selected.indexOf(page.index)*100 : 0}%`});
 }
 
@@ -10101,6 +10432,27 @@ function updateSignPlacement() {
 	document.querySelector('label[for="signX"]').textContent = el.signPlacement.value === "seam" ? "右侧内缩" : "横向";
 }
 
+function updateSignEncryption() {
+	const required = Boolean(state.doc?.encryption?.policyRequired);
+	el.signEncryptionFields.hidden = !required;
+	const mode = required ? el.signEncryptionType.value : "";
+	const password = mode === "password";
+	const certificates = mode === "certificate";
+	el.signEncryptionUserRow.hidden = el.signEncryptionPasswordRow.hidden = el.signEncryptionConfirmRow.hidden = !password;
+	el.signEncryptionCertificatesRow.hidden = !certificates;
+	el.signEncryptionPassword.required = el.signEncryptionConfirm.required = password;
+	el.signEncryptionCertificates.required = certificates;
+	if (!password) {
+		el.signEncryptionUser.value = "";
+		el.signEncryptionPassword.value = "";
+		el.signEncryptionConfirm.value = "";
+	}
+	if (!certificates && el.signEncryptionCertificates.files?.length) {
+		releaseNative(Array.from(el.signEncryptionCertificates.files));
+		el.signEncryptionCertificates.value = "";
+	}
+}
+
 async function signDocument(event) {
 	const tab = documentTab(), state = tab.state, wasmSeq = state.wasmSeq;
 	const valid = () => !tab.closed && wasmSeq === state.wasmSeq;
@@ -10117,16 +10469,41 @@ async function signDocument(event) {
 		el.signStatus.textContent = "请选择证书、私钥和信任根";
 		return;
 	}
+	const policyRequired = Boolean(state.doc.encryption?.policyRequired);
+	const encryptionMode = policyRequired ? el.signEncryptionType.value : "";
+	if (encryptionMode === "password") {
+		if (!el.signEncryptionPassword.value) {
+			el.signStatus.textContent = "请输入口令";
+			el.signEncryptionPassword.focus();
+			return;
+		}
+		if (el.signEncryptionPassword.value !== el.signEncryptionConfirm.value) {
+			el.signStatus.textContent = "口令不一致";
+			el.signEncryptionConfirm.focus();
+			return;
+		}
+	}
+	if (encryptionMode === "certificate" && !el.signEncryptionCertificates.files?.length) {
+		el.signStatus.textContent = "请选择接收者证书";
+		return;
+	}
 	if (el.signMode.value === "replace" && !await requestConfirmation("替换现有签名，是否继续？")) return;
 	let key;
+	let file = null;
 	const keyPassword = new TextEncoder().encode(el.signKeyPassword.value);
+	const encryptionPassword = encryptionMode === "password" ? new TextEncoder().encode(el.signEncryptionPassword.value) : null;
+	const encryptionUser = encryptionMode === "password" ? el.signEncryptionUser.value.trim() : "";
+	const encryptionCerts = encryptionMode === "certificate" ? Array.from(el.signEncryptionCertificates.files || []) : [];
 	const files = Object.fromEntries(["Key", "Certificate", "Roots", "Intermediates", "Seal"].map(name => [name, Array.from(el[`sign${name}`].files || [])]));
 	const options = { keyPassword, pages:el.signPages.value.trim(), placement:el.signPlacement.value,
 		x:Number(el.signX.value), y:Number(el.signY.value), width:Number(el.signWidth.value), height:Number(el.signHeight.value),
 		mode:el.signMode.value, lock:el.signLock.checked, compression:compressionOptions(el.outputCompression.value) };
+	if (policyRequired) options.encryptionMode = encryptionMode;
 	const name = `${baseFileName()}_签章.ofd`;
 	el.signKeyPassword.value = "";
 	el.signKey.value = "";
+	el.signEncryptionPassword.value = "";
+	el.signEncryptionConfirm.value = "";
 	state.exporting = true;
 	state.signing = true;
 	state.signCanceled = false;
@@ -10134,7 +10511,7 @@ async function signDocument(event) {
 	setBusy(true, "正在签署文档", null, "正在签署文档", tab);
 	el.signForm.querySelectorAll("input, select, button[type=submit]").forEach(input => { input.disabled = true; });
 	try {
-		const file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({suggestedName:name, types:[{description:"OFD",accept:{"application/ofd":[".ofd"]}}]}) : null;
+		file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({suggestedName:name, types:[{description:"OFD",accept:{"application/ofd":[".ofd"]}}]}) : null;
 		if (!valid() || state.signCanceled) return;
 		if (active() && (canvasEditor.input || canvasEditor.crop || canvasEditor.nudge || canvasEditor.nudgeCommit)) {
 			setBusy(false, "", 0, "", tab);
@@ -10147,6 +10524,11 @@ async function signDocument(event) {
 		if (!valid() || state.signCanceled) return;
 		const [certificate, roots, intermediates, seal] = await Promise.all(["Certificate", "Roots", "Intermediates", "Seal"].map(name => securityFiles({files:files[name]})));
 		Object.assign(options, {key, certificate:certificate[0], roots, intermediates, seal:seal[0] || null});
+		if (encryptionMode === "password") {
+			options.encryption = { password: encryptionPassword, userName: encryptionUser };
+		} else if (encryptionMode === "certificate") {
+			options.encryption = { recipients: await encryptionRecipients(encryptionCerts) };
+		}
 		if (!valid() || state.signCanceled) return;
 		const result = await callTabWASM(tab, "ofdgoSaveSigned", null, options, file);
 		if (!valid()) return;
@@ -10159,6 +10541,8 @@ async function signDocument(event) {
 	} finally {
 		key?.fill(0);
 		keyPassword.fill(0);
+		encryptionPassword?.fill(0);
+		await releaseNative([file, ...files.Key]);
 		state.signing = false;
 		state.exporting = false;
 		state.exportRequestID = 0;
@@ -10168,6 +10552,7 @@ async function signDocument(event) {
 			el.signCancel.disabled = false;
 			if (state.signCanceled) el.signStatus.textContent = "签署已取消";
 			updateSignPlacement();
+			updateSignEncryption();
 			el.cancelExportButton.hidden = true;
 		});
 		if (valid()) {
@@ -10193,7 +10578,17 @@ async function verifyDocument(event) {
 	};
 	if (!state.doc || document.body.hasAttribute("data-busy")) return;
 	const files = Object.fromEntries(["Roots", "Certs", "TimeRoots", "Tokens", "CRLs", "OCSP"].map(name => [name, Array.from(el[`verify${name}`].files || [])]));
+	const verifyTimeValue = el.verifyTime.value.trim();
 	const options = { requireTimestamp:el.verifyRequireTime.checked, requireRevocation:el.verifyRequireRevocation.checked };
+	if (verifyTimeValue) {
+		const parsed = new Date(verifyTimeValue);
+		if (Number.isNaN(parsed.getTime())) {
+			el.verifyStatus.textContent = "验证时间无效";
+			el.verifyTime.focus();
+			return;
+		}
+		options.verifyTime = parsed.toISOString();
+	}
 	setBusy(true, "正在验证签名", null, "正在验证签名", tab);
 	el.verifyForm.inert = true;
 	try {
@@ -10258,91 +10653,129 @@ async function updateExportRange() {
 
 function addBatchFiles(files) {
 	let rejected = false;
+	const discarded = [];
 	for (const file of files) {
-		if (!/\.(ofd|pdf)$/i.test(file.name)) { rejected = true; continue; }
+		if (!/\.(ofd|pdf)$/i.test(file.name)) {
+			rejected = true;
+			discarded.push(file);
+			continue;
+		}
 		batch.items.push({ file, format: "", pages: "", status: "pending", text: "待转", details: [] });
 	}
+	if (discarded.length) releaseNative(discarded);
 	if (rejected) batchElements.Status.textContent = "仅支持PDF、OFD";
 	renderBatchList();
 }
 
-function renderBatchList() {
-	const fragment = document.createDocumentFragment();
-	for (const item of batch.items) {
-		const row = document.createElement("tr");
-		const name = row.insertCell();
-		const label = document.createElement("span");
-		label.className = "convert-name";
-		label.textContent = item.file.name;
-		label.title = item.file.name;
-		name.append(label);
-		let detailRow;
-		if (item.details.length) {
-			detailRow = document.createElement("tr");
-			detailRow.className = "convert-details";
-			const cell = detailRow.insertCell();
-			cell.colSpan = 5;
-			const details = document.createElement("details");
-			const summary = document.createElement("summary");
-			summary.textContent = "提示";
-			const messages = document.createElement("ul");
-			messages.className = "convert-messages";
-			messages.tabIndex = 0;
-			for (const message of item.details) {
-				const entry = document.createElement("li");
-				entry.textContent = message;
-				messages.append(entry);
-			}
-			details.append(summary, messages);
-			cell.append(details);
+function batchCompletedStatus(status) {
+	return status === "done" || status === "ready" || status === "unchanged" || status === "failed" || status === "canceled";
+}
+
+function batchSpacerRow(height) {
+	const row = document.createElement("tr");
+	row.className = "convert-spacer";
+	const cell = row.insertCell();
+	cell.colSpan = 5;
+	cell.style.height = `${Math.max(0, Math.round(height))}px`;
+	return row;
+}
+
+function buildBatchRow(item, index) {
+	const row = document.createElement("tr");
+	row.dataset.batchIndex = String(index);
+	const name = row.insertCell();
+	const label = document.createElement("span");
+	label.className = "convert-name";
+	label.textContent = item.file.name;
+	label.title = item.file.name;
+	name.append(label);
+	let detailRow = null;
+	if (item.details.length) {
+		detailRow = document.createElement("tr");
+		detailRow.className = "convert-details";
+		const cell = detailRow.insertCell();
+		cell.colSpan = 5;
+		const details = document.createElement("details");
+		const summary = document.createElement("summary");
+		summary.textContent = "提示";
+		const messages = document.createElement("ul");
+		messages.className = "convert-messages";
+		messages.tabIndex = 0;
+		for (const message of item.details) {
+			const entry = document.createElement("li");
+			entry.textContent = message;
+			messages.append(entry);
 		}
-		const reset = () => {
-			item.details = [];
-			detailRow?.remove();
-			batchStatus(item, "pending", "待转");
-			batchElements.Status.textContent = "";
-			batchElements.Progress.value = 0;
-			updateBatchControls();
-		};
-		const pagesCell = row.insertCell();
-		pagesCell.dataset.label = "页码";
-		const pages = document.createElement("input");
-		pages.type = "text";
-		pages.placeholder = "全部";
-		pages.title = "如1-3,5；留空为全部";
-		pages.value = item.pages;
-		pages.disabled = batch.running;
-		pages.addEventListener("change", () => { item.pages = pages.value; reset(); });
-		pagesCell.append(pages);
-		const formatCell = row.insertCell();
-		formatCell.dataset.label = "格式";
-		const formatControl = document.createElement("span");
-		formatControl.className = "convert-format";
-		const format = document.createElement("select");
-		format.append(new Option("默认", ""), ...batch.formats.map(value => new Option(value.label, value.value)));
-		format.value = item.format;
-		format.disabled = batch.running;
-		format.addEventListener("change", () => { item.format = format.value; reset(); });
-		formatControl.append(format);
-		formatCell.append(formatControl);
-		item.cell = row.insertCell();
-		item.cell.textContent = item.text;
-		item.cell.dataset.status = item.status;
-		item.cell.dataset.label = "状态";
-		const action = row.insertCell();
-		const remove = document.createElement("button");
-		remove.type = "button";
-		remove.className = "icon-button remove-button";
-		remove.title = "移除";
-		remove.disabled = batch.running;
-		remove.addEventListener("click", () => { batch.items.splice(batch.items.indexOf(item), 1); renderBatchList(); });
-		action.append(remove);
-		fragment.append(row);
-		if (detailRow) fragment.append(detailRow);
+		details.append(summary, messages);
+		cell.append(details);
 	}
+	const pagesCell = row.insertCell();
+	pagesCell.dataset.label = "页码";
+	const pages = document.createElement("input");
+	pages.type = "text";
+	pages.placeholder = "全部";
+	pages.title = "如1-3,5；留空为全部";
+	pages.value = item.pages;
+	pages.disabled = batch.running;
+	pagesCell.append(pages);
+	const formatCell = row.insertCell();
+	formatCell.dataset.label = "格式";
+	const formatControl = document.createElement("span");
+	formatControl.className = "convert-format";
+	const format = document.createElement("select");
+	format.append(new Option("默认", ""), ...batch.formats.map(value => new Option(value.label, value.value)));
+	format.value = item.format;
+	format.disabled = batch.running;
+	formatControl.append(format);
+	formatCell.append(formatControl);
+	item.cell = row.insertCell();
+	item.cell.textContent = item.text;
+	item.cell.dataset.status = item.status;
+	item.cell.dataset.label = "状态";
+	const action = row.insertCell();
+	const remove = document.createElement("button");
+	remove.type = "button";
+	remove.className = "icon-button remove-button";
+	remove.title = "移除";
+	remove.disabled = batch.running;
+	action.append(remove);
+	return detailRow ? [row, detailRow] : [row];
+}
+
+function renderBatchList(force = true) {
+	const total = batch.items.length;
+	const virtual = total > 80;
+	let start = 0;
+	let end = total;
+	if (virtual) {
+		const container = batchElements.List.closest(".convert-table");
+		const rowHeight = Math.max(36, batch.rowHeight || 56);
+		const height = container?.clientHeight || 420;
+		const top = container?.scrollTop || 0;
+		const overscan = 12;
+		start = Math.max(0, Math.floor(top / rowHeight) - overscan);
+		end = Math.min(total, Math.ceil((top + height) / rowHeight) + overscan);
+	}
+	if (!force && start === batch.range[0] && end === batch.range[1]) return;
+	for (const row of batchElements.List.children) {
+		const index = Number(row.dataset.batchIndex);
+		if (Number.isInteger(index) && batch.items[index]) batch.items[index].cell = null;
+	}
+	batch.range = [start, end];
+	const fragment = document.createDocumentFragment();
+	if (virtual && start > 0) fragment.append(batchSpacerRow(start * (batch.rowHeight || 56)));
+	for (let i = start; i < end; i++) fragment.append(...buildBatchRow(batch.items[i], i));
+	if (virtual && end < total) fragment.append(batchSpacerRow((total - end) * (batch.rowHeight || 56)));
 	batchElements.List.replaceChildren(fragment);
-	batchElements.Empty.hidden = batch.items.length > 0;
-	updateBatchControls();
+	if (virtual) {
+		const sample = batchElements.List.querySelector("tr[data-batch-index]");
+		if (sample) {
+			const measured = sample.getBoundingClientRect().height;
+			if (measured >= 32 && Math.abs(measured - batch.rowHeight) >= 4) batch.rowHeight = measured;
+		}
+	}
+	batchElements.Empty.hidden = total > 0;
+	if (force) updateBatchControls();
 }
 
 function updateBatchControls() {
@@ -10369,10 +10802,31 @@ function batchUsesDPI(item) {
 }
 
 function batchStatus(item, status, text) {
+	const previous = item.status;
+	if (item.inBatch && previous !== status) {
+		if (previous === "running") batch.activeJobs.delete(item);
+		if (batchCompletedStatus(previous)) batch.counts.completed = Math.max(0, batch.counts.completed - 1);
+		if (previous === "done") batch.counts.done = Math.max(0, batch.counts.done - 1);
+		if (previous === "failed") batch.counts.failed = Math.max(0, batch.counts.failed - 1);
+		if (status === "running") batch.activeJobs.add(item);
+		if (batchCompletedStatus(status)) batch.counts.completed += 1;
+		if (status === "done") batch.counts.done += 1;
+		if (status === "failed") batch.counts.failed += 1;
+	}
 	item.status = status;
 	item.text = text;
-	item.cell.textContent = text;
-	item.cell.dataset.status = status;
+	if (item.cell) {
+		item.cell.textContent = text;
+		item.cell.dataset.status = status;
+	}
+}
+
+function scheduleBatchProgress() {
+	if (batch.canceled || batch.progressFrame) return;
+	batch.progressFrame = requestAnimationFrame(() => {
+		batch.progressFrame = 0;
+		updateBatchProgress();
+	});
 }
 
 function batchProgress(item, position, count, progress) {
@@ -10384,23 +10838,21 @@ function batchProgress(item, position, count, progress) {
 	const current = { item, position, count, progress, started: sameStage ? previous.started : now, updated: now };
 	if (item) item.progress = current;
 	else batch.progress = current;
-	updateBatchProgress();
+	scheduleBatchProgress();
 }
 
 function updateBatchProgress() {
 	if (batch.canceled) return;
-	for (const item of batch.jobs) {
+	for (const item of batch.activeJobs) {
 		if (item.status !== "running" || !item.progress) continue;
 		const progress = item.progress.progress;
 		const stage = progress.phase?.includes("compress") ? "压缩" : progress.phase?.startsWith("write") ? "写入" : { open: "读取", pages: "解析", convert: "转换", prepare: "准备", fonts: "字体", export: "导出" }[progress.phase] || "处理";
 		batchStatus(item, "running", `${stage}${progress.total > 0 ? `\n${progress.completed}/${progress.total}` : ""}`);
 	}
 	if (!batch.progress) {
-		const completed = batch.jobs.filter(item => ["done", "ready", "unchanged", "failed", "canceled"].includes(item.status)).length;
-		const running = batch.jobs.filter(item => item.status === "running").length;
-		batchElements.Status.textContent = `完成 ${completed}/${batch.jobs.length} · 运行 ${running}`;
+		batchElements.Status.textContent = `完成 ${batch.counts.completed}/${batch.jobs.length} · 运行 ${batch.activeJobs.size}`;
 		batchElements.Progress.max = batch.jobs.length || 1;
-		batchElements.Progress.value = completed;
+		batchElements.Progress.value = batch.counts.completed;
 		return;
 	}
 	const { item, position, count, progress, started } = batch.progress;
@@ -10483,18 +10935,19 @@ function startBatchWorker() {
 
 function cancelBatch() {
 	batch.canceled = true;
+	if (batch.progressFrame) { cancelAnimationFrame(batch.progressFrame); batch.progressFrame = 0; }
 	batchElements.Cancel.disabled = true;
 	batch.progress = null;
 	batchElements.Status.textContent = "正在取消";
-	const request = batch.unlocking;
-	if (request && request.tab.credentials === request) {
+	const request = workspace.batchCredentials;
+	if (request) {
 		if (request === credentialRequest) finishCredentials(null);
 		else {
-			request.tab.credentials = null;
-			documentDialogs.closeFor(request.tab, el.credentialsPanel);
+			workspace.batchCredentials = null;
 			request.resolve(null);
 		}
 	}
+	notifyCredentialsAvailable();
 	for (const slot of batch.workers) slot.cancel?.();
 	for (const [id, request] of batch.requests) request.slot.worker.postMessage({ type: "cancel", id });
 }
@@ -10514,6 +10967,7 @@ async function runBatch() {
 	const backend = state.renderBackend;
 	const fontKey = [fontManager.permission, fontManager.records().map(font => [font.id, font.name, font.enabled, font.checksum])];
 	for (const item of batch.items) {
+		item.inBatch = false;
 		const format = batch.formats.find(format => format.value === (item.format || defaultFormat.value));
 		const key = JSON.stringify([format.value, pageRange(item), batchUsesDPI(item) ? dpi : 0, archive, backend, fontKey, compression, format.value === "ofd" ? Number(batchElements.FontMode.value) : 0]);
 		if (item.settingsKey !== key) {
@@ -10523,7 +10977,7 @@ async function runBatch() {
 			item.settingsKey = key;
 		}
 	}
-	renderBatchList();
+	renderBatchList(true);
 	let jobs = batch.items.filter(item => item.status !== "done" && item.status !== "unchanged");
 	if (!jobs.length) {
 		jobs = [...batch.items];
@@ -10533,22 +10987,33 @@ async function runBatch() {
 	batch.canceled = false;
 	batch.progress = null;
 	batch.jobs = jobs;
+	batch.activeJobs.clear();
+	batch.counts = { completed: 0, done: 0, failed: 0 };
+	for (const item of jobs) {
+		item.inBatch = true;
+		item.status = "pending";
+		item.text = "待转";
+	}
 	batch.credentials = Promise.resolve();
-	const progressTimer = window.setInterval(updateBatchProgress, 1000);
-	renderBatchList();
+	const progressTimer = window.setInterval(scheduleBatchProgress, 1000);
+	renderBatchList(true);
 	window.addEventListener("beforeunload", warnBatch);
 	let destination = null;
 	let zipFile = null;
 	let storage = null;
 	let stagingName = "";
+	let tempDir = null;
 	let packed = false;
 	const results = new Array(jobs.length);
 	try {
 		if (archive) {
 			zipFile = await saveFilePicker({ suggestedName: "转换结果.zip", types: [{ description: "ZIP", accept: { "application/zip": [".zip"] } }] });
-			if (!nativeHost && navigator.storage?.getDirectory) {
+			if (nativeHost) {
+				tempDir = await nativeHost.createTempDirectory();
+				destination = tempDir;
+			} else if (navigator.storage?.getDirectory) {
 				storage = await navigator.storage.getDirectory();
-				stagingName = `ofdgo-convert-${crypto.randomUUID()}`;
+				stagingName = `ofdgo-convert-${randomID()}`;
 				destination = await storage.getDirectoryHandle(stagingName, { create: true });
 			}
 		} else destination = await directoryPicker();
@@ -10588,7 +11053,7 @@ async function runBatch() {
 				const position = next++;
 				const { item, format, options } = plans[position];
 				batchStatus(item, "running", "准备");
-				updateBatchProgress();
+				scheduleBatchProgress();
 				try {
 					if (!slot || slot.error) slot = await startBatchWorker();
 					for (;;) {
@@ -10610,10 +11075,7 @@ async function runBatch() {
 							options.credentials?.keyPassword?.fill(0);
 							const unlock = batch.credentials.then(async () => {
 								if (batch.canceled) throw new DOMException("已取消转换", "AbortError");
-								const credentials = requestCredentials(code, state.openSeq, err.code === "pdfPassword");
-								batch.unlocking = documentTab().credentials;
-								try { return await credentials; }
-								finally { batch.unlocking = null; }
+								return requestBatchCredentials(code, err.code === "pdfPassword", item.file.name);
 							});
 							batch.credentials = unlock.then(() => {}, () => {});
 							options.credentials = await unlock;
@@ -10636,7 +11098,7 @@ async function runBatch() {
 						slot = null;
 					}
 				}
-				updateBatchProgress();
+				scheduleBatchProgress();
 			}
 		};
 		const running = Array.from({ length: parallel }, (_, index) => (async () => {
@@ -10654,21 +11116,28 @@ async function runBatch() {
 			packed = true;
 			for (const item of jobs) if (item.status === "ready") batchStatus(item, "done", "完成");
 		}
-		const done = jobs.filter(item => item.status === "done").length;
-		const failed = jobs.filter(item => item.status === "failed").length;
-		const unchanged = batch.items.filter(item => item.status === "unchanged").length;
-		batchElements.Status.textContent = `${batch.canceled ? "取消 · " : ""}完成 ${done}${failed ? ` · 失败 ${failed}` : ""}${unchanged ? ` · 原样 ${unchanged}` : ""}`;
+		const unchanged = batch.items.reduce((total, item) => total + (item.status === "unchanged" ? 1 : 0), 0);
+		batchElements.Status.textContent = `${batch.canceled ? "取消 · " : ""}完成 ${batch.counts.done}${batch.counts.failed ? ` · 失败 ${batch.counts.failed}` : ""}${unchanged ? ` · 原样 ${unchanged}` : ""}`;
 	} catch (err) {
 		batchElements.Status.textContent = err.name === "AbortError" ? "转换取消" : err.message;
 	} finally {
 		window.clearInterval(progressTimer);
+		if (batch.progressFrame) { cancelAnimationFrame(batch.progressFrame); batch.progressFrame = 0; }
+		if (batch.renderFrame) { cancelAnimationFrame(batch.renderFrame); batch.renderFrame = 0; }
 		batch.progress = null;
+		batch.activeJobs.clear();
+		for (const item of jobs) item.inBatch = false;
 		if (!batchElements.Progress.hasAttribute("value")) batchElements.Progress.value = 0;
 		if (archive && !packed) for (const item of jobs) if (item.status === "ready") { item.status = "pending"; item.text = "待转"; }
-		for (const slot of batch.workers) slot.worker.terminate();
+		await Promise.all([...batch.workers].map(slot => Promise.resolve(slot.worker.terminate())));
 		batch.workers.clear();
 		batch.requests.clear();
-		if (nativeHost) await nativeHost.release(results);
+		if (nativeHost) await nativeHost.release(results, { temporaryOnly: true });
+		await releaseNative([zipFile, destination && destination !== tempDir ? destination : null]);
+		if (tempDir) {
+			try { await nativeHost.removeTempDirectory(tempDir); }
+			catch { batchElements.Status.textContent += " · 临时文件清理失败"; }
+		}
 		batch.fontData?.clear();
 		batch.localFonts?.clear();
 		if (storage && stagingName) {
@@ -10677,7 +11146,7 @@ async function runBatch() {
 		}
 		batch.running = false;
 		window.removeEventListener("beforeunload", warnBatch);
-		renderBatchList();
+		renderBatchList(true);
 	}
 }
 
@@ -10719,7 +11188,6 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 	let retrySaveAs = false;
 	let background = false;
 	let savedRevision = null;
-	let packageDirty = false;
 	let encryptionDirty = false;
 	let snapshotPrepared = false;
 	let finishSave;
@@ -10729,8 +11197,10 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 	state.saving = saving && indices === null;
 	updateControls();
 	setBusy(true, "正在生成文件", null, status, tab);
+	let file = null;
+	let previousHandle = null;
 	try {
-		let file = saving && indices === null && !saveAs ? state.saveHandle : null;
+		file = saving && indices === null && !saveAs ? state.saveHandle : null;
 		if (file && !nativeHost) {
 			try {
 				const permission = await file.queryPermission({mode: "readwrite"});
@@ -10765,12 +11235,11 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 		if (saving && indices === null && !readingSave) {
 			snapshotPrepared = true;
 			savedRevision = state.editorInfo?.revision;
-			packageDirty = state.packageDirty;
 			encryptionDirty = state.encryptionDirty;
 			await callWASM("ofdgoPrepareSave");
 			if (tab.closed || wasmSeq !== state.wasmSeq) return;
 		}
-		if (saving && indices === null) {
+		if (saving && indices === null && !readingSave) {
 			background = true;
 			state.exporting = false;
 			setBusy(false, "", 0, "", tab);
@@ -10785,34 +11254,71 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			return;
 		}
 		if (readingSave && file) {
-			const writer = await file.createWritable();
+			const controller = new AbortController();
+			let writer = null, creating = null, aborted = false;
+			const abortWriter = () => {
+				if (aborted) return;
+				aborted = true;
+				if (writer) return writer.abort().catch(() => {});
+				if (creating) creating.then(w => w?.abort?.().catch(() => {})).catch(() => {});
+			};
+			state.exportCancel = () => {
+				controller.abort();
+				abortWriter();
+			};
+			if (active()) {
+				el.cancelExportButton.hidden = false;
+				el.cancelExportButton.disabled = false;
+			}
+			const abortPromise = new Promise((_, reject) => {
+				controller.signal.addEventListener("abort", () => reject(new DOMException(`${action}已取消`, "AbortError")), { once: true });
+			});
 			try {
-				await writer.write(result.blob);
+				if (controller.signal.aborted) throw new DOMException(`${action}已取消`, "AbortError");
+				creating = file.createWritable();
+				writer = await Promise.race([creating, abortPromise]);
+				if (controller.signal.aborted) throw new DOMException(`${action}已取消`, "AbortError");
+				const source = result.blob;
+				if (!nativeHost && source instanceof Blob && source.size > 2 * 1024 * 1024) {
+					const chunk = 2 * 1024 * 1024;
+					for (let offset = 0; offset < source.size; offset += chunk) {
+						if (controller.signal.aborted) throw new DOMException(`${action}已取消`, "AbortError");
+						await Promise.race([writer.write(source.slice(offset, offset + chunk)), abortPromise]);
+						if (active()) setProgress("正在保存文件", Math.round(Math.min(source.size, offset + chunk) / source.size * 100));
+					}
+				} else {
+					await Promise.race([writer.write(source), abortPromise]);
+				}
+				if (controller.signal.aborted) throw new DOMException(`${action}已取消`, "AbortError");
 				if (destination?.saveStamp) {
 					const current = await file.getFile();
 					if (current.size !== destination.saveStamp.size || current.lastModified !== destination.saveStamp.modified) throw new Error("文件已被修改，请另存");
 				}
-				await writer.close();
+				if (controller.signal.aborted) throw new DOMException(`${action}已取消`, "AbortError");
+				await Promise.race([writer.close(), abortPromise]);
 			} catch (error) {
-				await writer.abort().catch(() => {});
+				await abortWriter();
 				throw error;
+			} finally {
+				state.exportCancel = null;
 			}
 			delete result.blob;
 		}
 		if (result.blob) {
 			downloadBytes(result.blob, result.mime, fileName);
 		}
-		if (saving && indices === null && state.editorInfo && file && savedRevision != null) {
+		if (saving && indices === null && state.editorInfo && (file || result.blob) && savedRevision != null) {
 			state.savedRevision = snapshotPrepared ? savedRevision : state.editorInfo.revision;
-			if (!snapshotPrepared || state.editorInfo.revision === savedRevision) {
-				if (!snapshotPrepared || state.packageDirty === packageDirty) state.packageDirty = false;
-				if (!snapshotPrepared || state.encryptionDirty === encryptionDirty) state.encryptionDirty = false;
+			if ((!snapshotPrepared || state.editorInfo.revision === savedRevision) && (!snapshotPrepared || state.encryptionDirty === encryptionDirty)) {
+				state.encryptionDirty = false;
+				state.savedEncrypted = Boolean(state.doc?.encryption?.encrypted);
 			}
-			state.dirty = state.packageDirty || state.encryptionDirty || state.editorInfo.revision !== state.savedRevision;
+			state.dirty = state.encryptionDirty || state.editorInfo.revision !== state.savedRevision;
 			if (active()) updatePendingChanges();
 			updateWorkspaceDirty();
 		}
 		if (saving && indices === null && file) {
+			if (state.saveHandle && state.saveHandle !== file) previousHandle = state.saveHandle;
 			state.saveHandle = file;
 			state.fileName = file.name;
 			state.saveStamp = null;
@@ -10845,6 +11351,9 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 	} finally {
 		try {
 			if (snapshotPrepared) await callWASM("ofdgoDiscardSave").catch(() => {});
+			if (previousHandle) await releaseNative(previousHandle);
+			if (file && file !== state.saveHandle) await releaseNative(file);
+			state.exportCancel = null;
 			state.saving = false;
 			state.saveRequestID = 0;
 			if (!background) {
@@ -10853,7 +11362,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 				if (wasmSeq === state.wasmSeq) setBusy(false, "", 0, "", tab);
 			}
 			if (active()) {
-				el.cancelExportButton.hidden = !state.exportRequestID;
+				el.cancelExportButton.hidden = !state.exportRequestID && !state.exportCancel;
 				if (!document.body.hasAttribute("data-busy")) el.progressPanel.hidden = true;
 				if (wasmSeq === state.wasmSeq) updateControls();
 			} else if (workspace.active === tab) tab.controlsPending = true;
@@ -10874,6 +11383,12 @@ function cancelExport() {
 	}
 	const tab = documentTab();
 	const target = tab.state;
+	if (target.exportCancel && !el.cancelExportButton.disabled) {
+		el.cancelExportButton.disabled = true;
+		setProgress("正在取消操作", null);
+		target.exportCancel();
+		return;
+	}
 	const requestID = operationRequest(tab)?.id || target.exportRequestID || target.saveRequestID;
 	if (!requestID || el.cancelExportButton.disabled) {
 		return;
@@ -11067,7 +11582,7 @@ function pageLinkTarget(link, page, surface, openAction) {
 	}
 	if (link.dest) {
 		const target = pageIndexByID(state.doc.pages, link.dest.pageID);
-		return { href: target < 0 ? "#" : `#page-${target + 1}`, title: target < 0 ? "文档链接" : `第${target + 1}页`, activate: () => navigateDestination(link.dest, openAction) };
+		return { href: target < 0 ? "#" : `#page-${target + 1}`, title: target < 0 ? "文档链接" : `第${target + 1}页`, activate: () => navigateDestination(link.dest, openAction, page?.index ?? state.pageIndex) };
 	}
 	if (link.attachment) {
 		return { href: "#", title: link.fileName ? `下载附件：${link.fileName}` : "下载附件", activate: () => {
@@ -11146,7 +11661,7 @@ function destinationPoint(page, x, y) {
 	return { x, y };
 }
 
-async function navigateDestination(dest, openAction) {
+async function navigateDestination(dest, openAction, sourcePage = state.pageIndex) {
 	if (document.body.hasAttribute("data-busy") && !openAction?.initial) return;
 	if (openAction && state.openActionTask !== openAction) return false;
 	const index = pageIndexByID(state.doc.pages, dest.pageID);
@@ -11173,6 +11688,7 @@ async function navigateDestination(dest, openAction) {
 		const page = state.doc.pages[index], size = pageView.pageViewSize(page);
 		const origin = destinationPoint(page, 0, 0), x = destinationPoint(page, 1, 0), y = destinationPoint(page, 0, 1);
 		const view = await callWASM("ofdgoDestinationView", JSON.stringify({
+			sourcePage,
 			dest,
 			matrix: [x.x - origin.x, x.y - origin.y, y.x - origin.x, y.y - origin.y, origin.x, origin.y],
 			viewport: {
@@ -11226,10 +11742,17 @@ async function navigateDestination(dest, openAction) {
 	}
 }
 
+function cancelDocumentTextSelection(tab = documentTab()) {
+	for (const [id, request] of wasmRequests) {
+		if (request.tab === tab && request.name === "ofdgoPagesText") cancelOperation(id);
+	}
+}
+
 function syncSelection() {
 	const selection = document.getSelection();
 	if (state.documentSelection && (!selection.rangeCount || !isDocumentSelection(selection.getRangeAt(0)))) {
 		state.documentSelection = null;
+		cancelDocumentTextSelection();
 		if (state.doc && !document.body.hasAttribute("data-busy")) {
 			setStatus(pageStatus(state.pageIndex, state.doc.pageCount));
 		}
@@ -11245,38 +11768,59 @@ function isDocumentSelection(range) {
 		&& range.endContainer === el.svgHost && range.endOffset === el.svgHost.childNodes.length;
 }
 
+async function writeTextToClipboard(text) {
+	if (navigator.clipboard?.writeText) {
+		await navigator.clipboard.writeText(text);
+		return true;
+	}
+	return false;
+}
+
 async function selectDocumentText() {
 	const selection = document.getSelection();
 	if (state.documentSelection && selection.rangeCount && isDocumentSelection(selection.getRangeAt(0))) {
 		return;
 	}
-	const openSeq = state.openSeq;
-	const current = { text: null };
-	const active = () => state.documentSelection === current && openSeq === state.openSeq
-		&& selection.rangeCount > 0 && isDocumentSelection(selection.getRangeAt(0));
-	state.documentSelection = current;
+	const tab = documentTab();
+	const target = tab.state;
+	const openSeq = target.openSeq;
+	const count = target.doc?.pageCount || 0;
+	if (!count) return;
+	cancelDocumentTextSelection(tab);
+	const current = { text: null, copyPending: false };
+	const active = () => target.documentSelection === current && openSeq === target.openSeq
+		&& isForegroundDocument(tab) && selection.rangeCount > 0 && isDocumentSelection(selection.getRangeAt(0));
+	target.documentSelection = current;
 	const range = document.createRange();
 	range.selectNodeContents(el.svgHost);
 	selection.removeAllRanges();
 	selection.addRange(range);
-	const pages = [];
-	const count = state.doc.pageCount;
+	setStatus("正在全选文字");
 	try {
-		for (let index = 0; index < count; index += 1) {
-			setStatus(`正在全选文字 · ${index + 1} / ${count} 页`);
-			const text = await callWASM("ofdgoPageTextString", index);
-			if (!active()) {
+		const text = await callTabWASM(tab, "ofdgoPagesText", 0, count - 1);
+		if (!active()) {
+			return;
+		}
+		current.text = text || "";
+		if (current.copyPending) {
+			current.copyPending = false;
+			if (!current.text) {
+				setStatus("暂无文字");
 				return;
 			}
-			if (text) {
-				pages.push(text);
+			try {
+				if (await writeTextToClipboard(current.text)) setStatus("已复制全部文字");
+				else setStatus("文字已全选，请再按复制");
+			} catch {
+				setStatus("文字已全选，请再按复制");
 			}
+			return;
 		}
-		current.text = pages.join("\n");
 		setStatus(current.text ? "文字已全选" : "暂无文字");
 	} catch (err) {
+		if (err.name === "AbortError") return;
 		if (active()) {
-			state.documentSelection = null;
+			target.documentSelection = null;
 			selection.removeAllRanges();
 			showError(err, false);
 		}
@@ -11296,7 +11840,7 @@ function copyEditorSelection(event) {
 		return true;
 	}
 	const index = items[0].index, ids = items.map(item => item.id);
-	const clipboard = { tab, token: crypto.randomUUID(), source: `${tab.id}:${documentContentKey(state)}`, page: state.doc.pages[index].id, bounds: selectionBounds(items), x: 0, y: 0, cut };
+	const clipboard = { tab, token: randomID(), source: `${tab.id}:${documentContentKey(state)}`, page: state.doc.pages[index].id, bounds: selectionBounds(items), x: 0, y: 0, cut };
 	if (canvasEditor.nudge) {
 		clipboard.bounds.x += canvasEditor.nudge.x;
 		clipboard.bounds.y += canvasEditor.nudge.y;
@@ -11410,11 +11954,11 @@ async function pasteEditorContent(event) {
 			setStatus("一次粘贴一张图片");
 			return;
 		}
-		if (!/^image\/(png|jpeg)$/.test(files[0].type)) {
-			setStatus("仅支持PNG、JPG图片");
+		if (!/^image\/(png|jpeg|bmp|tiff|webp|gif)$/.test(files[0].type)) {
+			setStatus("仅支持PNG、JPG、BMP、TIFF、WebP、GIF图片");
 			return;
 		}
-		await changeDocument("ofdgoInsertImage", null, index, files[0].arrayBuffer().then(bytes => new Uint8Array(bytes)), x, y, width);
+		await changeDocument("ofdgoInsertImage", null, index, normalizeImageBytes(files[0]), x, y, width);
 		return;
 	}
 	if (!value.trim()) return;
@@ -11428,6 +11972,47 @@ async function pasteEditorContent(event) {
 	const data = readTextFont(font);
 	await changeDocument("ofdgoInsertText", null, index, value, data, x, y, style.size, style.color,
 		width, style.wrap, style.align || "left", style.paragraphHeight || 0, style.letterSpacing || 0, ...textIndents(style));
+}
+
+function extractRangeText(container, range) {
+	const lines = [];
+	for (const run of container.querySelectorAll(".text-run")) {
+		if (!range.intersectsNode(run)) {
+			continue;
+		}
+		const part = range.cloneRange();
+		if (!run.contains(part.startContainer)) {
+			part.setStart(run, 0);
+		}
+		if (!run.contains(part.endContainer)) {
+			part.setEnd(run, run.childNodes.length);
+		}
+		const text = part.cloneContents().textContent;
+		if (text) {
+			lines.push(text);
+		}
+	}
+	return lines.join("\n");
+}
+
+function rangePageShell(node) {
+	return (node?.nodeType === 1 ? node : node?.parentElement)?.closest?.(".page-shell") || null;
+}
+
+async function copyCrossPageText(tab, openSeq, headText, middleStart, middleEnd, tailText) {
+	setStatus("正在提取跨页文字");
+	try {
+		const middleText = await callTabWASM(tab, "ofdgoPagesText", middleStart, middleEnd);
+		if (tab.closed || openSeq !== tab.state.openSeq) return;
+		const fullText = [headText, middleText, tailText].filter(Boolean).join("\n");
+		if (await writeTextToClipboard(fullText)) {
+			if (isForegroundDocument(tab)) setStatus("已复制所选文字");
+		} else if (isForegroundDocument(tab)) {
+			setStatus("无法自动写入剪贴板");
+		}
+	} catch (err) {
+		if (err.name !== "AbortError" && isForegroundDocument(tab) && openSeq === tab.state.openSeq) showError(err, false);
+	}
 }
 
 function copySelection(event) {
@@ -11444,7 +12029,8 @@ function copySelection(event) {
 	if (state.documentSelection && isDocumentSelection(range)) {
 		event.preventDefault();
 		if (state.documentSelection.text === null) {
-			setStatus("正在全选文字");
+			state.documentSelection.copyPending = true;
+			setStatus("正在提取文字，完成后自动复制");
 		} else {
 			event.clipboardData.setData("text/plain", state.documentSelection.text);
 		}
@@ -11453,27 +12039,31 @@ function copySelection(event) {
 	if (!el.svgHost.contains(range.startContainer) || !el.svgHost.contains(range.endContainer)) {
 		return;
 	}
-	const lines = [];
-	for (const run of el.svgHost.querySelectorAll(".text-run")) {
-		if (!range.intersectsNode(run)) {
-			continue;
+	const startShell = rangePageShell(range.startContainer);
+	const endShell = rangePageShell(range.endContainer);
+	const startPage = startShell ? Number(startShell.dataset.pageIndex) : -1;
+	const endPage = endShell ? Number(endShell.dataset.pageIndex) : -1;
+	const hasUnrenderedMiddle = startPage >= 0 && endPage > startPage + 1 && (() => {
+		for (let page = startPage + 1; page < endPage; page++) {
+			const shell = pageView.pageShell(page);
+			if (!shell || !shell.classList.contains("rendered")) return true;
 		}
-		const part = range.cloneRange();
-		if (!run.contains(part.startContainer)) {
-			part.setStart(run, 0);
-		}
-		if (!run.contains(part.endContainer)) {
-			part.setEnd(run, run.childNodes.length);
-		}
-		const text = part.cloneContents().textContent;
-		if (text) {
-			lines.push(text);
-		}
-	}
-	if (!lines.length) {
+		return false;
+	})();
+	if (hasUnrenderedMiddle) {
+		const headText = extractRangeText(startShell, range);
+		const tailText = extractRangeText(endShell, range);
+		const partial = extractRangeText(el.svgHost, range);
+		event.clipboardData.setData("text/plain", partial);
+		event.preventDefault();
+		copyCrossPageText(documentTab(), state.openSeq, headText, startPage + 1, endPage - 1, tailText);
 		return;
 	}
-	event.clipboardData.setData("text/plain", lines.join("\n"));
+	const text = extractRangeText(el.svgHost, range);
+	if (!text) {
+		return;
+	}
+	event.clipboardData.setData("text/plain", text);
 	event.preventDefault();
 }
 
@@ -11508,6 +12098,7 @@ function showNavigation(selected) {
 	el.pageSelectionTools.hidden = !state.editing || !state.pageMultiSelect || selected !== el.pagesTab;
 	el.navigationContent.scrollTop = state.navigationScroll.get(selected) || 0;
 	if (selected === el.pagesTab) pageView.syncThumbnailWindow();
+	if (selected === el.outlinesTab && state.outlinesDirty) mountOutlines();
 	if (selected === el.annotationsTab) loadAnnotationSummary();
 }
 
@@ -11616,18 +12207,22 @@ function createAnnotationRow(item) {
 	return row;
 }
 
-function renderOutlines(reset = true) {
-	const selected = !reset && [el.pagesTab, el.outlinesTab, el.annotationsTab, el.searchTab].find(tab => tab.getAttribute("data-selected") === "true");
-	const scrollTop = reset ? 0 : el.navigationContent.scrollTop;
-	if (reset) {
-		state.navigationScroll.clear();
-		state.outlineExpanded.clear();
-		state.outlineSelection = null;
+function countOutlineNodes(outlines, limit = 200) {
+	let count = 0;
+	const stack = [...outlines];
+	while (stack.length && count <= limit) {
+		const item = stack.pop();
+		count++;
+		if (item.children?.length) {
+			for (let i = 0; i < item.children.length; i++) stack.push(item.children[i]);
+		}
 	}
+	return count;
+}
+
+function mountOutlines() {
+	state.outlinesDirty = false;
 	const outlines = state.doc?.outlines || [];
-	el.pageListTitle.hidden = Boolean(state.doc);
-	el.navigationTabs.hidden = !state.doc;
-	el.outlinesTab.hidden = outlines.length === 0 && !state.editing;
 	el.outlineList.replaceChildren();
 	if (state.editing) {
 		const tools = document.createElement("div");
@@ -11645,13 +12240,30 @@ function renderOutlines(reset = true) {
 		el.outlineList.append(tools);
 	}
 	if (outlines.length > 0) {
-		el.outlineList.append(createOutlineList(outlines));
+		const collapseDeep = countOutlineNodes(outlines, 200) > 200;
+		el.outlineList.append(createOutlineList(outlines, [], collapseDeep));
 	}
-	el.navigationContent.scrollTop = scrollTop;
-	showNavigation(selected && !selected.hidden ? selected : el.pagesTab);
 }
 
-const SEARCH_MATCH_LIMIT = 10000;
+function renderOutlines(reset = true) {
+	const selected = !reset && [el.pagesTab, el.outlinesTab, el.annotationsTab, el.searchTab].find(tab => tab.getAttribute("data-selected") === "true");
+	const scrollTop = reset ? 0 : el.navigationContent.scrollTop;
+	if (reset) {
+		state.navigationScroll.clear();
+		state.outlineExpanded.clear();
+		state.outlineSelection = null;
+	}
+	const outlines = state.doc?.outlines || [];
+	el.pageListTitle.hidden = Boolean(state.doc);
+	el.navigationTabs.hidden = !state.doc;
+	el.outlinesTab.hidden = outlines.length === 0 && !state.editing;
+	el.outlineList.replaceChildren();
+	state.outlinesDirty = true;
+	const target = selected && !selected.hidden ? selected : el.pagesTab;
+	if (target === el.outlinesTab) mountOutlines();
+	el.navigationContent.scrollTop = scrollTop;
+	showNavigation(target);
+}
 
 function resetSearch(clearInput = true) {
 	for (const [id, request] of wasmRequests) if (request.tab === documentTab() && ["ofdgoSearchPage", "ofdgoSearchPages"].includes(request.name)) cancelOperation(id);
@@ -11663,11 +12275,13 @@ function resetSearch(clearInput = true) {
 	state.searchQuery = "";
 	state.searchMatches = [];
 	state.searchIndex = -1;
+	state.searchResultPage = 0;
 	if (clearInput) {
 		el.searchInput.value = "";
 	}
 	el.searchStatus.textContent = "";
 	el.searchResults.replaceChildren();
+	el.searchPager.hidden = true;
 	updateSearchCount();
 	clearSearchHighlights();
 }
@@ -11778,12 +12392,26 @@ function updateSearchCount() {
 	el.searchNext.disabled = count === 0;
 }
 
+function changeSearchResultPage(delta) {
+	const totalPages = Math.max(1, Math.ceil(state.searchMatches.length / 50));
+	const next = Math.max(0, Math.min(totalPages - 1, (state.searchResultPage || 0) + delta));
+	if (next === state.searchResultPage) return;
+	state.searchResultPage = next;
+	renderSearchResults();
+	el.searchResults.scrollTop = 0;
+}
+
 function renderSearchResults() {
-	const start = Math.floor(Math.max(0, state.searchIndex) / 50) * 50;
-	if (el.searchResults.firstElementChild && Number(el.searchResults.firstElementChild.dataset.matchIndex) !== start) {
+	const count = state.searchMatches.length;
+	const totalPages = Math.max(1, Math.ceil(count / 50));
+	state.searchResultPage = Math.max(0, Math.min(state.searchResultPage || 0, totalPages - 1));
+	const start = state.searchResultPage * 50;
+	const end = Math.min(start + 50, count);
+	if (el.searchResults.firstElementChild && Number(el.searchResults.firstElementChild.dataset.matchIndex) !== start
+		|| el.searchResults.childElementCount > end - start) {
 		el.searchResults.replaceChildren();
 	}
-	for (let i = start + el.searchResults.childElementCount; i < Math.min(start + 50, state.searchMatches.length); i += 1) {
+	for (let i = start + el.searchResults.childElementCount; i < end; i += 1) {
 		const match = state.searchMatches[i];
 		const button = document.createElement("button");
 		button.type = "button";
@@ -11803,6 +12431,10 @@ function renderSearchResults() {
 	for (const button of el.searchResults.children) {
 		button.setAttribute("data-current", String(Number(button.dataset.matchIndex) === state.searchIndex));
 	}
+	el.searchPager.hidden = totalPages <= 1;
+	el.searchPageInfo.textContent = `${state.searchResultPage + 1} / ${totalPages}`;
+	el.searchPagePrev.disabled = state.searchResultPage <= 0;
+	el.searchPageNext.disabled = state.searchResultPage + 1 >= totalPages;
 	updateSearchCount();
 }
 
@@ -11813,6 +12445,7 @@ async function selectSearchMatch(index) {
 	}
 	index = (index + count) % count;
 	state.searchIndex = index;
+	state.searchResultPage = Math.floor(index / 50);
 	const match = state.searchMatches[index];
 	const target = state;
 	const seq = state.searchSeq;
@@ -11827,7 +12460,8 @@ async function selectSearchMatch(index) {
 		return;
 	}
 	renderSearchHighlights(match.page);
-	const mark = pageView.pageShell(match.page).querySelector(".search-highlight");
+	const shell = pageView.pageShell(match.page);
+	const mark = shell?.querySelector(".search-highlight");
 	if (mark) {
 		const box = mark.getBoundingClientRect();
 		const viewer = el.viewerPanel.getBoundingClientRect();
@@ -11840,8 +12474,8 @@ async function selectSearchMatch(index) {
 	} else {
 		pageView.scrollToPage(match.page);
 	}
-	if (state.editing) {
-		const node = [...pageView.pageShell(match.page).querySelectorAll(".edit-object")].find(node => canvasEditor.nodes.get(node)?.id === match.id);
+	if (state.editing && shell) {
+		const node = [...shell.querySelectorAll(".edit-object")].find(node => canvasEditor.nodes.get(node)?.id === match.id);
 		const item = node && canvasEditor.nodes.get(node);
 		if (item?.type === "TextObject" && !match.parts?.length) {
 			state.selectObjects = true;
@@ -11852,12 +12486,14 @@ async function selectSearchMatch(index) {
 		} else canvasEditor.select(null);
 	}
 	const button = el.searchResults.querySelector("[data-current=true]");
-	const row = button.getBoundingClientRect();
-	const panel = el.searchResults.getBoundingClientRect();
-	if (row.top < panel.top) {
-		el.searchResults.scrollTop += row.top - panel.top;
-	} else if (row.bottom > panel.bottom) {
-		el.searchResults.scrollTop += row.bottom - panel.bottom;
+	if (button) {
+		const row = button.getBoundingClientRect();
+		const panel = el.searchResults.getBoundingClientRect();
+		if (row.top < panel.top) {
+			el.searchResults.scrollTop += row.top - panel.top;
+		} else if (row.bottom > panel.bottom) {
+			el.searchResults.scrollTop += row.bottom - panel.bottom;
+		}
 	}
 	return true;
 }
@@ -11873,7 +12509,10 @@ function renderSearchHighlights(index) {
 	if (!match || match.page !== index) {
 		return;
 	}
-	const surface = pageView.pageShell(index).querySelector(".page-surface");
+	const surface = pageView.pageShell(index)?.querySelector(".page-surface");
+	if (!surface) {
+		return;
+	}
 	for (const mark of surface.querySelectorAll(".search-highlight")) {
 		mark.remove();
 	}
@@ -11965,7 +12604,7 @@ async function activateOutline(path) {
 	}
 }
 
-function createOutlineList(outlines, path = []) {
+function createOutlineList(outlines, path = [], collapseDeep = false) {
 	const list = document.createElement("ul");
 	list.className = "outline-list";
 	for (const [index, outline] of outlines.entries()) {
@@ -12019,14 +12658,14 @@ function createOutlineList(outlines, path = []) {
 		if (hasChildren) {
 			const details = document.createElement("details");
 			const key = JSON.stringify(current);
-			details.open = state.outlineExpanded.get(key) ?? outline.expanded;
+			details.open = state.outlineExpanded.get(key) ?? (collapseDeep ? false : Boolean(outline.expanded));
 			details.addEventListener("toggle", () => {
 				if (!details.isConnected) return;
 				state.outlineExpanded.set(key, details.open);
-				if (details.open && details.childElementCount === 1) details.append(createOutlineList(outline.children, current));
+				if (details.open && details.childElementCount === 1) details.append(createOutlineList(outline.children, current, collapseDeep));
 			});
 			details.append(row);
-			if (details.open) details.append(createOutlineList(outline.children, current));
+			if (details.open) details.append(createOutlineList(outline.children, current, collapseDeep));
 			item.append(details);
 		} else {
 			item.append(row);
@@ -12035,8 +12674,6 @@ function createOutlineList(outlines, path = []) {
 	}
 	return list;
 }
-
-const pageIndexes = new WeakMap();
 
 function pageIndexByID(pages, id) {
 	let indexes = pageIndexes.get(pages);
@@ -12367,16 +13004,21 @@ function renderMetaContent(node, value, render) {
 	metaContents.set(node, key);
 }
 
+let structureXMLSequence = 0;
+
 function openStructureDialog() {
 	if (!state.editing || !state.doc || document.body.hasAttribute("data-busy")) return;
 	el.structureEntry.replaceChildren();
 	for (const [index, structure] of (state.doc.structures || []).entries()) {
 		if (structure.internal) continue;
-		el.structureEntry.add(new Option(`${index + 1} · ${structure.root?.name || structure.typeId}`, index));
+		el.structureEntry.add(new Option(`${index + 1} · ${structure.root?.name || structure.typeId || structure.namespace}`, index));
 	}
 	el.structureEntry.add(new Option("新建标引", -1));
+	el.structureEntry.add(new Option("导入标引", -2));
 	el.structureEntry.value = String((state.doc.structures || []).findIndex(structure => !structure.internal));
 	el.structureAction.value = "update";
+	el.structureXMLFile.value = "";
+	el.structureXML.value = "";
 	refreshStructureNodes();
 	el.structureDialog.showModal();
 }
@@ -12393,8 +13035,32 @@ function refreshStructureNodes() {
 	refreshStructureFields();
 }
 
+async function loadStructureXML(index) {
+	const sequence = ++structureXMLSequence;
+	const openSeq = state.openSeq;
+	el.structureXML.value = "";
+	el.structureXML.disabled = true;
+	el.structureSubmit.disabled = true;
+	el.structureStatus.textContent = "正在读取源码";
+	try {
+		const xml = await callWASM("ofdgoStructureXML", index);
+		if (sequence !== structureXMLSequence || openSeq !== state.openSeq || !el.structureDialog.open) return;
+		el.structureXML.value = xml || "";
+		el.structureStatus.textContent = "";
+	} catch (err) {
+		if (sequence !== structureXMLSequence || openSeq !== state.openSeq || !el.structureDialog.open) return;
+		el.structureStatus.textContent = err.message;
+	} finally {
+		if (sequence === structureXMLSequence && openSeq === state.openSeq && el.structureDialog.open) {
+			el.structureXML.disabled = el.structureSource.hidden;
+			el.structureSubmit.disabled = false;
+		}
+	}
+}
+
 function refreshStructureFields() {
-	const index = Number(el.structureEntry.value), creating = index < 0;
+	structureXMLSequence += 1;
+	const index = Number(el.structureEntry.value), importingXML = index === -2, creating = index === -1;
 	const structure = state.doc.structures?.[index];
 	let node = structure?.root, canBind = Boolean(structure?.canBind);
 	for (const part of JSON.parse(el.structureNodeSelect.value || "[]")) {
@@ -12404,15 +13070,26 @@ function refreshStructureFields() {
 	canBind &&= node?.name !== "ObjectRef";
 	el.structureAction.querySelector('[value="bind"]').disabled = !canBind;
 	if (!canBind && el.structureAction.value === "bind") el.structureAction.value = "update";
-	if (!creating && !node) el.structureAction.value = "delete";
-	for (const option of el.structureAction.options) option.disabled = option.value === "bind" ? !canBind : !creating && !node && option.value !== "delete";
-	const action = creating ? "create" : el.structureAction.value;
-	document.querySelector("#structureNodeRow").hidden = creating || !node;
-	document.querySelector("#structureActionRow").hidden = creating;
+	if (!creating && !importingXML && !node && el.structureAction.value !== "updateXML") el.structureAction.value = "delete";
+	for (const option of el.structureAction.options) {
+		option.disabled = option.value === "bind" ? !canBind
+			: !creating && !importingXML && !node && option.value !== "delete" && option.value !== "updateXML";
+	}
+	const action = importingXML ? "importXML" : creating ? "create" : el.structureAction.value;
+	const editingXML = action === "updateXML", xmlMode = importingXML || editingXML;
+	document.querySelector("#structureNodeRow").hidden = creating || importingXML || editingXML || !node;
+	document.querySelector("#structureActionRow").hidden = creating || importingXML;
 	document.querySelector("#structureTypeRow").hidden = !creating;
 	el.structureType.value = creating ? "custom" : structure?.typeId || "";
-	el.structureFields.hidden = action === "bind" || action === "delete";
+	el.structureFields.hidden = xmlMode || action === "bind" || action === "delete";
 	el.structureBinding.hidden = action !== "bind";
+	el.structureSource.hidden = !xmlMode;
+	el.structureXMLTypeRow.hidden = el.structureXMLNamespaceRow.hidden = !importingXML;
+	el.structureXMLType.disabled = el.structureXMLNamespace.disabled = !importingXML;
+	el.structureXMLFile.disabled = el.structureXML.disabled = !xmlMode;
+	el.structureXMLType.required = importingXML;
+	el.structureXML.required = xmlMode;
+	el.structureSubmit.disabled = false;
 	el.structureName.value = action === "update" ? node?.name || "" : "";
 	el.structureNamespace.value = creating ? "" : node?.namespace || "";
 	el.structureText.value = action === "update" ? node?.text || "" : "";
@@ -12426,8 +13103,20 @@ function refreshStructureFields() {
 	}
 	for (const control of el.structureFields.querySelectorAll("input,textarea,button")) control.disabled = el.structureFields.hidden;
 	el.structureType.disabled = !creating;
-	el.structureStatus.textContent = structure?.error || (action === "delete" ? "删除此节点及子节点" : "");
-	el.structureSubmit.textContent = ({ create: "新增", add: "新增", update: "修改", bind: "绑定", delete: "删除" })[action];
+	el.structureNamespace.required = creating && !el.structureFields.hidden;
+	if (importingXML) {
+		el.structureXMLType.value = "custom";
+		el.structureXMLNamespace.value = "";
+		el.structureXMLFile.value = "";
+		el.structureXML.value = "";
+		el.structureStatus.textContent = "";
+	} else if (editingXML) {
+		el.structureXMLFile.value = "";
+		loadStructureXML(index);
+	} else {
+		el.structureStatus.textContent = structure?.error || (action === "delete" ? "删除此节点及子节点" : "");
+	}
+	el.structureSubmit.textContent = ({ create: "新增", importXML: "导入", updateXML: "保存", add: "新增", update: "修改", bind: "绑定", delete: "删除" })[action];
 }
 
 function addStructureAttribute(attribute = {}) {
@@ -12613,16 +13302,12 @@ function renderSignatures() {
 	for (const signature of signatures) {
 		const row = document.createElement("div");
 		row.className = `signature-row ${signature.status}`;
-
 		const head = document.createElement("div");
 		head.className = "signature-head";
-
 		const name = signatureNameNode(signature);
-
 		const badges = document.createElement("div");
 		badges.className = "signature-badges";
 		badges.append(fontBadge(signature.trustedValid ? "可信" : signature.status === "valid" ? "完整" : signature.status === "invalid" ? "异常" : "未验", signature.status));
-
 		if (state.editing) {
 			const tab = documentTab(), key = documentContentKey(state);
 			const remove = document.createElement("button");
@@ -12809,15 +13494,12 @@ function appendInfoLine(row, label, value, status = "") {
 	}
 	const line = document.createElement("div");
 	line.className = status ? `info-line ${status}` : "info-line";
-
 	const key = document.createElement("span");
 	key.className = "info-label";
 	key.textContent = label;
-
 	const text = document.createElement("span");
 	text.className = "info-value";
 	text.textContent = String(value);
-
 	line.append(key, text);
 	row.append(line);
 }
@@ -12953,10 +13635,78 @@ function mountAnnotationNotes(index, surface, annotations) {
 	};
 }
 
+function updateDocumentFontControls() {
+	const fonts = state.doc?.fonts || [];
+	const visible = Boolean(state.doc && state.editing);
+	const busy = !state.ready || state.exporting || document.body.hasAttribute("data-busy") || Boolean(state.doc?.detailsPending);
+	const multi = (state.doc?.documents?.length || 1) > 1;
+	el.embedAllFontsButton.hidden = !visible;
+	el.externalizeAllFontsButton.hidden = !visible;
+	el.embedAllFontsButton.disabled = !visible || busy || (!multi && !fonts.some(font => !font.embedded));
+	el.externalizeAllFontsButton.disabled = !visible || busy || (!multi && !fonts.some(font => font.embedded));
+}
+
+async function processAllFonts(mode) {
+	const tab = documentTab();
+	if (tab.fontTask || !state.editing || !state.doc || document.body.hasAttribute("data-busy")) return;
+	const openSeq = state.openSeq;
+	if (mode === 1) {
+		if (!nativeHost && fontManager.canReadLocal()) {
+			tab.fontTask = true;
+			setBusy(true, fontManager.catalogLoaded ? "正在匹配字体" : "正在请求授权", 12, fontManager.catalogLoaded ? STATUS.fonts : "正在请求授权", tab);
+			try {
+				const available = fontManager.catalogLoaded ? fontManager.catalog : await fontManager.queryLocal();
+				if (!tab.closed && isForegroundDocument(tab) && openSeq === state.openSeq && state.editing && state.doc) {
+					const loaded = await loadDocumentLocalFonts(available, openSeq, tab, true);
+					if ((loaded || tab.configurePending) && !tab.closed && isForegroundDocument(tab) && openSeq === state.openSeq && state.editing && state.doc) {
+						const fonts = await fontManager.files(fontManager.records());
+						if (!tab.closed && isForegroundDocument(tab) && openSeq === state.openSeq && state.editing && state.doc) {
+							await callTabWASM(tab, "ofdgoConfigure", fonts, state.renderAnnotations);
+							tab.configurePending = false;
+						} else if (!tab.closed) {
+							tab.configurePending = true;
+						}
+					}
+				}
+			} catch (err) {
+				tab.status = err?.name === "NotAllowedError" ? "系统字体未授权" : String(err.message || err);
+				if (isForegroundDocument(tab)) setStatus(tab.status);
+			} finally {
+				tab.fontTask = false;
+				setBusy(false, "", 0, "", tab);
+			}
+		} else {
+			await requestLocalFontsBeforeOpen();
+		}
+		if (!isForegroundDocument(tab) || openSeq !== state.openSeq || !state.editing || !state.doc || document.body.hasAttribute("data-busy")) return;
+	}
+	state.fontProcessMode = mode;
+	try {
+		await changeDocument("ofdgoProcessFonts", null, mode);
+		if (!isForegroundDocument(tab)) return;
+		const list = state.fontProcessResult;
+		const action = mode === 2 ? "外置" : "嵌入";
+		if (list) {
+			const changed = list.filter(item => item.changed).length;
+			const skipped = list.length - changed;
+			if (changed) setStatus(skipped ? `已${action}${changed}个字体，跳过${skipped}项` : `已${action}${changed}个字体`);
+			else if (skipped) {
+				const reason = list.find(item => item.reason)?.reason;
+				setStatus(`${action}未变更（跳过${skipped}项${reason ? `：${fontBindingError(reason)}` : ""}）`);
+			} else setStatus("暂无可处理的字体");
+		}
+		renderDocumentFonts();
+	} finally {
+		tab.state.fontProcessMode = 0;
+		if (isForegroundDocument(tab)) updateDocumentFontControls();
+	}
+}
+
 function renderDocumentFonts() {
 	const fonts = state.doc?.fonts || [];
 	const previous = new Map([...el.docFontList.children].filter(row => row.font).map(row => [row.font.id, row]));
 	el.docFontSummary.textContent = fontSummary(fonts);
+	updateDocumentFontControls();
 	if (!fonts.length) {
 		const empty = document.createElement("div");
 		empty.className = "font-empty";
@@ -12966,7 +13716,8 @@ function renderDocumentFonts() {
 	}
 	const rows = [];
 	for (const font of fonts) {
-		const signature = JSON.stringify([font.status, font.embedded, font.fontName, font.familyName, font.id, fontResult(font), fontMeta(font), state.editing]);
+		const resultText = fontResult(font), metaText = fontMeta(font);
+		const signature = JSON.stringify([font.status, font.embedded, font.fontName, font.familyName, font.id, resultText, metaText, state.editing]);
 		const cached = previous.get(font.id);
 		if (cached?.fontSignature === signature) {
 			cached.font = font;
@@ -12977,23 +13728,17 @@ function renderDocumentFonts() {
 		row.font = font;
 		row.fontSignature = signature;
 		row.className = `doc-font-row ${font.status || "missing"}`;
-
 		const head = document.createElement("div");
 		head.className = "doc-font-head";
-
 		const name = document.createElement("div");
 		name.className = "doc-font-name";
 		name.textContent = font.fontName || font.familyName || font.id || "-";
-
 		const badges = document.createElement("div");
 		badges.className = "doc-font-badges";
 		badges.append(fontBadge(statusText(font.status), font.status || "missing"));
 		if (font.embedded && font.status !== "embedded") {
 			badges.append(fontBadge("内嵌", "embedded"));
 		}
-		const resultText = fontResult(font);
-		const metaText = fontMeta(font);
-
 		head.append(badges, name);
 		if (state.editing) {
 			const action = document.createElement("button");
@@ -13172,6 +13917,7 @@ function updateDocumentControls() {
 function updateControls() {
 	renderSecurity();
 	updateStructureControls();
+	updateDocumentFontControls();
 	const hasDoc = Boolean(state.doc);
 	el.newButton.disabled = workspace.closing;
 	el.closeButton.disabled = !(hasDoc || documentTab().opening || documentTab().error) || workspace.closing;
@@ -13264,7 +14010,7 @@ function updateObjectControls(item, reset = false) {
 	const disabled = !item || Boolean(item.draft) || !state.ready || state.exporting;
 	el.deleteObjectButton.disabled = disabled || !canEditObject(item, "delete");
 	el.copyObjectButton.disabled = disabled || !canEditObject(item, "copy");
-	el.objectStyleButton.disabled = disabled || !canEditObject(item, "transform");
+	el.objectStyleButton.disabled = disabled || !canEditObject(item, "transform") || members.some(member => member.type === "Signature");
 	const cropping = Boolean(canvasEditor.crop);
 	el.objectBoundsButton.disabled = disabled || cropping || !canEditObject(item, "transform");
 	el.objectAlign.disabled = disabled || cropping || !canEditObject(item, "arrange");
@@ -13468,7 +14214,7 @@ async function callTabWASM(tab, name, ...args) {
 			}
 		}
 		if (name === "ofdgoResources" && workspace.active === tab && resourceElements.Panel.open) resourceManager.requestID = id;
-		const request = {name, openSeq:state.openSeq, tab, id, cancellable:name === "ofdgoEditDocument",
+		const request = {name, openSeq:state.openSeq, tab, id, cancellable:name === "ofdgoEditDocument" || name === "ofdgoProcessFonts",
 			resolve:value => { finishOperation(request); resolve(mergeEditorSummary(tab, value, doc, editor)); }, reject:err => { finishOperation(request); reject(err); }};
 		wasmRequests.set(id, request);
 		if (request.cancellable && visible) { el.cancelExportButton.hidden = false; el.cancelExportButton.disabled = false; }
@@ -13553,6 +14299,7 @@ function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab())
 	el.closeButton.disabled = !(state.doc || tab.opening || tab.error) || workspace.closing;
 	el.refreshAppButton.disabled = busy;
 	updateStructureControls();
+	updateDocumentFontControls();
 	updateDocumentControls();
 	renderSecurity();
 	updateDisplayControls();

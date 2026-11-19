@@ -63,6 +63,274 @@ type pdfTextReplacements struct {
 	widget   bool
 }
 
+// span 查找最外层替换区段，相邻区段即使原文相同也分别保留
+// 入参: text 替换文本
+// 返回: *pdfTextReplacement 区段状态，未声明时为空
+func (r *pdfTextReplacements) span(text *pdfgo.ReplacementText) *pdfTextReplacement {
+	if text == nil {
+		return nil
+	}
+	if r.spans == nil {
+		r.spans = make(map[*pdfgo.ReplacementText]*pdfTextReplacement)
+	}
+	first := text
+	for text.Parent != nil && r.spans[text] == nil {
+		text = text.Parent
+	}
+	span := r.spans[text]
+	if span == nil {
+		span = &pdfTextReplacement{text: text}
+		r.spans[text] = span
+		r.order = append(r.order, span)
+	}
+	for first != text {
+		r.spans[first] = span
+		first = first.Parent
+	}
+	return span
+}
+
+// block 标记无法仅用字符与字形变换表达的区段
+// 入参: text 替换文本
+func (r *pdfTextReplacements) block(text *pdfgo.ReplacementText) {
+	if span := r.span(text); span != nil {
+		span.blocked = true
+	}
+}
+
+// markedContent 处理结构区段、可选内容及替换文本属性
+// 入参: mark 内容标记
+// 返回: error 未支持的语义错误
+func (r *pdfTextReplacements) markedContent(mark pdfgo.MarkedContentMark) error {
+	if mark.Operator == "EMC" {
+		return nil
+	}
+	if r.importer.structureBindings != nil {
+		if err := r.importer.prepareSourceStructure(r.importer.ctx, mark.Reader); err != nil {
+			return err
+		}
+		r.importer.structureBindings.observe(mark.Sequence)
+		if mark.Sequence != nil && r.importer.structureBindings.marked != nil {
+			key, ok, err := pdfStructureContentKey(mark.Sequence)
+			if err != nil {
+				return err
+			}
+			if ok && r.importer.structureBindings.marked[key] {
+				return nil
+			}
+		}
+	}
+	if mark.Tag == "OC" {
+		kind, err := mark.Reader.Resolve(mark.Properties["Type"])
+		if err != nil {
+			return err
+		}
+		if kind == pdfgo.Name("OCG") || kind == pdfgo.Name("OCMD") {
+			return nil
+		}
+	}
+	if r.widget && mark.Tag == "Tx" && len(mark.Properties) == 0 {
+		return nil
+	}
+	if mark.Replacement != nil && len(mark.Properties) == 1 {
+		return nil
+	}
+	if r.importer.warning == nil {
+		return &pdfgo.UnsupportedError{Feature: "marked content requiring semantic preservation"}
+	}
+	r.importer.warning(pdfgo.Diagnostic{Offset: mark.Offset, Message: "marked content " + string(mark.Tag) + " not preserved"})
+	return nil
+}
+
+// apply 合并可等价表示的替换区段，原文相同但样式不同的区段保留原图元
+// 入参: nodes 原始图元
+// 返回: []pdfCompositeNode 转换图元, error 取消或语义转换错误
+func (r *pdfTextReplacements) apply(nodes []pdfCompositeNode) ([]pdfCompositeNode, error) {
+	if len(r.order) == 0 {
+		return nodes, nil
+	}
+	if err := r.count(nodes, false); err != nil {
+		return nil, err
+	}
+	for _, span := range r.order {
+		span.identity = !span.blocked && span.count > 0 && span.matched == len(span.text.Text)
+	}
+	var err error
+	nodes, err = r.merge(nodes)
+	if err != nil {
+		return nil, err
+	}
+	for _, span := range r.order {
+		if span.applied || span.identity || !span.blocked && span.count == 0 && span.text.Text == "" {
+			continue
+		}
+		if r.importer.warning == nil {
+			return nil, &pdfgo.UnsupportedError{Feature: "ActualText span without equivalent OFD glyph mapping"}
+		}
+		r.importer.warning(pdfgo.Diagnostic{Offset: span.offset, Message: "PDF ActualText span not preserved; original appearance retained"})
+	}
+	r.clear(nodes)
+	return nodes, nil
+}
+
+// count 统计区段文字并逐字核对原文，排除需要组级合成的内容
+// 入参: nodes 图元, blocked 上层组是否阻止直接转换
+// 返回: error 取消错误
+func (r *pdfTextReplacements) count(nodes []pdfCompositeNode, blocked bool) error {
+	for _, node := range nodes {
+		if err := r.importer.ctx.Err(); err != nil {
+			return err
+		}
+		if node.text != nil {
+			if span := r.span(node.text.Replacement); span != nil {
+				span.count++
+				span.blocked = span.blocked || blocked
+				for i, glyph := range node.text.Glyphs {
+					if span.matched < 0 {
+						break
+					}
+					if i%256 == 0 {
+						if err := r.importer.ctx.Err(); err != nil {
+							return err
+						}
+					}
+					if glyph.Text == "" || !strings.HasPrefix(span.text.Text[span.matched:], glyph.Text) {
+						span.matched = -1
+						break
+					}
+					span.matched += len(glyph.Text)
+				}
+			}
+		}
+		childBlocked := blocked
+		if group := node.group; group != nil && node.textObject == nil {
+			opaque, err := r.importer.opaque(node, group.ColorSpace)
+			if err := r.importer.ctx.Err(); err != nil {
+				return err
+			}
+			childBlocked = childBlocked || !opaque || err != nil || group.ColorSpace != nil && !group.ColorSpace.SRGBEquivalent()
+		}
+		if err := r.count(node.children, childBlocked); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// merge 合并同层连续图元，保留原始绘制顺序与字形坐标
+// 入参: nodes 图元
+// 返回: []pdfCompositeNode 合并结果, error 取消错误
+func (r *pdfTextReplacements) merge(nodes []pdfCompositeNode) ([]pdfCompositeNode, error) {
+	result := nodes[:0]
+	for i := 0; i < len(nodes); {
+		if err := r.importer.ctx.Err(); err != nil {
+			return nil, err
+		}
+		node := nodes[i]
+		var err error
+		node.children, err = r.merge(node.children)
+		if err != nil {
+			return nil, err
+		}
+		end := i + 1
+		combined := false
+		first := node.text
+		if first == nil && node.textObject != nil && len(node.children) != 0 {
+			first = node.children[0].text
+		}
+		if first != nil {
+			if span := r.span(first.Replacement); span != nil && !span.applied && !span.blocked && span.text.Text != "" && !(span.identity && span.count == 1) {
+				var marks []*pdfgo.TextMark
+				for end = i; end < len(nodes); end++ {
+					current := nodes[end]
+					children := current.children
+					if current.text != nil {
+						children = nodes[end : end+1]
+					} else if current.textObject == nil {
+						break
+					}
+					valid := len(children) != 0
+					for _, child := range children {
+						if child.text == nil || r.span(child.text.Replacement) != span {
+							valid = false
+							break
+						}
+					}
+					if !valid {
+						break
+					}
+					for _, child := range children {
+						marks = append(marks, child.text)
+					}
+				}
+				end = max(end, i+1)
+				if len(marks) == span.count {
+					if mark, ok := codecpdf.MergeReplacement(marks, span.text); ok {
+						var origins pdfOriginSet
+						for _, source := range marks {
+							if err := r.importer.ctx.Err(); err != nil {
+								return nil, err
+							}
+							origin := r.importer.textOrigin(*source)
+							origins.add(origin.sequence)
+							for _, sequence := range origin.related {
+								origins.add(sequence)
+							}
+						}
+						if len(origins.origin.related) != 0 {
+							if r.importer.textOrigins == nil {
+								r.importer.textOrigins = make(map[*pdfgo.ReplacementText]pdfObjectOrigin)
+							}
+							r.importer.textOrigins[span.text] = origins.origin
+						}
+						if node.text != nil {
+							node.text = mark
+						} else {
+							node.children = []pdfCompositeNode{{text: mark}}
+						}
+						span.applied = true
+						combined = true
+					}
+				}
+			}
+		}
+		node.formCount = 0
+		result = append(result, node)
+		if !combined {
+			for _, remaining := range nodes[i+1 : end] {
+				remaining.formCount = 0
+				result = append(result, remaining)
+			}
+		}
+		i = end
+	}
+	clear(nodes[len(result):])
+	return result, nil
+}
+
+// clear 清除无需替换及未转换的区段引用，防止局部绘制重复使用整段原文
+// 入参: nodes 图元
+func (r *pdfTextReplacements) clear(nodes []pdfCompositeNode) {
+	for _, node := range nodes {
+		if node.text != nil {
+			if span := r.span(node.text.Replacement); span != nil && !span.applied {
+				node.text.Replacement = nil
+			}
+		}
+		r.clear(node.children)
+	}
+}
+
+// pdfTextGlyphItem 保存单字形的基线坐标、转义原文及字形索引，用于同行合并
+type pdfTextGlyphItem struct {
+	x            float64
+	y            float64
+	text         string
+	runes        int
+	hasTransform bool
+	gid          uint16
+}
+
 // text 保留字形及逐字基线，外部字体优先复用同名内嵌资源
 // 入参: mark PDF文字绘制信息
 // 返回: error 错误信息
@@ -224,9 +492,13 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	const unit = 25.4 / 72
 	m := p.matrix.Mul(mark.Matrix).Mul(pdfgo.Matrix{1 / unit, 0, 0, -1 / unit, 0, 0})
 	var extent pdfPointBounds
-	object := TextObject{Font: id, Size: mark.Size * unit, HScale: mark.HorizontalScale, TextCode: make([]TextCode, 0, len(mark.Glyphs))}
-	if embedded {
-		object.CGTransform = make([]CGTransform, 0, len(mark.Glyphs))
+	object := TextObject{Font: id, Size: mark.Size * unit, HScale: mark.HorizontalScale}
+	items := make([]pdfTextGlyphItem, 0, len(mark.Glyphs))
+	if mark.Replacement != nil {
+		object.TextCode = make([]TextCode, 0, len(mark.Glyphs))
+		if embedded {
+			object.CGTransform = make([]CGTransform, 0, len(mark.Glyphs))
+		}
 	}
 	position := 0
 	for n, glyph := range mark.Glyphs {
@@ -266,10 +538,16 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			gid = metrics.GlyphIndex(char)
 		}
 		origin := mark.Positions[n]
-		object.TextCode = append(object.TextCode, TextCode{X: pdfNumbers(origin.X * unit), Y: pdfNumbers(-origin.Y * unit), Value: escapeOFDText(glyph.Text)})
+		escaped := escapeOFDText(glyph.Text)
 		count := utf8.RuneCountInString(glyph.Text)
-		if embedded || undefined {
-			object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: position, CodeCount: count, GlyphCount: 1, Glyphs: strconv.Itoa(int(gid))})
+		hasTransform := embedded || undefined
+		if mark.Replacement != nil {
+			object.TextCode = append(object.TextCode, TextCode{X: pdfNumbers(origin.X * unit), Y: pdfNumbers(-origin.Y * unit), Value: escaped})
+			if hasTransform {
+				object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: position, CodeCount: count, GlyphCount: 1, Glyphs: strconv.Itoa(int(gid))})
+			}
+		} else {
+			items = append(items, pdfTextGlyphItem{x: origin.X * unit, y: -origin.Y * unit, text: escaped, runes: count, hasTransform: hasTransform, gid: gid})
 		}
 		position += count
 		if embedded || outlineStroke || undefined && outline != nil {
@@ -331,6 +609,8 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	}
 	if mark.Replacement != nil {
 		pdfApplyReplacement(&object, mark.Replacement.Text, mark.Positions)
+	} else {
+		pdfCompactTextRuns(&object, items)
 	}
 	box := extent.box()
 	if stroke && !outlineStroke {
@@ -762,264 +1042,6 @@ func (p *pdfImporter) symbolFont(source *pdfgo.Font) (*pdfImportedFont, error) {
 	return result, nil
 }
 
-// span 查找最外层替换区段，相邻区段即使原文相同也分别保留
-// 入参: text 替换文本
-// 返回: *pdfTextReplacement 区段状态，未声明时为空
-func (r *pdfTextReplacements) span(text *pdfgo.ReplacementText) *pdfTextReplacement {
-	if text == nil {
-		return nil
-	}
-	if r.spans == nil {
-		r.spans = make(map[*pdfgo.ReplacementText]*pdfTextReplacement)
-	}
-	first := text
-	for text.Parent != nil && r.spans[text] == nil {
-		text = text.Parent
-	}
-	span := r.spans[text]
-	if span == nil {
-		span = &pdfTextReplacement{text: text}
-		r.spans[text] = span
-		r.order = append(r.order, span)
-	}
-	for first != text {
-		r.spans[first] = span
-		first = first.Parent
-	}
-	return span
-}
-
-// block 标记无法仅用字符与字形变换表达的区段
-// 入参: text 替换文本
-func (r *pdfTextReplacements) block(text *pdfgo.ReplacementText) {
-	if span := r.span(text); span != nil {
-		span.blocked = true
-	}
-}
-
-// markedContent 处理结构区段、可选内容及替换文本属性
-// 入参: mark 内容标记
-// 返回: error 未支持的语义错误
-func (r *pdfTextReplacements) markedContent(mark pdfgo.MarkedContentMark) error {
-	if mark.Operator == "EMC" {
-		return nil
-	}
-	if r.importer.structureBindings != nil {
-		if err := r.importer.prepareSourceStructure(r.importer.ctx, mark.Reader); err != nil {
-			return err
-		}
-		r.importer.structureBindings.observe(mark.Sequence)
-		if mark.Sequence != nil && r.importer.structureBindings.marked != nil {
-			key, ok, err := pdfStructureContentKey(mark.Sequence)
-			if err != nil {
-				return err
-			}
-			if ok && r.importer.structureBindings.marked[key] {
-				return nil
-			}
-		}
-	}
-	if mark.Tag == "OC" {
-		kind, err := mark.Reader.Resolve(mark.Properties["Type"])
-		if err != nil {
-			return err
-		}
-		if kind == pdfgo.Name("OCG") || kind == pdfgo.Name("OCMD") {
-			return nil
-		}
-	}
-	if r.widget && mark.Tag == "Tx" && len(mark.Properties) == 0 {
-		return nil
-	}
-	if mark.Replacement != nil && len(mark.Properties) == 1 {
-		return nil
-	}
-	if r.importer.warning == nil {
-		return &pdfgo.UnsupportedError{Feature: "marked content requiring semantic preservation"}
-	}
-	r.importer.warning(pdfgo.Diagnostic{Offset: mark.Offset, Message: "marked content " + string(mark.Tag) + " not preserved"})
-	return nil
-}
-
-// apply 合并可等价表示的替换区段，原文相同但样式不同的区段保留原图元
-// 入参: nodes 原始图元
-// 返回: []pdfCompositeNode 转换图元, error 取消或语义转换错误
-func (r *pdfTextReplacements) apply(nodes []pdfCompositeNode) ([]pdfCompositeNode, error) {
-	if len(r.order) == 0 {
-		return nodes, nil
-	}
-	if err := r.count(nodes, false); err != nil {
-		return nil, err
-	}
-	for _, span := range r.order {
-		span.identity = !span.blocked && span.count > 0 && span.matched == len(span.text.Text)
-	}
-	var err error
-	nodes, err = r.merge(nodes)
-	if err != nil {
-		return nil, err
-	}
-	for _, span := range r.order {
-		if span.applied || span.identity || !span.blocked && span.count == 0 && span.text.Text == "" {
-			continue
-		}
-		if r.importer.warning == nil {
-			return nil, &pdfgo.UnsupportedError{Feature: "ActualText span without equivalent OFD glyph mapping"}
-		}
-		r.importer.warning(pdfgo.Diagnostic{Offset: span.offset, Message: "PDF ActualText span not preserved; original appearance retained"})
-	}
-	r.clear(nodes)
-	return nodes, nil
-}
-
-// count 统计区段文字并逐字核对原文，排除需要组级合成的内容
-// 入参: nodes 图元, blocked 上层组是否阻止直接转换
-// 返回: error 取消错误
-func (r *pdfTextReplacements) count(nodes []pdfCompositeNode, blocked bool) error {
-	for _, node := range nodes {
-		if err := r.importer.ctx.Err(); err != nil {
-			return err
-		}
-		if node.text != nil {
-			if span := r.span(node.text.Replacement); span != nil {
-				span.count++
-				span.blocked = span.blocked || blocked
-				for i, glyph := range node.text.Glyphs {
-					if span.matched < 0 {
-						break
-					}
-					if i%256 == 0 {
-						if err := r.importer.ctx.Err(); err != nil {
-							return err
-						}
-					}
-					if glyph.Text == "" || !strings.HasPrefix(span.text.Text[span.matched:], glyph.Text) {
-						span.matched = -1
-						break
-					}
-					span.matched += len(glyph.Text)
-				}
-			}
-		}
-		childBlocked := blocked
-		if group := node.group; group != nil && node.textObject == nil {
-			opaque, err := r.importer.opaque(node, group.ColorSpace)
-			if err := r.importer.ctx.Err(); err != nil {
-				return err
-			}
-			childBlocked = childBlocked || !opaque || err != nil || group.ColorSpace != nil && !group.ColorSpace.SRGBEquivalent()
-		}
-		if err := r.count(node.children, childBlocked); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// merge 合并同层连续图元，保留原始绘制顺序与字形坐标
-// 入参: nodes 图元
-// 返回: []pdfCompositeNode 合并结果, error 取消错误
-func (r *pdfTextReplacements) merge(nodes []pdfCompositeNode) ([]pdfCompositeNode, error) {
-	result := nodes[:0]
-	for i := 0; i < len(nodes); {
-		if err := r.importer.ctx.Err(); err != nil {
-			return nil, err
-		}
-		node := nodes[i]
-		var err error
-		node.children, err = r.merge(node.children)
-		if err != nil {
-			return nil, err
-		}
-		end := i + 1
-		combined := false
-		first := node.text
-		if first == nil && node.textObject != nil && len(node.children) != 0 {
-			first = node.children[0].text
-		}
-		if first != nil {
-			if span := r.span(first.Replacement); span != nil && !span.applied && !span.blocked && span.text.Text != "" && !(span.identity && span.count == 1) {
-				var marks []*pdfgo.TextMark
-				for end = i; end < len(nodes); end++ {
-					current := nodes[end]
-					children := current.children
-					if current.text != nil {
-						children = nodes[end : end+1]
-					} else if current.textObject == nil {
-						break
-					}
-					valid := len(children) != 0
-					for _, child := range children {
-						if child.text == nil || r.span(child.text.Replacement) != span {
-							valid = false
-							break
-						}
-					}
-					if !valid {
-						break
-					}
-					for _, child := range children {
-						marks = append(marks, child.text)
-					}
-				}
-				end = max(end, i+1)
-				if len(marks) == span.count {
-					if mark, ok := codecpdf.MergeReplacement(marks, span.text); ok {
-						var origins pdfOriginSet
-						for _, source := range marks {
-							if err := r.importer.ctx.Err(); err != nil {
-								return nil, err
-							}
-							origin := r.importer.textOrigin(*source)
-							origins.add(origin.sequence)
-							for _, sequence := range origin.related {
-								origins.add(sequence)
-							}
-						}
-						if len(origins.origin.related) != 0 {
-							if r.importer.textOrigins == nil {
-								r.importer.textOrigins = make(map[*pdfgo.ReplacementText]pdfObjectOrigin)
-							}
-							r.importer.textOrigins[span.text] = origins.origin
-						}
-						if node.text != nil {
-							node.text = mark
-						} else {
-							node.children = []pdfCompositeNode{{text: mark}}
-						}
-						span.applied = true
-						combined = true
-					}
-				}
-			}
-		}
-		node.formCount = 0
-		result = append(result, node)
-		if !combined {
-			for _, remaining := range nodes[i+1 : end] {
-				remaining.formCount = 0
-				result = append(result, remaining)
-			}
-		}
-		i = end
-	}
-	clear(nodes[len(result):])
-	return result, nil
-}
-
-// clear 清除无需替换及未转换的区段引用，防止局部绘制重复使用整段原文
-// 入参: nodes 图元
-func (r *pdfTextReplacements) clear(nodes []pdfCompositeNode) {
-	for _, node := range nodes {
-		if node.text != nil {
-			if span := r.span(node.text.Replacement); span != nil && !span.applied {
-				node.text.Replacement = nil
-			}
-		}
-		r.clear(node.children)
-	}
-}
-
 // textOrigin 获取合并文字的完整来源，普通文字沿用原始区段
 // 入参: mark 文字图元
 // 返回: pdfObjectOrigin 来源区段
@@ -1045,4 +1067,70 @@ func pdfApplyReplacement(object *TextObject, text string, positions []pdfgo.Poin
 	}
 	object.TextCode = []TextCode{{X: pdfNumbers(positions[0].X * unit), Y: pdfNumbers(-positions[0].Y * unit), DeltaX: pdfNumbers(dx...), DeltaY: pdfNumbers(dy...), Value: escapeOFDText(text)}}
 	object.CGTransform = []CGTransform{{CodeCount: utf8.RuneCountInString(text), GlyphCount: len(glyphs), Glyphs: strings.Join(glyphs, " ")}}
+}
+
+// pdfCompactTextRuns 将同基线连续字形合并为单条TextCode与DeltaX，并合并连续一对一CGTransform
+// 入参: object 目标文字对象, items 字形项序列
+func pdfCompactTextRuns(object *TextObject, items []pdfTextGlyphItem) {
+	if len(items) == 0 {
+		return
+	}
+	object.TextCode = make([]TextCode, 0, 1)
+	var textBuf strings.Builder
+	var glyphBuf strings.Builder
+	var deltas []float64
+	pos := 0
+	for start := 0; start < len(items); {
+		first := items[start]
+		end := start + 1
+		if first.hasTransform || first.runes == 1 {
+			for end < len(items) && math.Abs(items[end].y-first.y) <= 1e-9 && (items[end].hasTransform || items[end].runes == 1) {
+				end++
+			}
+		}
+		textBuf.Reset()
+		deltas = deltas[:0]
+		curX := first.x
+		runStart, runCount := -1, 0
+		glyphBuf.Reset()
+		flushTransform := func() {
+			if runCount == 0 {
+				return
+			}
+			object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: runStart, CodeCount: runCount, GlyphCount: runCount, Glyphs: glyphBuf.String()})
+			runStart, runCount = -1, 0
+			glyphBuf.Reset()
+		}
+		for i := start; i < end; i++ {
+			item := items[i]
+			textBuf.WriteString(item.text)
+			if i > start {
+				dx := item.x - curX
+				deltas = append(deltas, dx)
+				curX += dx
+			}
+			if !item.hasTransform {
+				flushTransform()
+			} else if item.runes == 1 {
+				if runCount == 0 {
+					runStart = pos
+				} else {
+					glyphBuf.WriteByte(' ')
+				}
+				glyphBuf.WriteString(strconv.Itoa(int(item.gid)))
+				runCount++
+			} else {
+				flushTransform()
+				object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: pos, CodeCount: item.runes, GlyphCount: 1, Glyphs: strconv.Itoa(int(item.gid))})
+			}
+			pos += item.runes
+		}
+		flushTransform()
+		code := TextCode{X: pdfNumbers(first.x), Y: pdfNumbers(first.y), Value: textBuf.String()}
+		if len(deltas) > 0 {
+			code.DeltaX = pdfNumbers(deltas...)
+		}
+		object.TextCode = append(object.TextCode, code)
+		start = end
+	}
 }

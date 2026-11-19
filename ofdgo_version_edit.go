@@ -33,6 +33,77 @@ type versionEditFile struct {
 	links  []versionEditLink
 }
 
+// rewrite 按需读取并更新已隔离文件的引用，保留其余XML及相对路径基准
+// 入参: ctx 取消上下文, paths 原路径到新路径的映射
+// 返回: []byte 更新后的XML，未改动时返回已加载原文或nil, error 读取或属性编码错误
+func (file *versionEditFile) rewrite(ctx context.Context, paths map[string]string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	needed := false
+	for _, link := range file.links {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if paths[link.target] != "" {
+			needed = true
+			break
+		}
+	}
+	if !needed {
+		return file.data, nil
+	}
+	source := file.data
+	if source == nil {
+		var err error
+		source, err = file.reader.readFileViewContext(ctx, file.name)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var patches []editorXMLPatch
+	headers := make(map[*editorXML][]versionEditLink)
+	for _, link := range file.links {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if paths[link.target] == "" {
+			continue
+		}
+		if link.attribute == "" {
+			patches = append(patches, editorXMLContent(source, link.node, editorFontXMLText("/"+paths[link.target])))
+		} else {
+			headers[link.node] = append(headers[link.node], link)
+		}
+	}
+	for node, links := range headers {
+		data := source[node.start:node.end]
+		for _, link := range links {
+			root, err := parseEditorXMLContext(ctx, data)
+			if err != nil {
+				return nil, err
+			}
+			data, err = editorXMLAttribute(data, root, link.attribute, "/"+paths[link.target])
+			if err != nil {
+				return nil, err
+			}
+		}
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			return nil, err
+		}
+		if node.open == node.end {
+			patches = append(patches, editorXMLPatch{node.start, node.end, data})
+		} else {
+			patches = append(patches, editorXMLPatch{node.start, node.open, data[:root.open]})
+		}
+	}
+	if len(patches) == 0 {
+		return file.data, nil
+	}
+	return editorPatchXML(source, patches), ctx.Err()
+}
+
 // versionEditLink 记录文件引用的位置与包内目标
 type versionEditLink struct {
 	node      *editorXML
@@ -185,6 +256,41 @@ func (r *Reader) versionPreservedFiles(ctx context.Context) (map[string]bool, er
 			shared[name] = true
 		}
 	}
+	if r.versionInfo != nil {
+		if sigNode := body.child("Signatures"); sigNode != nil {
+			sigList, err := versionFileLocation("OFD.xml", editorImportText(data, sigNode))
+			if err == nil && sigList != "" {
+				shared[sigList] = true
+				listData, readErr := r.readFileViewContext(ctx, sigList)
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				var list Signatures
+				if readErr == nil && xml.Unmarshal(listData, &list) == nil {
+					for _, item := range list.List {
+						if err := ctx.Err(); err != nil {
+							return nil, err
+						}
+						sigPath := cleanPackagePath(resolveResourcePath(sigList, "", item.BaseLoc))
+						if sigPath == "" {
+							continue
+						}
+						shared[sigPath] = true
+						owned, protected, sigErr := r.signatureRemovalFiles(ctx, sigPath)
+						if err := ctx.Err(); err != nil {
+							return nil, err
+						}
+						if sigErr == nil {
+							maps.Copy(shared, owned)
+							maps.Copy(shared, protected)
+							delete(shared, "")
+							delete(shared, ".")
+						}
+					}
+				}
+			}
+		}
+	}
 	versions, err := r.DocumentVersionsContext(ctx)
 	if err != nil {
 		return nil, err
@@ -281,12 +387,23 @@ func (r *Reader) versionFileUnchanged(ctx context.Context, name string, data []b
 		}
 		return true, ctx.Err()
 	}
-	file, ok := r.packageFile(name)
-	if !ok || file.UncompressedSize64 != uint64(len(data)) {
-		return false, nil
-	}
-	input, err := file.Open()
-	if err != nil {
+	var input io.ReadCloser
+	if file, ok := r.packageFile(name); ok {
+		if file.UncompressedSize64 != uint64(len(data)) {
+			return false, nil
+		}
+		var err error
+		input, err = file.Open()
+		if err != nil {
+			return false, nil
+		}
+	} else if src := r.encryptedSource(); src != nil && src.has(name) {
+		var err error
+		input, err = src.open(name)
+		if err != nil {
+			return false, nil
+		}
+	} else {
 		return false, nil
 	}
 	defer input.Close()
@@ -342,9 +459,23 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 	if len(parts) == 0 && len(removed) == 0 {
 		return parts, ctx.Err()
 	}
-	shared, err := r.versionSharedFiles(ctx)
+	preserved, err := r.versionPreservedFiles(ctx)
 	if err != nil {
 		return nil, err
+	}
+	var otherIndexes []int
+	for index := range r.DocumentCount() {
+		if index != r.documentIndex {
+			otherIndexes = append(otherIndexes, index)
+		}
+	}
+	shared := maps.Clone(preserved)
+	if len(otherIndexes) != 0 {
+		otherFiles, err := r.documentFiles(ctx, otherIndexes...)
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(shared, otherFiles)
 	}
 	if r.versionInfo == nil && len(removed) == 0 {
 		changed := false
@@ -451,8 +582,27 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 		node := root.childAt("DocBody", r.documentIndex).child("DocRoot")
 		parts["OFD.xml"] = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, node, editorFontXMLText("/"+target))})
 	}
+	retainedShared := shared
+	if len(removed) != 0 && len(otherIndexes) != 0 && len(parts) != 0 {
+		afterView := *r
+		afterView.files = maps.Clone(r.files)
+		if afterView.files == nil {
+			afterView.files = make(map[string][]byte, len(parts))
+		}
+		for name, data := range parts {
+			if data != nil {
+				afterView.files[name] = data
+			}
+		}
+		afterFiles, err := afterView.documentFiles(ctx, otherIndexes...)
+		if err != nil {
+			return nil, err
+		}
+		retainedShared = maps.Clone(preserved)
+		maps.Copy(retainedShared, afterFiles)
+	}
 	for name := range removed {
-		if shared[name] {
+		if retainedShared[name] {
 			delete(removed, name)
 		}
 	}
@@ -471,77 +621,6 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 		}
 	}
 	return parts, nil
-}
-
-// rewrite 按需读取并更新已隔离文件的引用，保留其余XML及相对路径基准
-// 入参: ctx 取消上下文, paths 原路径到新路径的映射
-// 返回: []byte 更新后的XML，未改动时返回已加载原文或nil, error 读取或属性编码错误
-func (file *versionEditFile) rewrite(ctx context.Context, paths map[string]string) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	needed := false
-	for _, link := range file.links {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if paths[link.target] != "" {
-			needed = true
-			break
-		}
-	}
-	if !needed {
-		return file.data, nil
-	}
-	source := file.data
-	if source == nil {
-		var err error
-		source, err = file.reader.readFileViewContext(ctx, file.name)
-		if err != nil {
-			return nil, err
-		}
-	}
-	var patches []editorXMLPatch
-	headers := make(map[*editorXML][]versionEditLink)
-	for _, link := range file.links {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if paths[link.target] == "" {
-			continue
-		}
-		if link.attribute == "" {
-			patches = append(patches, editorXMLContent(source, link.node, editorFontXMLText("/"+paths[link.target])))
-		} else {
-			headers[link.node] = append(headers[link.node], link)
-		}
-	}
-	for node, links := range headers {
-		data := source[node.start:node.end]
-		for _, link := range links {
-			root, err := parseEditorXMLContext(ctx, data)
-			if err != nil {
-				return nil, err
-			}
-			data, err = editorXMLAttribute(data, root, link.attribute, "/"+paths[link.target])
-			if err != nil {
-				return nil, err
-			}
-		}
-		root, err := parseEditorXMLContext(ctx, data)
-		if err != nil {
-			return nil, err
-		}
-		if node.open == node.end {
-			patches = append(patches, editorXMLPatch{node.start, node.end, data})
-		} else {
-			patches = append(patches, editorXMLPatch{node.start, node.open, data[:root.open]})
-		}
-	}
-	if len(patches) == 0 {
-		return file.data, nil
-	}
-	return editorPatchXML(source, patches), ctx.Err()
 }
 
 // versionManifest 更新所选版本的入口与文件清单，保留已有文件标识及扩展字段

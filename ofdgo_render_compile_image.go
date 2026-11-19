@@ -18,11 +18,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"image"
 	"math"
 	"slices"
 
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
@@ -33,7 +33,7 @@ func (c *semanticCompiler) DrawStamp(stamp Stamp) error {
 	return c.sharedStamp(stamp, (*semanticCompiler).drawStampContent)
 }
 
-// imageObject 共用图片定位、裁剪和边框，不在度量时读取像素
+// imageObject 共用图片定位、裁剪和边框，边框仅受父裁剪与显式Clips限制而不受图像Boundary裁剪
 // 入参: object 图片对象, state 继承状态
 // 返回: error 资源或几何错误
 func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) error {
@@ -49,6 +49,22 @@ func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) er
 	clip, err := c.renderer.objectGeometryClip(object.Clips, object.Boundary, local, state)
 	if err != nil {
 		return err
+	}
+	var border PathObject
+	hasBorder := object.Border != nil
+	if hasBorder {
+		border = imageBorderObject(object, box)
+		if border.LineWidth == 0 {
+			hasBorder = false
+		}
+	}
+	useGroup := !c.measure && hasBorder && object.Alpha != nil && clampColor(*object.Alpha) < 255
+	imgAlpha := object.Alpha
+	if useGroup {
+		c.BeginTransparencyGroup(uint8(clampColor(*object.Alpha)))
+		defer c.EndTransparencyGroup()
+		imgAlpha = nil
+		border.Alpha = nil
 	}
 	if c.measure {
 		path, err := c.geometry.Transform(GeometryPath(basegeom.Rectangle(Box{W: 1, H: 1})), matrix)
@@ -71,45 +87,26 @@ func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) er
 		if err != nil {
 			return err
 		}
-		img, err = imageWithEffects(c.renderer.pageContext, img, mask, object.Alpha)
+		img, err = imageWithEffects(c.renderer.pageContext, img, mask, imgAlpha)
 		if err != nil {
 			return err
 		}
 		bounds := img.Bounds()
-		matrix = matrix.Multiply(Matrix{a: 1 / float64(bounds.Dx()), d: 1 / float64(bounds.Dy())}).Multiply(TranslationMatrix(-float64(bounds.Min.X), -float64(bounds.Min.Y)))
-		if err := c.addImage(img, matrix, clip); err != nil {
+		placed := matrix.Multiply(Matrix{a: 1 / float64(bounds.Dx()), d: 1 / float64(bounds.Dy())}).Multiply(TranslationMatrix(-float64(bounds.Min.X), -float64(bounds.Min.Y)))
+		if err := c.addImage(img, placed, clip); err != nil {
 			return err
 		}
 	}
-	if object.Border != nil {
-		border := imageBorderObject(object, box)
-		if border.LineWidth == 0 {
-			return nil
+	if hasBorder {
+		borderClip, err := c.renderer.imageBorderClip(object.Clips, object.Boundary, local, state)
+		if err != nil {
+			return err
 		}
-		state.Clip = clip
-		state.Defaults = nil
-		return c.pathObject(border, state)
+		origin, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
+		border.Boundary = ""
+		return c.pathObject(border, RenderState{Parent: &origin, BoundaryInCTM: true, Clip: borderClip})
 	}
 	return nil
-}
-
-// imageBorderObject 共用图像圆角边框的标准路径与样式
-// 入参: object 图像对象, box 物理范围
-// 返回: PathObject 边框
-func imageBorderObject(object ImageObject, box Box) PathObject {
-	border := object.Border
-	width := defaultPathLineWidth
-	if border.LineWidth != nil {
-		width = *border.LineWidth
-	}
-	w, h := box.W, box.H
-	data := fmt.Sprintf("M 0 0 L %g 0 L %g %g L 0 %g C", w, w, h, h)
-	rx, ry := min(border.HorizonalCornerRadius, w/2), min(border.VerticalCornerRadius, h/2)
-	if rx > 0 && ry > 0 {
-		data = fmt.Sprintf("M 0 %g A %g %g 0 0 1 %g 0 L %g 0 A %g %g 0 0 1 %g %g L %g %g A %g %g 0 0 1 %g %g L %g %g A %g %g 0 0 1 0 %g C",
-			ry, rx, ry, rx, w-rx, rx, ry, w, ry, w, h-ry, rx, ry, w-rx, h, rx, h, rx, ry, h-ry)
-	}
-	return PathObject{Boundary: object.Boundary, LineWidth: width, DashOffset: &border.DashOffset, DashPattern: border.DashPattern, Alpha: object.Alpha, StrokeColor: border.BorderColor, AbbreviatedData: data}
 }
 
 // addImage 保留图像资源与页面坐标裁剪，延迟像素采样
@@ -170,6 +167,26 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 		if err != nil {
 			return err
 		}
+		if !rasterPositive(stamp.Box.W) || !rasterPositive(stamp.Box.H) || stamp.Clip != nil && (!rasterPositive(stamp.Clip.W) || !rasterPositive(stamp.Clip.H)) {
+			return nil
+		}
+		clipBox := stamp.Box
+		if stamp.Clip != nil {
+			x0 := max(clipBox.X, stamp.Box.X+stamp.Clip.X)
+			y0 := max(clipBox.Y, stamp.Box.Y+stamp.Clip.Y)
+			x1 := min(clipBox.X+clipBox.W, stamp.Box.X+stamp.Clip.X+stamp.Clip.W)
+			y1 := min(clipBox.Y+clipBox.H, stamp.Box.Y+stamp.Clip.Y+stamp.Clip.H)
+			clipBox = Box{X: x0, Y: y0, W: x1 - x0, H: y1 - y0}
+		}
+		var clip GeometryPath
+		var segments []RasterSegment
+		if rasterPositive(clipBox.W) && rasterPositive(clipBox.H) {
+			clip = GeometryPath(basegeom.Rectangle(clipBox))
+			segments, err = c.segments(clip)
+			if err != nil {
+				return err
+			}
+		}
 		renderer := c.renderer.childRenderer(reader)
 		renderer.TransparentBackground = true
 		for _, reference := range document.Pages.Page {
@@ -181,48 +198,41 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 			if err != nil {
 				return err
 			}
-			matrix := TranslationMatrix(stamp.Box.X, stamp.Box.Y).Multiply(Matrix{a: stamp.Box.W / page.Width, d: stamp.Box.H / page.Height})
-			var clip GeometryPath
-			var segments []RasterSegment
-			if stamp.Clip != nil {
-				clip = GeometryPath(basegeom.Rectangle(Box{X: stamp.Box.X + stamp.Clip.X, Y: stamp.Box.Y + stamp.Clip.Y, W: stamp.Clip.W, H: stamp.Clip.H}))
-				segments, err = c.segments(clip)
-				if err != nil {
-					return err
-				}
+			if len(clip) == 0 {
+				continue
 			}
+			matrix := TranslationMatrix(stamp.Box.X, stamp.Box.Y).Multiply(Matrix{a: stamp.Box.W / page.Width, d: stamp.Box.H / page.Height})
 			for _, command := range page.Commands {
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				command.Transform = RasterMatrix(matrix.Multiply(MatrixFromValues([6]float64(command.Transform))).Values())
-				if command.Stroke != nil {
-					stroke := *command.Stroke
-					scale := math.Sqrt(math.Abs(matrix.a*matrix.d - matrix.b*matrix.c))
-					stroke.Width *= scale
-					stroke.DashOffset *= scale
-					stroke.Dashes = slices.Clone(stroke.Dashes)
-					for i := range stroke.Dashes {
-						stroke.Dashes[i] *= scale
+				if command.Group == RasterGroupNone {
+					command.Transform = RasterMatrix(matrix.Multiply(MatrixFromValues([6]float64(command.Transform))).Values())
+					if command.Stroke != nil {
+						stroke := *command.Stroke
+						scale := math.Sqrt(math.Abs(matrix.a*matrix.d - matrix.b*matrix.c))
+						stroke.Width *= scale
+						stroke.DashOffset *= scale
+						stroke.Dashes = slices.Clone(stroke.Dashes)
+						for i := range stroke.Dashes {
+							stroke.Dashes[i] *= scale
+						}
+						command.Stroke = &stroke
 					}
-					command.Stroke = &stroke
 				}
 				if command.Clip != nil {
+					rasterMat := RasterMatrix(matrix.Values())
 					command.Clip = slices.Clone(command.Clip)
 					for i := range command.Clip {
 						segment := command.Clip[i]
-						segment.End = RasterMatrix(matrix.Values()).Apply(segment.End)
-						segment.Control1 = RasterMatrix(matrix.Values()).Apply(segment.Control1)
-						segment.Control2 = RasterMatrix(matrix.Values()).Apply(segment.Control2)
+						segment.End = rasterMat.Apply(segment.End)
+						segment.Control1 = rasterMat.Apply(segment.Control1)
+						segment.Control2 = rasterMat.Apply(segment.Control2)
 						command.Clip[i] = segment
 					}
 				}
-				if stamp.Clip != nil {
-					if err := c.appendClippedCommands([]RasterCommand{command}, clip, segments); err != nil {
-						return err
-					}
-				} else {
-					c.page.Commands = append(c.page.Commands, command)
+				if err := c.appendClippedCommands([]RasterCommand{command}, clip, segments); err != nil {
+					return err
 				}
 			}
 		}
@@ -255,4 +265,23 @@ func (c *semanticCompiler) stampImage(img image.Image, stamp Stamp) error {
 	bounds := img.Bounds()
 	matrix := TranslationMatrix(box.X, box.Y).Multiply(Matrix{a: box.W / float64(bounds.Dx()), d: box.H / float64(bounds.Dy())}).Multiply(TranslationMatrix(-float64(bounds.Min.X), -float64(bounds.Min.Y)))
 	return c.addImage(img, matrix, clip)
+}
+
+// imageBorderObject 共用图像圆角边框的标准路径与样式
+// 入参: object 图像对象, box 物理范围
+// 返回: PathObject 边框
+func imageBorderObject(object ImageObject, box Box) PathObject {
+	border := object.Border
+	width := defaultPathLineWidth
+	if border.LineWidth != nil {
+		width = *border.LineWidth
+	}
+	w, h := box.W, box.H
+	data := fmt.Sprintf("M 0 0 L %g 0 L %g %g L 0 %g C", w, w, h, h)
+	rx, ry := min(border.HorizonalCornerRadius, w/2), min(border.VerticalCornerRadius, h/2)
+	if rx > 0 && ry > 0 {
+		data = fmt.Sprintf("M 0 %g A %g %g 0 0 1 %g 0 L %g 0 A %g %g 0 0 1 %g %g L %g %g A %g %g 0 0 1 %g %g L %g %g A %g %g 0 0 1 0 %g C",
+			ry, rx, ry, rx, w-rx, rx, ry, w, ry, w, h-ry, rx, ry, w-rx, h, rx, h, rx, ry, h-ry)
+	}
+	return PathObject{Boundary: object.Boundary, LineWidth: width, DashOffset: &border.DashOffset, DashPattern: border.DashPattern, Alpha: object.Alpha, StrokeColor: border.BorderColor, AbbreviatedData: data}
 }

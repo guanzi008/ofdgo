@@ -19,15 +19,6 @@ import (
 	"slices"
 )
 
-// editorChange 页面或对象操作及其修订标识
-type editorChange struct {
-	undo    func(*Editor)
-	redo    func(*Editor)
-	before  uint64
-	after   uint64
-	changes EditorChanges
-}
-
 // EditorChanges 描述最近一次修改或历史回放的刷新范围
 // All表示文档结构或共享资源变化；否则Pages为受影响的零基页码
 // 返回值只覆盖最近一次操作，调用方应在每次操作后读取
@@ -40,24 +31,6 @@ type EditorChanges struct {
 // 返回: EditorChanges 变化范围；未发生修改时为空
 func (e *Editor) Changes() EditorChanges {
 	return EditorChanges{All: e.changes.All, Pages: slices.Clone(e.changes.Pages)}
-}
-
-// merge 合并同一事务中的变化范围
-// 入参: change 待合并的变化
-func (c *EditorChanges) merge(change EditorChanges) {
-	if c.All {
-		return
-	}
-	if change.All {
-		c.All = true
-		c.Pages = nil
-		return
-	}
-	for _, page := range change.Pages {
-		if !slices.Contains(c.Pages, page) {
-			c.Pages = append(c.Pages, page)
-		}
-	}
 }
 
 // Transaction 将多项修改作为一次原子操作提交，失败时保留原文档及历史
@@ -148,7 +121,7 @@ func (e *Editor) Undo() bool {
 	e.historyIndex--
 	change := e.history[e.historyIndex]
 	change.undo(e)
-	e.changes, e.objectIndex = change.changes, nil
+	e.changes, e.objectIndices = change.changes, nil
 	e.invalidatePreviewPages(change.changes)
 	e.revision = change.before
 	return true
@@ -162,7 +135,7 @@ func (e *Editor) Redo() bool {
 	}
 	change := e.history[e.historyIndex]
 	change.redo(e)
-	e.changes, e.objectIndex = change.changes, nil
+	e.changes, e.objectIndices = change.changes, nil
 	e.invalidatePreviewPages(change.changes)
 	e.historyIndex++
 	e.revision = change.after
@@ -174,6 +147,33 @@ func (e *Editor) Redo() bool {
 // 返回: uint64 修订标识
 func (e *Editor) Revision() uint64 {
 	return e.revision
+}
+
+// editorChange 页面或对象操作及其修订标识
+type editorChange struct {
+	undo    func(*Editor)
+	redo    func(*Editor)
+	before  uint64
+	after   uint64
+	changes EditorChanges
+}
+
+// merge 合并同一事务中的变化范围
+// 入参: change 待合并的变化
+func (c *EditorChanges) merge(change EditorChanges) {
+	if c.All {
+		return
+	}
+	if change.All {
+		c.All = true
+		c.Pages = nil
+		return
+	}
+	for _, page := range change.Pages {
+		if !slices.Contains(c.Pages, page) {
+			c.Pages = append(c.Pages, page)
+		}
+	}
 }
 
 // transactionSnapshot 复制顶层容器，共享按替换方式更新的页面图层、图元和二进制资源
@@ -190,11 +190,12 @@ func (e *Editor) transactionState() Editor {
 	next := *e
 	next.Info = cloneEditorData(e.Info)
 	next.resources = slices.Clone(e.resources)
-	next.fonts, next.images, next.resourceID = maps.Clone(e.fonts), maps.Clone(e.images), maps.Clone(e.resourceID)
+	next.fonts, next.images, next.resourceID, next.promoted = maps.Clone(e.fonts), maps.Clone(e.images), maps.Clone(e.resourceID), maps.Clone(e.promoted)
 	next.origins = maps.Clone(e.origins)
 	next.removedPages = maps.Clone(e.removedPages)
 	next.structureRemaps = maps.Clone(e.structureRemaps)
 	next.fontMetrics = maps.Clone(e.fontMetrics)
+	next.objectIndices = nil
 	if e.source != nil {
 		source := *e.source
 		source.pages, source.origins = maps.Clone(source.pages), maps.Clone(source.origins)
@@ -227,7 +228,7 @@ func (e *Editor) restoreTransactionState(state Editor) {
 	state.fontSourcesCache = e.fontSourcesCache
 	state.validatedPaths = e.validatedPaths
 	state.encryption, state.output, state.OnWriteProgress = e.encryption, e.output, e.OnWriteProgress
-	state.saveTarget = e.saveTarget
+	state.saveTarget, state.sourceFile = e.saveTarget, e.sourceFile
 	*e = state
 }
 
@@ -259,6 +260,7 @@ func (e *Editor) retainDocumentResources(source *Editor) {
 	maps.Copy(e.fonts, source.fonts)
 	maps.Copy(e.images, source.images)
 	maps.Copy(e.resourceID, source.resourceID)
+	maps.Copy(e.promoted, source.promoted)
 	if sameBackend(e.backends.FontResources, source.backends.FontResources) {
 		e.fontRegistration = source.fontRegistration
 	}
@@ -327,7 +329,7 @@ func (e *Editor) recordChange(pages ...int) *editorChange {
 // 返回: *editorChange 可补充回放操作的记录
 func (e *Editor) recordChangeScope(scope EditorChanges) *editorChange {
 	e.invalidatePreviewPages(scope)
-	e.objectIndex = nil
+	e.objectIndices = nil
 	e.changes = scope
 	if e.transactionChanges != nil {
 		e.transactionChanges.merge(scope)

@@ -24,14 +24,17 @@ import (
 	"math"
 	"reflect"
 	"slices"
+	"strings"
 )
 
 // ObjectPath 定位页面顶层对象或注解外观内的成员，Children为从0开始的逐层绘制序号
 // Annotation非空时定位该注解的Appearance，ID留空
+// Signature非空时ID定位该签名的StampAnnot，不包含内部成员
 // 路径不依赖资源标识，几何变换、资源隔离及撤销重做不改变路径；成员增删或排序后需重新枚举
 type ObjectPath struct {
 	ID         string `json:"id"`
 	Annotation string `json:"annotation,omitempty"`
+	Signature  string `json:"signature,omitempty"`
 	Children   []int  `json:"children,omitempty"`
 }
 
@@ -50,47 +53,11 @@ type CompositeMember struct {
 	Cropped      bool
 }
 
-// editorCompositeNode 保留原始XML及实例上下文，不修改共享资源
-type editorCompositeNode struct {
-	data          []byte
-	node          *editorXML
-	object        GraphicObject
-	parent        Matrix
-	boundaryInCTM bool
-	defaults      *DrawParam
-	drawParams    []string
-	clip          *GeometryPath
-	visible       bool
-	alpha         *int
-	ref           *editorCompositeNode
-	children      []*editorCompositeNode
-	expanded      bool
-	changed       bool
-	span          *editorXML
-	owner         *editorCompositeNode
-	patches       []editorXMLPatch
-	index         int
-	states        map[string]editorCompositeState
-	remaps        []map[string]string
-}
-
-// editorCompositeState 保存内部对象的会话排版及可还原裁剪，不写入OFD
-type editorCompositeState struct {
-	layout *textLayout
-	crop   *editorCompositeCrop
-	origin [2]float64
-}
-
-// editorCompositeCrop 记录本次编辑新增的裁剪序号及原节点存在性
-type editorCompositeCrop struct {
-	indexes []int
-	exists  bool
-}
-
 // CompositeObjects 枚举复合对象的直接可绘制成员，资源引用层不占用路径层级
 // 入参: page 页面索引, path 复合对象路径
 // 返回: []CompositeMember 按绘制顺序排列的成员, error 错误信息
 func (e *Editor) CompositeObjects(page int, path ObjectPath) ([]CompositeMember, error) {
+	defer e.bindPageIndex(page)()
 	reader, renderer, _, members, err := e.compositeScope(page, path)
 	if err != nil {
 		return nil, err
@@ -114,47 +81,13 @@ func (e *Editor) CompositeObject(page int, path ObjectPath, index int) (Composit
 // 入参: page 页面索引, path 父复合路径, indexes 不重复的成员序号
 // 返回: []CompositeMember 独立成员快照, error 错误信息
 func (e *Editor) CompositeObjectsAt(page int, path ObjectPath, indexes []int) ([]CompositeMember, error) {
+	defer e.bindPageIndex(page)()
 	reader, renderer, _, nodes, err := e.compositeScope(page, path)
 	if err != nil {
 		return nil, err
 	}
 	defer reader.Close()
 	return e.measureCompositeSelection(renderer, nodes, indexes)
-}
-
-// measureCompositeSelection 复用已解析范围，按输入索引度量成员并保留容器位置
-// 入参: renderer 资源渲染器, nodes 范围内全部成员, indexes 不重复的成员序号
-// 返回: []CompositeMember 独立成员快照, error 索引或度量错误
-func (e *Editor) measureCompositeSelection(renderer *Renderer, nodes []*editorCompositeNode, indexes []int) ([]CompositeMember, error) {
-	selected := make([]*editorCompositeNode, len(indexes))
-	seen := make(map[int]bool, len(indexes))
-	for i, index := range indexes {
-		if index < 0 || index >= len(nodes) || seen[index] {
-			return nil, fmt.Errorf("invalid composite member index %d", index)
-		}
-		seen[index] = true
-		selected[i] = nodes[index]
-	}
-	positions := make([]ObjectPosition, len(nodes))
-	containers := make(map[*editorXML]ObjectPosition)
-	for i, node := range nodes {
-		position := containers[node.span.parent]
-		if position.Count == 0 {
-			position.Container = fmt.Sprint(i)
-		}
-		positions[i] = ObjectPosition{Container: position.Container, Index: position.Count}
-		position.Count++
-		containers[node.span.parent] = position
-	}
-	members, err := e.measureCompositeMembers(renderer, selected)
-	if err != nil {
-		return nil, err
-	}
-	for i, index := range indexes {
-		members[i].Position = positions[index]
-		members[i].Position.Count = containers[nodes[index].span.parent].Count
-	}
-	return members, nil
 }
 
 // TransformCompositeObjects 在页面坐标中等比缩放并平移内部选区，只隔离被修改实例的资源
@@ -261,7 +194,10 @@ func (e *Editor) StyleCompositeObjects(page int, path ObjectPath, indexes []int,
 					local.LineWidth = &width
 				}
 				if style.DashPattern != nil {
-					dash := scaleTextNumbers(*style.DashPattern, 1/members[i].StrokeScale)
+					dash, err := scaleTextNumbers(*style.DashPattern, 1/members[i].StrokeScale)
+					if err != nil {
+						return err
+					}
 					local.DashPattern = &dash
 				}
 				if style.DashOffset != nil {
@@ -289,9 +225,14 @@ func (e *Editor) AlignCompositeObjects(page int, path ObjectPath, indexes []int,
 		return fmt.Errorf("invalid alignment %q", alignment)
 	}
 	return e.arrangeCompositeObjects(page, path, indexes, func(boxes []Box) ([]Matrix, error) {
-		target, _ := ParseBox(e.pages[page].Area.PhysicalBox)
-		if len(boxes) > 1 {
-			target = Box{}
+		var target Box
+		if len(boxes) == 1 {
+			var err error
+			target, err = e.pageAreaBox(page)
+			if err != nil {
+				return nil, err
+			}
+		} else {
 			for _, box := range boxes {
 				target = unionTextBox(target, box)
 			}
@@ -320,9 +261,64 @@ func (e *Editor) DistributeCompositeObjects(page int, path ObjectPath, indexes [
 	})
 }
 
+// editorCompositeNode 保留原始XML及实例上下文，不修改共享资源
+type editorCompositeNode struct {
+	data            []byte
+	node            *editorXML
+	object          GraphicObject
+	pageID          string
+	parent          Matrix
+	boundaryInCTM   bool
+	defaults        *DrawParam
+	drawParams      []string
+	clip            *GeometryPath
+	visible         bool
+	alpha           *int
+	ref             *editorCompositeNode
+	children        []*editorCompositeNode
+	expanded        bool
+	changed         bool
+	span            *editorXML
+	owner           *editorCompositeNode
+	patches         []editorXMLPatch
+	index           int
+	states          map[string]editorCompositeState
+	inheritedStates map[string]editorCompositeState
+	remaps          []map[string]string
+}
+
+// newEditorCompositeNode 解析独立图形片段，保留全部原始属性
+// 入参: data XML片段
+// 返回: *editorCompositeNode 节点, error 错误信息
+func newEditorCompositeNode(data []byte) (*editorCompositeNode, error) {
+	node, err := parseEditorXML(data)
+	if err != nil {
+		return nil, err
+	}
+	var object GraphicObject
+	object.Type = node.name.Local
+	switch object.Type {
+	case "Appearance":
+		object.Type = "CompositeObject"
+		err = xml.Unmarshal(data, &object.CompositeGraphicUnit)
+	case "TextObject":
+		err = xml.Unmarshal(data, &object.TextObject)
+	case "PathObject":
+		err = xml.Unmarshal(data, &object.PathObject)
+	case "ImageObject":
+		err = xml.Unmarshal(data, &object.ImageObject)
+	case "CompositeObject", "CompositeGraphicUnit":
+		err = xml.Unmarshal(data, &object.CompositeGraphicUnit)
+	default:
+		err = fmt.Errorf("unsupported composite member %q", object.Type)
+	}
+	return &editorCompositeNode{data: data, node: node, object: object}, err
+}
+
 // setStates 独立保存当前XML子树的会话信息，共享不可变记录
 // 入参: states 来源记录
 func (n *editorCompositeNode) setStates(states map[string]editorCompositeState) {
+	n.inheritedStates = states
 	n.states = make(map[string]editorCompositeState)
 	var visit func(*editorXML)
 	visit = func(node *editorXML) {
@@ -358,43 +354,69 @@ func (n *editorCompositeNode) setState(state editorCompositeState) {
 	n.changed = true
 }
 
-// remapCompositeStates 随XML标识重映射会话记录，仅保留当前子树的对象
-// 入参: states 原记录, ids 标识映射
-// 返回: map[string]editorCompositeState 新记录
-func remapCompositeStates(states map[string]editorCompositeState, ids map[string]string) map[string]editorCompositeState {
-	var result map[string]editorCompositeState
-	for id, next := range ids {
-		if state, ok := states[id]; ok {
-			if result == nil {
-				result = make(map[string]editorCompositeState)
-			}
-			result[next] = state
+// transformable 校验内部对象能否保留原文进行几何操作，不执行绘制测量
+// 返回: bool 是否支持
+func (n *editorCompositeNode) transformable() bool {
+	_, invertible := n.parent.Invert()
+	return invertible && editorXMLTransformable(n.node) && validateEditorGeometry(n.object) == nil
+}
+
+// editorCompositeState 保存内部对象的会话排版及可还原裁剪，不写入OFD
+type editorCompositeState struct {
+	layout *textLayout
+	crop   *editorCompositeCrop
+	origin [2]float64
+}
+
+// editorCompositeCrop 记录本次编辑新增的裁剪序号及原节点存在性
+type editorCompositeCrop struct {
+	indexes []int
+	exists  bool
+}
+
+// measureCompositeSelection 复用已解析范围，按输入索引度量成员并保留容器位置
+// 入参: renderer 资源渲染器, nodes 范围内全部成员, indexes 不重复的成员序号
+// 返回: []CompositeMember 独立成员快照, error 索引或度量错误
+func (e *Editor) measureCompositeSelection(renderer *Renderer, nodes []*editorCompositeNode, indexes []int) ([]CompositeMember, error) {
+	selected := make([]*editorCompositeNode, len(indexes))
+	seen := make(map[int]bool, len(indexes))
+	for i, index := range indexes {
+		if index < 0 || index >= len(nodes) || seen[index] {
+			return nil, fmt.Errorf("invalid composite member index %d", index)
 		}
+		seen[index] = true
+		selected[i] = nodes[index]
 	}
-	return result
-}
-
-// removeCompositeStates 清除子树旧记录，再由写入结果合并新记录
-// 入参: states 目标记录, node 子树根节点
-func removeCompositeStates(states map[string]editorCompositeState, node *editorXML) {
-	delete(states, node.attr("ID"))
-	for _, child := range node.children {
-		removeCompositeStates(states, child)
+	positions := make([]ObjectPosition, len(nodes))
+	containers := make(map[*editorXML]ObjectPosition)
+	for i, node := range nodes {
+		position := containers[node.span.parent]
+		if position.Count == 0 {
+			position.Container = fmt.Sprint(i)
+		}
+		positions[i] = ObjectPosition{Container: position.Container, Index: position.Count}
+		position.Count++
+		containers[node.span.parent] = position
 	}
-}
-
-// compositeOrientation 将旋转或镜像中心移至选区中心
-// 入参: box 选区, matrix 方向矩阵
-// 返回: Matrix 页面变换
-func compositeOrientation(box Box, matrix Matrix) Matrix {
-	x, y := box.X+box.W/2, box.Y+box.H/2
-	return TranslationMatrix(x, y).Multiply(matrix).Multiply(TranslationMatrix(-x, -y))
+	members, err := e.measureCompositeMembers(renderer, selected)
+	if err != nil {
+		return nil, err
+	}
+	for i, index := range indexes {
+		members[i].Position = positions[index]
+		members[i].Position.Count = containers[nodes[index].span.parent].Count
+	}
+	return members, nil
 }
 
 // compositeScope 加载所需的复合路径及直接成员，不展开无关子树
 // 入参: page 页面索引, path 复合对象路径
 // 返回: *Reader 预览读取器, *Renderer 度量器, *editorCompositeNode 顶层节点, []*editorCompositeNode 成员, error 错误信息
 func (e *Editor) compositeScope(page int, path ObjectPath) (*Reader, *Renderer, *editorCompositeNode, []*editorCompositeNode, error) {
+	defer e.bindPageIndex(page)()
+	if path.Signature != "" {
+		return nil, nil, nil, nil, fmt.Errorf("signature appearances have no editable children")
+	}
 	if path.Annotation != "" {
 		return e.annotationScope(page, path)
 	}
@@ -421,16 +443,19 @@ func (e *Editor) compositeScope(page int, path ObjectPath) (*Reader, *Renderer, 
 		return nil, nil, nil, nil, err
 	}
 	root.node.parent = &editorXML{name: xml.Name{Local: "Layer"}, attrs: []xml.Attr{{Name: xml.Name{Local: "ID"}, Value: layer.ID}, {Name: xml.Name{Local: "DrawParam"}, Value: layer.DrawParam}}, parent: &editorXML{name: xml.Name{Local: "Content"}}}
+	root.pageID = e.pages[page].ID
 	root.setStates(object.CompositeGraphicUnit.states)
 	reader, err := e.reader(nil)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	if _, err = reader.PageContentByIndex(page); err != nil {
+	content, err := reader.PageContentByIndex(page)
+	if err != nil {
 		reader.Close()
 		return nil, nil, nil, nil, err
 	}
 	renderer := e.newRenderer(reader)
+	renderer.bindPageResources(content)
 	root.parent, root.visible, root.defaults = IdentityMatrix, true, renderer.drawParamDefaults(layer.DrawParam, nil)
 	root.drawParams = []string{layer.DrawParam}
 	scope := root
@@ -455,34 +480,6 @@ func (e *Editor) compositeScope(page int, path ObjectPath) (*Reader, *Renderer, 
 	}
 	reader.Close()
 	return nil, nil, nil, nil, err
-}
-
-// newEditorCompositeNode 解析独立图形片段，保留全部原始属性
-// 入参: data XML片段
-// 返回: *editorCompositeNode 节点, error 错误信息
-func newEditorCompositeNode(data []byte) (*editorCompositeNode, error) {
-	node, err := parseEditorXML(data)
-	if err != nil {
-		return nil, err
-	}
-	var object GraphicObject
-	object.Type = node.name.Local
-	switch object.Type {
-	case "Appearance":
-		object.Type = "CompositeObject"
-		err = xml.Unmarshal(data, &object.CompositeGraphicUnit)
-	case "TextObject":
-		err = xml.Unmarshal(data, &object.TextObject)
-	case "PathObject":
-		err = xml.Unmarshal(data, &object.PathObject)
-	case "ImageObject":
-		err = xml.Unmarshal(data, &object.ImageObject)
-	case "CompositeObject", "CompositeGraphicUnit":
-		err = xml.Unmarshal(data, &object.CompositeGraphicUnit)
-	default:
-		err = fmt.Errorf("unsupported composite member %q", object.Type)
-	}
-	return &editorCompositeNode{data: data, node: node, object: object}, err
 }
 
 // compositeMembers 展开当前复合实例的资源引用与直接绘制成员
@@ -523,12 +520,29 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 				return nil, err
 			}
 		}
-		defaults := renderer.drawParamDefaults(c.DrawParam, n.defaults)
+		defaults := renderer.compositeGraphicUnitDefaults(c, n.defaults)
 		drawParams := append(slices.Clone(n.drawParams), c.DrawParam)
 		visible := n.visible && (c.Visible == nil || *c.Visible)
 		alpha := mergeAlpha(n.alpha, c.Alpha)
 		if c.ResourceID != "" {
-			name, _ := resourceValue(reader.resourceFiles, c.ResourceID)
+			var name string
+			if renderer != nil {
+				for i := len(renderer.pageResources) - 1; i >= 0; i-- {
+					if parsed := renderer.pageResources[i]; parsed != nil && parsed.path != "" && parsedHasResource(parsed, c.ResourceID, "CompositeGraphicUnit") {
+						name = parsed.path
+						break
+					}
+				}
+			}
+			if name == "" {
+				name, _ = reader.resourceFileByKind("CompositeGraphicUnit", c.ResourceID)
+			}
+			if name == "" {
+				name, _ = e.sourceResourceFile(c.ResourceID, "CompositeGraphicUnit")
+			}
+			if name == "" {
+				return nil, fmt.Errorf("composite resource %q not found", c.ResourceID)
+			}
 			data, err := reader.readFile(name)
 			if err != nil {
 				return nil, err
@@ -549,13 +563,18 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 			if err != nil {
 				return nil, err
 			}
-			var states map[string]editorCompositeState
+			states := maps.Clone(n.inheritedStates)
 			for _, resource := range e.resources {
 				if sameResourceID(resource.composite, c.ResourceID) {
-					states = resource.states
+					if states == nil {
+						states = maps.Clone(resource.states)
+					} else {
+						maps.Copy(states, resource.states)
+					}
 					break
 				}
 			}
+			n.ref.pageID = n.pageID
 			n.ref.setStates(states)
 			n.ref.parent, n.ref.boundaryInCTM, n.ref.defaults, n.ref.clip, n.ref.visible = matrix, true, defaults, clip, visible
 			n.ref.drawParams = drawParams
@@ -581,7 +600,14 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 					if err != nil {
 						return err
 					}
-					item.setStates(n.states)
+					item.pageID = n.pageID
+					mergedStates := n.states
+					if len(n.inheritedStates) != 0 {
+						mergedStates = maps.Clone(n.inheritedStates)
+						maps.Copy(mergedStates, n.states)
+					}
+					item.setStates(mergedStates)
+					e.restoreCompositeNodeTextLayout(item)
 					item.parent, item.boundaryInCTM, item.defaults, item.clip, item.visible, item.span = matrix, n.boundaryInCTM, defaults, clip, visible, child
 					item.drawParams = drawParams
 					item.alpha = alpha
@@ -620,6 +646,9 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 // 入参: renderer 渲染器, nodes 成员
 // 返回: []CompositeMember 独立快照及操作能力, error 度量错误
 func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorCompositeNode) ([]CompositeMember, error) {
+	if renderer != nil {
+		defer e.bindParsedScope(renderer.pageResources)()
+	}
 	result := make([]CompositeMember, len(nodes))
 	positions := make(map[*editorXML]ObjectPosition)
 	orderable := make(map[*editorXML]bool)
@@ -700,13 +729,6 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 		positions[node.span.parent] = position
 	}
 	return result, nil
-}
-
-// transformable 校验内部对象能否保留原文进行几何操作，不执行绘制测量
-// 返回: bool 是否支持
-func (n *editorCompositeNode) transformable() bool {
-	_, invertible := n.parent.Invert()
-	return invertible && editorXMLTransformable(n.node) && validateEditorGeometry(n.object) == nil
 }
 
 // compositeMemberStyle 解析成员的继承样式，缺失或循环参数不开放改色
@@ -805,6 +827,7 @@ func (e *Editor) editCompositeObjects(page int, path ObjectPath, indexes []int, 
 // 入参: page 页面索引, path 父路径, edit 修改回调
 // 返回: error 错误信息
 func (e *Editor) editCompositeScope(page int, path ObjectPath, edit func(*Renderer, *editorCompositeNode, []*editorCompositeNode) error) (err error) {
+	defer e.bindPageIndex(page)()
 	reader, renderer, root, nodes, err := e.compositeScope(page, path)
 	if err != nil {
 		return err
@@ -907,81 +930,10 @@ func (e *Editor) transformCompositeMember(renderer *Renderer, n *editorComposite
 		return err
 	}
 	n.node, n.object, n.changed = updated.node, updated.object, true
+	if state, ok := n.states[editorObjectID(n.object)]; ok && state.layout != nil {
+		n.object.TextObject.layout = state.layout
+	}
 	return nil
-}
-
-// transformCompositeOffsets 变换旧式内联复合成员的页面偏移，资源引用保持原坐标约定
-// 入参: data 修改后的复合片段, matrix 页面变换
-// 返回: []byte 同步内部边界及非随动裁剪后的片段, error 错误信息
-func transformCompositeOffsets(data []byte, matrix Matrix) ([]byte, error) {
-	root, err := parseEditorXML(data)
-	if err != nil {
-		return nil, err
-	}
-	var patches []editorXMLPatch
-	var visit func(*editorXML) error
-	visit = func(node *editorXML) error {
-		for _, child := range node.children {
-			switch child.name.Local {
-			case "Content", "PageBlock", "CompositeObject", "CompositeGraphicUnit":
-				if err := visit(child); err != nil {
-					return err
-				}
-			case "TextObject", "PathObject", "ImageObject":
-				fragment, err := editorXMLStandalone(data[child.start:child.end], child)
-				if err != nil {
-					return err
-				}
-				n, err := newEditorCompositeNode(fragment)
-				if err != nil {
-					return err
-				}
-				object := cloneEditorData(n.object)
-				object = compositeBoundary(object, Matrix{a: matrix.a, b: matrix.b, c: matrix.c, d: matrix.d}, false)
-				if clips := editorObjectClips(&object); *clips != nil && !(*clips).usesObjectMatrix() {
-					*clips = transformObjectClips(*clips, TranslationMatrix(matrix.e, matrix.f))
-				}
-				fragment, err = editorXMLObject(n.data, n.node, n.object, object)
-				if err != nil {
-					return err
-				}
-				patches = append(patches, editorXMLPatch{child.start, child.end, fragment})
-			}
-		}
-		return nil
-	}
-	if err = visit(root); err != nil {
-		return nil, err
-	}
-	return editorPatchXML(data, patches), nil
-}
-
-// compositeBoundary 在边界参与和不参与父变换的坐标约定之间转换
-// 入参: object 基本对象, parent 父矩阵, inward 是否转换到父坐标
-// 返回: GraphicObject 转换后的对象
-func compositeBoundary(object GraphicObject, parent Matrix, inward bool) GraphicObject {
-	matrix := parent
-	matrix.e, matrix.f = 0, 0
-	clipMatrix := parent
-	if inward {
-		matrix, _ = matrix.Invert()
-		clipMatrix, _ = parent.Invert()
-	}
-	boundary, _ := editorGeometry(object)
-	box, _ := ParseBox(boundary)
-	box.X, box.Y = matrix.a*box.X+matrix.c*box.Y, matrix.b*box.X+matrix.d*box.Y
-	switch object.Type {
-	case "TextObject":
-		object.TextObject.Boundary = editorBoxString(box)
-	case "PathObject":
-		object.PathObject.Boundary = editorBoxString(box)
-	case "ImageObject":
-		object.ImageObject.Boundary = editorBoxString(box)
-	}
-	if clips := editorObjectClips(&object); *clips != nil && !(*clips).usesObjectMatrix() {
-		*clips = transformObjectClips(*clips, clipMatrix)
-	}
-	return object
 }
 
 // writeCompositeNode 保留原文逐级合并内部修改，仅复制发生变化的资源分支
@@ -1082,15 +1034,320 @@ func (e *Editor) addCompositeResource(data []byte, states map[string]editorCompo
 	return id, nil
 }
 
-// compositeResource 记录生成复合资源的完整引用，用于保存时按依赖保留资源
+// compositeResource 记录生成复合资源的完整引用，从当前页局部作用域提升资源以消除跨页冲突
 // 入参: id 资源标识, data 资源XML
 // 返回: editorResource 资源, error 错误信息
 func (e *Editor) compositeResource(id string, data []byte) (editorResource, error) {
+	if e.source != nil && len(e.pageScope) > 0 {
+		prevMaxID, prevResCount := e.maxID, len(e.resources)
+		prevPromoted, prevImages := maps.Clone(e.promoted), maps.Clone(e.images)
+		promotedData, err := e.promoteScopeXMLToDocument(data, e.pageScope)
+		if err != nil {
+			clear(e.resources[prevResCount:])
+			e.resources, e.maxID = e.resources[:prevResCount], prevMaxID
+			e.promoted, e.images = prevPromoted, prevImages
+			return editorResource{}, err
+		}
+		data = promotedData
+	}
 	refs, err := editorResourceReferences(data)
 	if err != nil {
 		return editorResource{}, err
 	}
 	return editorResource{name: e.packageName("Res/Composites/Composite_" + id + ".xml"), data: data, composite: id, references: refs}, nil
+}
+
+// promoteScopeXMLToDocument 将XML片段引用的局部页面资源克隆提升为无冲突文档级资源并重写引用
+// 入参: data XML数据, scope 当前页面局部资源作用域
+// 返回: []byte 重写后的XML数据, error 资源读取、克隆或编码错误
+func (e *Editor) promoteScopeXMLToDocument(data []byte, scope []*parsedRes) ([]byte, error) {
+	if e.source == nil || len(scope) == 0 {
+		return data, nil
+	}
+	initialRefs, err := editorResourceReferences(data)
+	if err != nil || len(initialRefs) == 0 {
+		return data, err
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return nil, err
+	}
+	if err := e.prepromoteSelfRelativeDrawParams(scope); err != nil {
+		return nil, err
+	}
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return nil, err
+	}
+	remapped, changed, err := e.remapXMLResources(data, root, scope, nil, true, make(map[string]bool))
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		return remapped, nil
+	}
+	return data, nil
+}
+
+// prepromoteSelfRelativeDrawParams 预先提升局部资源中继承上级同名参数的DrawParam，避免同名Relative被误判为自环
+// 入参: scope 页面局部资源作用域
+// 返回: error 读取或提升错误
+func (e *Editor) prepromoteSelfRelativeDrawParams(scope []*parsedRes) error {
+	reader := e.source.reader
+	for idx, parsed := range scope {
+		if parsed.path == "" {
+			continue
+		}
+		for _, rawID := range slices.Sorted(maps.Keys(parsed.drawParams.exact)) {
+			dp := parsed.drawParams.exact[rawID]
+			if dp == nil || dp.Relative == "" || !sameResourceID(dp.Relative, dp.ID) {
+				continue
+			}
+			key := editorResourceID(dp.ID)
+			if key == "" {
+				continue
+			}
+			cacheKey := parsed.path + "\x00" + key
+			if cached := e.promoted[cacheKey]; cached != "" && strings.HasPrefix(e.resolveScopeResourceFile(nil, cached), "@editor/") {
+				continue
+			}
+			parentScope := scope[:idx]
+			parentID, _, err := e.promoteScopedResource(dp.Relative, "DrawParam", parentScope, nil, true, make(map[string]bool))
+			if err != nil {
+				return err
+			}
+			if e.resolveScopeResourceFile(parentScope, parentID) == "" {
+				return fmt.Errorf("draw parameter %q not found", dp.Relative)
+			}
+			resData, err := reader.readFile(parsed.path)
+			if err != nil {
+				return err
+			}
+			resRoot, err := parseEditorXML(resData)
+			if err != nil {
+				return err
+			}
+			resNode := editorResourceNode(resRoot, "DrawParams", "DrawParam", key)
+			if resNode == nil {
+				return fmt.Errorf("draw parameter %q not found in %s", key, parsed.path)
+			}
+			baseLoc := resRoot.attr("BaseLoc")
+			standalone, err := editorXMLStandalone(resData[resNode.start:resNode.end], resNode)
+			if err != nil {
+				return err
+			}
+			if linkLoc := strings.TrimSpace(resNode.attr("Link")); linkLoc != "" {
+				extPath := resolveResourcePath(parsed.path, baseLoc, linkLoc)
+				extData, readErr := reader.readFile(extPath)
+				if readErr != nil {
+					return readErr
+				}
+				extRoot, parseErr := parseEditorXML(extData)
+				if parseErr != nil {
+					return parseErr
+				}
+				standalone, err = editorXMLStandalone(extData[extRoot.start:extRoot.end], extRoot)
+				if err != nil {
+					return err
+				}
+				extRoot, err = parseEditorXML(standalone)
+				if err != nil {
+					return err
+				}
+				standalone, err = editorXMLAttribute(standalone, extRoot, "ID", key)
+				if err != nil {
+					return err
+				}
+			}
+			dpRoot, err := parseEditorXML(standalone)
+			if err != nil {
+				return err
+			}
+			clearRel, err := editorXMLAttributeChange(standalone, dpRoot, "Relative", nil)
+			if err != nil {
+				return err
+			}
+			standalone = editorPatchXML(standalone, []editorXMLPatch{clearRel})
+			var promotedDP DrawParam
+			wrapped, objIDs, err := e.promoteXMLResource(standalone, "DrawParams", &promotedDP, scope[:idx+1], nil, make(map[string]bool))
+			if err != nil {
+				return err
+			}
+			newID := objIDs[key]
+			wrappedRoot, err := parseEditorXML(wrapped)
+			if err != nil {
+				return err
+			}
+			wrappedNode := editorResourceNode(wrappedRoot, "DrawParams", "DrawParam", newID)
+			setRel, err := editorXMLAttributePatch(wrapped, wrappedNode, "Relative", parentID)
+			if err != nil {
+				return err
+			}
+			wrapped = editorPatchXML(wrapped, []editorXMLPatch{setRel})
+			promotedDP.Relative = parentID
+			refs, err := editorResourceReferences(wrapped)
+			if err != nil {
+				return err
+			}
+			e.resources = append(e.resources, editorResource{name: e.packageName("Res/DrawParams/DrawParam_" + newID + ".xml"), data: wrapped, draw: &promotedDP, references: refs})
+			e.promoted[cacheKey] = newID
+		}
+	}
+	return nil
+}
+
+// validateVector 校验共享矢量资源及嵌套绘制引用，不修改资源内容
+// 入参: id 矢量资源标识
+// 返回: error 尺寸、内容或引用错误
+func (v *editorValidation) validateVector(id string) error {
+	if key := editorResourceID(id); key != "" {
+		id = key
+	}
+	if v.composites[id] {
+		return fmt.Errorf("cyclic composite resource %q", id)
+	}
+	if v.vectors[id] {
+		return nil
+	}
+	if v.composites == nil {
+		v.composites = make(map[string]bool)
+	}
+	v.composites[id] = true
+	defer delete(v.composites, id)
+	node, err := v.compositeDefinition(id)
+	if err != nil {
+		return err
+	}
+	unit := node.object.CompositeGraphicUnit
+	if node.node.attr("Width") == "" || node.node.attr("Height") == "" || !finite(unit.Width) || !finite(unit.Height) || unit.Width < 0 || unit.Height < 0 {
+		return fmt.Errorf("invalid vector dimensions")
+	}
+	if node.node.child("Content") == nil {
+		return fmt.Errorf("vector content is missing")
+	}
+	for _, image := range []string{unit.Thumbnail, unit.Substitution} {
+		if image != "" {
+			if _, err := v.editorImage(image); err != nil {
+				return err
+			}
+		}
+	}
+	for object := range unit.objects() {
+		if _, err := v.prepareObject(editorObjectID(object), object); err != nil {
+			return err
+		}
+	}
+	if v.vectors == nil {
+		v.vectors = make(map[string]bool)
+	}
+	v.vectors[id] = true
+	return nil
+}
+
+// remapCompositeStates 随XML标识重映射会话记录，仅保留当前子树的对象
+// 入参: states 原记录, ids 标识映射
+// 返回: map[string]editorCompositeState 新记录
+func remapCompositeStates(states map[string]editorCompositeState, ids map[string]string) map[string]editorCompositeState {
+	var result map[string]editorCompositeState
+	for id, next := range ids {
+		if state, ok := states[id]; ok {
+			if result == nil {
+				result = make(map[string]editorCompositeState)
+			}
+			result[next] = state
+		}
+	}
+	return result
+}
+
+// removeCompositeStates 清除子树旧记录，再由写入结果合并新记录
+// 入参: states 目标记录, node 子树根节点
+func removeCompositeStates(states map[string]editorCompositeState, node *editorXML) {
+	delete(states, node.attr("ID"))
+	for _, child := range node.children {
+		removeCompositeStates(states, child)
+	}
+}
+
+// compositeOrientation 将旋转或镜像中心移至选区中心
+// 入参: box 选区, matrix 方向矩阵
+// 返回: Matrix 页面变换
+func compositeOrientation(box Box, matrix Matrix) Matrix {
+	x, y := box.X+box.W/2, box.Y+box.H/2
+	return TranslationMatrix(x, y).Multiply(matrix).Multiply(TranslationMatrix(-x, -y))
+}
+
+// transformCompositeOffsets 变换旧式内联复合成员的页面偏移，资源引用保持原坐标约定
+// 入参: data 修改后的复合片段, matrix 页面变换
+// 返回: []byte 同步内部边界及非随动裁剪后的片段, error 错误信息
+func transformCompositeOffsets(data []byte, matrix Matrix) ([]byte, error) {
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return nil, err
+	}
+	var patches []editorXMLPatch
+	var visit func(*editorXML) error
+	visit = func(node *editorXML) error {
+		for _, child := range node.children {
+			switch child.name.Local {
+			case "Content", "PageBlock", "CompositeObject", "CompositeGraphicUnit":
+				if err := visit(child); err != nil {
+					return err
+				}
+			case "TextObject", "PathObject", "ImageObject":
+				fragment, err := editorXMLStandalone(data[child.start:child.end], child)
+				if err != nil {
+					return err
+				}
+				n, err := newEditorCompositeNode(fragment)
+				if err != nil {
+					return err
+				}
+				object := cloneEditorData(n.object)
+				object = compositeBoundary(object, Matrix{a: matrix.a, b: matrix.b, c: matrix.c, d: matrix.d}, false)
+				if clips := editorObjectClips(&object); *clips != nil && !(*clips).usesObjectMatrix() {
+					*clips = transformObjectClips(*clips, TranslationMatrix(matrix.e, matrix.f))
+				}
+				fragment, err = editorXMLObject(n.data, n.node, n.object, object)
+				if err != nil {
+					return err
+				}
+				patches = append(patches, editorXMLPatch{child.start, child.end, fragment})
+			}
+		}
+		return nil
+	}
+	if err = visit(root); err != nil {
+		return nil, err
+	}
+	return editorPatchXML(data, patches), nil
+}
+
+// compositeBoundary 在边界参与和不参与父变换的坐标约定之间转换
+// 入参: object 基本对象, parent 父矩阵, inward 是否转换到父坐标
+// 返回: GraphicObject 转换后的对象
+func compositeBoundary(object GraphicObject, parent Matrix, inward bool) GraphicObject {
+	matrix := parent
+	matrix.e, matrix.f = 0, 0
+	clipMatrix := parent
+	if inward {
+		matrix, _ = matrix.Invert()
+		clipMatrix, _ = parent.Invert()
+	}
+	boundary, _ := editorGeometry(object)
+	box, _ := ParseBox(boundary)
+	box.X, box.Y = matrix.a*box.X+matrix.c*box.Y, matrix.b*box.X+matrix.d*box.Y
+	switch object.Type {
+	case "TextObject":
+		object.TextObject.Boundary = editorBoxString(box)
+	case "PathObject":
+		object.PathObject.Boundary = editorBoxString(box)
+	case "ImageObject":
+		object.ImageObject.Boundary = editorBoxString(box)
+	}
+	if clips := editorObjectClips(&object); *clips != nil && !(*clips).usesObjectMatrix() {
+		*clips = transformObjectClips(*clips, clipMatrix)
+	}
+	return object
 }
 
 // editorResourceReferences 收集标准资源XML中的对象引用
@@ -1158,52 +1415,4 @@ func collectCompositeReferences(composite CompositeGraphicUnit, used map[string]
 	for object := range composite.objects() {
 		collectObjectReferences(object, used)
 	}
-}
-
-// validateVector 校验共享矢量资源及嵌套绘制引用，不修改资源内容
-// 入参: id 矢量资源标识
-// 返回: error 尺寸、内容或引用错误
-func (v *editorValidation) validateVector(id string) error {
-	if key := editorResourceID(id); key != "" {
-		id = key
-	}
-	if v.composites[id] {
-		return fmt.Errorf("cyclic composite resource %q", id)
-	}
-	if v.vectors[id] {
-		return nil
-	}
-	if v.composites == nil {
-		v.composites = make(map[string]bool)
-	}
-	v.composites[id] = true
-	defer delete(v.composites, id)
-	node, err := v.compositeDefinition(id)
-	if err != nil {
-		return err
-	}
-	unit := node.object.CompositeGraphicUnit
-	if node.node.attr("Width") == "" || node.node.attr("Height") == "" || !finite(unit.Width) || !finite(unit.Height) || unit.Width < 0 || unit.Height < 0 {
-		return fmt.Errorf("invalid vector dimensions")
-	}
-	if node.node.child("Content") == nil {
-		return fmt.Errorf("vector content is missing")
-	}
-	for _, image := range []string{unit.Thumbnail, unit.Substitution} {
-		if image != "" {
-			if _, err := v.editorImage(image); err != nil {
-				return err
-			}
-		}
-	}
-	for object := range unit.objects() {
-		if _, err := v.prepareObject(editorObjectID(object), object); err != nil {
-			return err
-		}
-	}
-	if v.vectors == nil {
-		v.vectors = make(map[string]bool)
-	}
-	v.vectors[id] = true
-	return nil
 }

@@ -30,15 +30,20 @@ import (
 // defaultResourceCacheBytes 定义默认缓存总预算及类别扩展基准
 const defaultResourceCacheBytes = 256 << 20
 
+// defaultMaxEntryBytes 定义包内单条目默认最大解压字节数
+const defaultMaxEntryBytes = 512 << 20
+
 // ResourceOptions 设置共享计算、派生缓存与快照预算，字节预算不限制进程实际分配
 // Parallelism为0时使用GOMAXPROCS，MemoryLimit为0时不指定计算预算
 // CacheBytes为0时使用256MiB，SnapshotBytes为0时使用缓存预算的一半，负值禁用相应缓存
+// MaxEntryBytes为0时单条目解压上限取512MiB，负值不限制单条目解压大小
 // AvailableMemory返回可用于新增任务的字节数，同时作为缓存动态上限，需支持并发且不可重入Resources
 type ResourceOptions struct {
 	Parallelism     int
 	MemoryLimit     int64
 	CacheBytes      int64
 	SnapshotBytes   int64
+	MaxEntryBytes   int64
 	AvailableMemory func() int64
 }
 
@@ -52,37 +57,6 @@ type Resources struct {
 	limit   int64
 	checked time.Time
 	order   list.List
-}
-
-// resourceEntry 保存共享缓存成本与弱引用淘汰操作
-type resourceEntry struct {
-	cost  int64
-	evict func()
-}
-
-// renderCache 按估算字节数限制派生渲染数据，淘汰不修改源资源
-type renderCache[K comparable, V any] struct {
-	mu          sync.Mutex
-	resources   *Resources
-	limit, used int
-	entries     map[K]*list.Element
-	order       list.List
-	loading     map[K]*renderCacheLoad[V]
-}
-
-// renderCacheLoad 合并同一资源的并发加载，不持有已完成任务
-type renderCacheLoad[V any] struct {
-	done  chan struct{}
-	value V
-	err   error
-}
-
-// renderCacheEntry 保存缓存值及内存成本
-type renderCacheEntry[K comparable, V any] struct {
-	key    K
-	value  V
-	cost   int
-	shared *list.Element
 }
 
 // NewResources 创建共享资源策略，不启动任务或修改进程全局配置
@@ -101,6 +75,9 @@ func NewResources(options ResourceOptions) (*Resources, error) {
 		options.SnapshotBytes = options.CacheBytes / 2
 	}
 	options.SnapshotBytes = max(0, min(options.SnapshotBytes, options.CacheBytes))
+	if options.MaxEntryBytes == 0 {
+		options.MaxEntryBytes = defaultMaxEntryBytes
+	}
 	return &Resources{options: options, pool: pool, limit: options.CacheBytes}, nil
 }
 
@@ -123,23 +100,6 @@ func (r *Resources) Acquire(ctx context.Context, memory int64) (func(), error) {
 	return func() { once.Do(func() { r.pool.release(true, memory) }) }, nil
 }
 
-// context 为未指定转换池的操作附加资源调度器
-// 入参: ctx 操作上下文
-// 返回: context.Context 计算上下文
-func (r *Resources) context(ctx context.Context) context.Context {
-	if r == nil || ctx.Value(conversionPoolKey{}) != nil {
-		return ctx
-	}
-	return context.WithValue(ctx, conversionPoolKey{}, r.pool)
-}
-
-// WithResources 设置阅读器及派生编辑器共享的资源策略
-// 入参: resources 共享策略，nil使用默认策略
-// 返回: ReaderOption 阅读选项
-func WithResources(resources *Resources) ReaderOption {
-	return func(options *readerOptions) { options.resources = resources }
-}
-
 // Clear 释放当前缓存，正在计算的任务完成后仍可写入新缓存
 func (r *Resources) Clear() {
 	r.mu.Lock()
@@ -157,47 +117,27 @@ func (r *Resources) CacheUsage() int64 {
 	return r.used
 }
 
-// refresh 按当前可用内存收缩缓存，需持有资源锁
-func (r *Resources) refresh() {
-	if r.options.AvailableMemory == nil || time.Since(r.checked) < 250*time.Millisecond {
-		return
-	}
-	r.checked = time.Now()
-	r.limit = min(r.options.CacheBytes, max(0, r.options.AvailableMemory()))
-	for r.used > r.limit {
-		r.evict()
-	}
+// WithResources 设置阅读器及派生编辑器共享的资源策略
+// 入参: resources 共享策略，nil使用默认策略
+// 返回: ReaderOption 阅读选项
+func WithResources(resources *Resources) ReaderOption {
+	return func(options *readerOptions) { options.resources = resources }
 }
 
-// evict 淘汰最久未访问的共享条目，需持有资源锁
-func (r *Resources) evict() {
-	item := r.order.Back()
-	entry := item.Value.(resourceEntry)
-	r.order.Remove(item)
-	r.used -= entry.cost
-	entry.evict()
+// resourceEntry 保存共享缓存成本与弱引用淘汰操作
+type resourceEntry struct {
+	cost  int64
+	evict func()
 }
 
-// resourceCache 按类别基准分配共享预算，较大总预算同比扩展类别额度
-// 入参: resources 共享策略, baseline 类别基准预算
-// 返回: *renderCache 缓存实例
-func resourceCache[K comparable, V any](resources *Resources, baseline int) *renderCache[K, V] {
-	if resources == nil {
-		return &renderCache[K, V]{limit: baseline}
-	}
-	limit := min(resources.options.CacheBytes, int64(int(^uint(0)>>1)-1))
-	if baseline > 0 && limit > int64(baseline) {
-		share := int64(baseline)
-		if limit > defaultResourceCacheBytes {
-			scaled := float64(baseline) * (float64(limit) / defaultResourceCacheBytes)
-			share = limit
-			if scaled < float64(limit) {
-				share = int64(scaled)
-			}
-		}
-		limit = min(limit, share)
-	}
-	return &renderCache[K, V]{resources: resources, limit: int(limit)}
+// renderCache 按估算字节数限制派生渲染数据，淘汰不修改源资源
+type renderCache[K comparable, V any] struct {
+	mu          sync.Mutex
+	resources   *Resources
+	limit, used int
+	entries     map[K]*list.Element
+	order       list.List
+	loading     map[K]*renderCacheLoad[V]
 }
 
 // mutex 返回缓存数据及共享账本使用的同一把锁
@@ -369,6 +309,74 @@ func (c *renderCache[K, V]) load(ctx context.Context, key K, read func() (V, int
 		}
 		return value, err
 	}
+}
+
+// renderCacheLoad 合并同一资源的并发加载，不持有已完成任务
+type renderCacheLoad[V any] struct {
+	done  chan struct{}
+	value V
+	err   error
+}
+
+// renderCacheEntry 保存缓存值及内存成本
+type renderCacheEntry[K comparable, V any] struct {
+	key    K
+	value  V
+	cost   int
+	shared *list.Element
+}
+
+// context 为未指定转换池的操作附加资源调度器
+// 入参: ctx 操作上下文
+// 返回: context.Context 计算上下文
+func (r *Resources) context(ctx context.Context) context.Context {
+	if r == nil || ctx.Value(conversionPoolKey{}) != nil {
+		return ctx
+	}
+	return context.WithValue(ctx, conversionPoolKey{}, r.pool)
+}
+
+// refresh 按当前可用内存收缩缓存，需持有资源锁
+func (r *Resources) refresh() {
+	if r.options.AvailableMemory == nil || time.Since(r.checked) < 250*time.Millisecond {
+		return
+	}
+	r.checked = time.Now()
+	r.limit = min(r.options.CacheBytes, max(0, r.options.AvailableMemory()))
+	for r.used > r.limit {
+		r.evict()
+	}
+}
+
+// evict 淘汰最久未访问的共享条目，需持有资源锁
+func (r *Resources) evict() {
+	item := r.order.Back()
+	entry := item.Value.(resourceEntry)
+	r.order.Remove(item)
+	r.used -= entry.cost
+	entry.evict()
+}
+
+// resourceCache 按类别基准分配共享预算，较大总预算同比扩展类别额度
+// 入参: resources 共享策略, baseline 类别基准预算
+// 返回: *renderCache 缓存实例
+func resourceCache[K comparable, V any](resources *Resources, baseline int) *renderCache[K, V] {
+	if resources == nil {
+		return &renderCache[K, V]{limit: baseline}
+	}
+	limit := min(resources.options.CacheBytes, int64(int(^uint(0)>>1)-1))
+	if baseline > 0 && limit > int64(baseline) {
+		share := int64(baseline)
+		if limit > defaultResourceCacheBytes {
+			scaled := float64(baseline) * (float64(limit) / defaultResourceCacheBytes)
+			share = limit
+			if scaled < float64(limit) {
+				share = int64(scaled)
+			}
+		}
+		limit = min(limit, share)
+	}
+	return &renderCache[K, V]{resources: resources, limit: int(limit)}
 }
 
 // rasterCommandCost 按保留容量估算中立指令成本，不含临时后端路径及借用图片

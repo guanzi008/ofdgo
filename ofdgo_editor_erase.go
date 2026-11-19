@@ -16,11 +16,13 @@ package ofdgo
 
 import (
 	"fmt"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
+	"maps"
 	"math"
 	"reflect"
 	"slices"
 	"strings"
+
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
 // EraseObjects 擦除同页对象与矩形区域重叠的可见部分，一次撤销恢复全部
@@ -276,6 +278,16 @@ func (e *Editor) eraseObjects(page int, ids []string, box Box, points []Point, r
 				}
 			}
 			layers[i].Objects = objects
+		}
+		removedIDs := slices.Collect(maps.Keys(removed))
+		if e.hasRichTextMetadata(page, removedIDs) {
+			return e.Transaction(func(e *Editor) error {
+				if err := e.cleanupRichTextMetadata(page, removedIDs); err != nil {
+					return err
+				}
+				e.replaceLayers(page, layers)
+				return nil
+			})
 		}
 		e.replaceLayers(page, layers)
 	}

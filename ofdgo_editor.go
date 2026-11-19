@@ -26,6 +26,7 @@ import (
 	"io/fs"
 	"maps"
 	"math"
+	"os"
 	"reflect"
 	"slices"
 	"strconv"
@@ -38,6 +39,9 @@ import (
 
 // editorPathValidationLimit 限制同次对象校验保留的路径数量
 const editorPathValidationLimit = 1024
+
+// maxUnitID 表示OFD标准ST_ID允许的最大无符号32位标识
+const maxUnitID uint64 = 1<<32 - 1
 
 // Editor 编辑OFD文档，长度单位为毫米，页面索引从0开始，实例需串行使用
 // Info可修改文档元数据，通过方法管理页面、对象和资源，WriteTo输出副本，Save和SaveAs通过输出事务保存
@@ -62,13 +66,15 @@ type Editor struct {
 	backends           RenderBackends
 	images             map[string]image.Point
 	resourceID         map[editorResourceKey]string
-	maxID              int
+	promoted           map[string]string
+	maxID              uint64
 	history            []editorChange
 	historyIndex       int
 	historyLimit       int
 	revision           uint64
 	serial             uint64
 	source             *editorSource
+	sourceFile         os.FileInfo
 	origins            map[string]*editorObjectOrigin
 	removedPages       map[string]bool
 	structureRemaps    map[string][]map[string]string
@@ -81,34 +87,38 @@ type Editor struct {
 	validatedPaths     *renderCache[string, bool]
 	changes            EditorChanges
 	transactionChanges *EditorChanges
-	objectIndex        *editorObjectIndex
+	objectIndices      map[string]*editorObjectIndex
 	richIndex          *richTextIndex
+	pageScope          []*parsedRes
+	nameCache          *editorNameCache
+	ownedReader        *Reader
+	ownedOwner         *Editor
+	ownedTx            *EditorChanges
+	ownedRevision      uint64
 }
 
-// editorResource 文档内嵌资源
-type editorResource struct {
-	name         string
-	data         []byte
-	font         *Font
-	image        *MultiMedia
-	space        *ColorSpace
-	composite    string
-	vectorKey    [32]byte
-	vectorStates map[string]editorCompositeState
-	objectIDs    map[string]string
-	references   []string
-	usage        *editorVectorUsage
-	subset       *editorFontSubset
-	states       map[string]editorCompositeState
-	draw         *DrawParam
-	drawSource   string
-}
-
-// editorResourceKey 资源内容和字体集合索引
-type editorResourceKey struct {
-	checksum [32]byte
-	index    int
-	kind     string
+// NewEditor 创建空白文档，保存前至少添加一页
+// 返回: *Editor 文档编辑器
+func NewEditor() *Editor {
+	resources, _ := NewResources(ResourceOptions{})
+	var id [16]byte
+	rand.Read(id[:])
+	id[6] = id[6]&0x0f | 0x40
+	id[8] = id[8]&0x3f | 0x80
+	return &Editor{
+		runtimeResources: resources,
+		Info: DocInfo{
+			DocID:        hex.EncodeToString(id[:]),
+			CreationDate: time.Now().Format("2006-01-02"),
+			Creator:      ofdCreator,
+		},
+		fonts:       make(map[string]*FontResource),
+		images:      make(map[string]image.Point),
+		resourceID:  make(map[editorResourceKey]string),
+		promoted:    make(map[string]string),
+		fontMetrics: make(map[string]FontMetrics),
+		backends:    defaultRenderBackends(),
+	}
 }
 
 // SetFontDirs 设置编辑与几何度量使用的外部字体目录，不嵌入或替换文档字体
@@ -155,29 +165,6 @@ func (e *Editor) SetRenderBackends(backends RenderBackends) {
 // 返回: RenderBackends 后端组合
 func (e *Editor) Backends() RenderBackends {
 	return e.backends
-}
-
-// NewEditor 创建空白文档，保存前至少添加一页
-// 返回: *Editor 文档编辑器
-func NewEditor() *Editor {
-	resources, _ := NewResources(ResourceOptions{})
-	var id [16]byte
-	rand.Read(id[:])
-	id[6] = id[6]&0x0f | 0x40
-	id[8] = id[8]&0x3f | 0x80
-	return &Editor{
-		runtimeResources: resources,
-		Info: DocInfo{
-			DocID:        hex.EncodeToString(id[:]),
-			CreationDate: time.Now().Format("2006-01-02"),
-			Creator:      ofdCreator,
-		},
-		fonts:       make(map[string]*FontResource),
-		images:      make(map[string]image.Point),
-		resourceID:  make(map[editorResourceKey]string),
-		fontMetrics: make(map[string]FontMetrics),
-		backends:    defaultRenderBackends(),
-	}
 }
 
 // SetResources 替换后续操作的资源策略，需与编辑操作串行调用
@@ -272,6 +259,9 @@ func (e *Editor) AddPage(width, height float64) (int, error) {
 	}
 	if err := e.prepareSourceIDs(); err != nil {
 		return 0, err
+	}
+	if e.maxID > maxUnitID-2 {
+		return 0, fmt.Errorf("MaxUnitID exceeds uint32 range")
 	}
 	e.pages = append(e.pages, PageContent{
 		ID:      e.nextID(),
@@ -478,30 +468,48 @@ func (e *Editor) ResizePages(indexes []int, width, height float64) error {
 	if !finite(width) || !finite(height) || width <= 0 || height <= 0 {
 		return fmt.Errorf("page dimensions must be finite and positive")
 	}
-	after := fmt.Sprintf("0 0 %s %s", ofdNumber(width), ofdNumber(height))
-	before := make([]string, len(indexes))
+	before := make([]PageArea, len(indexes))
+	after := make([]PageArea, len(indexes))
 	changed := false
 	for i, index := range indexes {
-		page, err := e.page(index)
+		box, err := e.pageAreaBox(index)
 		if err != nil {
 			return err
 		}
-		before[i] = page.Area.PhysicalBox
-		changed = changed || before[i] != after
+		if err := validateCreationBox(Box{X: box.X, Y: box.Y, W: width, H: height}); err != nil {
+			return err
+		}
+		page := &e.pages[index]
+		before[i] = page.Area
+		next := page.Area
+		formatted := fmt.Sprintf("%s %s %s %s", ofdNumber(box.X), ofdNumber(box.Y), ofdNumber(width), ofdNumber(height))
+		next.PhysicalBox = formatted
+		if strings.TrimSpace(next.ApplicationBox) != "" {
+			if appBox, appErr := ParseBox(next.ApplicationBox); appErr == nil && appBox == box {
+				next.ApplicationBox = formatted
+			}
+		}
+		if strings.TrimSpace(next.ContentBox) != "" {
+			if contentBox, contentErr := ParseBox(next.ContentBox); contentErr == nil && contentBox == box {
+				next.ContentBox = formatted
+			}
+		}
+		after[i] = next
+		changed = changed || before[i] != after[i]
 	}
 	if !changed {
 		return nil
 	}
 	indexes = slices.Clone(indexes)
 	resize := func(e *Editor) {
-		for _, index := range indexes {
-			e.pages[index].Area.PhysicalBox = after
+		for i, index := range indexes {
+			e.pages[index].Area = after[i]
 		}
 	}
 	if change := e.recordChange(); change != nil {
 		change.undo = func(e *Editor) {
 			for i, index := range indexes {
-				e.pages[index].Area.PhysicalBox = before[i]
+				e.pages[index].Area = before[i]
 			}
 		}
 		change.redo = resize
@@ -531,81 +539,6 @@ func (e *Editor) AddImageContext(ctx context.Context, data []byte) (string, erro
 // 返回: image.Point 像素宽高, error 资源或格式错误
 func (e *Editor) ImageSize(id string) (image.Point, error) {
 	return e.editorImage(id)
-}
-
-// addDecodedImage 注册图片并复用与编码数据一致的像素
-// 入参: data 图片数据, decoded 已解码像素，为nil时按需解码
-// 返回: string 资源标识, error 注册错误
-func (e *Editor) addDecodedImage(data []byte, decoded image.Image) (string, error) {
-	return e.addDecodedImageContext(context.Background(), data, decoded)
-}
-
-// addDecodedImageContext 注册图片并复用原编码摘要及像素，重复资源不再解析
-// 入参: ctx 取消上下文, data 图片数据, decoded 已解码像素，为nil时按需解码
-// 返回: string 资源标识, error 注册或取消错误
-func (e *Editor) addDecodedImageContext(ctx context.Context, data []byte, decoded image.Image) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	checksum := sha256.Sum256(data)
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	if id := e.resourceID[editorResourceKey{checksum: checksum, index: -1}]; id != "" {
-		return id, nil
-	}
-	config, format, err := baseimage.DecodeConfigDataContext(ctx, data)
-	if err != nil {
-		return "", err
-	}
-	return e.addImage(ctx, data, image.Pt(config.Width, config.Height), format, decoded, checksum)
-}
-
-// addImage 注册图片资源，复用调用方已完成解码的像素数据
-// 入参: ctx 取消上下文, data 图片编码数据, size 像素尺寸, format 图片格式, decoded 已解码图像，可为nil, checksum 原编码摘要
-// 返回: string 资源标识, error 格式或资源错误
-func (e *Editor) addImage(ctx context.Context, data []byte, size image.Point, format string, decoded image.Image, checksum [32]byte) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	if (format != "png" && format != "jpeg" && format != "bmp" && format != "tiff" && format != "jbig2") || size.X <= 0 || size.Y <= 0 {
-		return "", fmt.Errorf("only PNG, JPEG, BMP, single-page TIFF and JBIG2 images are supported")
-	}
-	key := editorResourceKey{checksum: checksum, index: -1}
-	if id, ok := e.resourceID[key]; ok {
-		return id, nil
-	}
-	if err := e.prepareSourceIDsContext(ctx); err != nil {
-		return "", err
-	}
-	if format == "png" && uint64(size.X)*uint64(size.Y) <= 64<<20 {
-		compact, err := editorBinaryImage(ctx, data, decoded)
-		if err != nil {
-			return "", err
-		}
-		if compact != nil {
-			data, format = compact, "jbig2"
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	id := e.nextID()
-	extension := format
-	if extension == "jpeg" {
-		extension = "jpg"
-	} else if extension == "jbig2" {
-		extension = "jb2"
-	}
-	name := e.packageName("Res/Images/Image_" + id + "." + extension)
-	e.resources = append(e.resources, editorResource{
-		name:  name,
-		data:  bytes.Clone(data),
-		image: &MultiMedia{ID: id, Type: "Image", Format: strings.ToUpper(format), MediaFile: "/" + name},
-	})
-	e.images[id] = size
-	e.resourceID[key] = id
-	return id, nil
 }
 
 // AddObject 按添加顺序放入正文图层，支持文字、路径、图片和矢量资源实例，自动分配对象ID
@@ -708,6 +641,7 @@ func (e *Editor) MoveObject(page int, id string, to int) error {
 // 入参: page 页面索引, box 文字边界, value 原文, fontID 字体资源标识, size 字号
 // 返回: string 对象标识, error 错误信息
 func (e *Editor) AddText(page int, box Box, value, fontID string, size float64) (string, error) {
+	defer e.bindPageIndex(page)()
 	object := GraphicObject{Type: "TextObject", TextObject: TextObject{
 		Boundary: fmt.Sprintf("%s %s %s %s", ofdNumber(box.X), ofdNumber(box.Y), ofdNumber(box.W), ofdNumber(box.H)),
 		Font:     fontID, Size: size,
@@ -723,6 +657,7 @@ func (e *Editor) AddText(page int, box Box, value, fontID string, size float64) 
 // 入参: page 页面索引, id 文字对象标识, value 原文, fontID 字体资源标识, size 字号
 // 返回: error 错误信息
 func (e *Editor) UpdateText(page int, id, value, fontID string, size float64) error {
+	defer e.bindPageIndex(page)()
 	layer, index, err := e.findObject(page, id)
 	if err != nil {
 		return err
@@ -753,23 +688,30 @@ func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) err
 // 入参: page 页面索引, id 图片对象标识, data AddImage支持的图片数据, fit 为contain、cover或空，空值保留原变换和裁剪
 // 返回: error 错误信息
 func (e *Editor) ReplaceImage(page int, id string, data []byte, fit string) error {
+	restore := e.bindPageIndex(page)
 	object, err := e.Object(page, id)
 	if err != nil {
+		restore()
 		return err
 	}
 	if object.Type != "ImageObject" {
+		restore()
 		return fmt.Errorf("object %q is not an image", id)
 	}
 	decoded, _, err := baseimage.DecodePixelsContext(context.Background(), data)
 	if err != nil {
+		restore()
 		return err
 	}
 	if object.ImageObject.ImageMask != "" {
 		if err := e.validateImageMask(object.ImageObject.ImageMask, decoded.Bounds().Size()); err != nil {
+			restore()
 			return err
 		}
 	}
+	restore()
 	return e.Transaction(func(e *Editor) error {
+		defer e.bindPageIndex(page)()
 		resource, err := e.addDecodedImage(data, decoded)
 		if err != nil {
 			return err
@@ -805,6 +747,134 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 	return LayoutText(obj, value, options, metrics)
 }
 
+// editorResource 文档内嵌资源
+type editorResource struct {
+	name         string
+	data         []byte
+	font         *Font
+	image        *MultiMedia
+	space        *ColorSpace
+	composite    string
+	vectorKey    [32]byte
+	vectorStates map[string]editorCompositeState
+	objectIDs    map[string]string
+	references   []string
+	usage        *editorVectorUsage
+	subset       *editorFontSubset
+	states       map[string]editorCompositeState
+	draw         *DrawParam
+	drawSource   string
+}
+
+// definition 获取独立定义资源的标识
+// 返回: string 复合资源或绘制参数标识
+func (r editorResource) definition() string {
+	if r.draw != nil {
+		return r.draw.ID
+	}
+	return r.composite
+}
+
+// id 获取编辑器注册资源的标识
+// 返回: string 资源标识
+func (r editorResource) id() string {
+	switch {
+	case r.font != nil:
+		return r.font.ID
+	case r.image != nil:
+		return r.image.ID
+	case r.space != nil:
+		return r.space.ID
+	default:
+		return r.definition()
+	}
+}
+
+// editorResourceKey 资源内容和字体集合索引
+type editorResourceKey struct {
+	checksum [32]byte
+	index    int
+	kind     string
+}
+
+// addDecodedImage 注册图片并复用与编码数据一致的像素
+// 入参: data 图片数据, decoded 已解码像素，为nil时按需解码
+// 返回: string 资源标识, error 注册错误
+func (e *Editor) addDecodedImage(data []byte, decoded image.Image) (string, error) {
+	return e.addDecodedImageContext(context.Background(), data, decoded)
+}
+
+// addDecodedImageContext 注册图片并复用原编码摘要及像素，重复资源不再解析
+// 入参: ctx 取消上下文, data 图片数据, decoded 已解码像素，为nil时按需解码
+// 返回: string 资源标识, error 注册或取消错误
+func (e *Editor) addDecodedImageContext(ctx context.Context, data []byte, decoded image.Image) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	checksum := sha256.Sum256(data)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if id := e.resourceID[editorResourceKey{checksum: checksum, index: -1}]; id != "" {
+		return id, nil
+	}
+	config, format, err := baseimage.DecodeConfigDataContext(ctx, data)
+	if err != nil {
+		return "", err
+	}
+	return e.addImage(ctx, data, image.Pt(config.Width, config.Height), format, decoded, checksum)
+}
+
+// addImage 注册图片资源，复用调用方已完成解码的像素数据
+// 入参: ctx 取消上下文, data 图片编码数据, size 像素尺寸, format 图片格式, decoded 已解码图像，可为nil, checksum 原编码摘要
+// 返回: string 资源标识, error 格式或资源错误
+func (e *Editor) addImage(ctx context.Context, data []byte, size image.Point, format string, decoded image.Image, checksum [32]byte) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if (format != "png" && format != "jpeg" && format != "bmp" && format != "tiff" && format != "jbig2") || size.X <= 0 || size.Y <= 0 {
+		return "", fmt.Errorf("only PNG, JPEG, BMP, single-page TIFF and JBIG2 images are supported")
+	}
+	key := editorResourceKey{checksum: checksum, index: -1}
+	if id, ok := e.resourceID[key]; ok {
+		return id, nil
+	}
+	if err := e.prepareSourceIDsContext(ctx); err != nil {
+		return "", err
+	}
+	if format == "png" && uint64(size.X)*uint64(size.Y) <= 64<<20 {
+		compact, err := editorBinaryImage(ctx, data, decoded)
+		if err != nil {
+			return "", err
+		}
+		if compact != nil {
+			data, format = compact, "jbig2"
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if e.maxID >= maxUnitID {
+		return "", fmt.Errorf("MaxUnitID exceeds uint32 range")
+	}
+	id := e.nextID()
+	extension := format
+	if extension == "jpeg" {
+		extension = "jpg"
+	} else if extension == "jbig2" {
+		extension = "jb2"
+	}
+	name := e.packageName("Res/Images/Image_" + id + "." + extension)
+	e.resources = append(e.resources, editorResource{
+		name:  name,
+		data:  bytes.Clone(data),
+		image: &MultiMedia{ID: id, Type: "Image", Format: strings.ToUpper(format), MediaFile: "/" + name},
+	})
+	e.images[id] = size
+	e.resourceID[key] = id
+	return id, nil
+}
+
 // newRenderer 使用编辑器字体来源和完整后端配置创建资源度量器
 // 入参: reader 当前文档快照
 // 返回: *Renderer 度量器
@@ -815,15 +885,6 @@ func (e *Editor) newRenderer(reader *Reader) *Renderer {
 	renderer := NewRenderer(reader, WithFontDirs(e.fontDirs...), WithFontFS(e.fontFS...), WithRenderBackends(e.backends))
 	renderer.fontSourcesCache = e.fontSourcesCache.child()
 	return renderer
-}
-
-// definition 获取独立定义资源的标识
-// 返回: string 复合资源或绘制参数标识
-func (r editorResource) definition() string {
-	if r.draw != nil {
-		return r.draw.ID
-	}
-	return r.composite
 }
 
 // page 按索引获取内部页面
@@ -877,11 +938,21 @@ func (e *Editor) reorderPages(order []int) {
 	}
 }
 
-// nextID 分配文档内唯一标识
+// formatUnitID 格式化文档对象与资源标识
+// 入参: id 无符号标识数值
+// 返回: string 十进制标识文本
+func formatUnitID(id uint64) string {
+	return strconv.FormatUint(id, 10)
+}
+
+// nextID 分配文档内唯一标识，达到ST_ID上限时触发panic防止静默溢出
 // 返回: string 对象标识
 func (e *Editor) nextID() string {
+	if e.maxID >= maxUnitID {
+		panic("ofdgo: MaxUnitID exceeds uint32 range")
+	}
 	e.maxID++
-	return strconv.Itoa(e.maxID)
+	return formatUnitID(e.maxID)
 }
 
 // findObject 查找页面各图层中的对象
@@ -959,6 +1030,9 @@ func (v *editorValidation) prepareObject(id string, object GraphicObject) (Graph
 		fill, stroke = obj.FillColor, (*FillColor)(obj.StrokeColor)
 	case "ImageObject":
 		obj := &object.ImageObject
+		if err := validateEditorStroke(PathObject{LineWidth: obj.LineWidth, Cap: obj.Cap, Join: obj.Join, MiterLimit: obj.MiterLimit, DashOffset: obj.DashOffset, DashPattern: obj.DashPattern}); err != nil {
+			return GraphicObject{}, err
+		}
 		size, err := e.editorImage(obj.ResourceID)
 		if err != nil {
 			return GraphicObject{}, err
@@ -979,7 +1053,8 @@ func (v *editorValidation) prepareObject(id string, object GraphicObject) (Graph
 			}
 		}
 		obj.ID = id
-		boundary, ctm = obj.Boundary, obj.CTM
+		boundary, ctm, drawParam = obj.Boundary, obj.CTM, obj.DrawParam
+		join = obj.Join
 		alpha, clips, actions = obj.Alpha, obj.Clips, obj.Actions
 	case "CompositeObject":
 		obj := &object.CompositeGraphicUnit
@@ -1119,7 +1194,7 @@ func cloneEditorObject(object GraphicObject) (GraphicObject, error) {
 // 入参: object 对象副本, dx 横向位移, dy 纵向位移, scale 正缩放比例
 // 返回: GraphicObject 变换后的对象, error 错误信息
 func transformEditorObject(object GraphicObject, dx, dy, scale float64) (GraphicObject, error) {
-	if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" || object.Type == "TextObject" && (len(object.TextObject.CGTransform) != 0 || object.TextObject.VScale != 0 || object.TextObject.Decoration != "") {
+	if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" || object.Type == "TextObject" && len(object.TextObject.CGTransform) != 0 {
 		return transformEditorMatrix(object, Matrix{a: scale, d: scale, e: dx, f: dy}), nil
 	}
 	var boundary, ctm *string
@@ -1142,7 +1217,11 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 				obj.LineWidth = defaultPathLineWidth
 			}
 			obj.LineWidth *= scale
-			obj.DashPattern = scaleTextNumbers(obj.DashPattern, scale)
+			var err error
+			obj.DashPattern, err = scaleTextNumbers(obj.DashPattern, scale)
+			if err != nil {
+				return GraphicObject{}, err
+			}
 			if obj.DashOffset != nil {
 				offset := *obj.DashOffset * scale
 				obj.DashOffset = &offset
@@ -1150,7 +1229,10 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 			for i := range obj.TextCode {
 				code := &obj.TextCode[i]
 				for _, value := range []*string{&code.X, &code.Y, &code.DeltaX, &code.DeltaY} {
-					*value = scaleTextNumbers(*value, scale)
+					*value, err = scaleTextNumbers(*value, scale)
+					if err != nil {
+						return GraphicObject{}, err
+					}
 				}
 			}
 		}
@@ -1182,19 +1264,29 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 	return object, nil
 }
 
-// scaleTextNumbers 缩放已校验的文字定位数值，保留g重复编码
+// scaleTextNumbers 校验并缩放文字定位数值，保留g重复编码
 // 入参: value 定位数值, scale 缩放比例
-// 返回: string 缩放后的数值
-func scaleTextNumbers(value string, scale float64) string {
+// 返回: string 缩放后的数值, error 定位编码或结果错误
+func scaleTextNumbers(value string, scale float64) (string, error) {
 	fields := strings.Fields(value)
 	for i := 0; i < len(fields); i++ {
 		if fields[i] == "g" {
+			if i+2 >= len(fields) {
+				return "", fmt.Errorf("incomplete delta repetition")
+			}
+			repeat, err := strconv.Atoi(fields[i+1])
+			if err != nil || repeat <= 0 {
+				return "", fmt.Errorf("invalid delta repetition")
+			}
 			i += 2
 		}
-		number, _ := strconv.ParseFloat(fields[i], 64)
+		number, err := strconv.ParseFloat(fields[i], 64)
+		if err != nil || !finite(number*scale) {
+			return "", fmt.Errorf("invalid scaled text position")
+		}
 		fields[i] = ofdNumber(number * scale)
 	}
-	return strings.Join(fields, " ")
+	return strings.Join(fields, " "), nil
 }
 
 // prepareText 校验并补全标准文字定位，避免依赖阅读器的缺省字距补偿
@@ -1228,9 +1320,6 @@ func (e *Editor) prepareText(obj *TextObject) error {
 	if len(obj.TextCode) == 0 {
 		return fmt.Errorf("text codes are empty")
 	}
-	if obj.VScale != 0 || obj.Decoration != "" {
-		return &EditError{Code: EditUnsupportedObject, Err: fmt.Errorf("text extensions are not supported for creation")}
-	}
 	glyphCount := 1 << 16
 	if !external {
 		glyphCount = int(sfnt.NumGlyphs())
@@ -1241,7 +1330,7 @@ func (e *Editor) prepareText(obj *TextObject) error {
 	if !finite(obj.HScale) || obj.HScale < 0 {
 		return fmt.Errorf("invalid text dimensions")
 	}
-	if obj.Weight < 0 || obj.Weight > 900 || obj.Weight%100 != 0 {
+	if obj.Weight < 0 || obj.Weight > 1000 || obj.Weight%100 != 0 {
 		return fmt.Errorf("invalid text weight")
 	}
 	for _, direction := range []int{obj.ReadDirection, obj.CharDirection} {

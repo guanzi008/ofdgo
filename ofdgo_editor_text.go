@@ -17,7 +17,6 @@ package ofdgo
 import (
 	"crypto/sha256"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"image/color"
@@ -27,6 +26,12 @@ import (
 
 	"github.com/go-text/typesetting/segmenter"
 )
+
+// textTagType 标识普通文字编辑标引，正文使用标准文字图元
+const textTagType = "OFDGo.Text"
+
+// textNamespace 标识普通文字编辑语义的命名空间，版本仅随不兼容的语义变更升级
+const textNamespace = "https://ofdgo.aite.me/ns/text/1"
 
 // MissingGlyphError 字体缺字错误，FontID为OFD字体资源标识，Characters按首次出现顺序保留不重复的缺失字符
 // 可通过errors.As从编辑错误中取得，不表示字体缺失或文件损坏
@@ -66,52 +71,6 @@ type TextStyle struct {
 	Reflow bool
 }
 
-// textLayout 保存可恢复的原文与排版选项，不参与阅读渲染
-type textLayout struct {
-	value     string
-	options   TextLayout
-	autoWidth bool
-}
-
-// textNamespace 标识普通文字编辑语义的命名空间，版本仅随不兼容的语义变更升级
-const textNamespace = "https://ofdgo.aite.me/ns/text/1"
-
-// textMetadataAttribute 判断无资源引用的普通文字编辑元数据属性
-// 入参: node 所属节点, attr 属性
-// 返回: bool 是否为本库普通文字元数据
-func textMetadataAttribute(node xml.Name, attr xml.Attr) bool {
-	return classifyOFDNamespace(node.Space) != ofdXMLUnknown && (node.Local == "TextObject" || node.Local == "Text") && attr.Name.Space == textNamespace && attr.Name.Local == "Text"
-}
-
-// textMetadata 保存原文、选项与标准定位摘要
-type textMetadata struct {
-	Text      string     `json:"text"`
-	Layout    TextLayout `json:"layout"`
-	AutoWidth bool       `json:"autoWidth"`
-	Digest    string     `json:"digest"`
-}
-
-// textDigest 计算与字体编号无关的文字定位摘要
-// 返回: string 摘要
-func (obj TextObject) textDigest() string {
-	codes := append([]TextCode(nil), obj.TextCode...)
-	for i := range codes {
-		codes[i].Value = string(textCodeRunes(codes[i].Value))
-	}
-	data, _ := json.Marshal(codes)
-	return fmt.Sprintf("%x", sha256.Sum256(data))
-}
-
-// textMetadata 编码普通文字的排版语义，与标准定位一起保存
-// 返回: string 元数据, error 编码错误
-func (obj TextObject) textMetadata() (string, error) {
-	if obj.layout == nil {
-		return "", nil
-	}
-	data, err := json.Marshal(textMetadata{Text: obj.layout.value, Layout: obj.layout.options, AutoWidth: obj.layout.autoWidth, Digest: obj.textDigest()})
-	return string(data), err
-}
-
 // Error 返回缺失字符的Unicode码点
 // 返回: string 错误描述
 func (e *MissingGlyphError) Error() string {
@@ -127,6 +86,7 @@ func (e *MissingGlyphError) Error() string {
 // 入参: page 页面索引, ids 文字对象标识, style 样式增量
 // 返回: error 错误信息
 func (e *Editor) StyleText(page int, ids []string, style TextStyle) (err error) {
+	defer e.bindPageIndex(page)()
 	objects, _, err := e.selectedObjects(page, ids)
 	if err != nil {
 		return err
@@ -154,6 +114,7 @@ func (e *Editor) StyleText(page int, ids []string, style TextStyle) (err error) 
 // 入参: page 页面索引, id 文字对象标识, value 新内容, style 样式增量
 // 返回: error 错误信息
 func (e *Editor) UpdateTextContent(page int, id, value string, style TextStyle) (err error) {
+	defer e.bindPageIndex(page)()
 	capability, err := e.ObjectCapabilities(page, id)
 	if err != nil {
 		return err
@@ -228,6 +189,17 @@ func (e *Editor) UpdateTextContent(page int, id, value string, style TextStyle) 
 	return e.updateObjects(page, updates, true)
 }
 
+// RewritePageText 按目标页面资源作用域保留原定位重写文字，不修改文档或历史
+// 入参: page 页面索引, text 文字对象, value 新内容
+// 返回: error 页面、字体或定位错误
+func (e *Editor) RewritePageText(page int, text *TextObject, value string) error {
+	if _, err := e.page(page); err != nil {
+		return err
+	}
+	defer e.bindPageIndex(page)()
+	return e.RewriteText(text, value)
+}
+
 // RewriteText 保留原文的字形定位，不修改对象样式或文档
 // 等长替换保留各字原位；单段增删保留前缀和后缀步进，新增字符沿用局部字距
 // 方向、缩放和修饰原样保留；单段纵排沿用现有纵向步进，其他复杂布局仅支持等长替换，合并字形需显式重排
@@ -240,7 +212,6 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 		return fmt.Errorf("text must contain UTF-8 characters without tabs")
 	}
 	check := cloneEditorData(*obj)
-	check.VScale, check.Decoration = 0, ""
 	check.TextCode = textCodeOrigins(check.TextCode, 0)
 	if err := e.prepareText(&check); err != nil {
 		var missing *MissingGlyphError
@@ -254,7 +225,8 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 	}
 	old, next := []rune(obj.Text()), []rune(value)
 	vertical := (obj.ReadDirection == 90 || obj.ReadDirection == 270) && obj.CharDirection == 0 && len(obj.TextCode) == 1 && obj.TextCode[0].DeltaY != ""
-	complex := obj.ReadDirection != 0 && !vertical || obj.CharDirection != 0 || len(obj.CGTransform) != 0 || obj.VScale != 0 || obj.Decoration != ""
+	reverseHorizontal := obj.ReadDirection == 180 && obj.CharDirection == 0 && len(obj.TextCode) == 1 && obj.TextCode[0].DeltaX != ""
+	complex := obj.ReadDirection != 0 && !vertical && !reverseHorizontal || obj.CharDirection != 0 || len(obj.CGTransform) != 0
 	if complex && len(old) != len(next) {
 		return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("changing positioned text length requires explicit layout")}
 	}
@@ -333,7 +305,13 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 					codes[i].DeltaX = rewriteTextDeltas(codes[i].DeltaX, runes, replacement, from, to, advance)
 				}
 				if codes[i].DeltaY != "" {
-					codes[i].DeltaY = rewriteTextDeltas(codes[i].DeltaY, runes, replacement, from, to, func(rune) float64 { return 0 })
+					verticalAdvance := func(rune) float64 {
+						if vertical {
+							return obj.Size
+						}
+						return 0
+					}
+					codes[i].DeltaY = rewriteTextDeltas(codes[i].DeltaY, runes, replacement, from, to, verticalAdvance)
 				}
 				codes[i].Value = escapeOFDText(string(content))
 				changed = true
@@ -435,73 +413,40 @@ func (obj TextObject) TextLayout() (string, TextLayout) {
 	return obj.Text(), TextLayout{}
 }
 
-// missingGlyphError 汇总缺失字符，无缺字时返回nil
-// 入参: id 字体资源标识, characters 缺失字符
-// 返回: error 缺字诊断
-func missingGlyphError(id string, characters []rune) error {
-	if len(characters) == 0 {
-		return nil
-	}
-	seen := make(map[rune]bool)
-	var value strings.Builder
-	for _, char := range characters {
-		if !seen[char] {
-			seen[char] = true
-			value.WriteRune(char)
-		}
-	}
-	return &MissingGlyphError{FontID: id, Characters: value.String()}
+// textLayout 保存可恢复的原文与排版选项，不参与阅读渲染
+type textLayout struct {
+	value     string
+	options   TextLayout
+	autoWidth bool
 }
 
-// rewriteTextDeltas 按需读取并局部替换字符步进，保留末尾附加位移及其重复编码
-// 入参: value 原位移, old 原字符, replacement 替换字符, start 起点, end 终点, advance 字体步进
-// 返回: string 更新后的位移数组
-func rewriteTextDeltas(value string, old, replacement []rune, start, end int, advance func(rune) float64) string {
-	deltas := textPositionValues{data: value, compressed: true}
-	steps := make([]float64, len(old))
-	complete := len(old) == 0
-	for i, char := range old {
-		steps[i] = advance(char)
-		delta, ok := deltas.next()
-		if ok || i < len(old)-1 && deltas.present {
-			steps[i] = delta
-		}
-		complete = ok
+// textMetadata 保存原文、选项与标准定位摘要
+type textMetadata struct {
+	Text      string     `json:"text"`
+	Layout    TextLayout `json:"layout"`
+	AutoWidth bool       `json:"autoWidth"`
+	Digest    string     `json:"digest"`
+}
+
+// textDigest 计算与字体编号无关的文字定位摘要
+// 返回: string 摘要
+func (obj TextObject) textDigest() string {
+	codes := append([]TextCode(nil), obj.TextCode...)
+	for i := range codes {
+		codes[i].Value = string(textCodeRunes(codes[i].Value))
 	}
-	tracking := 0.0
-	if len(old) > 0 && (len(old) > 1 || deltas.present) {
-		index := min(start, max(0, len(old)-2))
-		tracking = steps[index] - advance(old[index])
+	data, _ := json.Marshal(codes)
+	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
+// textMetadata 编码普通文字的排版语义，与标准定位一起保存
+// 返回: string 元数据, error 编码错误
+func (obj TextObject) textMetadata() (string, error) {
+	if obj.layout == nil {
+		return "", nil
 	}
-	result := append([]float64(nil), steps[:start]...)
-	for _, char := range replacement {
-		result = append(result, advance(char)+tracking)
-	}
-	result = append(result, steps[end:]...)
-	if !complete {
-		result = result[:len(result)-1]
-	}
-	var output strings.Builder
-	write := func(field string) {
-		if output.Len() != 0 {
-			output.WriteByte(' ')
-		}
-		output.WriteString(field)
-	}
-	for _, delta := range result {
-		write(ofdNumber(delta))
-	}
-	if deltas.repeat > 0 {
-		if deltas.repeat > 1 {
-			write("g")
-			write(strconv.Itoa(deltas.repeat))
-		}
-		write(ofdNumber(deltas.value))
-	}
-	if tail := strings.TrimSpace(deltas.data); tail != "" {
-		write(tail)
-	}
-	return output.String()
+	data, err := json.Marshal(textMetadata{Text: obj.layout.value, Layout: obj.layout.options, AutoWidth: obj.layout.autoWidth, Digest: obj.textDigest()})
+	return string(data), err
 }
 
 // styleTextObjects 生成文字样式副本，不提交文档或历史
@@ -609,6 +554,75 @@ func (e *Editor) replaceTextFont(text *TextObject, id string) error {
 	}
 	text.Font, text.CGTransform = id, transforms
 	return nil
+}
+
+// missingGlyphError 汇总缺失字符，无缺字时返回nil
+// 入参: id 字体资源标识, characters 缺失字符
+// 返回: error 缺字诊断
+func missingGlyphError(id string, characters []rune) error {
+	if len(characters) == 0 {
+		return nil
+	}
+	seen := make(map[rune]bool)
+	var value strings.Builder
+	for _, char := range characters {
+		if !seen[char] {
+			seen[char] = true
+			value.WriteRune(char)
+		}
+	}
+	return &MissingGlyphError{FontID: id, Characters: value.String()}
+}
+
+// rewriteTextDeltas 按需读取并局部替换字符步进，保留末尾附加位移及其重复编码
+// 入参: value 原位移, old 原字符, replacement 替换字符, start 起点, end 终点, advance 字体步进
+// 返回: string 更新后的位移数组
+func rewriteTextDeltas(value string, old, replacement []rune, start, end int, advance func(rune) float64) string {
+	deltas := textPositionValues{data: value, compressed: true}
+	steps := make([]float64, len(old))
+	complete := len(old) == 0
+	for i, char := range old {
+		steps[i] = advance(char)
+		delta, ok := deltas.next()
+		if ok || i < len(old)-1 && deltas.present {
+			steps[i] = delta
+		}
+		complete = ok
+	}
+	tracking := 0.0
+	if len(old) > 0 && (len(old) > 1 || deltas.present) {
+		index := min(start, max(0, len(old)-2))
+		tracking = steps[index] - advance(old[index])
+	}
+	result := append([]float64(nil), steps[:start]...)
+	for _, char := range replacement {
+		result = append(result, advance(char)+tracking)
+	}
+	result = append(result, steps[end:]...)
+	if !complete {
+		result = result[:len(result)-1]
+	}
+	var output strings.Builder
+	write := func(field string) {
+		if output.Len() != 0 {
+			output.WriteByte(' ')
+		}
+		output.WriteString(field)
+	}
+	for _, delta := range result {
+		write(ofdNumber(delta))
+	}
+	if deltas.repeat > 0 {
+		if deltas.repeat > 1 {
+			write("g")
+			write(strconv.Itoa(deltas.repeat))
+		}
+		write(ofdNumber(deltas.value))
+	}
+	if tail := strings.TrimSpace(deltas.data); tail != "" {
+		write(tail)
+	}
+	return output.String()
 }
 
 // breakTextLines 优先使用Unicode断行机会，过长词仅在字素边界折行，不丢弃空白

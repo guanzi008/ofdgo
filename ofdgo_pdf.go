@@ -79,165 +79,38 @@ type PDFImport struct {
 	options  PDFImportOptions
 	pages    []PageContent
 	ready    []bool
+	previews *renderCache[string, []byte]
 	err      error
 	finished bool
 }
 
-// pdfImportInput 将输入读取绑定到当前转换上下文
-type pdfImportInput struct {
-	input    *Input
-	importer *pdfImporter
-}
-
-// pdfImporter 保存单次转换的对象与资源状态
-type pdfImporter struct {
-	resources          *Resources
-	ctx                context.Context
-	reader             *pdfgo.Reader
-	editor             *Editor
-	renderer           *Renderer
-	report             PDFImportReport
-	matrix             pdfgo.Matrix
-	page               int
-	pageActionPage     int
-	fontIDs            map[*pdfgo.Font]string
-	fonts              map[*pdfgo.Font]*pdfImportedFont
-	fontPrograms       map[pdfFontProgramKey]*pdfImportedFont
-	symbolFonts        map[*pdfgo.Font]*pdfImportedFont
-	fontWarnings       map[string]bool
-	clipTexts          map[*pdfgo.TextClip][]TextObject
-	textOrigins        map[*pdfgo.ReplacementText]pdfObjectOrigin
-	clipPaths          *renderCache[[32]byte, pdfClipPath]
-	cmykSpace          string
-	rgbSpace           string
-	iccSpaces          map[pdfICCKey]string
-	objects            *pdfObjectBuffer
-	structureBindings  *pdfStructureBindings
-	annotationBindings []pdfStructureObjectBinding
-	formResources      *pdfFormCache
-	validation         *editorValidation
-	pages              map[pdfgo.Reference]*pdfgo.Page
-	pageOrder          []*pdfgo.Page
-	pageIDs            map[pdfgo.Reference]string
-	pageIndexes        map[pdfgo.Reference]int
-	destinationBoxes   map[pdfgo.Reference]Box
-	imageIDs           map[pdfImageKey][]pdfImageResource
-	imageContents      *renderCache[pdfImageContentKey, pdfImageContent]
-	attachmentIDs      map[pdfAttachmentKey]string
-	modelAttachments   map[*pdfgo.Stream]string
-	mediaResources     map[pdfMediaFileKey]pdfMediaResource
-	mediaInstances     map[pdfMediaInstanceKey]pdfMediaResource
-	movieBounds        map[*Movie]Box
-	renditions         *pdfRenditionImport
-	maskClips          map[*pdfgo.SoftMask]pdfgo.Path
-	pageBox            pdfgo.Rectangle
-	pageWidth          float64
-	pageHeight         float64
-	warning            func(pdfgo.Diagnostic)
-	rasterDPI          float64
-	rasterWarned       bool
-	compositeCache     *pdfCompositeCache
-	compositeNodes     []pdfCompositeNode
-	compositeSpace     *pdfgo.ColorSpace
-	patternCells       *renderCache[pdfPatternCellKey, pdfPatternCell]
-	patternOrigins     map[*Pattern]pdfObjectOrigin
-	annotationData     []byte
-	resolveFile        pdfgo.FileResolver
-	resolveReference   pdfgo.ReferenceResolver
-	references         *codecpdf.ReferenceCache
-	halftoneWarnings   map[*pdfgo.Halftone]bool
-	halftones          map[string]*pdfgo.Halftone
-	transferBackdrop   bool
-	transferModel      pdfgo.Name
-	compression        CompressionOptions
-}
-
-// pdfObjectBuffer 分块收集导入对象，提交前只整理一次连续数据
-type pdfObjectBuffer struct {
-	parts     [][]GraphicObject
-	sequences []pdfObjectSequence
-	size      int
-}
-
-// pdfObjectSequence 记录连续对象的来源区段，仅在区段变化时追加
-type pdfObjectSequence struct {
-	start int
-	pdfObjectOrigin
-}
-
-// pdfObjectOrigin 保存图元的来源区段，混合区域同时保留参与合成的区段
-type pdfObjectOrigin struct {
-	sequence *pdfgo.ContentSequence
-	related  []*pdfgo.ContentSequence
-}
-
-// pdfOriginSet 按首次出现顺序收集来源，仅在出现不同区段时分配去重表
-type pdfOriginSet struct {
-	origin  pdfObjectOrigin
-	seen    map[*pdfgo.ContentSequence]bool
-	started bool
-}
-
-// add 记录参与绘制的区段，空区段表示未标记内容
-// 入参: sequence 来源区段
-func (s *pdfOriginSet) add(sequence *pdfgo.ContentSequence) {
-	if !s.started {
-		s.origin.sequence, s.started = sequence, true
-		return
+// ConvertPDF 将PDF转换并写入OFD，转换阶段失败时不写入目标
+// 入参: ctx 取消上下文, input 输入源, output OFD输出, options 转换选项
+// 返回: PDFImportReport 转换统计, error 错误信息
+func ConvertPDF(ctx context.Context, input *Input, output io.Writer, options PDFImportOptions) (PDFImportReport, error) {
+	editor, report, err := ImportPDF(ctx, input, options)
+	if err != nil {
+		return PDFImportReport{}, err
 	}
-	if sequence == s.origin.sequence || s.seen[sequence] {
-		return
+	if err := ctx.Err(); err != nil {
+		return PDFImportReport{}, err
 	}
-	if s.seen == nil {
-		s.seen = make(map[*pdfgo.ContentSequence]bool)
-	}
-	s.seen[sequence] = true
-	s.origin.related = append(s.origin.related, sequence)
-}
-
-// equal 比较来源及其顺序，不合并不同来源的图元
-// 入参: other 待比较来源
-// 返回: bool 是否相同
-func (o pdfObjectOrigin) equal(other pdfObjectOrigin) bool {
-	return o.sequence == other.sequence && slices.Equal(o.related, other.related)
-}
-
-// merge 合并参与混色的来源，不修改已有区段切片
-// 入参: other 另一来源
-// 返回: pdfObjectOrigin 去重后的来源
-func (o pdfObjectOrigin) merge(other pdfObjectOrigin) pdfObjectOrigin {
-	if o.equal(other) {
-		return o
-	}
-	result := o
-	copied := false
-	appendSequence := func(sequence *pdfgo.ContentSequence) {
-		if sequence != result.sequence && !slices.Contains(result.related, sequence) {
-			if !copied {
-				result.related = slices.Clone(result.related)
-				copied = true
-			}
-			result.related = append(result.related, sequence)
+	if options.OnProgress != nil {
+		if err := options.OnProgress("write", 0, 0); err != nil {
+			return PDFImportReport{}, err
 		}
 	}
-	appendSequence(other.sequence)
-	for _, sequence := range other.related {
-		appendSequence(sequence)
+	editor.OnWriteProgress = func(stage string, completed, total int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if options.OnProgress != nil {
+			return options.OnProgress("write."+stage, completed, total)
+		}
+		return nil
 	}
-	return result
-}
-
-// ImportPDF 将PDF内容转换为独立OFD编辑文档，失败时不返回部分结果
-// 返回的编辑文档独立于输入源，函数返回后可关闭输入源
-// 入参: ctx 取消上下文, input 输入源, options 转换选项
-// 返回: *Editor 编辑文档, PDFImportReport 转换统计, error 错误信息
-func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Editor, PDFImportReport, error) {
-	pending, err := NewPDFImport(ctx, input, options)
-	if err != nil {
-		return nil, PDFImportReport{}, err
-	}
-	defer pending.Close()
-	return pending.Finish(ctx)
+	_, err = editor.WriteToWithOptions(ctx, output, WriteOptions{Compression: options.Compression})
+	return report, err
 }
 
 // NewPDFImport 建立PDF页面索引和文档信息，不转换页面图元
@@ -389,16 +262,6 @@ func NewPDFImport(ctx context.Context, input *Input, options PDFImportOptions) (
 	return &PDFImport{input: input, importer: importer, options: options, pages: cloneEditorData(editor.pages), ready: make([]bool, len(editor.pages))}, nil
 }
 
-// ReadAt 读取当前操作需要的数据，不取得输入所有权
-// 入参: data 目标缓冲, offset 文件偏移
-// 返回: int 读取字节数, error 读取或取消错误
-func (r *pdfImportInput) ReadAt(data []byte, offset int64) (int, error) {
-	if err := r.importer.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return r.input.ReadAt(data, offset)
-}
-
 // PageCount 返回文档页数
 // 返回: int 页面总数
 func (p *PDFImport) PageCount() int { return len(p.pages) }
@@ -513,6 +376,25 @@ func (p *PDFImport) Reader(ctx context.Context, index int) (*Reader, error) {
 	}
 	snapshot := *p.importer.editor
 	snapshot.pages = slices.Clone(p.pages)
+	if p.previews == nil {
+		p.previews = resourceCache[string, []byte](p.options.Resources, 16<<20)
+	}
+	snapshot.previewPages = make(map[string][]byte, len(p.pages))
+	for i, page := range p.pages {
+		if i == index {
+			continue
+		}
+		data, ok := p.previews.get(page.ID)
+		if !ok {
+			var err error
+			data, err = encodeOFDXMLContext(ctx, func(x *ofdXML) { x.page(page) })
+			if err != nil {
+				return nil, err
+			}
+			p.previews.put(page.ID, data, len(data)+128)
+		}
+		snapshot.previewPages[page.ID] = data
+	}
 	if index >= 0 {
 		snapshot.pages[index] = p.importer.editor.pages[index]
 	}
@@ -525,6 +407,56 @@ func (p *PDFImport) Reader(ctx context.Context, index int) (*Reader, error) {
 		reader.pageReady[reader.doc.Pages.Page[index].ID] = true
 	}
 	return reader, nil
+}
+
+// PageText 直接读取已转换页面的文字，不创建整本文档的阅读快照，不包含注解外观
+// 返回结果独立于转换会话，转换及提取失败时不返回部分文字
+// renderer的Reader不参与提取，提供的渲染器须与本次提取串行使用
+// 入参: ctx 取消上下文, index 零基页面索引, renderer 提取配置及字体来源缓存，nil沿用导入配置
+// 返回: *PageText 页面文字, error 转换、提取或关闭错误
+func (p *PDFImport) PageText(ctx context.Context, index int, renderer *Renderer) (*PageText, error) {
+	if err := p.ConvertPage(ctx, index); err != nil {
+		return nil, err
+	}
+	snapshot := *p.importer.editor
+	snapshot.source = nil
+	snapshot.pages = []PageContent{snapshot.pages[index]}
+	reader, err := snapshot.resourceReader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	if renderer == nil {
+		renderer = p.importer.renderer
+	}
+	renderer = renderer.childRenderer(reader)
+	renderer.OutputContext = ctx
+	return renderer.PageTextContext(ctx, &snapshot.pages[0])
+}
+
+// PDFDestination 准备链接来源页并查询实时PDF定位语义，不修改已交付的阅读快照
+// 入参: ctx 取消上下文, index 链接来源页，-1仅查询文档动作, dest OFD动作目标
+// 返回: pdfgo.DestinationTarget 定位目标, bool 是否存在, error 页面转换或关闭错误
+func (p *PDFImport) PDFDestination(ctx context.Context, index int, dest Dest) (pdfgo.DestinationTarget, bool, error) {
+	if p.importer == nil {
+		return pdfgo.DestinationTarget{}, false, fmt.Errorf("PDF import is closed")
+	}
+	if p.err != nil {
+		return pdfgo.DestinationTarget{}, false, p.err
+	}
+	if err := ctx.Err(); err != nil {
+		return pdfgo.DestinationTarget{}, false, err
+	}
+	if index != -1 {
+		if err := p.ConvertPage(ctx, index); err != nil {
+			return pdfgo.DestinationTarget{}, false, err
+		}
+	}
+	if targets := p.importer.editor.pdfDestinations; targets != nil {
+		target, ok := targets.targets[pdfDestinationKey(dest)]
+		return target, ok, nil
+	}
+	return pdfgo.DestinationTarget{}, false, nil
 }
 
 // Finish 转换尚未就绪的页面并补全文档结构，返回独立编辑文档
@@ -579,39 +511,104 @@ func (p *PDFImport) Close() error {
 	err := p.importer.reader.Close()
 	p.importer = nil
 	p.pages, p.ready = nil, nil
+	p.previews.clear()
+	p.previews = nil
 	clear(p.options.Password)
 	p.options = PDFImportOptions{}
 	p.input = nil
 	return err
 }
 
-// ConvertPDF 将PDF转换并写入OFD，转换阶段失败时不写入目标
-// 入参: ctx 取消上下文, input 输入源, output OFD输出, options 转换选项
-// 返回: PDFImportReport 转换统计, error 错误信息
-func ConvertPDF(ctx context.Context, input *Input, output io.Writer, options PDFImportOptions) (PDFImportReport, error) {
-	editor, report, err := ImportPDF(ctx, input, options)
+// ImportPDF 将PDF内容转换为独立OFD编辑文档，失败时不返回部分结果
+// 返回的编辑文档独立于输入源，函数返回后可关闭输入源
+// 入参: ctx 取消上下文, input 输入源, options 转换选项
+// 返回: *Editor 编辑文档, PDFImportReport 转换统计, error 错误信息
+func ImportPDF(ctx context.Context, input *Input, options PDFImportOptions) (*Editor, PDFImportReport, error) {
+	pending, err := NewPDFImport(ctx, input, options)
 	if err != nil {
-		return PDFImportReport{}, err
+		return nil, PDFImportReport{}, err
 	}
-	if err := ctx.Err(); err != nil {
-		return PDFImportReport{}, err
+	defer pending.Close()
+	return pending.Finish(ctx)
+}
+
+// pdfImportInput 将输入读取绑定到当前转换上下文
+type pdfImportInput struct {
+	input    *Input
+	importer *pdfImporter
+}
+
+// ReadAt 读取当前操作需要的数据，不取得输入所有权
+// 入参: data 目标缓冲, offset 文件偏移
+// 返回: int 读取字节数, error 读取或取消错误
+func (r *pdfImportInput) ReadAt(data []byte, offset int64) (int, error) {
+	if err := r.importer.ctx.Err(); err != nil {
+		return 0, err
 	}
-	if options.OnProgress != nil {
-		if err := options.OnProgress("write", 0, 0); err != nil {
-			return PDFImportReport{}, err
-		}
-	}
-	editor.OnWriteProgress = func(stage string, completed, total int) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if options.OnProgress != nil {
-			return options.OnProgress("write."+stage, completed, total)
-		}
-		return nil
-	}
-	_, err = editor.WriteToWithOptions(ctx, output, WriteOptions{Compression: options.Compression})
-	return report, err
+	return r.input.ReadAt(data, offset)
+}
+
+// pdfImporter 保存单次转换的对象与资源状态
+type pdfImporter struct {
+	resources          *Resources
+	ctx                context.Context
+	reader             *pdfgo.Reader
+	editor             *Editor
+	renderer           *Renderer
+	report             PDFImportReport
+	matrix             pdfgo.Matrix
+	page               int
+	pageActionPage     int
+	fontIDs            map[*pdfgo.Font]string
+	fonts              map[*pdfgo.Font]*pdfImportedFont
+	fontPrograms       map[pdfFontProgramKey]*pdfImportedFont
+	symbolFonts        map[*pdfgo.Font]*pdfImportedFont
+	fontWarnings       map[string]bool
+	clipTexts          map[*pdfgo.TextClip][]TextObject
+	textOrigins        map[*pdfgo.ReplacementText]pdfObjectOrigin
+	clipPaths          *renderCache[[32]byte, pdfClipPath]
+	cmykSpace          string
+	rgbSpace           string
+	iccSpaces          map[pdfICCKey]string
+	objects            *pdfObjectBuffer
+	structureBindings  *pdfStructureBindings
+	annotationBindings []pdfStructureObjectBinding
+	formResources      *pdfFormCache
+	validation         *editorValidation
+	pages              map[pdfgo.Reference]*pdfgo.Page
+	pageOrder          []*pdfgo.Page
+	pageIDs            map[pdfgo.Reference]string
+	pageIndexes        map[pdfgo.Reference]int
+	destinationBoxes   map[pdfgo.Reference]Box
+	imageIDs           map[pdfImageKey][]pdfImageResource
+	imageContents      *renderCache[pdfImageContentKey, pdfImageContent]
+	attachmentIDs      map[pdfAttachmentKey]string
+	modelAttachments   map[*pdfgo.Stream]string
+	mediaResources     map[pdfMediaFileKey]pdfMediaResource
+	mediaInstances     map[pdfMediaInstanceKey]pdfMediaResource
+	movieBounds        map[*Movie]Box
+	renditions         *pdfRenditionImport
+	maskClips          map[*pdfgo.SoftMask]pdfgo.Path
+	pageBox            pdfgo.Rectangle
+	pageWidth          float64
+	pageHeight         float64
+	warning            func(pdfgo.Diagnostic)
+	rasterDPI          float64
+	rasterWarned       bool
+	compositeCache     *pdfCompositeCache
+	compositeNodes     []pdfCompositeNode
+	compositeSpace     *pdfgo.ColorSpace
+	patternCells       *renderCache[pdfPatternCellKey, pdfPatternCell]
+	patternOrigins     map[*Pattern]pdfObjectOrigin
+	annotationData     []byte
+	resolveFile        pdfgo.FileResolver
+	resolveReference   pdfgo.ReferenceResolver
+	references         *codecpdf.ReferenceCache
+	halftoneWarnings   map[*pdfgo.Halftone]bool
+	halftones          map[string]*pdfgo.Halftone
+	transferBackdrop   bool
+	transferModel      pdfgo.Name
+	compression        CompressionOptions
 }
 
 // referencePage 衔接PDF访问器与当前导入会话的引用文档缓存
@@ -694,12 +691,6 @@ func (p *pdfImporter) objectValidation() *editorValidation {
 	return p.validation
 }
 
-// appendObject 追加本次导入对象，按需建立独立暂存缓冲
-// 入参: object 独立导入对象
-func (p *pdfImporter) appendObject(object GraphicObject) {
-	p.appendSequenceObject(object, nil)
-}
-
 // appendSequenceObject 追加对象并保留来源区段，供复合对象优化核对边界
 // 入参: object 独立导入对象, sequence 来源区段
 func (p *pdfImporter) appendSequenceObject(object GraphicObject, sequence *pdfgo.ContentSequence) {
@@ -733,6 +724,44 @@ func (p *pdfImporter) appendOriginObject(object GraphicObject, origin pdfObjectO
 		p.objects = &pdfObjectBuffer{}
 	}
 	p.objects.appendOrigin(object, origin)
+}
+
+// commitObjects 将当前页面待转换对象写入编辑文档
+// 返回: error 对象写入错误
+func (p *pdfImporter) commitObjects() error {
+	if p.objects.len() == 0 {
+		return nil
+	}
+	objects, err := p.objects.data(p.ctx)
+	if err != nil {
+		return err
+	}
+	objects, err = p.sharedClipObjects(objects)
+	if err != nil {
+		return err
+	}
+	var bindings []pdfStructureBinding
+	if p.structureBindings != nil {
+		bindings, err = p.objects.structureBindings(p.ctx)
+		if err != nil {
+			return err
+		}
+	}
+	if err := p.objectValidation().appendOwnedObjects(p.ctx, p.page, objects); err != nil {
+		return err
+	}
+	if p.structureBindings != nil {
+		p.structureBindings.append(p.editor.pages[p.page].ID, objects, bindings)
+	}
+	p.objects = nil
+	return nil
+}
+
+// pdfObjectBuffer 分块收集导入对象，提交前只整理一次连续数据
+type pdfObjectBuffer struct {
+	parts     [][]GraphicObject
+	sequences []pdfObjectSequence
+	size      int
 }
 
 // append 追加对象，小批量连续存储，超过阈值后不复制前序片段
@@ -897,33 +926,70 @@ func (b *pdfObjectBuffer) data(ctx context.Context) ([]GraphicObject, error) {
 	return objects, nil
 }
 
-// commitObjects 将当前页面待转换对象写入编辑文档
-// 返回: error 对象写入错误
-func (p *pdfImporter) commitObjects() error {
-	if p.objects.len() == 0 {
-		return nil
+// pdfObjectSequence 记录连续对象的来源区段，仅在区段变化时追加
+type pdfObjectSequence struct {
+	start int
+	pdfObjectOrigin
+}
+
+// pdfObjectOrigin 保存图元的来源区段，混合区域同时保留参与合成的区段
+type pdfObjectOrigin struct {
+	sequence *pdfgo.ContentSequence
+	related  []*pdfgo.ContentSequence
+}
+
+// equal 比较来源及其顺序，不合并不同来源的图元
+// 入参: other 待比较来源
+// 返回: bool 是否相同
+func (o pdfObjectOrigin) equal(other pdfObjectOrigin) bool {
+	return o.sequence == other.sequence && slices.Equal(o.related, other.related)
+}
+
+// merge 合并参与混色的来源，不修改已有区段切片
+// 入参: other 另一来源
+// 返回: pdfObjectOrigin 去重后的来源
+func (o pdfObjectOrigin) merge(other pdfObjectOrigin) pdfObjectOrigin {
+	if o.equal(other) {
+		return o
 	}
-	objects, err := p.objects.data(p.ctx)
-	if err != nil {
-		return err
-	}
-	objects, err = p.sharedClipObjects(objects)
-	if err != nil {
-		return err
-	}
-	var bindings []pdfStructureBinding
-	if p.structureBindings != nil {
-		bindings, err = p.objects.structureBindings(p.ctx)
-		if err != nil {
-			return err
+	result := o
+	copied := false
+	appendSequence := func(sequence *pdfgo.ContentSequence) {
+		if sequence != result.sequence && !slices.Contains(result.related, sequence) {
+			if !copied {
+				result.related = slices.Clone(result.related)
+				copied = true
+			}
+			result.related = append(result.related, sequence)
 		}
 	}
-	if err := p.objectValidation().appendOwnedObjects(p.ctx, p.page, objects); err != nil {
-		return err
+	appendSequence(other.sequence)
+	for _, sequence := range other.related {
+		appendSequence(sequence)
 	}
-	if p.structureBindings != nil {
-		p.structureBindings.append(p.editor.pages[p.page].ID, objects, bindings)
+	return result
+}
+
+// pdfOriginSet 按首次出现顺序收集来源，仅在出现不同区段时分配去重表
+type pdfOriginSet struct {
+	origin  pdfObjectOrigin
+	seen    map[*pdfgo.ContentSequence]bool
+	started bool
+}
+
+// add 记录参与绘制的区段，空区段表示未标记内容
+// 入参: sequence 来源区段
+func (s *pdfOriginSet) add(sequence *pdfgo.ContentSequence) {
+	if !s.started {
+		s.origin.sequence, s.started = sequence, true
+		return
 	}
-	p.objects = nil
-	return nil
+	if sequence == s.origin.sequence || s.seen[sequence] {
+		return
+	}
+	if s.seen == nil {
+		s.seen = make(map[*pdfgo.ContentSequence]bool)
+	}
+	s.seen[sequence] = true
+	s.origin.related = append(s.origin.related, sequence)
 }

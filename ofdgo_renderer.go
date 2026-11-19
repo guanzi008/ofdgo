@@ -19,6 +19,7 @@ import (
 	"image"
 	"io/fs"
 	"maps"
+	"slices"
 )
 
 // Renderer 渲染器实现
@@ -39,6 +40,10 @@ type Renderer struct {
 	OnExportProgress      func(completed, total int) error
 	DrawParams            map[string]*DrawParam
 	CompositeGraphicUnits map[string]*CompositeGraphicUnit
+	hasBaseScope          bool
+	scopedDrawParams      map[string]*DrawParam
+	scopedComposites      map[string]*CompositeGraphicUnit
+	pageResources         []*parsedRes
 	templatePageCache     map[string]*PageContent
 	imageCache            *renderCache[string, image.Image]
 	fontDirs              []string
@@ -53,6 +58,7 @@ type Renderer struct {
 	textContentOnly       bool
 	knownSVGResources     map[string]bool
 	backends              RenderBackends
+	rasterDisabled        bool
 	backendStates         map[any]any
 	sharedBackendStates   map[any]any
 	resolvedFonts         map[resolvedFontKey]resolvedFontResult
@@ -81,10 +87,17 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	if err != nil {
 		return nil, err
 	}
+	drawParams := r.DrawParams
+	composites := r.CompositeGraphicUnits
+	if r.hasBaseScope {
+		drawParams = r.scopedDrawParams
+		composites = r.scopedComposites
+	}
+	maps.Copy(reader.drawParamCache, drawParams)
+	maps.Copy(reader.compositeGraphicUnitCache, composites)
 	next := NewRenderer(reader, WithDPI(r.DPI), WithAnnotations(r.RenderAnnotations), WithRenderBackends(r.backends), WithFontDirs(r.fontDirs...), WithFontFS(r.fontFS...))
+	next.rasterDisabled = r.rasterDisabled
 	next.Compression = r.Compression
-	next.DrawParams = maps.Clone(r.DrawParams)
-	next.CompositeGraphicUnits = maps.Clone(r.CompositeGraphicUnits)
 	next.OutputContext = ctx
 	next.TransparentBackground = r.TransparentBackground
 	next.decodeImages = r.decodeImages
@@ -95,27 +108,22 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	next.fontPreparations = r.fontPreparations
 	next.fontMetrics = r.fontMetrics
 	next.glyphOutlines = r.glyphOutlines
-	next.sharedBackendStates[canvasPathCacheKey{}] = r.canvasParsedPaths()
-	next.sharedBackendStates[canvasClipCacheKey{}] = r.canvasClipIntersections()
-	next.sharedBackendStates[canvasFillCacheKey{}] = r.canvasSettledPaths()
-	next.sharedBackendStates[canvasDrawClipCacheKey{}] = r.canvasDrawClips()
-	next.sharedBackendStates[canvasStrokeCacheKey{}] = r.canvasStrokeClips()
-	next.sharedBackendStates[svgResourceCacheKey{}] = r.svgImageResources()
+	if r.fontSourcesCache != nil && next.fontSourcesCache != nil {
+		next.fontSourcesCache.collections = r.fontSourcesCache.collections
+		next.fontSourcesCache.shared = r.fontSourcesCache.shared
+	}
+	maps.Copy(next.sharedBackendStates, r.sharedBackendStates)
+	seenForkers := make(map[any]bool)
+	for _, candidate := range []any{r.backends.Compiler, r.backends.Raster, r.backends.Fonts, r.backends.Geometry, r.backends.SVG, r.backends.PDF, r.backends.EPS} {
+		if candidate == nil || seenForkers[candidate] {
+			continue
+		}
+		seenForkers[candidate] = true
+		if forker, ok := candidate.(sharedStateForker); ok {
+			forker.forkSharedState(r, next)
+		}
+	}
 	return next, nil
-}
-
-// deviceLineWidth 按设备分辨率计算描边宽度，零线宽为一像素，正线宽至少为两像素
-// 入参: width 页面空间线宽，单位为毫米
-// 返回: float64 设备描边宽度，单位为毫米
-func (r *Renderer) deviceLineWidth(width float64) float64 {
-	pixel := 25.4 / r.DPI
-	if width == 0 {
-		return pixel
-	}
-	if width > 0 {
-		return max(width, 2*pixel)
-	}
-	return width
 }
 
 // ClearCache 释放派生字体、图片、模板与后端缓存，不改变文档和渲染配置
@@ -141,7 +149,194 @@ func (r *Renderer) FontSources() ([]string, []fs.FS) {
 	return append([]string(nil), r.fontDirs...), append([]fs.FS(nil), r.fontFS...)
 }
 
-// childRenderer 继承配置并复用字体文件索引与数据，文档匹配结果保持独立
+// BindPageResources 解析并绑定指定页面的局部资源作用域，返回恢复闭包
+// 入参: page 页面内容
+// 返回: func() 恢复之前的作用域状态
+func (r *Renderer) BindPageResources(page *PageContent) func() {
+	return r.bindPageResources(page)
+}
+
+// sharedStateForker 为多后端提供并发Fork时的线程安全共享缓存继承钩子
+type sharedStateForker interface {
+	forkSharedState(src, dst *Renderer)
+}
+
+// bindPageResources 解析并绑定当前页面的局部资源作用域，返回恢复闭包
+// 入参: page 页面内容
+// 返回: func() 恢复之前的作用域状态
+func (r *Renderer) bindPageResources(page *PageContent) func() {
+	if page == nil {
+		return r.bindParsedResources(nil)
+	}
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	if r.Reader != nil && r.Reader.doc == nil && r.Reader.OFD != nil {
+		_, _ = r.Reader.docStructureContext(ctx)
+	}
+	res := page.pageResources
+	if res == nil && len(page.PageRes) > 0 && r.Reader != nil {
+		basePath := ""
+		if r.Reader.doc != nil && page.ID != "" {
+			for _, ref := range r.Reader.doc.Pages.Page {
+				if sameResourceID(ref.ID, page.ID) {
+					basePath = r.Reader.ResPath(ref.BaseLoc)
+					break
+				}
+			}
+		}
+		if basePath == "" {
+			basePath = r.Reader.ResPath("Document.xml")
+		}
+		if collected, err := r.Reader.collectPageResourcesContext(ctx, basePath, page); err == nil {
+			res = collected
+		}
+	}
+	return r.bindParsedResources(res)
+}
+
+// bindParsedResources 绑定指定的局部资源列表并同步局部绘制参数与复合图元作用域
+// 入参: res 局部资源表列表
+// 返回: func() 恢复之前的作用域状态
+func (r *Renderer) bindParsedResources(res []*parsedRes) func() {
+	prevRes := r.pageResources
+	prevDrawParams := r.DrawParams
+	prevComposites := r.CompositeGraphicUnits
+	prevHasBase := r.hasBaseScope
+	prevBaseDP := r.scopedDrawParams
+	prevBaseComp := r.scopedComposites
+	if !r.hasBaseScope {
+		r.hasBaseScope = true
+		r.scopedDrawParams = prevDrawParams
+		r.scopedComposites = prevComposites
+	}
+	r.pageResources = res
+	r.DrawParams = r.mergeScopedDrawParams(r.scopedDrawParams, res)
+	r.CompositeGraphicUnits = r.mergeScopedComposites(r.scopedComposites, res)
+	return func() {
+		r.pageResources = prevRes
+		r.DrawParams = prevDrawParams
+		r.CompositeGraphicUnits = prevComposites
+		r.hasBaseScope = prevHasBase
+		r.scopedDrawParams = prevBaseDP
+		r.scopedComposites = prevBaseComp
+	}
+}
+
+// mergeScopedDrawParams 基于外部初始覆盖与文档资源合并当前页面局部绘制参数
+// 入参: base 外部基准绘制参数表, res 当前页面局部资源
+// 返回: map[string]*DrawParam 当前作用域绘制参数表
+func (r *Renderer) mergeScopedDrawParams(base map[string]*DrawParam, res []*parsedRes) map[string]*DrawParam {
+	locals := make([]map[string]*DrawParam, 0, len(res))
+	for _, item := range res {
+		if item != nil && len(item.drawParams.exact) > 0 {
+			locals = append(locals, item.drawParams.exact)
+		}
+	}
+	if len(locals) == 0 {
+		return base
+	}
+	var docIndex *resourceIndex[*DrawParam]
+	var docFallback map[string]*DrawParam
+	if r.Reader != nil {
+		docIndex = r.Reader.docDrawParams
+		docFallback = r.Reader.drawParamCache
+	}
+	return mergeScopedResources(base, docIndex, docFallback, r.Reader != nil, locals)
+}
+
+// mergeScopedComposites 基于外部初始覆盖与文档资源合并当前页面局部复合图元
+// 入参: base 外部基准复合图元表, res 当前页面局部资源
+// 返回: map[string]*CompositeGraphicUnit 当前作用域复合图元表
+func (r *Renderer) mergeScopedComposites(base map[string]*CompositeGraphicUnit, res []*parsedRes) map[string]*CompositeGraphicUnit {
+	locals := make([]map[string]*CompositeGraphicUnit, 0, len(res))
+	for _, item := range res {
+		if item != nil && len(item.composites.exact) > 0 {
+			locals = append(locals, item.composites.exact)
+		}
+	}
+	if len(locals) == 0 {
+		return base
+	}
+	var docIndex *resourceIndex[*CompositeGraphicUnit]
+	var docFallback map[string]*CompositeGraphicUnit
+	if r.Reader != nil {
+		docIndex = r.Reader.docComposites
+		docFallback = r.Reader.compositeGraphicUnitCache
+	}
+	return mergeScopedResources(base, docIndex, docFallback, r.Reader != nil, locals)
+}
+
+// hasCompositeOverride 判断外部基准表是否显式注入了覆盖文档定义的复合图元
+// 入参: base 外部基准表, id 资源标识
+// 返回: bool 是否存在外部显式覆盖
+func (r *Renderer) hasCompositeOverride(base map[string]*CompositeGraphicUnit, id string) bool {
+	existing, ok := resourceValue(base, id)
+	if !ok || existing == nil {
+		return false
+	}
+	if r.Reader == nil {
+		return true
+	}
+	var docVal *CompositeGraphicUnit
+	if r.Reader.docComposites != nil {
+		docVal, _ = r.Reader.docComposites.get(id)
+	} else {
+		docVal, _ = resourceValue(r.Reader.compositeGraphicUnitCache, id)
+	}
+	return existing != docVal
+}
+
+// fontDefinition 按页面局部资源优先查找字体定义
+// 入参: id 字体资源标识
+// 返回: *Font 字体定义
+func (r *Renderer) fontDefinition(id string) *Font {
+	if r.Reader == nil {
+		return nil
+	}
+	if font, ok := r.Reader.resolveFontScoped(r.pageResources, id); ok {
+		return font
+	}
+	return r.Reader.fontDefinition(id)
+}
+
+// compositeDefinition 按外部覆盖与页面局部资源优先查找复合图元定义
+// 入参: id 复合图元资源标识
+// 返回: *CompositeGraphicUnit 复合图元定义
+func (r *Renderer) compositeDefinition(id string) *CompositeGraphicUnit {
+	base := r.CompositeGraphicUnits
+	if r.hasBaseScope {
+		base = r.scopedComposites
+	}
+	if r.hasCompositeOverride(base, id) {
+		unit, _ := resourceValue(base, id)
+		return unit
+	}
+	if r.Reader != nil {
+		if scoped, found := r.Reader.resolveCompositeScoped(r.pageResources, id); found {
+			return scoped
+		}
+	}
+	unit, _ := resourceValue(r.CompositeGraphicUnits, id)
+	return unit
+}
+
+// deviceLineWidth 按设备分辨率计算描边宽度，零线宽为一像素，正线宽至少为两像素
+// 入参: width 页面空间线宽，单位为毫米
+// 返回: float64 设备描边宽度，单位为毫米
+func (r *Renderer) deviceLineWidth(width float64) float64 {
+	pixel := 25.4 / r.DPI
+	if width == 0 {
+		return pixel
+	}
+	if width > 0 {
+		return max(width, 2*pixel)
+	}
+	return width
+}
+
+// childRenderer 继承配置并复用字体文件索引、候选与数据，文档解析与回退状态保持独立
 // 入参: reader 子阅读器
 // 返回: *Renderer 子渲染器
 func (r *Renderer) childRenderer(reader *Reader) *Renderer {
@@ -157,11 +352,13 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 		opts = append(opts, WithFontFS(r.fontFS...))
 	}
 	renderer := NewRenderer(reader, opts...)
+	renderer.rasterDisabled = r.rasterDisabled
 	renderer.printing = r.printing
 	renderer.sharedBackendStates = r.sharedBackendStates
 	renderer.fontPreparations = r.fontPreparations
 	renderer.fontDigests = r.fontDigests
 	renderer.fontMetrics = r.fontMetrics
+	renderer.glyphOutlines = r.glyphOutlines
 	renderer.fontSourcesCache = r.fontSourcesCache.child()
 	renderer.decodeImages = r.decodeImages
 	renderer.pageContext = r.pageContext
@@ -198,6 +395,94 @@ func (r *Renderer) loadTemplate(templateID string) *PageContent {
 		return page
 	}
 	return nil
+}
+
+// templateOrder 获取页面模板引用的绘制顺序，省略时继承文档模板页声明并回退背景层
+// 入参: ref 页面模板引用
+// 返回: int 绘制顺序
+func (r *Renderer) templateOrder(ref Template) int {
+	kind := ref.ZOrder
+	if kind == "" && r.Reader.doc != nil {
+		for _, tpl := range r.Reader.doc.CommonData.TemplatePage {
+			if sameResourceID(tpl.ID, ref.TemplateID) {
+				kind = tpl.ZOrder
+				break
+			}
+		}
+	}
+	if kind == "" {
+		kind = "Background"
+	}
+	return layerOrder(kind)
+}
+
+// internalRasterBackend 获取矢量导出内部局部采样可用的光栅后端
+// 返回: RasterBackend 光栅后端，未配置且非仅禁用图像输出时为nil
+func (r *Renderer) internalRasterBackend() RasterBackend {
+	if r.backends.Raster != nil {
+		return r.backends.Raster
+	}
+	if r.rasterDisabled {
+		return CanvasBackend{}
+	}
+	return nil
+}
+
+// mergeScopedResources 按常数时间索引将页面局部资源合并至基准表，保留外部显式覆盖
+// 入参: base 基准资源表, docIndex 文档级资源索引, docFallback 文档级回退表, hasReader 是否绑定阅读器, locals 各局部资源文件的精确表
+// 返回: map[string]T 合并后的作用域资源表
+func mergeScopedResources[T comparable](base map[string]T, docIndex *resourceIndex[T], docFallback map[string]T, hasReader bool, locals []map[string]T) map[string]T {
+	var zero T
+	totalLocal := 0
+	for _, exact := range locals {
+		totalLocal += len(exact)
+	}
+	scoped := make(map[string]T, len(base)+totalLocal)
+	var baseIdx resourceIndex[T]
+	normKeys := make(map[string][]string, len(base))
+	for key, val := range base {
+		scoped[key] = val
+		baseIdx.put(key, val)
+		if norm := editorResourceID(key); norm != "" {
+			normKeys[norm] = append(normKeys[norm], key)
+		}
+	}
+	var fallbackIdx *resourceIndex[T]
+	for _, exact := range locals {
+		for _, id := range slices.Sorted(maps.Keys(exact)) {
+			val := exact[id]
+			if existing, ok := baseIdx.get(id); ok && existing != zero {
+				if !hasReader {
+					continue
+				}
+				var docVal T
+				if docIndex != nil {
+					docVal, _ = docIndex.get(id)
+				} else if len(docFallback) != 0 {
+					if fallbackIdx == nil {
+						fallbackIdx = &resourceIndex[T]{}
+						for fk, fv := range docFallback {
+							fallbackIdx.put(fk, fv)
+						}
+					}
+					docVal, _ = fallbackIdx.get(id)
+				}
+				if existing != docVal {
+					continue
+				}
+			}
+			if norm := editorResourceID(id); norm != "" {
+				for _, oldKey := range normKeys[norm] {
+					if oldKey != id {
+						delete(scoped, oldKey)
+					}
+				}
+				normKeys[norm] = []string{id}
+			}
+			scoped[id] = val
+		}
+	}
+	return scoped
 }
 
 // layerOrder 获取图层类型的绘制顺序

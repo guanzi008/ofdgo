@@ -24,7 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"math"
 	"reflect"
 	"runtime"
@@ -92,59 +91,26 @@ type NativeEngine struct {
 	// ReserveOutput 为单次批量预留整体入口，返回错误时由宿主释放未交付的预留
 	ReserveOutput func(context.Context, NativeOutputRequest) (NativeOutputTarget, error)
 	// CleanupOutput 必须幂等，以兼容前端收到output事件后重复removeEntry
-	CleanupOutput func(context.Context, NativeOutputTarget) error
-	gate          chan struct{}
-	once          sync.Once
-	saves         sync.WaitGroup
-	closed        bool
-	renderMu      sync.Mutex
-	renderCount   int
-	renderDone    chan struct{}
-	renderSlots   chan struct{}
-	renderIdle    []*Session
-}
-
-// nativeReader 在会话当前操作上下文中分块读取，不捕获已结束请求的上下文
-type nativeReader struct {
-	engine *NativeEngine
-	input  io.ReaderAt
-}
-
-// nativeCall 保存单次worker适配状态
-type nativeCall struct {
-	engine      *NativeEngine
-	ctx         context.Context
-	emit        func(any)
-	output      io.WriteCloser
-	buffer      bytes.Buffer
-	destination any
-	files       []any
-	currentName string
-	mime        string
-	size        int64
-	exporting   bool
-	batch       bool
-	base        string
-	extension   string
-	paged       bool
-	reserved    *NativeOutputTarget
-	committed   bool
-}
-
-// platformValue 仅承载JSON参数、字节与宿主回调，不执行脚本
-type platformValue struct{ value any }
-
-// nativeCallback 同步宿主回调
-type nativeCallback func(...any) (any, error)
-
-// nativeField 保存字段名称、位置及空值省略规则
-type nativeField struct {
-	name      string
-	index     int
-	omitEmpty bool
+	CleanupOutput  func(context.Context, NativeOutputTarget) error
+	gate           chan struct{}
+	once           sync.Once
+	saves          sync.WaitGroup
+	closed         bool
+	ctxMu          sync.Mutex
+	renderMu       sync.Mutex
+	renderCount    int
+	renderSeq      uint64
+	renderContexts map[uint64]context.Context
+	saveSeq        uint64
+	saveContexts   map[uint64]context.Context
+	renderDone     chan struct{}
+	renderSlots    chan struct{}
+	renderIdle     []*Session
 }
 
 // NewNativeEngine 创建独立业务会话，resolver不接收未经授权的文件路径
+// 入参: resolve 宿主资源解析回调
+// 返回: *NativeEngine 独立原生业务引擎
 func NewNativeEngine(resolve NativeResolver) *NativeEngine { return &NativeEngine{Resolve: resolve} }
 
 // Call 执行worker输入协议，返回ok/data/error，字节保持[]byte，emit不含请求id
@@ -158,7 +124,11 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 	e.once.Do(func() {
 		e.gate = make(chan struct{}, 1)
 		e.renderSlots = make(chan struct{}, e.renderParallelism())
-		e.resolveInput = e.input
+		e.renderContexts = make(map[uint64]context.Context)
+		e.saveContexts = make(map[uint64]context.Context)
+		e.resolveInput = func(ctx context.Context, value any) (io.ReaderAt, int64, error) {
+			return e.resolveNativeInput(ctx, value, false)
+		}
 		e.conversionPool = e.ConversionPool
 		e.resources = e.Resources
 	})
@@ -219,6 +189,11 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 			}
 		}
 		operation.currentEditor = nil
+		e.ctxMu.Lock()
+		e.renderSeq++
+		renderID := e.renderSeq
+		e.renderContexts[renderID] = ctx
+		e.ctxMu.Unlock()
 		e.renderMu.Lock()
 		if e.renderCount == 0 {
 			e.renderDone = make(chan struct{})
@@ -229,9 +204,12 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 		locked = false
 		defer func() {
 			worker.Renderer.OutputContext = context.Background()
+			e.ctxMu.Lock()
+			delete(e.renderContexts, renderID)
+			e.ctxMu.Unlock()
 			e.renderMu.Lock()
 			if result != nil && result["ok"] == true && ctx.Err() == nil {
-				e.currentSession.svgFonts = maps.Clone(worker.svgFonts)
+				e.currentSession.retainSVGFonts(worker.svgFonts)
 				clear(worker.pageCache)
 				worker.textCache.Clear()
 				clear(worker.svgFonts)
@@ -288,16 +266,28 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 		if snapshot == nil {
 			return nativeFailure(fmt.Errorf("save snapshot is not prepared"))
 		}
-		output := &NativeEngine{OpenWriter: e.OpenWriter}
+		output := &NativeEngine{OpenWriter: e.OpenWriter, Resources: e.Resources, ConversionPool: e.ConversionPool}
 		output.currentEditor = snapshot
+		e.ctxMu.Lock()
+		e.saveSeq++
+		saveID := e.saveSeq
+		e.saveContexts[saveID] = ctx
+		e.ctxMu.Unlock()
 		e.saves.Add(1)
-		defer e.saves.Done()
+		defer func() {
+			e.ctxMu.Lock()
+			delete(e.saveContexts, saveID)
+			e.ctxMu.Unlock()
+			e.saves.Done()
+		}()
 		<-e.gate
 		locked = false
 		defer output.Close()
 		return output.Call(ctx, "ofdgoSaveDocument", args, emit)
 	}
+	e.ctxMu.Lock()
 	e.ctx = ctx
+	e.ctxMu.Unlock()
 	if e.currentSession != nil {
 		e.currentSession.Renderer.OutputContext = ctx
 	}
@@ -305,7 +295,9 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 		if e.currentSession != nil {
 			e.currentSession.Renderer.OutputContext = context.Background()
 		}
+		e.ctxMu.Lock()
 		e.ctx = nil
+		e.ctxMu.Unlock()
 		if failure := recover(); failure != nil {
 			if err, ok := failure.(error); ok {
 				result = nativeFailure(err)
@@ -364,27 +356,12 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 	return result
 }
 
-// nativeReadOnly 判断不会改变文档、字体来源或渲染配置的查询
-// 入参: name 操作名称
-// 返回: bool 是否保留空闲渲染会话
-func nativeReadOnly(name string) bool {
-	switch name {
-	case "ofdgoImagePreview", "ofdgoImagePageSize", "ofdgoCheckDocument", "ofdgoDocumentInfo", "ofdgoEditorInfo", "ofdgoDocumentNavigation", "ofdgoDocumentVersions", "ofdgoPackageDocuments",
-		"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoActionList", "ofdgoPageSettings", "ofdgoStyleResource",
-		"ofdgoOutlineLinks", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoOpenLinks", "ofdgoRenderBackends",
-		"ofdgoSVGFontData", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences",
-		"ofdgoResourceTargets", "ofdgoResourceLocations", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange":
-		return true
-	}
-	return false
-}
-
 // Close 释放会话，不关闭宿主持有的ReaderAt资源
+// 返回: error 关闭错误
 func (e *NativeEngine) Close() error {
 	e.once.Do(func() {
 		e.gate = make(chan struct{}, 1)
 		e.renderSlots = make(chan struct{}, e.renderParallelism())
-		e.resolveInput = e.input
 	})
 	e.gate <- struct{}{}
 	defer func() { <-e.gate }()
@@ -404,6 +381,585 @@ func (e *NativeEngine) Close() error {
 	}
 	e.currentSession, e.currentEditor, e.pendingImport, e.copiedObjects, e.portableObjects, e.copiedStyle = nil, nil, nil, nil, nil, nil
 	return err
+}
+
+// nativeReader 在会话当前操作上下文或请求上下文中分块读取，不捕获已结束请求的上下文
+type nativeReader struct {
+	engine *NativeEngine
+	ctx    context.Context
+	input  io.ReaderAt
+}
+
+// ReadAt 分块传递取消检查，宿主ReadAt自身阻塞时由宿主控制超时
+// 入参: data 目标切片, offset 读取偏移
+// 返回: int 读取字节数, error 读取或取消错误
+func (r nativeReader) ReadAt(data []byte, offset int64) (int, error) {
+	total := 0
+	for len(data) > 0 {
+		if err := r.contextErr(); err != nil {
+			return total, err
+		}
+		n := min(len(data), 256<<10)
+		got, err := r.input.ReadAt(data[:n], offset)
+		total += got
+		if err != nil {
+			return total, err
+		}
+		if got != n {
+			return total, io.ErrUnexpectedEOF
+		}
+		data, offset = data[n:], offset+int64(n)
+	}
+	return total, nil
+}
+
+// contextErr 返回当前读取应响应的取消状态
+// 返回: error 取消错误
+func (r nativeReader) contextErr() error {
+	if r.ctx != nil {
+		return r.ctx.Err()
+	}
+	return r.engine.readerContextErr()
+}
+
+// nativeCall 保存单次worker适配状态
+type nativeCall struct {
+	engine      *NativeEngine
+	ctx         context.Context
+	emit        func(any)
+	output      io.WriteCloser
+	buffer      bytes.Buffer
+	destination any
+	files       []any
+	currentName string
+	mime        string
+	size        int64
+	exporting   bool
+	batch       bool
+	base        string
+	extension   string
+	paged       bool
+	reserved    *NativeOutputTarget
+	committed   bool
+}
+
+// event 发送标准worker进度
+// 入参: value 进度事件内容
+func (c *nativeCall) event(value map[string]any) {
+	if c.emit != nil {
+		c.emit(value)
+	}
+}
+
+// checkpoint 检查操作取消
+// 入参: _ 忽略的回调参数
+// 返回: any 空结果, error 取消错误
+func (c *nativeCall) checkpoint(...any) (any, error) { return nil, c.ctx.Err() }
+
+// progress 创建标准进度回调
+// 入参: kind 事件类型, stage 阶段名, phased 是否包含子阶段
+// 返回: nativeCallback 进度回调函数
+func (c *nativeCall) progress(kind, stage string, phased bool) nativeCallback {
+	return func(args ...any) (any, error) {
+		if err := c.ctx.Err(); err != nil {
+			return nil, err
+		}
+		event := map[string]any{"type": kind}
+		if stage != "" {
+			event["stage"] = stage
+		}
+		if phased {
+			event["phase"], event["completed"], event["total"] = args[0], args[1], args[2]
+		} else {
+			event["completed"], event["total"] = args[0], args[1]
+		}
+		c.event(event)
+		return nil, c.ctx.Err()
+	}
+}
+
+// readCallback 创建有界随机读取回调
+// 入参: value 输入源参数
+// 返回: nativeCallback 读取回调, int64 数据大小, error 授权或读取错误
+func (c *nativeCall) readCallback(value any) (nativeCallback, int64, error) {
+	input, size, err := c.engine.resolveNativeInput(c.ctx, value, true)
+	if err != nil {
+		return nil, 0, err
+	}
+	return func(args ...any) (any, error) {
+		if err := c.ctx.Err(); err != nil {
+			return nil, err
+		}
+		offset, n := int64(platformValueOf(args[0]).Float()), platformValueOf(args[1]).Int()
+		if offset < 0 || n < 0 || n > 256<<10 || offset > size || int64(n) > size-offset {
+			return nil, fmt.Errorf("invalid native read range")
+		}
+		data := make([]byte, n)
+		got, err := input.ReadAt(data, offset)
+		if got != n {
+			return nil, io.ErrUnexpectedEOF
+		}
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+		return data, nil
+	}, size, nil
+}
+
+// write 写出数据块
+// 入参: args 输出字节参数
+// 返回: any 空结果, error 写入或取消错误
+func (c *nativeCall) write(args ...any) (any, error) {
+	if err := c.ctx.Err(); err != nil {
+		return nil, err
+	}
+	value := platformValueOf(args[0])
+	data, ok := value.value.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("expected output bytes")
+	}
+	var writer io.Writer = &c.buffer
+	if c.output != nil {
+		writer = c.output
+	}
+	n, err := writer.Write(data)
+	c.size += int64(n)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	return nil, err
+}
+
+// open 创建宿主输出，目标只交给授权hook解释
+// 入参: name 输出条目名
+// 返回: error 打开错误
+func (c *nativeCall) open(name string) error {
+	c.currentName = name
+	c.buffer.Reset()
+	if c.destination == nil {
+		return nil
+	}
+	if c.engine.OpenWriter == nil {
+		return fmt.Errorf("native output resolver is not configured")
+	}
+	var err error
+	c.output, err = c.engine.OpenWriter(c.ctx, c.destination, name)
+	if err == nil && c.output == nil {
+		return fmt.Errorf("native output resolver returned nil")
+	}
+	return err
+}
+
+// boundary 处理批量输出文件边界
+// 入参: args 动作与文件名参数
+// 返回: any 空结果, error 边界处理错误
+func (c *nativeCall) boundary(args ...any) (any, error) {
+	if err := c.ctx.Err(); err != nil {
+		return nil, err
+	}
+	action, name := args[0].(string), args[1].(string)
+	if action == "open" {
+		if c.paged {
+			name = c.base + "/" + name
+		} else {
+			name = c.base + "." + c.extension
+		}
+		return nil, c.open(name)
+	}
+	file := map[string]any{"name": c.currentName, "mime": c.mime}
+	if c.output != nil {
+		if err := c.output.Close(); err != nil {
+			return nil, err
+		}
+		c.output = nil
+	} else {
+		file["file"] = append([]byte(nil), c.buffer.Bytes()...)
+	}
+	c.files = append(c.files, file)
+	c.buffer.Reset()
+	return nil, nil
+}
+
+// font 按需请求授权字体
+// 入参: args 字体名称参数
+// 返回: any 字体字节数据, error 读取错误
+func (c *nativeCall) font(args ...any) (any, error) {
+	if err := c.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c.engine.LoadFont == nil {
+		return nil, fmt.Errorf("native font resolver is not configured")
+	}
+	return c.engine.LoadFont(c.ctx, args[0].(string))
+}
+
+// fileCallback 逐个读取图片或附件
+// 入参: files 文件描述数组
+// 返回: nativeCallback 文件读取回调
+func (c *nativeCall) fileCallback(files platformValue) nativeCallback {
+	return func(args ...any) (any, error) {
+		data, err := c.engine.readBytes(c.ctx, files.Index(platformValueOf(args[0]).Int()).value)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"bytes": data}, nil
+	}
+}
+
+// prepare 将worker输入转换为共用业务参数
+// 入参: name 操作名, args 原始调用参数
+// 返回: []any 转换后的业务参数, error 参数校验或准备错误
+func (c *nativeCall) prepare(name string, args []any) ([]any, error) {
+	checkpoint := nativeCallback(c.checkpoint)
+	write := nativeCallback(c.write)
+	switch name {
+	case "ofdgoDetectFormat":
+		if len(args) != 1 {
+			return nil, fmt.Errorf("missing detection input")
+		}
+		read, size, err := c.readCallback(args[0])
+		return []any{read, size, checkpoint}, err
+	case "ofdgoConvertFile":
+		if len(args) != 4 {
+			return nil, fmt.Errorf("missing conversion input")
+		}
+		read, size, err := c.readCallback(args[0])
+		if err != nil {
+			return nil, err
+		}
+		c.destination, c.batch = args[3], true
+		options := platformValueOf(args[1])
+		c.base = nativeOutputBase(options.Get("base"))
+		for _, f := range ofdgo.OutputFormats() {
+			if f.Value == options.Get("format").String() {
+				c.mime = f.MIME
+				c.extension, c.paged = f.Extension, f.Paged
+			}
+		}
+		if c.extension == "" {
+			return nil, fmt.Errorf("unsupported conversion format")
+		}
+		if c.destination != nil {
+			if c.engine.ReserveOutput == nil || c.engine.CleanupOutput == nil {
+				return nil, fmt.Errorf("batch destination requires reservation and cleanup hooks")
+			}
+			target, err := c.engine.ReserveOutput(c.ctx, NativeOutputRequest{Destination: c.destination, Base: c.base, Extension: c.extension, MIME: c.mime, Paged: c.paged})
+			if err != nil {
+				return nil, err
+			}
+			c.reserved = &target
+			if target.Destination == nil || target.Base == "" || target.Name == "" || nativeOutputBase(platformValueOf(target.Base)) != target.Base {
+				return nil, fmt.Errorf("invalid reserved output target")
+			}
+			c.destination, c.base = target.Destination, target.Base
+			c.event(map[string]any{"type": "output", "name": target.Name})
+		}
+		return []any{read, size, args[1], write, c.progress("conversion", "", true), nativeCallback(c.boundary), checkpoint, args[2], nativeCallback(c.font)}, nil
+	case "ofdgoPackFiles":
+		if len(args) != 3 {
+			return nil, fmt.Errorf("missing archive input")
+		}
+		entries := platformValueOf(args[0])
+		metadata := make([]any, entries.Length())
+		readers := make([]nativeCallback, entries.Length())
+		for i := range readers {
+			entry := entries.Index(i)
+			read, size, err := c.readCallback(entry.Get("file").value)
+			if err != nil {
+				return nil, err
+			}
+			readers[i] = read
+			metadata[i] = map[string]any{"name": entry.Get("name").String(), "size": size}
+		}
+		c.destination, c.exporting = args[1], true
+		if err := c.open(""); err != nil {
+			return nil, err
+		}
+		progress := nativeCallback(func(values ...any) (any, error) {
+			c.event(map[string]any{"type": "conversion", "phase": "pack", "completed": values[0], "total": values[1]})
+			return nil, c.ctx.Err()
+		})
+		return []any{metadata, nativeCallback(func(values ...any) (any, error) { return readers[platformValueOf(values[0]).Int()], nil }), write, progress, checkpoint, args[2]}, nil
+	case "ofdgoChangeAttachment":
+		if len(args) > 3 && (args[0] == "add" || args[0] == "replace") {
+			args[3] = c.fileCallback(platformValueOf(args[3]))
+		}
+	case "ofdgoChangeResource":
+		if len(args) > 4 && (args[0] == "add" || args[0] == "replace") {
+			data, err := c.engine.readBytes(c.ctx, args[4])
+			if err != nil {
+				return nil, err
+			}
+			args[4] = data
+		}
+	case "ofdgoImportImages":
+		if len(args) != 5 {
+			return nil, fmt.Errorf("missing image import input")
+		}
+		files := platformValueOf(args[0])
+		names := make([]any, files.Length())
+		for i := range names {
+			names[i] = files.Index(i).Get("name").String()
+		}
+		args[0] = names
+		args = append(args, c.fileCallback(files))
+	}
+	switch name {
+	case "ofdgoResources", "ofdgoPrepareSave", "ofdgoPagesText":
+		return append(args, checkpoint), nil
+	case "ofdgoImportPages", "ofdgoImportDocuments", "ofdgoImportImages":
+		return append(args, c.progress("import", "", true)), nil
+	case "ofdgoProcessFonts":
+		return append(args, c.progress("fonts", "", true)), nil
+	case "ofdgoOpenPDF":
+		return append(args, c.progress("conversion", "", true), nativeCallback(c.font)), nil
+	case "ofdgoExportImages", "ofdgoExportPage", "ofdgoExportDocument", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion", "ofdgoSaveDocument", "ofdgoSaveSigned", "ofdgoPrintPDF":
+		if len(args) == 0 {
+			return nil, fmt.Errorf("missing output arguments")
+		}
+		c.destination, c.exporting = args[len(args)-1], true
+		args = args[:len(args)-1]
+		if err := c.open(""); err != nil {
+			return nil, err
+		}
+		saving := name == "ofdgoSaveDocument" || name == "ofdgoSaveSigned"
+		var indices, compression any
+		if saving {
+			if name != "ofdgoSaveSigned" && len(args) > 0 {
+				if m, ok := args[len(args)-1].(map[string]any); ok && m["mode"] != nil {
+					compression = m
+					args = args[:len(args)-1]
+				}
+			}
+			if len(args) == 0 {
+				return nil, fmt.Errorf("missing save page selection")
+			}
+			indices, args = args[0], args[1:]
+		}
+		args = append(args, write)
+		if name == "ofdgoExportDocument" {
+			args = append(args, c.progress("export", "pages", false))
+		}
+		if name == "ofdgoExportVersion" {
+			args = append(args, c.progress("export", "prepare", true), checkpoint)
+		}
+		if name == "ofdgoPrintPDF" {
+			args = append(args, checkpoint)
+		}
+		if saving {
+			args = append(args, c.progress("export", "prepare", true))
+			if compression != nil {
+				args = append(args, indices, compression, checkpoint)
+			} else if indices != nil {
+				args = append(args, indices)
+			}
+		} else if name != "ofdgoPrintPDF" {
+			for _, arg := range args {
+				if m, ok := arg.(map[string]any); ok && m["mode"] != nil {
+					args = append(args, checkpoint)
+					break
+				}
+			}
+		}
+	}
+	return args, nil
+}
+
+// finish 完成输出并保留原生字节
+// 入参: name 操作名, result 操作响应映射
+// 返回: error 提交或关闭错误
+func (c *nativeCall) finish(name string, result map[string]any) error {
+	if !c.exporting && !c.batch {
+		return nil
+	}
+	data, ok := result["data"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("invalid output result")
+	}
+	if c.batch {
+		if data["unchanged"] == true && c.size == 0 {
+			c.files = []any{}
+			if err := c.abort(); err != nil {
+				return err
+			}
+		}
+		data["files"] = c.files
+	} else if c.output != nil {
+		if err := c.output.Close(); err != nil {
+			return err
+		}
+		c.output = nil
+	} else {
+		data["blob"] = c.buffer.Bytes()
+		c.buffer = bytes.Buffer{}
+	}
+	data["size"] = c.size
+	c.committed = true
+	if c.exporting && name != "ofdgoExportMedia" && name != "ofdgoPackFiles" && name != "ofdgoPrintPDF" {
+		c.event(map[string]any{"type": "export", "stage": "save"})
+	}
+	return nil
+}
+
+// abort 失败时释放尚未提交的宿主输出，支持可选Abort回滚
+// 返回: error 回滚或清理错误
+func (c *nativeCall) abort() error {
+	var err error
+	if c.output != nil {
+		if output, ok := c.output.(interface{ Abort() error }); ok {
+			err = output.Abort()
+		}
+		c.output = nil
+	}
+	if c.reserved != nil && !c.committed {
+		target := *c.reserved
+		c.reserved = nil
+		err = errors.Join(err, c.engine.CleanupOutput(context.WithoutCancel(c.ctx), target))
+	}
+	return err
+}
+
+// platformValue 仅承载JSON参数、字节与宿主回调，不执行脚本
+type platformValue struct{ value any }
+
+// Type 返回协议参数类型
+// 返回: int 参数类型标识
+func (v platformValue) Type() int {
+	switch v.value.(type) {
+	case nil:
+		return platformTypeUndefined
+	case string:
+		return platformTypeString
+	case bool:
+		return platformTypeBoolean
+	case nativeCallback:
+		return platformTypeFunction
+	case float64, float32, int, int64, uint64, json.Number:
+		return platformTypeNumber
+	default:
+		return platformTypeObject
+	}
+}
+
+// IsNull 检查空参数
+// 返回: bool 是否为空
+func (v platformValue) IsNull() bool { return v.value == nil }
+
+// IsUndefined 检查缺省参数
+// 返回: bool 是否未定义
+func (v platformValue) IsUndefined() bool { return v.value == nil }
+
+// String 读取字符串
+// 返回: string 字符串文本
+func (v platformValue) String() string {
+	if v.value == nil {
+		return "<undefined>"
+	}
+	return fmt.Sprint(v.value)
+}
+
+// Bool 读取布尔参数
+// 返回: bool 布尔值
+func (v platformValue) Bool() bool {
+	b, ok := v.value.(bool)
+	if !ok {
+		panic("expected boolean")
+	}
+	return b
+}
+
+// Float 读取数值参数
+// 返回: float64 浮点数值
+func (v platformValue) Float() float64 {
+	switch n := v.value.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case uint64:
+		return float64(n)
+	case json.Number:
+		f, err := n.Float64()
+		if err != nil {
+			panic(err)
+		}
+		return f
+	default:
+		panic("expected number")
+	}
+}
+
+// Int 读取整数参数
+// 返回: int 整数值
+func (v platformValue) Int() int { return int(v.Float()) }
+
+// Get 读取对象字段
+// 入参: key 字段名
+// 返回: platformValue 字段值
+func (v platformValue) Get(key string) platformValue {
+	if m, ok := v.value.(map[string]any); ok {
+		return platformValueOf(m[key])
+	}
+	if key == "length" || key == "byteLength" {
+		return platformValueOf(v.Length())
+	}
+	return platformNull()
+}
+
+// Length 读取数组长度
+// 返回: int 元素数量
+func (v platformValue) Length() int {
+	if v.value == nil {
+		return 0
+	}
+	return reflect.ValueOf(v.value).Len()
+}
+
+// Index 读取数组元素
+// 入参: i 元素索引
+// 返回: platformValue 数组元素值
+func (v platformValue) Index(i int) platformValue {
+	return platformValueOf(reflect.ValueOf(v.value).Index(i).Interface())
+}
+
+// Invoke 调用宿主函数
+// 入参: args 调用参数
+// 返回: platformValue 回调返回值
+func (v platformValue) Invoke(args ...any) platformValue {
+	result, err := v.value.(nativeCallback)(args...)
+	if err != nil {
+		panic(err)
+	}
+	return platformValueOf(result)
+}
+
+// nativeCallback 同步宿主回调
+type nativeCallback func(...any) (any, error)
+
+// nativeField 保存字段名称、位置及空值省略规则
+type nativeField struct {
+	name      string
+	index     int
+	omitEmpty bool
+}
+
+// nativeReadOnly 判断不会改变文档、字体来源或渲染配置的查询
+// 入参: name 操作名称
+// 返回: bool 是否保留空闲渲染会话
+func nativeReadOnly(name string) bool {
+	switch name {
+	case "ofdgoImagePreview", "ofdgoImagePageSize", "ofdgoCheckDocument", "ofdgoDocumentInfo", "ofdgoEditorInfo", "ofdgoDocumentNavigation", "ofdgoDocumentVersions", "ofdgoPackageDocuments",
+		"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoActionList", "ofdgoPageSettings", "ofdgoStyleResource",
+		"ofdgoOutlineLinks", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoStructureXML", "ofdgoOpenLinks", "ofdgoRenderBackends",
+		"ofdgoSVGFontData", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoPagesText", "ofdgoResources", "ofdgoResourceReferences",
+		"ofdgoResourceTargets", "ofdgoResourceLocations", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoClearImport":
+		return true
+	}
+	return false
 }
 
 // waitRenders 等待已开始的页面任务，取消等待不修改当前会话
@@ -486,16 +1042,52 @@ func (e *NativeEngine) renderObjects(operation *businessEngine, index int) ([]an
 	return operation.editorObjects(index, text)
 }
 
-// input 读取授权源并以宿主报告的大小为准
-func (e *NativeEngine) input(ctx context.Context, value any) (io.ReaderAt, int64, error) {
+// readerContextErr 检查当前串行操作、并行页面渲染与后台保存的取消状态
+// 返回: error 取消错误
+func (e *NativeEngine) readerContextErr() error {
+	e.ctxMu.Lock()
+	defer e.ctxMu.Unlock()
+	var canceled error
+	if e.ctx != nil {
+		err := e.ctx.Err()
+		if err == nil {
+			return nil
+		}
+		canceled = err
+	}
+	for _, ctx := range e.renderContexts {
+		err := ctx.Err()
+		if err == nil {
+			return nil
+		}
+		canceled = err
+	}
+	for _, ctx := range e.saveContexts {
+		err := ctx.Err()
+		if err == nil {
+			return nil
+		}
+		canceled = err
+	}
+	return canceled
+}
+
+// resolveNativeInput 解析原生二进制或授权句柄并包装分块取消读取器
+// 入参: ctx 调用上下文, value 输入字节或授权描述, bindContext 是否绑定本次请求上下文
+// 返回: io.ReaderAt 随机读取器, int64 数据大小, error 授权或读取错误
+func (e *NativeEngine) resolveNativeInput(ctx context.Context, value any, bindContext bool) (io.ReaderAt, int64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
 	if p, ok := value.(platformValue); ok {
 		value = p.value
 	}
+	var bound context.Context
+	if bindContext {
+		bound = ctx
+	}
 	if data, ok := value.([]byte); ok {
-		return nativeReader{engine: e, input: bytes.NewReader(data)}, int64(len(data)), nil
+		return nativeReader{engine: e, ctx: bound, input: bytes.NewReader(data)}, int64(len(data)), nil
 	}
 	descriptor, ok := value.(map[string]any)
 	if !ok {
@@ -512,35 +1104,14 @@ func (e *NativeEngine) input(ctx context.Context, value any) (io.ReaderAt, int64
 	if input == nil || size < 0 {
 		return nil, 0, fmt.Errorf("invalid native file input")
 	}
-	return nativeReader{engine: e, input: input}, size, nil
-}
-
-// ReadAt 分块传递取消检查，宿主ReadAt自身阻塞时由宿主控制超时
-func (r nativeReader) ReadAt(data []byte, offset int64) (int, error) {
-	total := 0
-	for len(data) > 0 {
-		if err := r.engine.operationContext().Err(); err != nil {
-			return total, err
-		}
-		n := min(len(data), 256<<10)
-		got, err := r.input.ReadAt(data[:n], offset)
-		total += got
-		if err != nil {
-			return total, err
-		}
-		if got != n {
-			return total, io.ErrUnexpectedEOF
-		}
-		data, offset = data[n:], offset+int64(n)
-	}
-	return total, nil
+	return nativeReader{engine: e, ctx: bound, input: input}, size, nil
 }
 
 // readBytes 分块读取完整资源并检查取消状态
 // 入参: ctx 调用上下文, value 资源参数
 // 返回: []byte 资源数据, error 读取错误
 func (e *NativeEngine) readBytes(ctx context.Context, value any) ([]byte, error) {
-	input, size, err := e.input(ctx, value)
+	input, size, err := e.resolveNativeInput(ctx, value, true)
 	if err != nil {
 		return nil, err
 	}
@@ -566,6 +1137,8 @@ func (e *NativeEngine) readBytes(ctx context.Context, value any) ([]byte, error)
 }
 
 // nativePlain 保留字节并转换JSON结构
+// 入参: value 待转换值
+// 返回: any 标准原生结构
 func nativePlain(value any) any {
 	switch v := value.(type) {
 	case platformValue:
@@ -733,6 +1306,8 @@ func nativePlainType(value reflect.Type, visiting map[reflect.Type]bool) bool {
 }
 
 // nativeFailure 转换结构化业务错误
+// 入参: err 业务错误
+// 返回: map[string]any 错误描述映射
 func nativeFailure(err error) map[string]any {
 	result := nativePlain(failureResult(err)).(map[string]any)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -741,356 +1316,9 @@ func nativeFailure(err error) map[string]any {
 	return result
 }
 
-// event 发送标准worker进度
-func (c *nativeCall) event(value map[string]any) {
-	if c.emit != nil {
-		c.emit(value)
-	}
-}
-
-// checkpoint 检查操作取消
-func (c *nativeCall) checkpoint(...any) (any, error) { return nil, c.ctx.Err() }
-
-// progress 创建标准进度回调
-func (c *nativeCall) progress(kind, stage string, phased bool) nativeCallback {
-	return func(args ...any) (any, error) {
-		if err := c.ctx.Err(); err != nil {
-			return nil, err
-		}
-		event := map[string]any{"type": kind}
-		if stage != "" {
-			event["stage"] = stage
-		}
-		if phased {
-			event["phase"], event["completed"], event["total"] = args[0], args[1], args[2]
-		} else {
-			event["completed"], event["total"] = args[0], args[1]
-		}
-		c.event(event)
-		return nil, c.ctx.Err()
-	}
-}
-
-// readCallback 创建有界随机读取回调
-func (c *nativeCall) readCallback(value any) (nativeCallback, int64, error) {
-	input, size, err := c.engine.input(c.ctx, value)
-	if err != nil {
-		return nil, 0, err
-	}
-	return func(args ...any) (any, error) {
-		if err := c.ctx.Err(); err != nil {
-			return nil, err
-		}
-		offset, n := int64(platformValueOf(args[0]).Float()), platformValueOf(args[1]).Int()
-		if offset < 0 || n < 0 || n > 256<<10 || offset > size || int64(n) > size-offset {
-			return nil, fmt.Errorf("invalid native read range")
-		}
-		data := make([]byte, n)
-		got, err := input.ReadAt(data, offset)
-		if got != n {
-			return nil, io.ErrUnexpectedEOF
-		}
-		if err != nil && err != io.EOF {
-			return nil, err
-		}
-		return data, nil
-	}, size, nil
-}
-
-// write 写出数据块
-func (c *nativeCall) write(args ...any) (any, error) {
-	if err := c.ctx.Err(); err != nil {
-		return nil, err
-	}
-	value := platformValueOf(args[0])
-	data, ok := value.value.([]byte)
-	if !ok {
-		return nil, fmt.Errorf("expected output bytes")
-	}
-	var writer io.Writer = &c.buffer
-	if c.output != nil {
-		writer = c.output
-	}
-	n, err := writer.Write(data)
-	c.size += int64(n)
-	if err == nil && n != len(data) {
-		err = io.ErrShortWrite
-	}
-	return nil, err
-}
-
-// open 创建宿主输出，目标只交给授权hook解释
-func (c *nativeCall) open(name string) error {
-	c.currentName = name
-	c.buffer.Reset()
-	if c.destination == nil {
-		return nil
-	}
-	if c.engine.OpenWriter == nil {
-		return fmt.Errorf("native output resolver is not configured")
-	}
-	var err error
-	c.output, err = c.engine.OpenWriter(c.ctx, c.destination, name)
-	if err == nil && c.output == nil {
-		return fmt.Errorf("native output resolver returned nil")
-	}
-	return err
-}
-
-// boundary 处理批量输出文件边界
-func (c *nativeCall) boundary(args ...any) (any, error) {
-	if err := c.ctx.Err(); err != nil {
-		return nil, err
-	}
-	action, name := args[0].(string), args[1].(string)
-	if action == "open" {
-		if c.paged {
-			name = c.base + "/" + name
-		} else {
-			name = c.base + "." + c.extension
-		}
-		return nil, c.open(name)
-	}
-	file := map[string]any{"name": c.currentName, "mime": c.mime}
-	if c.output != nil {
-		if err := c.output.Close(); err != nil {
-			return nil, err
-		}
-		c.output = nil
-	} else {
-		file["file"] = append([]byte(nil), c.buffer.Bytes()...)
-	}
-	c.files = append(c.files, file)
-	c.buffer.Reset()
-	return nil, nil
-}
-
-// font 按需请求授权字体
-func (c *nativeCall) font(args ...any) (any, error) {
-	if err := c.ctx.Err(); err != nil {
-		return nil, err
-	}
-	if c.engine.LoadFont == nil {
-		return nil, fmt.Errorf("native font resolver is not configured")
-	}
-	return c.engine.LoadFont(c.ctx, args[0].(string))
-}
-
-// fileCallback 逐个读取图片或附件
-func (c *nativeCall) fileCallback(files platformValue) nativeCallback {
-	return func(args ...any) (any, error) {
-		data, err := c.engine.readBytes(c.ctx, files.Index(platformValueOf(args[0]).Int()).value)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"bytes": data}, nil
-	}
-}
-
-// prepare 将worker输入转换为共用业务参数
-func (c *nativeCall) prepare(name string, args []any) ([]any, error) {
-	checkpoint := nativeCallback(c.checkpoint)
-	write := nativeCallback(c.write)
-	switch name {
-	case "ofdgoDetectFormat":
-		if len(args) != 1 {
-			return nil, fmt.Errorf("missing detection input")
-		}
-		read, size, err := c.readCallback(args[0])
-		return []any{read, size, checkpoint}, err
-	case "ofdgoConvertFile":
-		if len(args) != 4 {
-			return nil, fmt.Errorf("missing conversion input")
-		}
-		read, size, err := c.readCallback(args[0])
-		if err != nil {
-			return nil, err
-		}
-		c.destination, c.batch = args[3], true
-		options := platformValueOf(args[1])
-		c.base = nativeOutputBase(options.Get("base"))
-		for _, f := range ofdgo.OutputFormats() {
-			if f.Value == options.Get("format").String() {
-				c.mime = f.MIME
-				c.extension, c.paged = f.Extension, f.Paged
-			}
-		}
-		if c.extension == "" {
-			return nil, fmt.Errorf("unsupported conversion format")
-		}
-		if c.destination != nil {
-			if c.engine.ReserveOutput == nil || c.engine.CleanupOutput == nil {
-				return nil, fmt.Errorf("batch destination requires reservation and cleanup hooks")
-			}
-			target, err := c.engine.ReserveOutput(c.ctx, NativeOutputRequest{Destination: c.destination, Base: c.base, Extension: c.extension, MIME: c.mime, Paged: c.paged})
-			if err != nil {
-				return nil, err
-			}
-			c.reserved = &target
-			if target.Destination == nil || target.Base == "" || target.Name == "" || nativeOutputBase(platformValueOf(target.Base)) != target.Base {
-				return nil, fmt.Errorf("invalid reserved output target")
-			}
-			c.destination, c.base = target.Destination, target.Base
-			c.event(map[string]any{"type": "output", "name": target.Name})
-		}
-		return []any{read, size, args[1], write, c.progress("conversion", "", true), nativeCallback(c.boundary), checkpoint, args[2], nativeCallback(c.font)}, nil
-	case "ofdgoPackFiles":
-		if len(args) != 3 {
-			return nil, fmt.Errorf("missing archive input")
-		}
-		entries := platformValueOf(args[0])
-		metadata := make([]any, entries.Length())
-		readers := make([]nativeCallback, entries.Length())
-		for i := range readers {
-			entry := entries.Index(i)
-			read, size, err := c.readCallback(entry.Get("file").value)
-			if err != nil {
-				return nil, err
-			}
-			readers[i] = read
-			metadata[i] = map[string]any{"name": entry.Get("name").String(), "size": size}
-		}
-		c.destination, c.exporting = args[1], true
-		if err := c.open(""); err != nil {
-			return nil, err
-		}
-		progress := nativeCallback(func(values ...any) (any, error) {
-			c.event(map[string]any{"type": "conversion", "phase": "pack", "completed": values[0], "total": values[1]})
-			return nil, c.ctx.Err()
-		})
-		return []any{metadata, nativeCallback(func(values ...any) (any, error) { return readers[platformValueOf(values[0]).Int()], nil }), write, progress, checkpoint, args[2]}, nil
-	case "ofdgoChangeAttachment":
-		if len(args) > 3 && (args[0] == "add" || args[0] == "replace") {
-			args[3] = c.fileCallback(platformValueOf(args[3]))
-		}
-	case "ofdgoChangeResource":
-		if len(args) > 4 && (args[0] == "add" || args[0] == "replace") {
-			data, err := c.engine.readBytes(c.ctx, args[4])
-			if err != nil {
-				return nil, err
-			}
-			args[4] = data
-		}
-	case "ofdgoImportImages":
-		if len(args) != 5 {
-			return nil, fmt.Errorf("missing image import input")
-		}
-		files := platformValueOf(args[0])
-		names := make([]any, files.Length())
-		for i := range names {
-			names[i] = files.Index(i).Get("name").String()
-		}
-		args[0] = names
-		args = append(args, c.fileCallback(files))
-	}
-	switch name {
-	case "ofdgoResources", "ofdgoPrepareSave":
-		return append(args, checkpoint), nil
-	case "ofdgoImportPages", "ofdgoImportDocuments", "ofdgoImportImages":
-		return append(args, c.progress("import", "", true)), nil
-	case "ofdgoOpenPDF":
-		return append(args, c.progress("conversion", "", true), nativeCallback(c.font)), nil
-	case "ofdgoExportImages", "ofdgoExportPage", "ofdgoExportDocument", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion", "ofdgoSaveDocument", "ofdgoSaveSigned":
-		if len(args) == 0 {
-			return nil, fmt.Errorf("missing output arguments")
-		}
-		c.destination, c.exporting = args[len(args)-1], true
-		args = args[:len(args)-1]
-		if err := c.open(""); err != nil {
-			return nil, err
-		}
-		saving := name == "ofdgoSaveDocument" || name == "ofdgoSaveSigned"
-		var indices, compression any
-		if saving {
-			if name != "ofdgoSaveSigned" && len(args) > 0 {
-				if m, ok := args[len(args)-1].(map[string]any); ok && m["mode"] != nil {
-					compression = m
-					args = args[:len(args)-1]
-				}
-			}
-			if len(args) == 0 {
-				return nil, fmt.Errorf("missing save page selection")
-			}
-			indices, args = args[0], args[1:]
-		}
-		args = append(args, write)
-		if name == "ofdgoExportDocument" {
-			args = append(args, c.progress("export", "pages", false))
-		}
-		if name == "ofdgoExportVersion" {
-			args = append(args, c.progress("export", "prepare", true), checkpoint)
-		}
-		if saving {
-			args = append(args, c.progress("export", "prepare", true))
-			if compression != nil {
-				args = append(args, indices, compression, checkpoint)
-			} else if indices != nil {
-				args = append(args, indices)
-			}
-		} else {
-			for _, arg := range args {
-				if m, ok := arg.(map[string]any); ok && m["mode"] != nil {
-					args = append(args, checkpoint)
-					break
-				}
-			}
-		}
-	}
-	return args, nil
-}
-
-// finish 完成输出并保留原生字节
-func (c *nativeCall) finish(name string, result map[string]any) error {
-	if !c.exporting && !c.batch {
-		return nil
-	}
-	data, ok := result["data"].(map[string]any)
-	if !ok {
-		return fmt.Errorf("invalid output result")
-	}
-	if c.batch {
-		if data["unchanged"] == true && c.size == 0 {
-			c.files = []any{}
-			if err := c.abort(); err != nil {
-				return err
-			}
-		}
-		data["files"] = c.files
-	} else if c.output != nil {
-		if err := c.output.Close(); err != nil {
-			return err
-		}
-		c.output = nil
-	} else {
-		data["blob"] = c.buffer.Bytes()
-		c.buffer = bytes.Buffer{}
-	}
-	data["size"] = c.size
-	c.committed = true
-	if c.exporting && name != "ofdgoExportMedia" && name != "ofdgoPackFiles" {
-		c.event(map[string]any{"type": "export", "stage": "save"})
-	}
-	return nil
-}
-
-// abort 失败时释放尚未提交的宿主输出，支持可选Abort回滚
-func (c *nativeCall) abort() error {
-	var err error
-	if c.output != nil {
-		if output, ok := c.output.(interface{ Abort() error }); ok {
-			err = output.Abort()
-		}
-		c.output = nil
-	}
-	if c.reserved != nil && !c.committed {
-		target := *c.reserved
-		c.reserved = nil
-		err = errors.Join(err, c.engine.CleanupOutput(context.WithoutCancel(c.ctx), target))
-	}
-	return err
-}
-
 // nativeOutputBase 清理worker输出文件名，冲突后缀由宿主排他创建决定
+// 入参: value 文件名参数
+// 返回: string 清理后的基础文件名
 func nativeOutputBase(value platformValue) string {
 	base := "document"
 	if value.Type() == platformTypeString {
@@ -1110,6 +1338,8 @@ func nativeOutputBase(value platformValue) string {
 }
 
 // inputFromValue 读取宿主授权的随机读取源
+// 入参: value 输入源参数
+// 返回: *ofdgo.Input 文档输入源, error 读取错误
 func (e *businessEngine) inputFromValue(value platformValue) (*ofdgo.Input, error) {
 	reader, size, err := e.resolveInput(e.operationContext(), value.value)
 	if err != nil {
@@ -1119,6 +1349,8 @@ func (e *businessEngine) inputFromValue(value platformValue) (*ofdgo.Input, erro
 }
 
 // platformValueOf 包装参数
+// 入参: v Go值
+// 返回: platformValue 包装后的参数值
 func platformValueOf(v any) platformValue {
 	if p, ok := v.(platformValue); ok {
 		return p
@@ -1127,115 +1359,19 @@ func platformValueOf(v any) platformValue {
 }
 
 // platformNull 返回空参数
+// 返回: platformValue 空参数值
 func platformNull() platformValue { return platformValue{} }
 
-// Type 返回协议参数类型
-func (v platformValue) Type() int {
-	switch v.value.(type) {
-	case nil:
-		return platformTypeUndefined
-	case string:
-		return platformTypeString
-	case bool:
-		return platformTypeBoolean
-	case nativeCallback:
-		return platformTypeFunction
-	case float64, float32, int, int64, uint64, json.Number:
-		return platformTypeNumber
-	default:
-		return platformTypeObject
-	}
-}
-
-// IsNull 检查空参数
-func (v platformValue) IsNull() bool { return v.value == nil }
-
-// IsUndefined 检查缺省参数
-func (v platformValue) IsUndefined() bool { return v.value == nil }
-
-// String 读取字符串
-func (v platformValue) String() string {
-	if v.value == nil {
-		return "<undefined>"
-	}
-	return fmt.Sprint(v.value)
-}
-
-// Bool 读取布尔参数
-func (v platformValue) Bool() bool {
-	b, ok := v.value.(bool)
-	if !ok {
-		panic("expected boolean")
-	}
-	return b
-}
-
-// Float 读取数值参数
-func (v platformValue) Float() float64 {
-	switch n := v.value.(type) {
-	case float64:
-		return n
-	case float32:
-		return float64(n)
-	case int:
-		return float64(n)
-	case int64:
-		return float64(n)
-	case uint64:
-		return float64(n)
-	case json.Number:
-		f, err := n.Float64()
-		if err != nil {
-			panic(err)
-		}
-		return f
-	default:
-		panic("expected number")
-	}
-}
-
-// Int 读取整数参数
-func (v platformValue) Int() int { return int(v.Float()) }
-
-// Get 读取对象字段
-func (v platformValue) Get(key string) platformValue {
-	if m, ok := v.value.(map[string]any); ok {
-		return platformValueOf(m[key])
-	}
-	if key == "length" || key == "byteLength" {
-		return platformValueOf(v.Length())
-	}
-	return platformNull()
-}
-
-// Length 读取数组长度
-func (v platformValue) Length() int {
-	if v.value == nil {
-		return 0
-	}
-	return reflect.ValueOf(v.value).Len()
-}
-
-// Index 读取数组元素
-func (v platformValue) Index(i int) platformValue {
-	return platformValueOf(reflect.ValueOf(v.value).Index(i).Interface())
-}
-
-// Invoke 调用宿主函数
-func (v platformValue) Invoke(args ...any) platformValue {
-	result, err := v.value.(nativeCallback)(args...)
-	if err != nil {
-		panic(err)
-	}
-	return platformValueOf(result)
-}
-
 // platformCopyBytes 复制读取块
+// 入参: dst 目标切片, src 原生字节参数
+// 返回: int 复制字节数
 func platformCopyBytes(dst []byte, src platformValue) int {
 	return copy(dst, src.value.([]byte))
 }
 
 // platformJSON 编码小参数
+// 入参: v 参数值
+// 返回: string JSON字符串
 func platformJSON(v platformValue) string {
 	data, err := json.Marshal(v.value)
 	if err != nil {
@@ -1245,6 +1381,8 @@ func platformJSON(v platformValue) string {
 }
 
 // platformParseJSON 解析小参数
+// 入参: data JSON字节
+// 返回: map[string]any 解析后的键值结构
 func platformParseJSON(data []byte) map[string]any {
 	var v map[string]any
 	if err := json.Unmarshal(data, &v); err != nil {
@@ -1254,9 +1392,13 @@ func platformParseJSON(data []byte) map[string]any {
 }
 
 // bytesToJS 保留原生二进制数据
+// 入参: data 二进制切片
+// 返回: platformValue 包装后的参数值
 func bytesToJS(data []byte) platformValue { return platformValueOf(data) }
 
 // bytesFromJS 读取字节或授权资源
+// 入参: v 二进制或资源描述参数
+// 返回: []byte 字节数据, error 读取错误
 func (e *businessEngine) bytesFromJS(v platformValue) ([]byte, error) {
 	if data, ok := v.value.([]byte); ok {
 		return append([]byte(nil), data...), nil
@@ -1270,17 +1412,23 @@ func (e *businessEngine) bytesFromJS(v platformValue) ([]byte, error) {
 }
 
 // successResult 保留二进制返回结构
+// 入参: data 业务返回数据
+// 返回: platformValue 成功响应结构
 func successResult(data any) platformValue {
 	return platformValueOf(map[string]any{"ok": true, "data": data})
 }
 
 // awaitExport 执行可取消宿主回调
+// 入参: fn 宿主回调函数, args 回调参数
+// 返回: error 回调执行错误
 func awaitExport(fn platformValue, args ...any) error {
 	_, err := fn.value.(nativeCallback)(args...)
 	return err
 }
 
 // loadConversionFont 读取宿主授权字体
+// 入参: fn 字体加载回调, name 字体名称
+// 返回: []byte 字体字节数据, error 读取错误
 func (e *businessEngine) loadConversionFont(fn platformValue, name string) ([]byte, error) {
 	result, err := fn.value.(nativeCallback)(name)
 	if err != nil {

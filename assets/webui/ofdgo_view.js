@@ -1,14 +1,16 @@
 import { nativeHost, engineLimits } from "./ofdgo_host.js";
 
 export const MM_TO_PX = 96 / 25.4;
+export const SCROLL_SEGMENT_SIZE = 1000000;
+
 const PAGE_CACHE_LIMIT = 16;
 const PAGE_CACHE_BYTES = 32 * 1024 * 1024;
-const svgFontBytes = new WeakMap();
 const PAGE_LAYOUT_GAP = 16;
-export const SCROLL_SEGMENT_SIZE = 1000000;
+const svgFontBytes = new WeakMap();
 let textMeasure = null;
 
 export function createPageView(context) {
+	let scrollbarMeasurement = null;
 	const pageView = {
 		async renderPage(index, options = {}) {
 			const tab = context.documentTab(), state = tab.state;
@@ -39,7 +41,7 @@ export function createPageView(context) {
 			}
 			try {
 				pageView.setCurrentPage(index);
-				if (options.fit !== false) {
+				if (options.fit !== false && !(state.fitMode === "width" && state.pageLayout === 1 && state.pageWindow?.offsets.length > 1)) {
 					pageView.applyFit(false);
 				}
 				if (options.scroll !== false) {
@@ -114,15 +116,19 @@ export function createPageView(context) {
 			if (!view || view.offsets.length < 2) return;
 			const { host, viewport, offsets, nodes } = view;
 			const extent = Math.min(SCROLL_SEGMENT_SIZE, view.total);
-			host.style.height = `${extent}px`;
+			const heightText = `${extent}px`;
+			if (host.style.height !== heightText) host.style.height = heightText;
 			const inset = pageView.windowInset(view), height = viewport.clientHeight;
 			const maxTop = Math.max(0, viewport.scrollHeight - height);
 			const logicalMax = maxTop + view.total - extent;
 			const logical = Math.max(-inset, Math.min(logicalMax - inset, target ?? pageView.pageWindowTop(view)));
-			viewport.scrollTop = logicalMax > 0 ? (logical + inset) * maxTop / logicalMax : 0;
+			const nextTop = logicalMax > 0 ? (logical + inset) * maxTop / logicalMax : 0;
+			if (target !== null || view.total > SCROLL_SEGMENT_SIZE && Math.abs(viewport.scrollTop - nextTop) >= 1) {
+				viewport.scrollTop = nextTop;
+			}
 			view.scrollTop = viewport.scrollTop;
 			view.logicalTop = logical;
-			view.origin = logical - viewport.scrollTop + inset;
+			view.origin = view.total > SCROLL_SEGMENT_SIZE ? logical - viewport.scrollTop + inset : 0;
 			let first = pageView.virtualIndex(offsets, Math.max(view.origin, logical - view.overscan));
 			let last = pageView.virtualIndex(offsets, Math.min(view.origin + extent, logical + height + view.overscan));
 			if (view.columns) {
@@ -153,7 +159,10 @@ export function createPageView(context) {
 				const top = offsets[index] - view.origin;
 				const itemHeight = view.heights?.[index] ?? offsets[index + 1] - offsets[index] - view.gap;
 				if (view.lefts) {
-					node.style.left = `${view.lefts[index]}px`;
+					node.style.left = view.columns && host === context.el.pageList
+						? index % 2 ? `calc(50% + ${view.gap / 2}px)` : "0px"
+						: `${view.lefts[index]}px`;
+					node.style.right = "auto";
 					node.style.transform = "none";
 				}
 				node.style.top = `${Math.max(-itemHeight, Math.min(extent, top))}px`;
@@ -235,6 +244,7 @@ export function createPageView(context) {
 				task.resolve(null);
 			}
 			context.state.pageRenderQueue = [];
+			context.state.pageRenderScheduleSeq = (context.state.pageRenderScheduleSeq || 0) + 1;
 			context.state.pageRenderRunning = context.state.pageRenderWorkers > 0;
 			context.state.pagePrefetchIndex = null;
 			context.state.pagePrefetchDirection = 1;
@@ -303,8 +313,10 @@ export function createPageView(context) {
 			}
 			const selection = document.getSelection();
 			const range = !selection.isCollapsed && selection.rangeCount ? selection.getRangeAt(0) : null;
-			if (context.canvasEditor.input?.item.index === index || context.canvasEditor.crop?.item.index === index
-				|| range && (!context.state.documentSelection || !context.isDocumentSelection(range)) && range.intersectsNode(shell)) {
+			const endpointShell = node => (node?.nodeType === 1 ? node : node?.parentElement)?.closest?.(".page-shell");
+			const selectedEndpoint = range && (!context.state.documentSelection || !context.isDocumentSelection(range))
+				&& (endpointShell(range.startContainer) === shell || endpointShell(range.endContainer) === shell);
+			if (context.canvasEditor.input?.item.index === index || context.canvasEditor.crop?.item.index === index || selectedEndpoint) {
 				context.state.selectedPages.add(index);
 				return;
 			}
@@ -385,19 +397,30 @@ export function createPageView(context) {
 				}
 				return;
 			}
-			context.state.pageRenderRunning = true;
 			const tab = context.documentTab(), openSeq = tab.state.openSeq, loadSeq = tab.state.pageLoadSeq;
+			const scheduleSeq = (tab.state.pageRenderScheduleSeq || 0) + 1;
+			tab.state.pageRenderScheduleSeq = scheduleSeq;
+			tab.state.pageRenderRunning = true;
 			requestAnimationFrame(() => {
-				if (context.activeTab === tab && openSeq === tab.state.openSeq && loadSeq === tab.state.pageLoadSeq) pageView.processPageRenderQueue();
+				if (scheduleSeq !== tab.state.pageRenderScheduleSeq || openSeq !== tab.state.openSeq || loadSeq !== tab.state.pageLoadSeq) return;
+				if (context.activeTab === tab) pageView.processPageRenderQueue(tab, openSeq, loadSeq, scheduleSeq);
+				else tab.state.pageRenderRunning = tab.state.pageRenderWorkers > 0;
 			});
 		},
 
-		async processPageRenderQueue() {
-			const tab = context.documentTab(), openSeq = tab.state.openSeq, loadSeq = tab.state.pageLoadSeq;
+		async processPageRenderQueue(tab = context.documentTab(), openSeq = tab.state.openSeq, loadSeq = tab.state.pageLoadSeq, scheduleSeq = tab.state.pageRenderScheduleSeq) {
 			await context.nextFrame();
-			if (context.activeTab !== tab || openSeq !== tab.state.openSeq || loadSeq !== tab.state.pageLoadSeq) return;
+			if (scheduleSeq !== tab.state.pageRenderScheduleSeq || openSeq !== tab.state.openSeq || loadSeq !== tab.state.pageLoadSeq) return;
+			if (context.activeTab !== tab) {
+				tab.state.pageRenderRunning = tab.state.pageRenderWorkers > 0;
+				return;
+			}
 			const available = (nativeHost?.parallelism || context.wasmWorker?.parallelism || 1) - tab.state.pageRenderWorkers;
-			await Promise.all(Array.from({ length: Math.max(0, available) }, () => pageView.processPageRenderTasks()));
+			if (available <= 0) {
+				tab.state.pageRenderRunning = tab.state.pageRenderWorkers > 0;
+				return;
+			}
+			await Promise.all(Array.from({ length: available }, () => pageView.processPageRenderTasks()));
 		},
 
 		async processPageRenderTasks() {
@@ -618,8 +641,8 @@ export function createPageView(context) {
 			const tab = context.documentTab(), state = tab.state, openSeq = state.openSeq, loadSeq = state.pageLoadSeq;
 			if (state.pagePresentFrame || !state.pagePresentQueue.size) return;
 			state.pagePresentFrame = requestAnimationFrame(() => {
-				if (context.activeTab !== tab || openSeq !== state.openSeq || loadSeq !== state.pageLoadSeq) return;
 				state.pagePresentFrame = 0;
+				if (context.activeTab !== tab || openSeq !== state.openSeq || loadSeq !== state.pageLoadSeq) return;
 				const started = performance.now();
 				do {
 					const task = [...state.pagePresentQueue.values()].sort(pageView.comparePageRenderTask)[0];
@@ -656,7 +679,7 @@ export function createPageView(context) {
 			svg.classList.add("ofd-svg");
 			surface.replaceChildren(svg);
 			surface.append(textLayer || pageView.createTextLayer(page.text));
-			if (context.state.editorInfo && pageView.displayMode() === "svg") {
+			if (context.state.editing && context.state.editorInfo && pageView.displayMode() === "svg") {
 				context.mountEditorObjects(index, page, surface);
 			}
 			context.mountAnnotationNotes(index, surface, page.annotations);
@@ -825,13 +848,24 @@ export function createPageView(context) {
 		},
 
 		setCurrentPage(index) {
+			const previousPage = pageView.currentPageInfo();
 			if (index !== context.state.pageIndex && !context.state.openActionTask?.navigating) context.state.openActionTask = null;
 			context.state.pageIndex = index;
 			pageView.prunePageRenderQueue();
 			if (context.state.editing) context.state.openActionPage = context.state.doc?.pages[index]?.id;
 			if (context.state.fitMode === "width" && context.state.pageLayout === 1) {
-				context.state.scale = pageView.fitWidthScale(pageView.currentPageInfo());
-				context.el.zoomLabel.textContent = `${Math.round(context.state.scale * 100)}%`;
+				const nextPage = pageView.currentPageInfo();
+				if (previousPage && nextPage && context.state.pageWindow?.offsets.length > 1) {
+					const prevWidth = pageView.pageViewSize(previousPage).width;
+					const nextWidth = pageView.pageViewSize(nextPage).width;
+					if (prevWidth > 0 && nextWidth > 0 && prevWidth !== nextWidth) {
+						context.state.scale = Math.min(4, context.state.scale * prevWidth / nextWidth);
+						context.el.zoomLabel.textContent = `${Math.round(context.state.scale * 100)}%`;
+					}
+				} else if (nextPage) {
+					context.state.scale = pageView.fitWidthScale(nextPage);
+					context.el.zoomLabel.textContent = `${Math.round(context.state.scale * 100)}%`;
+				}
 			}
 			pageView.updatePageListCurrent();
 			context.updateControls();
@@ -1031,19 +1065,15 @@ export function createPageView(context) {
 			button.title = `${context.formatSize(page.width)} x ${context.formatSize(page.height)} mm`;
 			pageView.setPageItemCurrent(button, page.index === context.state.pageIndex);
 			pageView.layoutThumbnail(button, page);
-
 			const thumb = document.createElement("span");
 			thumb.className = "thumb-paper";
 			pageView.setThumbnailContent(thumb, context.state.pageCache.get(page.index)?.svg, page.index, openSeq);
-
 			const label = document.createElement("span");
 			label.className = "thumb-label";
 			label.textContent = `第${page.index + 1}页`;
-
 			const size = document.createElement("span");
 			size.className = "thumb-size";
 			size.textContent = `${context.formatSize(page.width)} x ${context.formatSize(page.height)} mm`;
-
 			button.append(thumb, label, size);
 			if (context.state.editing && context.pageCan("move", page.index)) context.enablePageDrag(button, page.index);
 			button.addEventListener("click", event => context.selectThumbnailPage(event, page.index));
@@ -1061,60 +1091,78 @@ export function createPageView(context) {
 			const view = context.state.thumbnailWindow;
 			if (!view) return;
 			const visible = !context.el.pageList.hidden && context.state.showPages;
-			const anchor = visible && view.offsets.length > 1 ? pageView.pageWindowAnchor(view) : view.anchor || { index: context.state.pageIndex, offset: 0 };
-			const width = context.el.navigationContent.clientWidth || view.width || 180;
-			view.width = width;
+			const inset = visible ? pageView.windowInset(view) : Number.parseFloat(getComputedStyle(view.viewport).paddingTop) || 0;
+			const anchor = visible && view.offsets.length > 1 ? pageView.pageWindowAnchor(view) : view.anchor || { index: context.state.pageIndex, offset: -inset };
 			view.rotation = context.state.rotation;
 			view.layout = context.state.pageLayout;
 			view.host.classList.toggle("grouped-pages", context.state.pageLayout > 1);
 			const gap = Number.parseFloat(getComputedStyle(view.host).columnGap) || 0;
-			const offsets = new Float64Array(context.state.doc.pages.length + 1);
-			view.heights = new Float64Array(context.state.doc.pages.length);
-			view.lefts = context.state.pageLayout > 1 ? new Float64Array(context.state.doc.pages.length) : null;
-			view.scales = context.state.pageLayout > 1 ? new Float64Array(context.state.doc.pages.length) : null;
-			view.columns = context.state.pageLayout > 1 ? context.state.pageLayout : 0;
-			view.itemWidth = context.state.pageLayout > 1 ? Math.max(1, (width - gap) / 2) : width;
-			let top = 0;
-			for (let start = 0; start < context.state.doc.pages.length; start += context.state.pageLayout) {
-				if (context.state.pageLayout === 1) {
-					const size = pageView.pageViewSize(context.state.doc.pages[start]);
-					const ratio = size.width > 0 && size.height > 0 ? size.height / size.width : 1 / 0.707;
-					view.heights[start] = Math.max(1, width - 20) * ratio + 66;
-					offsets[start] = top;
-					top += view.heights[start] + gap;
-					continue;
+			const measure = (width) => {
+				view.width = width;
+				const offsets = new Float64Array(context.state.doc.pages.length + 1);
+				view.heights = new Float64Array(context.state.doc.pages.length);
+				view.lefts = context.state.pageLayout > 1 ? new Float64Array(context.state.doc.pages.length) : null;
+				view.scales = context.state.pageLayout > 1 ? new Float64Array(context.state.doc.pages.length) : null;
+				view.columns = context.state.pageLayout > 1 ? context.state.pageLayout : 0;
+				view.itemWidth = context.state.pageLayout > 1 ? Math.max(1, (width - gap) / 2) : width;
+				let top = 0;
+				for (let start = 0; start < context.state.doc.pages.length; start += context.state.pageLayout) {
+					if (context.state.pageLayout === 1) {
+						const size = pageView.pageViewSize(context.state.doc.pages[start]);
+						const ratio = size.width > 0 && size.height > 0 ? size.height / size.width : 1 / 0.707;
+						view.heights[start] = Math.max(1, width - 20) * ratio + 66;
+						offsets[start] = top;
+						top += view.heights[start] + gap;
+						continue;
+					}
+					const group = pageView.pageGroupSize(start), scale = Math.max(1, view.itemWidth - 20) / Math.max(...group.widths);
+					const height = group.height * scale + 66;
+					for (let column = 0; column < 2; column++) {
+						const index = start + column;
+						if (index >= context.state.doc.pages.length) break;
+						offsets[index] = top;
+						view.heights[index] = height;
+						view.lefts[index] = column * (view.itemWidth + gap);
+						view.scales[index] = scale;
+					}
+					top += height + gap;
 				}
-				const group = pageView.pageGroupSize(start), scale = Math.max(1, view.itemWidth - 20) / Math.max(...group.widths);
-				const height = group.height * scale + 66;
-				for (let column = 0; column < 2; column++) {
-					const index = start + column;
-					if (index >= context.state.doc.pages.length) break;
-					offsets[index] = top;
-					view.heights[index] = height;
-					view.lefts[index] = column * (view.itemWidth + gap);
-					view.scales[index] = scale;
-				}
-				top += height + gap;
+				offsets[context.state.doc.pages.length] = top;
+				view.offsets = offsets;
+				view.gap = gap;
+				view.total = Math.ceil(Math.max(0, offsets.at(-1) - gap));
+				view.host.style.height = `${Math.min(SCROLL_SEGMENT_SIZE, view.total)}px`;
+			};
+			let width = pageView.thumbnailHostWidth() || view.width || 180;
+			measure(width);
+			const nextWidth = pageView.thumbnailHostWidth();
+			if (nextWidth && nextWidth !== width) {
+				measure(nextWidth);
+				view.width = nextWidth;
 			}
-			offsets[context.state.doc.pages.length] = top;
-			view.offsets = offsets;
-			view.gap = gap;
-			view.total = Math.ceil(offsets.at(-1));
 			for (const [index, button] of view.nodes) {
 				pageView.layoutThumbnail(button, context.state.doc.pages[index]);
 			}
-			view.pendingTop = offsets[anchor.index] + anchor.offset;
-			view.host.style.height = `${Math.min(SCROLL_SEGMENT_SIZE, view.total)}px`;
+			view.pendingTop = view.offsets[anchor.index] + anchor.offset;
 			if (visible) {
 				pageView.syncPageWindow(view, view.pendingTop);
 				view.pendingTop = null;
 			}
 		},
 
+		thumbnailHostWidth() {
+			if (context.el.pageList.clientWidth) return context.el.pageList.clientWidth;
+			const navWidth = context.el.navigationContent.clientWidth;
+			if (!navWidth) return 0;
+			const navStyle = getComputedStyle(context.el.navigationContent);
+			return Math.max(0, navWidth - (Number.parseFloat(navStyle.paddingLeft) || 0) - (Number.parseFloat(navStyle.paddingRight) || 0));
+		},
+
 		syncThumbnailWindow() {
 			const view = context.state.thumbnailWindow;
 			if (!view || context.el.pageList.hidden || !context.state.showPages) return;
-			if (context.el.navigationContent.clientWidth && (view.width !== context.el.navigationContent.clientWidth || view.rotation !== context.state.rotation || view.layout !== context.state.pageLayout)) pageView.layoutThumbnails();
+			const hostWidth = pageView.thumbnailHostWidth();
+			if (hostWidth && (view.width !== hostWidth || view.rotation !== context.state.rotation || view.layout !== context.state.pageLayout)) pageView.layoutThumbnails();
 			pageView.syncPageWindow(view, view.pendingTop ?? null);
 			view.pendingTop = null;
 			pageView.prunePageRenderQueue();
@@ -1124,16 +1172,18 @@ export function createPageView(context) {
 			pageView.syncThumbnailWindow();
 			const view = context.state.thumbnailWindow;
 			if (!view) return;
+			const inset = pageView.windowInset(view);
+			const padBottom = Number.parseFloat(getComputedStyle(view.viewport).paddingBottom) || 0;
 			const top = pageView.pageWindowTop(view);
 			let start = view.offsets[index], end = start + view.heights[index];
-			if (start < top || end > top + context.el.navigationContent.clientHeight) {
+			if (start - inset < top || end + padBottom > top + context.el.navigationContent.clientHeight) {
 				const first = pageView.pageGroupStart(index), last = Math.min(context.state.doc.pageCount - 1, first + context.state.pageLayout - 1);
 				const groupEnd = view.offsets[last] + view.heights[last];
-				if (groupEnd - view.offsets[first] <= context.el.navigationContent.clientHeight) {
+				if (groupEnd - view.offsets[first] + inset + padBottom <= context.el.navigationContent.clientHeight) {
 					start = view.offsets[first];
 					end = groupEnd;
 				}
-				const target = start < top ? Math.floor(start) : Math.min(start, Math.ceil(end - context.el.navigationContent.clientHeight));
+				const target = start - inset < top ? Math.floor(start - inset) : Math.min(start - inset, Math.ceil(end + padBottom - context.el.navigationContent.clientHeight));
 				pageView.syncPageWindow(view, target);
 			}
 		},
@@ -1153,12 +1203,14 @@ export function createPageView(context) {
 			const size = pageView.pageViewSize(page);
 			const view = context.state.thumbnailWindow;
 			button.style.height = `${view.heights[page.index]}px`;
-			button.style.width = `${view.itemWidth}px`;
 			if (view.scales) {
+				button.style.width = `calc(50% - ${view.gap / 2}px)`;
 				button.style.setProperty("--thumb-paper-width", `${size.width * view.scales[page.index]}px`);
 				button.style.setProperty("--thumb-paper-height", `${size.height * view.scales[page.index]}px`);
 			} else {
+				button.style.removeProperty("width");
 				button.style.removeProperty("left");
+				button.style.removeProperty("right");
 				button.style.removeProperty("transform");
 				button.style.removeProperty("--thumb-paper-width");
 				button.style.removeProperty("--thumb-paper-height");
@@ -1527,18 +1579,23 @@ export function createPageView(context) {
 		},
 
 		scrollbarWidth() {
+			const style = getComputedStyle(context.el.viewerPanel).scrollbarWidth;
+			const key = `${style}:${window.devicePixelRatio || 1}:${window.innerWidth}:${window.innerHeight}:${window.visualViewport?.scale || 1}`;
+			if (scrollbarMeasurement?.key === key) return scrollbarMeasurement.width;
 			const probe = document.createElement("div");
 			const content = document.createElement("div");
+			probe.className = "scrollbar-probe";
 			probe.style.position = "absolute";
 			probe.style.width = "100px";
 			probe.style.height = "100px";
 			probe.style.overflow = "scroll";
-			probe.style.scrollbarWidth = getComputedStyle(context.el.viewerPanel).scrollbarWidth;
 			probe.style.left = "-9999px";
 			probe.append(content);
 			document.body.append(probe);
-			const width = 100 - Number.parseFloat(getComputedStyle(content).width);
+			const width = Math.max(0, 100 - Number.parseFloat(getComputedStyle(content).width));
 			probe.remove();
+			document.documentElement.style.setProperty("--scrollbar-width", `${width}px`);
+			scrollbarMeasurement = { key, width };
 			return width;
 		},
 
@@ -1663,7 +1720,7 @@ export function createPageView(context) {
 			const measure = textMeasure ||= document.createElement("canvas").getContext("2d");
 			measure.font = "100px sans-serif";
 			const widths = new Map();
-			let count = 0;
+			let count = 0, started = performance.now();
 			for (const run of text.runs || []) {
 				const line = document.createElement("span");
 				line.className = "text-run";
@@ -1685,7 +1742,10 @@ export function createPageView(context) {
 					span.style.transform = `matrix(${a * MM_TO_PX / width}, ${b * MM_TO_PX / width}, ${c * MM_TO_PX / 100}, ${d * MM_TO_PX / 100}, ${e * MM_TO_PX}, ${f * MM_TO_PX})`;
 					line.append(span);
 					end = item.end;
-					if (++count % 128 === 0) yield;
+					if (++count % 16 === 0 && performance.now() - started >= 4) {
+						yield;
+						started = performance.now();
+					}
 				}
 				const breaks = chars.slice(end).filter((char) => char === "\n").join("");
 				if (breaks) {

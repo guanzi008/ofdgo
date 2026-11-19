@@ -34,6 +34,47 @@ type editorXML struct {
 	parent                  *editorXML
 }
 
+// child 查找OFD直接子节点
+// 入参: name 节点名称
+// 返回: *editorXML 节点，不存在时为nil
+func (n *editorXML) child(name string) *editorXML {
+	return n.childAt(name, 0)
+}
+
+// childAt 查找指定序号的OFD直接子节点
+// 入参: name 节点名称, index 从0开始的节点序号
+// 返回: *editorXML 节点，不存在时为nil
+func (n *editorXML) childAt(name string, index int) *editorXML {
+	for _, child := range n.children {
+		if child.matchesOFD(name) {
+			if index == 0 {
+				return child
+			}
+			index--
+		}
+	}
+	return nil
+}
+
+// attr 获取无命名空间的属性值
+// 入参: name 属性名称
+// 返回: string 属性值
+func (n *editorXML) attr(name string) string {
+	for _, attr := range n.attrs {
+		if attr.Name.Space == "" && attr.Name.Local == name {
+			return attr.Value
+		}
+	}
+	return ""
+}
+
+// hasAttr 判断属性是否存在，区分空值与省略
+// 入参: name 属性名称
+// 返回: bool 是否存在
+func (n *editorXML) hasAttr(name string) bool {
+	return slices.ContainsFunc(n.attrs, func(attr xml.Attr) bool { return attr.Name.Space == "" && attr.Name.Local == name })
+}
+
 // editorXMLPatch 替换原文中的连续区间
 type editorXMLPatch struct {
 	start, end int
@@ -169,47 +210,6 @@ func parseEditorXMLContext(ctx context.Context, data []byte) (*editorXML, error)
 	return root, nil
 }
 
-// child 查找OFD直接子节点
-// 入参: name 节点名称
-// 返回: *editorXML 节点，不存在时为nil
-func (n *editorXML) child(name string) *editorXML {
-	return n.childAt(name, 0)
-}
-
-// childAt 查找指定序号的OFD直接子节点
-// 入参: name 节点名称, index 从0开始的节点序号
-// 返回: *editorXML 节点，不存在时为nil
-func (n *editorXML) childAt(name string, index int) *editorXML {
-	for _, child := range n.children {
-		if child.matchesOFD(name) {
-			if index == 0 {
-				return child
-			}
-			index--
-		}
-	}
-	return nil
-}
-
-// attr 获取无命名空间的属性值
-// 入参: name 属性名称
-// 返回: string 属性值
-func (n *editorXML) attr(name string) string {
-	for _, attr := range n.attrs {
-		if attr.Name.Space == "" && attr.Name.Local == name {
-			return attr.Value
-		}
-	}
-	return ""
-}
-
-// hasAttr 判断属性是否存在，区分空值与省略
-// 入参: name 属性名称
-// 返回: bool 是否存在
-func (n *editorXML) hasAttr(name string) bool {
-	return slices.ContainsFunc(n.attrs, func(attr xml.Attr) bool { return attr.Name.Space == "" && attr.Name.Local == name })
-}
-
 // editorPatchXML 按位置应用互不重叠的替换
 // 入参: data 原文, patches 修改区间
 // 返回: []byte 修改后的XML
@@ -266,8 +266,13 @@ func editorXMLSetText(data []byte, node *editorXML, values [][2]string) ([]byte,
 	var patches []editorXMLPatch
 	var added []byte
 	order := []string{"PhysicalBox", "ApplicationBox", "ContentBox", "BleedBox"}
-	if node.name.Local == "DocInfo" {
+	switch node.name.Local {
+	case "DocInfo":
 		order = []string{"DocID", "Title", "Author", "Subject", "Abstract", "CreationDate", "ModDate", "DocUsage", "Cover", "Keywords", "Creator", "CreatorVersion", "CustomDatas"}
+	case "Document":
+		order = []string{"CommonData", "Pages", "Outlines", "Permissions", "Actions", "VPreferences", "Bookmarks", "Annotations", "CustomTags", "Attachments", "Extensions"}
+	case "DocBody":
+		order = []string{"DocInfo", "DocRoot", "Versions", "Signatures"}
 	}
 	for _, value := range values {
 		child := node.child(value[0])
@@ -289,10 +294,12 @@ func editorXMLSetText(data []byte, node *editorXML, values [][2]string) ([]byte,
 			added = append(added, encoded...)
 		} else if len(encoded) != 0 {
 			position := node.close
-			for _, next := range node.children {
-				if slices.Index(order, next.name.Local) > slices.Index(order, value[0]) {
-					position = next.start
-					break
+			if targetIdx := slices.Index(order, value[0]); targetIdx >= 0 {
+				for _, next := range node.children {
+					if nextIdx := slices.Index(order, next.name.Local); nextIdx > targetIdx {
+						position = next.start
+						break
+					}
 				}
 			}
 			patches = append(patches, editorXMLPatch{position, position, encoded})
@@ -397,9 +404,6 @@ func editorXMLAttributes(node *editorXML, allowed string) bool {
 		if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" && attr.Name.Space == "" {
 			continue
 		}
-		if textMetadataAttribute(node.name, attr) {
-			continue
-		}
 		if attr.Name.Space != "" || !slices.Contains(strings.Fields(allowed), attr.Name.Local) {
 			return false
 		}
@@ -414,28 +418,92 @@ func editorXMLSupported(node *editorXML) bool {
 	var allowed, children string
 	switch node.name.Local {
 	case "TextObject", "Text":
-		allowed, children = "ID Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Cap DashPattern DashOffset Italic Visible Stroke Fill Alpha", "Clips FillColor StrokeColor CGTransform TextCode"
+		allowed, children = "Name Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Cap DashPattern DashOffset Italic Visible Stroke Fill Alpha", "Actions FillColor StrokeColor CGTransform TextCode"
+		if node.name.Local == "TextObject" {
+			allowed += " ID"
+			children += " Clips"
+		}
 	case "CGTransform":
 		allowed, children = "CodePosition CodeCount GlyphCount", "Glyphs"
 	case "Glyphs":
 	case "PathObject", "Path":
-		allowed, children = "Boundary CTM DrawParam LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha", "StrokeColor FillColor AbbreviatedData"
+		allowed, children = "Name Boundary CTM DrawParam LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha", "Actions StrokeColor FillColor AbbreviatedData"
 		if node.name.Local == "PathObject" {
 			allowed += " ID"
 			children += " Clips"
 		}
 	case "ImageObject":
-		allowed, children = "ID Boundary CTM ResourceID Substitution ImageMask Visible Alpha", "Clips"
+		allowed, children = "ID Name Boundary CTM ResourceID Substitution ImageMask DrawParam LineWidth MiterLimit Join Cap DashPattern DashOffset Visible Alpha", "Actions Clips Border"
+	case "Border":
+		allowed, children = "LineWidth HorizonalCornerRadius VerticalCornerRadius DashOffset DashPattern", "BorderColor"
 	case "TextCode":
 		allowed = "X Y DeltaX DeltaY"
-	case "FillColor", "StrokeColor":
+	case "FillColor", "StrokeColor", "BorderColor":
 		allowed = "Value Alpha ColorSpace Index"
 	case "Clips":
 		allowed, children = "TransFlag", "Clip"
 	case "Clip":
 		children = "Area"
 	case "Area":
-		allowed, children = "CTM DrawParam", "Path Text"
+		if node.parent != nil && node.parent.name.Local == "Region" {
+			if !node.hasAttr("Start") {
+				return false
+			}
+			allowed, children = "Start", "Move Line QuadraticBezier CubicBezier Arc Close"
+		} else {
+			allowed, children = "CTM DrawParam", "Path Text"
+		}
+	case "Actions":
+		if len(node.children) == 0 {
+			return false
+		}
+		children = "Action"
+	case "Action":
+		allowed, children = "Event", "Region Goto URI GotoA Sound Movie"
+		targets := 0
+		for i, child := range node.children {
+			if child.name.Local == "Region" {
+				if i != 0 {
+					return false
+				}
+			} else {
+				targets++
+			}
+		}
+		if targets > 1 {
+			return false
+		}
+	case "Region":
+		if len(node.children) == 0 {
+			return false
+		}
+		children = "Area"
+	case "Move", "Line":
+		allowed = "Point1"
+	case "QuadraticBezier":
+		allowed = "Point1 Point2"
+	case "CubicBezier":
+		allowed = "Point1 Point2 Point3"
+	case "Arc":
+		allowed = "SweepDirection LargeArc RotationAngle EllipseSize EndPoint"
+	case "Close":
+	case "Goto":
+		if len(node.children) != 1 {
+			return false
+		}
+		children = "Dest Bookmark"
+	case "Dest":
+		allowed = "Type PageID Left Top Right Bottom Zoom"
+	case "Bookmark":
+		allowed = "Name"
+	case "URI":
+		allowed = "URI Base Target"
+	case "GotoA":
+		allowed = "AttachID NewWindow"
+	case "Sound":
+		allowed = "ResourceID Volume Repeat Synchronous"
+	case "Movie":
+		allowed = "ResourceID Operator"
 	case "AbbreviatedData":
 	default:
 		return false
@@ -458,13 +526,13 @@ func editorXMLTransformable(node *editorXML) bool {
 	var attrs string
 	switch node.name.Local {
 	case "TextObject":
-		attrs = "ID Boundary CTM DrawParam Font Size HScale VScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Cap DashPattern DashOffset Italic Decoration Visible Stroke Fill Alpha"
+		attrs = "ID Name Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Cap DashPattern DashOffset Italic Visible Stroke Fill Alpha"
 	case "PathObject":
-		attrs = "ID Boundary CTM DrawParam LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha"
+		attrs = "ID Name Boundary CTM DrawParam LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha"
 	case "ImageObject":
-		attrs = "ID Boundary CTM ResourceID Substitution ImageMask Visible Alpha"
+		attrs = "ID Name Boundary CTM ResourceID Substitution ImageMask DrawParam LineWidth Cap Join MiterLimit DashOffset DashPattern Visible Alpha"
 	case "CompositeObject", "CompositeGraphicUnit":
-		attrs = "ID Boundary CTM ResourceID DrawParam Visible Alpha"
+		attrs = "ID Name Boundary CTM ResourceID DrawParam LineWidth Cap Join MiterLimit DashOffset DashPattern Visible Alpha"
 	default:
 		return false
 	}
@@ -514,7 +582,7 @@ func editorXMLObject(data []byte, node *editorXML, before, after GraphicObject) 
 		}
 		return editorXMLGenerated(encoded, node.name.Space)
 	}
-	if node.attr("DrawParam") != "" && (before.Type == "TextObject" && before.TextObject.DrawParam == "" || before.Type == "PathObject" && before.PathObject.DrawParam == "") {
+	if node.attr("DrawParam") != "" && (before.Type == "TextObject" && before.TextObject.DrawParam == "" || before.Type == "PathObject" && before.PathObject.DrawParam == "" || before.Type == "ImageObject" && before.ImageObject.DrawParam == "") {
 		before = GraphicObject{Type: before.Type}
 		var err error
 		switch before.Type {
@@ -522,6 +590,8 @@ func editorXMLObject(data []byte, node *editorXML, before, after GraphicObject) 
 			err = xml.Unmarshal(data[node.start:node.end], &before.TextObject)
 		case "PathObject":
 			err = xml.Unmarshal(data[node.start:node.end], &before.PathObject)
+		case "ImageObject":
+			err = xml.Unmarshal(data[node.start:node.end], &before.ImageObject)
 		}
 		if err != nil {
 			return nil, err
@@ -572,15 +642,6 @@ func editorXMLMergeNamespace(data []byte, node *editorXML, oldXML, newXML []byte
 		return nil, err
 	}
 	changes := make(map[string]string)
-	textValue := func(n *editorXML) string {
-		for _, attr := range n.attrs {
-			if attr.Name.Space == textNamespace && attr.Name.Local == "Text" {
-				return attr.Value
-			}
-		}
-		return ""
-	}
-	textChanged := textValue(oldNode) != textValue(newNode)
 	if legacyClip {
 		changes["TransFlag"] = ""
 	}
@@ -590,7 +651,7 @@ func editorXMLMergeNamespace(data []byte, node *editorXML, oldXML, newXML []byte
 		}
 	}
 	contentChanged := !bytes.Equal(oldXML[oldNode.open:oldNode.close], newXML[newNode.open:newNode.close])
-	if len(changes) == 0 && !textChanged && !contentChanged && namespace == node.name.Space {
+	if len(changes) == 0 && !contentChanged && namespace == node.name.Space {
 		return bytes.Clone(data[node.start:node.end]), nil
 	}
 	d := xml.NewDecoder(bytes.NewReader(data[node.start:node.open]))
@@ -599,27 +660,6 @@ func editorXMLMergeNamespace(data []byte, node *editorXML, oldXML, newXML []byte
 		return nil, err
 	}
 	start := token.(xml.StartElement)
-	if textChanged {
-		value, found := textValue(newNode), false
-		attrs := start.Attr[:0]
-		for i, attr := range start.Attr {
-			resolved := node.attrs[i]
-			if resolved.Name.Space == textNamespace && resolved.Name.Local == "Text" {
-				found = true
-				if value != "" {
-					attr.Value = value
-					attrs = append(attrs, attr)
-				}
-				continue
-			}
-			attrs = append(attrs, attr)
-		}
-		start.Attr = attrs
-		if !found && value != "" {
-			prefix := editorXMLNamespacePrefix(node, "ofdgo")
-			start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Space: "xmlns", Local: prefix}, Value: textNamespace}, xml.Attr{Name: xml.Name{Space: prefix, Local: "Text"}, Value: value})
-		}
-	}
 	if legacyClip || namespace != node.name.Space {
 		start.Name.Space = editorXMLNamespacePrefix(node, "ofd")
 		start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Space: "xmlns", Local: start.Name.Space}, Value: namespace})

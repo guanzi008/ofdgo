@@ -16,12 +16,12 @@ package ofdgo
 
 import (
 	"bytes"
-
 	"encoding/xml"
 	"fmt"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"math"
 	"slices"
+
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
 // TransformObjectsMatrix 对同页对象施加可逆页面变换，保留原文、资源与裁剪
@@ -84,6 +84,7 @@ func (e *Editor) FlipObjects(page int, ids []string, axis string) error {
 // 入参: page 页面索引, ids 对象标识, box 页面毫米坐标中的目标范围
 // 返回: error 错误信息
 func (e *Editor) ResizeObjects(page int, ids []string, box Box) error {
+	defer e.bindPageIndex(page)()
 	if err := validateCreationBox(box); err != nil {
 		return err
 	}
@@ -115,32 +116,12 @@ func (e *Editor) ResizeObjects(page int, ids []string, box Box) error {
 	})
 }
 
-// ImageBounds 返回完整图片经Boundary位移及CTM变换后的轴对齐边界，不应用裁剪或父级变换
-// 返回: Box 所在坐标系中的完整图片边界, error 错误信息
-func (obj ImageObject) ImageBounds() (Box, error) {
-	box, err := creationBox(obj.Boundary)
-	if err != nil {
-		return Box{}, err
-	}
-	if obj.CTM == "" {
-		return box, nil
-	}
-	values, err := creationNumbers(obj.CTM, 6)
-	if err != nil {
-		return Box{}, err
-	}
-	box = TranslationMatrix(box.X, box.Y).Multiply(MatrixFromValues([6]float64(values))).TransformBox(Box{W: 1, H: 1})
-	if !finite(box.X) || !finite(box.Y) || !finite(box.W) || !finite(box.H) || !finite(box.X+box.W) || !finite(box.Y+box.H) {
-		return Box{}, fmt.Errorf("image bounds exceed finite range")
-	}
-	return box, nil
-}
-
 // CropImage 按页面毫米坐标重设图片裁剪，保留原始资源及像素，可再次扩大裁剪区域
 // 使用ImageObject.ImageBounds返回的范围可还原完整图片；提交一次撤销记录
 // 入参: page 页面索引, id 图片对象标识, box 页面毫米坐标中的保留范围
 // 返回: error 错误信息
 func (e *Editor) CropImage(page int, id string, box Box) error {
+	defer e.bindPageIndex(page)()
 	object, err := e.Object(page, id)
 	if err != nil {
 		return err
@@ -161,6 +142,7 @@ func (e *Editor) CropImage(page int, id string, box Box) error {
 // 入参: page 页面索引, id 图片对象标识, mode 为contain（完整显示）或cover（填满裁剪）
 // 返回: error 错误信息
 func (e *Editor) FitImage(page int, id, mode string) error {
+	defer e.bindPageIndex(page)()
 	object, err := e.Object(page, id)
 	if err != nil {
 		return err
@@ -173,6 +155,27 @@ func (e *Editor) FitImage(page int, id, mode string) error {
 	}
 	object.state.crop = nil
 	return e.UpdateObject(page, id, object)
+}
+
+// ImageBounds 返回完整图片经Boundary位移及CTM变换后的轴对齐边界，不应用裁剪或父级变换
+// 返回: Box 所在坐标系中的完整图片边界, error 错误信息
+func (obj ImageObject) ImageBounds() (Box, error) {
+	box, err := creationBox(obj.Boundary)
+	if err != nil {
+		return Box{}, err
+	}
+	if obj.CTM == "" {
+		return box, nil
+	}
+	values, err := creationNumbers(obj.CTM, 6)
+	if err != nil {
+		return Box{}, err
+	}
+	box = TranslationMatrix(box.X, box.Y).Multiply(MatrixFromValues([6]float64(values))).TransformBox(Box{W: 1, H: 1})
+	if !finite(box.X) || !finite(box.Y) || !finite(box.W) || !finite(box.H) || !finite(box.X+box.W) || !finite(box.Y+box.H) {
+		return Box{}, fmt.Errorf("image bounds exceed finite range")
+	}
+	return box, nil
 }
 
 // TextFrame 将对象Boundary逆变换到本地坐标并返回轴对齐边界
@@ -274,6 +277,7 @@ func editorFlip(axis string) (Matrix, error) {
 // 入参: page 页面索引, ids 对象标识, matrix 直角旋转或镜像矩阵
 // 返回: error 错误信息
 func (e *Editor) orientObjects(page int, ids []string, matrix Matrix) error {
+	defer e.bindPageIndex(page)()
 	objects, _, err := e.selectedObjects(page, ids)
 	if err != nil || len(objects) == 0 || matrix == IdentityMatrix {
 		return err
@@ -297,6 +301,7 @@ func (e *Editor) orientObjects(page int, ids []string, matrix Matrix) error {
 // 入参: page 页面索引, objects 选区快照, transform 单对象变换
 // 返回: error 错误信息
 func (e *Editor) transformObjects(page int, objects []GraphicObject, transform func(GraphicObject) (GraphicObject, error)) (err error) {
+	defer e.bindPageIndex(page)()
 	count, maximum := len(e.resources), e.maxID
 	idsReady := e.source != nil && e.source.idsReady
 	defer func() {
@@ -335,7 +340,9 @@ func (e *Editor) transformMatrix(object GraphicObject, matrix Matrix) (GraphicOb
 		return GraphicObject{}, err
 	}
 	defer reader.Close()
-	return e.transformImageResource(object, matrix, origin, e.newRenderer(reader))
+	renderer := e.newRenderer(reader)
+	defer renderer.bindParsedResources(e.pageScope)()
+	return e.transformImageResource(object, matrix, origin, renderer)
 }
 
 // imageTransformNeedsContainer 判断图片变换是否需保留边框或隐式坐标中的动作

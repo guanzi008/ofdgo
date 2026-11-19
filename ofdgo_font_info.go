@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
@@ -52,6 +54,9 @@ type FontInfo struct {
 	MatchedFace *FontFace `json:"matchedFace,omitempty"`
 	Detail      string    `json:"detail"`
 	Used        int       `json:"used"`
+	fontPath    string
+	bold        bool
+	italic      bool
 }
 
 // FontInfoScanner 逐页统计字体用量，不保留页面图元，扫描期间不得修改阅读器或渲染器配置
@@ -62,151 +67,6 @@ type FontInfoScanner struct {
 	usage    map[string]int
 	pages    []map[string]int
 	pending  []int
-}
-
-// fontUsagePage 逐图元统计字体的页面解码器
-type fontUsagePage struct {
-	renderer *Renderer
-	usage    map[string]int
-}
-
-// fontUsageReferences 保存字体统计中的当前引用路径，不合并共享内容的用量
-type fontUsageReferences struct {
-	composites map[*CompositeGraphicUnit]bool
-	patterns   map[*Pattern]bool
-}
-
-// Fonts 获取OFD声明的字体列表，不加载注解或签名
-// 返回: []Font 字体列表, error 错误信息
-func (r *Reader) Fonts() ([]Font, error) {
-	doc, err := r.docStructure()
-	if err != nil {
-		return nil, err
-	}
-	if !r.fontResourcesRead {
-		for _, page := range doc.Pages.Page {
-			r.loadPageResources(page)
-		}
-		for _, template := range doc.CommonData.TemplatePage {
-			r.loadPageResources(Page{BaseLoc: template.BaseLoc})
-		}
-		r.fontResourcesRead = true
-	}
-	fonts := make([]Font, 0, len(r.fontCache))
-	for _, font := range r.fontCache {
-		if font != nil {
-			fonts = append(fonts, *font)
-		}
-	}
-	sort.SliceStable(fonts, func(i, j int) bool {
-		return fonts[i].ID < fonts[j].ID
-	})
-	return fonts, nil
-}
-
-// FontData 读取内嵌字体，集合按声明名称和样式提取为独立字体，其他格式保留原始字节
-// 入参: id 字体资源标识
-// 返回: []byte 字体数据, error 资源缺失或集合解析错误
-func (r *Reader) FontData(id string) ([]byte, error) {
-	return r.fontData(id, false)
-}
-
-// FontFace 读取指定内嵌资源的本地化字体信息，集合按资源声明选取，不依赖系统字体
-// 入参: id 字体资源标识, platform 名称表平台标识, language 名称表语言标识
-// 返回: *FontFace 独立字体信息, error 资源或解析错误
-func (r *Reader) FontFace(id string, platform, language uint16) (*FontFace, error) {
-	if r.fontDefinition(id) == nil {
-		if _, err := r.Fonts(); err != nil {
-			return nil, err
-		}
-	}
-	font := r.fontDefinition(id)
-	if font == nil || font.FontFile == "" {
-		return nil, fmt.Errorf("embedded font %q not found", id)
-	}
-	name := r.ResPath(font.FontFile)
-	key := fmt.Sprintf("%s\x00%d:%d", name, platform, language)
-	faces, ok := r.fontFaces[key]
-	if !ok {
-		data, err := r.readFileView(name)
-		if err != nil {
-			return nil, err
-		}
-		values, err := (FontFile{Data: data}).LocalizedFaces(platform, language)
-		if err != nil {
-			return nil, err
-		}
-		faces = make([]*FontFace, len(values))
-		for index := range values {
-			faces[index] = &values[index]
-		}
-		r.fontFaces[key] = faces
-	}
-	names := make([][]string, len(faces))
-	for index, face := range faces {
-		names[index] = face.Names
-	}
-	face := *faces[basefont.NameIndex(names, []string{font.FontName, font.FamilyName}, font.Bold, font.Italic)]
-	face.Names = slices.Clone(face.Names)
-	return &face, nil
-}
-
-// fontData 按调用方所有权读取内嵌字体，集合字体始终独立提取
-// 入参: id 字体资源标识, readonly 是否允许借用只读资源
-// 返回: []byte 字体数据, error 资源或集合错误
-func (r *Reader) fontData(id string, readonly bool) ([]byte, error) {
-	if r.fontDefinition(id) == nil {
-		if _, err := r.Fonts(); err != nil {
-			return nil, err
-		}
-	}
-	f := r.fontDefinition(id)
-	if f == nil || f.FontFile == "" {
-		return nil, fmt.Errorf("embedded font %q not found", id)
-	}
-	read := r.readFile
-	if readonly {
-		read = r.readFileView
-	}
-	data, err := read(r.ResPath(f.FontFile))
-	if err != nil {
-		return nil, err
-	}
-	if bytes.HasPrefix(data, []byte("ttcf")) {
-		index := basefont.CollectionIndex(data, []string{f.FontName, f.FamilyName}, f.Bold, f.Italic)
-		return basefont.ExtractCollectionFont(data, index)
-	}
-	return data, nil
-}
-
-// fontDefinition 按资源标识查找已加载的字体，数值等价的引用共用同一定义
-// 入参: id 字体资源标识
-// 返回: *Font 字体定义，未找到或别名冲突时为nil
-func (r *Reader) fontDefinition(id string) *Font {
-	font, _ := resourceValue(r.fontCache, id)
-	return font
-}
-
-// FontInfos 获取文档字体诊断信息
-// 返回: []FontInfo 字体诊断列表, error 错误信息
-func (r *Renderer) FontInfos() ([]FontInfo, error) {
-	scanner, err := r.ScanFontInfos()
-	if err != nil {
-		return nil, err
-	}
-	for scanner.Next() {
-	}
-	return scanner.Infos()
-}
-
-// ScanFontInfos 创建分步字体诊断，页面读取失败的处理与FontInfos一致
-// 返回: *FontInfoScanner 字体诊断扫描器, error 错误信息
-func (r *Renderer) ScanFontInfos() (*FontInfoScanner, error) {
-	doc, err := r.fontInfoDocument()
-	if err != nil {
-		return nil, err
-	}
-	return &FontInfoScanner{renderer: r, doc: doc, usage: make(map[string]int), pages: make([]map[string]int, len(doc.Pages.Page))}, nil
 }
 
 // Refresh 为同一文档的局部编辑建立增量扫描，接续未完成扫描并重算已扫描的变化页
@@ -233,16 +93,7 @@ func (s *FontInfoScanner) Refresh(renderer *Renderer, pages []int) (*FontInfoSca
 	return &FontInfoScanner{renderer: renderer, doc: doc, index: s.index, usage: maps.Clone(s.usage), pages: slices.Clone(s.pages), pending: pending}, nil
 }
 
-// DeclaredFontInfos 获取已声明字体的匹配结果，不扫描页面用量
-// 返回: []FontInfo 字体诊断列表, error 错误信息
-func (r *Renderer) DeclaredFontInfos() ([]FontInfo, error) {
-	if r == nil || r.Reader == nil {
-		return nil, fmt.Errorf("ofd renderer is not initialized")
-	}
-	return r.fontInfos(nil)
-}
-
-// Next 统计下一页或模板的字体用量
+// Next 统计下一页的字体用量
 // 返回: bool 是否处理了页面，false表示扫描结束
 func (s *FontInfoScanner) Next() bool {
 	if len(s.pending) != 0 {
@@ -263,20 +114,14 @@ func (s *FontInfoScanner) Next() bool {
 		}
 		return true
 	}
-	pages := len(s.doc.Pages.Page)
-	if s.index < pages {
-		if counts, err := s.renderer.readPageFontUsage(s.doc.Pages.Page[s.index]); err == nil {
-			s.pages[s.index] = counts
-			for id, count := range counts {
-				s.usage[id] += count
-			}
-		}
-	} else if index := s.index - pages; index < len(s.doc.CommonData.TemplatePage) {
-		if page := s.renderer.loadTemplate(s.doc.CommonData.TemplatePage[index].ID); page != nil {
-			s.renderer.countPageFonts(page, s.usage)
-		}
-	} else {
+	if s.index >= len(s.doc.Pages.Page) {
 		return false
+	}
+	if counts, err := s.renderer.readPageFontUsage(s.doc.Pages.Page[s.index]); err == nil {
+		s.pages[s.index] = counts
+		for id, count := range counts {
+			s.usage[id] += count
+		}
 	}
 	s.index++
 	return true
@@ -285,21 +130,123 @@ func (s *FontInfoScanner) Next() bool {
 // Infos 获取扫描结束后的字体诊断，不返回未完成的用量统计
 // 返回: []FontInfo 字体诊断列表, error 错误信息
 func (s *FontInfoScanner) Infos() ([]FontInfo, error) {
-	if s.index < len(s.doc.Pages.Page)+len(s.doc.CommonData.TemplatePage) || len(s.pending) != 0 {
+	if s.index < len(s.doc.Pages.Page) || len(s.pending) != 0 {
 		return nil, fmt.Errorf("font info scan is not complete")
 	}
 	return s.renderer.fontInfos(s.usage)
+}
+
+// Fonts 获取OFD声明的文档及页面局部字体列表，保留不同页面资源文件的同名局部字体且不加载注解或签名
+// 返回: []Font 字体列表, error 错误信息
+func (r *Reader) Fonts() ([]Font, error) {
+	entries, err := r.declaredFonts()
+	if err != nil {
+		return nil, err
+	}
+	fonts := make([]Font, len(entries))
+	for i, entry := range entries {
+		fonts[i] = entry.font
+	}
+	return fonts, nil
+}
+
+// FontData 读取内嵌字体，集合按声明名称和样式提取为独立字体，其他格式保留原始字节
+// 入参: id 字体资源标识
+// 返回: []byte 字体数据, error 资源缺失或集合解析错误
+func (r *Reader) FontData(id string) ([]byte, error) {
+	return r.fontData(id, false)
+}
+
+// FontFace 读取指定内嵌资源的本地化字体信息，集合按资源声明选取，不依赖系统字体
+// 入参: id 字体资源标识, platform 名称表平台标识, language 名称表语言标识
+// 返回: *FontFace 独立字体信息, error 资源或解析错误
+func (r *Reader) FontFace(id string, platform, language uint16) (*FontFace, error) {
+	font, err := r.embeddedFontDefinition(id)
+	if err != nil {
+		return nil, err
+	}
+	if font == nil || font.FontFile == "" {
+		return nil, fmt.Errorf("embedded font %q not found", id)
+	}
+	return r.localizedFontFaceAt(*font, r.ResPath(font.FontFile), platform, language)
+}
+
+// LocalizeFontInfos 按各自包内字体路径更新内嵌字体的本地化名称，消除同名局部字体串台
+// 入参: fonts 字体诊断列表, platform 名称表平台标识, language 名称表语言标识
+func (r *Renderer) LocalizeFontInfos(fonts []FontInfo, platform, language uint16) {
+	if r == nil || r.Reader == nil {
+		return
+	}
+	for i := range fonts {
+		if !fonts[i].Embedded {
+			continue
+		}
+		fontPath := fonts[i].fontPath
+		if fontPath == "" && fonts[i].FontFile != "" {
+			fontPath = r.Reader.ResPath(fonts[i].FontFile)
+		}
+		if fontPath == "" {
+			continue
+		}
+		font := Font{ID: fonts[i].ID, FontName: fonts[i].FontName, FamilyName: fonts[i].FamilyName, FontFile: fonts[i].FontFile, Bold: fonts[i].bold, Italic: fonts[i].italic}
+		if face, err := r.Reader.localizedFontFaceAt(font, fontPath, platform, language); err == nil {
+			fonts[i].MatchedFace = face
+		}
+	}
+}
+
+// FontInfos 获取文档字体诊断信息
+// 返回: []FontInfo 字体诊断列表, error 错误信息
+func (r *Renderer) FontInfos() ([]FontInfo, error) {
+	scanner, err := r.ScanFontInfos()
+	if err != nil {
+		return nil, err
+	}
+	for scanner.Next() {
+	}
+	return scanner.Infos()
+}
+
+// ScanFontInfos 创建分步字体诊断，页面读取失败的处理与FontInfos一致
+// 返回: *FontInfoScanner 字体诊断扫描器, error 错误信息
+func (r *Renderer) ScanFontInfos() (*FontInfoScanner, error) {
+	doc, err := r.fontInfoDocument()
+	if err != nil {
+		return nil, err
+	}
+	return &FontInfoScanner{renderer: r, doc: doc, usage: make(map[string]int), pages: make([]map[string]int, len(doc.Pages.Page))}, nil
+}
+
+// DeclaredFontInfos 获取已声明字体的匹配结果，不扫描页面用量
+// 返回: []FontInfo 字体诊断列表, error 错误信息
+func (r *Renderer) DeclaredFontInfos() ([]FontInfo, error) {
+	if r == nil || r.Reader == nil {
+		return nil, fmt.Errorf("ofd renderer is not initialized")
+	}
+	return r.fontInfos(nil)
 }
 
 // FontInfosFromPages 从页面内容获取文档字体诊断信息
 // 入参: pages 页面内容列表
 // 返回: []FontInfo 字体诊断列表, error 错误信息
 func (r *Renderer) FontInfosFromPages(pages []*PageContent) ([]FontInfo, error) {
-	doc, err := r.fontInfoDocument()
-	if err != nil {
+	if _, err := r.fontInfoDocument(); err != nil {
 		return nil, err
 	}
-	return r.fontInfos(r.fontUsage(doc, pages))
+	return r.fontInfos(r.fontUsage(pages))
+}
+
+// declaredFontEntry 关联字体声明、所属资源文件作用域键及其包内字体路径
+type declaredFontEntry struct {
+	key      string
+	fontPath string
+	font     Font
+}
+
+// fontUsagePage 逐图元统计字体的页面解码器
+type fontUsagePage struct {
+	renderer *Renderer
+	usage    map[string]int
 }
 
 // UnmarshalXML 解析页面内容中的图层字体
@@ -322,11 +269,355 @@ func (p *fontUsagePage) UnmarshalXML(d *xml.Decoder, start xml.StartElement) err
 	})
 }
 
+// decodeObjects 逐个读取图元并复用字体统计规则
+// 入参: d XML解码器, start 容器起始节点, defaults 默认绘制参数
+// 返回: error 错误信息
+func (p *fontUsagePage) decodeObjects(d *xml.Decoder, start xml.StartElement, defaults *DrawParam) error {
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "PageBlock":
+			return p.decodeObjects(d, node, defaults)
+		case "TextObject", "PathObject", "ImageObject":
+			var obj fontUsageObject
+			if err := d.DecodeElement(&obj, &node); err != nil {
+				return err
+			}
+			graphic := GraphicObject{Type: node.Name.Local}
+			switch node.Name.Local {
+			case "TextObject":
+				graphic.TextObject = TextObject{Font: obj.Font, DrawParam: obj.DrawParam, Fill: obj.Fill, Stroke: obj.Stroke, FillColor: obj.FillColor, StrokeColor: obj.StrokeColor, Clips: obj.Clips}
+			case "PathObject":
+				graphic.PathObject = PathObject{DrawParam: obj.DrawParam, Fill: obj.Fill, Stroke: obj.Stroke, FillColor: obj.FillColor, StrokeColor: obj.StrokeColor, Clips: obj.Clips}
+			case "ImageObject":
+				graphic.ImageObject = ImageObject{Border: obj.Border, Clips: obj.Clips}
+			}
+			p.renderer.countObjectFonts(graphic, p.usage, defaults, nil)
+			return nil
+		}
+		var layer Layer
+		if err := layer.decodeObject(d, node); err != nil {
+			return err
+		}
+		for _, obj := range layer.Objects {
+			p.renderer.countObjectFonts(obj, p.usage, defaults, nil)
+		}
+		return nil
+	})
+}
+
+// fontUsageReferences 保存字体统计中的当前引用路径，不合并共享内容的用量
+type fontUsageReferences struct {
+	composites map[*CompositeGraphicUnit]bool
+	patterns   map[*Pattern]bool
+}
+
+// fontUsageObject 仅读取图元的字体、画刷及裁剪依赖，不构造坐标和路径数据
+type fontUsageObject struct {
+	Font        string       `xml:"Font,attr"`
+	DrawParam   string       `xml:"DrawParam,attr"`
+	Fill        *bool        `xml:"Fill,attr"`
+	Stroke      *bool        `xml:"Stroke,attr"`
+	FillColor   *FillColor   `xml:"FillColor"`
+	StrokeColor *StrokeColor `xml:"StrokeColor"`
+	Clips       *Clips       `xml:"Clips"`
+	Border      *ImageBorder `xml:"Border"`
+}
+
+// UnmarshalXML 读取标准命名空间内的字体依赖，跳过无关图元内容
+// 入参: d XML解码器, start 图元起始节点
+// 返回: error 解析错误
+func (o *fontUsageObject) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type plain fontUsageObject
+	var value plain
+	if err := decodeGraphicAttributes(start, &value); err != nil {
+		return err
+	}
+	*o = fontUsageObject(value)
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "FillColor":
+			return d.DecodeElement(&o.FillColor, &node)
+		case "StrokeColor":
+			return d.DecodeElement(&o.StrokeColor, &node)
+		case "Clips":
+			return d.DecodeElement(&o.Clips, &node)
+		case "Border":
+			return d.DecodeElement(&o.Border, &node)
+		}
+		return d.Skip()
+	})
+}
+
+// localizedFontFaceAt 按指定包内路径读取内嵌字体的本地化名称信息
+// 入参: font 字体定义, fontPath 已解析的包内字体路径, platform 名称表平台标识, language 名称表语言标识
+// 返回: *FontFace 独立字体信息, error 资源或解析错误
+func (r *Reader) localizedFontFaceAt(font Font, fontPath string, platform, language uint16) (*FontFace, error) {
+	name := cleanPackagePath(fontPath)
+	key := fmt.Sprintf("%s\x00%d:%d", name, platform, language)
+	faces, ok := r.fontFaces[key]
+	if !ok {
+		data, err := r.readFileView(name)
+		if err != nil {
+			return nil, err
+		}
+		values, err := (FontFile{Data: data}).LocalizedFaces(platform, language)
+		if err != nil {
+			return nil, err
+		}
+		faces = make([]*FontFace, len(values))
+		for index := range values {
+			faces[index] = &values[index]
+		}
+		r.fontFaces[key] = faces
+	}
+	if len(faces) == 0 {
+		return nil, fmt.Errorf("font faces empty")
+	}
+	names := make([][]string, len(faces))
+	for index, face := range faces {
+		names[index] = face.Names
+	}
+	face := *faces[basefont.NameIndex(names, []string{font.FontName, font.FamilyName}, font.Bold, font.Italic)]
+	face.Names = slices.Clone(face.Names)
+	return &face, nil
+}
+
+// declaredFonts 收集文档级与页面局部资源中声明的独立字体条目
+// 返回: []declaredFontEntry 绑定作用域键的字体列表, error 结构读取错误
+func (r *Reader) declaredFonts() ([]declaredFontEntry, error) {
+	doc, err := r.docStructure()
+	if err != nil {
+		return nil, err
+	}
+	if !r.fontResourcesRead {
+		for _, page := range doc.Pages.Page {
+			header, err := r.readPageHeaderContext(context.Background(), page)
+			if err == nil {
+				_, _ = r.collectPageResourcesContext(context.Background(), r.ResPath(page.BaseLoc), &header)
+			}
+		}
+		for _, template := range doc.CommonData.TemplatePage {
+			ref := Page{BaseLoc: template.BaseLoc}
+			header, err := r.readPageHeaderContext(context.Background(), ref)
+			if err == nil {
+				_, _ = r.collectPageResourcesContext(context.Background(), r.ResPath(ref.BaseLoc), &header)
+			}
+		}
+		r.fontResourcesRead = true
+	}
+	docResFiles := make(map[string]bool, len(doc.CommonData.PublicRes)+len(doc.CommonData.DocumentRes)+len(r.resourcesRead))
+	for _, loc := range doc.CommonData.PublicRes {
+		docResFiles[cleanPackagePath(r.ResPath(loc))] = true
+	}
+	for _, loc := range doc.CommonData.DocumentRes {
+		docResFiles[cleanPackagePath(r.ResPath(loc))] = true
+	}
+	for name, ok := range r.resourcesRead {
+		if ok {
+			docResFiles[cleanPackagePath(name)] = true
+		}
+	}
+	seen := make(map[string]bool, len(r.fontCache))
+	entries := make([]declaredFontEntry, 0, len(r.fontCache))
+	addEntry := func(prefix string, font *Font) {
+		if font == nil {
+			return
+		}
+		key := prefix + "\x00" + imageResourceKey(font.ID)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		fontPath := ""
+		if font.FontFile != "" {
+			fontPath = r.ResPath(font.FontFile)
+		}
+		entries = append(entries, declaredFontEntry{key: key, fontPath: fontPath, font: *font})
+	}
+	for _, id := range slices.Sorted(maps.Keys(r.fontCache)) {
+		addEntry("", r.fontCache[id])
+	}
+	for _, name := range slices.Sorted(maps.Keys(r.resFileCache)) {
+		cleanName := cleanPackagePath(name)
+		if docResFiles[cleanName] {
+			continue
+		}
+		parsed := r.resFileCache[name]
+		if parsed == nil {
+			continue
+		}
+		for _, id := range slices.Sorted(maps.Keys(parsed.fonts.exact)) {
+			addEntry(cleanName, parsed.fonts.exact[id])
+		}
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].font.ID < entries[j].font.ID
+	})
+	return entries, nil
+}
+
+// fontData 按调用方所有权读取内嵌字体，集合字体始终独立提取
+// 入参: id 字体资源标识, readonly 是否允许借用只读资源
+// 返回: []byte 字体数据, error 资源或集合错误
+func (r *Reader) fontData(id string, readonly bool) ([]byte, error) {
+	f, err := r.embeddedFontDefinition(id)
+	if err != nil {
+		return nil, err
+	}
+	if f == nil || f.FontFile == "" {
+		return nil, fmt.Errorf("embedded font %q not found", id)
+	}
+	return r.readFontData(f, readonly)
+}
+
+// embeddedFontDefinition 按标准优先级定位含有效内嵌文件的字体定义，不被无文件外部声明遮蔽
+// 入参: id 字体资源标识
+// 返回: *Font 内嵌字体定义, error 结构或资源解析错误
+func (r *Reader) embeddedFontDefinition(id string) (*Font, error) {
+	if id == "" {
+		return nil, nil
+	}
+	doc, err := r.docStructure()
+	if err != nil {
+		return nil, err
+	}
+	var fallback *Font
+	consider := func(f *Font) bool {
+		if f == nil || f.FontFile == "" {
+			return false
+		}
+		if r.hasPackageFile(r.ResPath(f.FontFile)) {
+			fallback = f
+			return true
+		}
+		if fallback == nil {
+			fallback = f
+		}
+		return false
+	}
+	if f, ok := r.docFonts.get(id); ok && consider(f) {
+		return fallback, nil
+	}
+	if f, ok := resourceValue(r.fontCache, id); ok && consider(f) {
+		return fallback, nil
+	}
+	for _, list := range [][]string{doc.CommonData.DocumentRes, doc.CommonData.PublicRes} {
+		for _, loc := range slices.Backward(list) {
+			parsed, err := r.parseResFileContext(context.Background(), r.ResPath(loc))
+			if err != nil {
+				return nil, err
+			}
+			if parsed != nil {
+				if f, ok := parsed.fonts.get(id); ok && consider(f) {
+					return fallback, nil
+				}
+			}
+		}
+	}
+	if !r.fontResourcesRead {
+		if _, err := r.declaredFonts(); err != nil {
+			return nil, err
+		}
+	}
+	seenRes := make(map[string]bool)
+	checkPage := func(p Page) *Font {
+		hdr, err := r.readPageHeaderContext(context.Background(), p)
+		if err != nil {
+			return nil
+		}
+		pagePath := r.ResPath(p.BaseLoc)
+		for _, res := range slices.Backward(hdr.PageRes) {
+			resFull := cleanPackagePath(resolveResourcePath(pagePath, "", res))
+			if resFull == "" || resFull == "." || seenRes[resFull] {
+				continue
+			}
+			seenRes[resFull] = true
+			if parsed := r.resFileCache[resFull]; parsed != nil {
+				if f, ok := parsed.fonts.get(id); ok && consider(f) {
+					return fallback
+				}
+			}
+		}
+		return nil
+	}
+	for _, p := range doc.Pages.Page {
+		if hit := checkPage(p); hit != nil {
+			return hit, nil
+		}
+	}
+	for _, tpl := range doc.CommonData.TemplatePage {
+		if hit := checkPage(Page{BaseLoc: tpl.BaseLoc}); hit != nil {
+			return hit, nil
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(r.resFileCache)) {
+		if seenRes[cleanPackagePath(name)] {
+			continue
+		}
+		if parsed := r.resFileCache[name]; parsed != nil {
+			if f, ok := parsed.fonts.get(id); ok && consider(f) {
+				return fallback, nil
+			}
+		}
+	}
+	return fallback, nil
+}
+
+// readFontData 按指定字体定义与调用方所有权读取内嵌字体，集合字体独立提取
+// 入参: f 字体定义, readonly 是否允许借用只读资源
+// 返回: []byte 字体数据, error 资源或集合错误
+func (r *Reader) readFontData(f *Font, readonly bool) ([]byte, error) {
+	if f == nil || f.FontFile == "" {
+		return nil, fmt.Errorf("embedded font not found")
+	}
+	read := r.readFile
+	if readonly {
+		read = r.readFileView
+	}
+	data, err := read(r.ResPath(f.FontFile))
+	if err != nil {
+		return nil, err
+	}
+	if bytes.HasPrefix(data, []byte("ttcf")) {
+		index := basefont.CollectionIndex(data, []string{f.FontName, f.FamilyName}, f.Bold, f.Italic)
+		return basefont.ExtractCollectionFont(data, index)
+	}
+	return data, nil
+}
+
+// fontDefinition 按文档级优先查找已加载的字体，未命中时兼容已解析局部资源
+// 入参: id 字体资源标识
+// 返回: *Font 字体定义，未找到或别名冲突时为nil
+func (r *Reader) fontDefinition(id string) *Font {
+	if id == "" {
+		return nil
+	}
+	if font, ok := r.docFonts.get(id); ok && font != nil {
+		return font
+	}
+	if font, ok := resourceValue(r.fontCache, id); ok && font != nil {
+		return font
+	}
+	for _, name := range slices.Sorted(maps.Keys(r.resFileCache)) {
+		if font, ok := r.resFileCache[name].fonts.get(id); ok && font != nil {
+			return font
+		}
+	}
+	return nil
+}
+
 // embeddedFontFace 按资源缓存内嵌字体名称并返回独立副本，不解析字形轮廓
 // 入参: of OFD字体定义
 // 返回: *FontFace 字体信息, error 资源读取错误
 func (r *Reader) embeddedFontFace(of Font) (*FontFace, error) {
-	name := r.ResPath(of.FontFile)
+	return r.embeddedFontFaceAt(of, r.ResPath(of.FontFile))
+}
+
+// embeddedFontFaceAt 按指定包内字体路径读取并缓存内嵌字体名称，消除多页同名局部字体串台
+// 入参: of OFD字体定义, fontPath 已解析的包内字体文件路径
+// 返回: *FontFace 字体信息, error 资源读取错误
+func (r *Reader) embeddedFontFaceAt(of Font, fontPath string) (*FontFace, error) {
+	name := cleanPackagePath(fontPath)
 	faces, ok := r.fontFaces[name]
 	if !ok {
 		data, err := r.readFileView(name)
@@ -384,31 +675,22 @@ func (r *Renderer) fontInfoDocument() (*Document, error) {
 // 入参: usage 字体使用次数
 // 返回: []FontInfo 字体诊断列表, error 错误信息
 func (r *Renderer) fontInfos(usage map[string]int) ([]FontInfo, error) {
-	fonts, err := r.Reader.Fonts()
+	entries, err := r.Reader.declaredFonts()
 	if err != nil {
 		return nil, err
 	}
-	counts := make(map[string]int, len(usage))
-	for id, used := range usage {
-		if font := r.Reader.fontDefinition(id); font != nil {
-			id = font.ID
-		}
-		counts[id] += used
-	}
-	usage = counts
-	infos := make([]FontInfo, 0, len(fonts)+len(usage))
-	seen := make(map[string]bool)
-	for _, font := range fonts {
-		info := r.fontInfo(font)
-		info.Used = usage[font.ID]
+	infos := make([]FontInfo, 0, len(entries)+len(usage))
+	for _, entry := range entries {
+		info := r.fontInfo(entry.font, entry.fontPath)
+		info.Used = usage[entry.key]
 		infos = append(infos, info)
-		seen[font.ID] = true
 	}
-	for id, used := range usage {
-		if seen[id] {
+	for _, id := range slices.Sorted(maps.Keys(usage)) {
+		used := usage[id]
+		if used <= 0 || strings.Contains(id, "\x00") {
 			continue
 		}
-		info := r.fontInfo(Font{ID: id})
+		info := r.fontInfo(Font{ID: id}, "")
 		info.FontName, info.Used = id, used
 		info.Detail = "字体资源未被声明"
 		if info.Status == FontStatusFallback {
@@ -428,10 +710,10 @@ func (r *Renderer) fontInfos(usage map[string]int) ([]FontInfo, error) {
 	return infos, nil
 }
 
-// fontInfo 获取单个字体诊断信息
-// 入参: font 字体定义
+// fontInfo 按条目自身的包内字体路径获取字体诊断信息
+// 入参: font 字体定义, fontPath 已解析的包内字体文件路径
 // 返回: FontInfo 字体诊断信息
-func (r *Renderer) fontInfo(font Font) FontInfo {
+func (r *Renderer) fontInfo(font Font, fontPath string) FontInfo {
 	info := FontInfo{
 		ID:         font.ID,
 		FontName:   font.FontName,
@@ -441,10 +723,16 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 		Embedded:   font.FontFile != "",
 	}
 	if info.Embedded {
-		face, err := r.Reader.embeddedFontFace(font)
+		if fontPath == "" {
+			fontPath = r.Reader.ResPath(font.FontFile)
+		}
+		info.fontPath = fontPath
+		info.bold = font.Bold
+		info.italic = font.Italic
+		face, err := r.Reader.embeddedFontFaceAt(font, fontPath)
 		if err == nil {
 			info.Status = FontStatusEmbedded
-			info.Matched = path.Base(font.FontFile)
+			info.Matched = path.Base(fontPath)
 			info.MatchedFace = face
 			info.Detail = "使用内嵌字体文件"
 		} else {
@@ -481,136 +769,100 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 }
 
 // fontUsage 统计文档字体使用次数
-// 入参: doc 文档结构, pages 页面内容列表
+// 入参: pages 页面内容列表
 // 返回: map[string]int 字体使用次数
-func (r *Renderer) fontUsage(doc *Document, pages []*PageContent) map[string]int {
+func (r *Renderer) fontUsage(pages []*PageContent) map[string]int {
 	usage := make(map[string]int)
 	for _, page := range pages {
 		if page != nil {
 			r.countPageFonts(page, usage)
 		}
 	}
-	for _, tpl := range doc.CommonData.TemplatePage {
-		if page := r.loadTemplate(tpl.ID); page != nil {
-			r.countPageFonts(page, usage)
-		}
-	}
 	return usage
 }
 
-// readPageFontUsage 读取页面字体用量，不保留页面图元
+// readPageFontUsage 读取页面及实际绑定模板的字体用量并隔离各自局部资源作用域，不保留页面图元
 // 入参: page 页面引用
 // 返回: map[string]int 字体使用次数, error 错误信息
 func (r *Renderer) readPageFontUsage(page Page) (map[string]int, error) {
-	r.Reader.loadPageResources(page)
+	header, hdrErr := r.Reader.readPageHeader(page)
+	var pageRes []*parsedRes
+	if hdrErr == nil {
+		pageRes, _ = r.Reader.collectPageResourcesContext(context.Background(), r.Reader.ResPath(page.BaseLoc), &header)
+	}
+	restore := r.bindParsedResources(pageRes)
 	f, err := r.Reader.openFile(r.Reader.ResPath(page.BaseLoc))
 	if err != nil {
+		restore()
 		return nil, err
 	}
-	defer f.Close()
 	content := fontUsagePage{renderer: r, usage: make(map[string]int)}
-	if err := xml.NewDecoder(f).Decode(&content); err != nil {
-		return nil, err
+	decErr := xml.NewDecoder(f).Decode(&content)
+	_, copyErr := io.Copy(io.Discard, f)
+	closeErr := f.Close()
+	if decErr != nil {
+		restore()
+		return nil, decErr
 	}
-	if _, err := io.Copy(io.Discard, f); err != nil {
-		return nil, err
+	if copyErr != nil {
+		restore()
+		return nil, copyErr
+	}
+	if closeErr != nil {
+		restore()
+		return nil, closeErr
 	}
 	r.countAnnotationFonts(page.ID, content.usage)
+	restore()
+	if hdrErr == nil {
+		for _, ref := range header.Template {
+			if tpl := r.loadTemplate(ref.TemplateID); tpl != nil {
+				r.countTemplateFonts(tpl, content.usage)
+			}
+		}
+	}
 	return content.usage, nil
 }
 
-// fontUsageObject 仅读取图元的字体、画刷及裁剪依赖，不构造坐标和路径数据
-type fontUsageObject struct {
-	Font        string       `xml:"Font,attr"`
-	DrawParam   string       `xml:"DrawParam,attr"`
-	Fill        *bool        `xml:"Fill,attr"`
-	Stroke      *bool        `xml:"Stroke,attr"`
-	FillColor   *FillColor   `xml:"FillColor"`
-	StrokeColor *StrokeColor `xml:"StrokeColor"`
-	Clips       *Clips       `xml:"Clips"`
-	Border      *ImageBorder `xml:"Border"`
-}
-
-// UnmarshalXML 读取标准命名空间内的字体依赖，跳过无关图元内容
-// 入参: d XML解码器, start 图元起始节点
-// 返回: error 解析错误
-func (o *fontUsageObject) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	type plain fontUsageObject
-	var value plain
-	if err := decodeGraphicAttributes(start, &value); err != nil {
-		return err
-	}
-	*o = fontUsageObject(value)
-	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
-		switch node.Name.Local {
-		case "FillColor":
-			return d.DecodeElement(&o.FillColor, &node)
-		case "StrokeColor":
-			return d.DecodeElement(&o.StrokeColor, &node)
-		case "Clips":
-			return d.DecodeElement(&o.Clips, &node)
-		case "Border":
-			return d.DecodeElement(&o.Border, &node)
-		}
-		return d.Skip()
-	})
-}
-
-// decodeObjects 逐个读取图元并复用字体统计规则
-// 入参: d XML解码器, start 容器起始节点, defaults 默认绘制参数
-// 返回: error 错误信息
-func (p *fontUsagePage) decodeObjects(d *xml.Decoder, start xml.StartElement, defaults *DrawParam) error {
-	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
-		switch node.Name.Local {
-		case "PageBlock":
-			return p.decodeObjects(d, node, defaults)
-		case "TextObject", "PathObject", "ImageObject":
-			var obj fontUsageObject
-			if err := d.DecodeElement(&obj, &node); err != nil {
-				return err
-			}
-			graphic := GraphicObject{Type: node.Name.Local}
-			switch node.Name.Local {
-			case "TextObject":
-				graphic.TextObject = TextObject{Font: obj.Font, DrawParam: obj.DrawParam, Fill: obj.Fill, Stroke: obj.Stroke, FillColor: obj.FillColor, StrokeColor: obj.StrokeColor, Clips: obj.Clips}
-			case "PathObject":
-				graphic.PathObject = PathObject{DrawParam: obj.DrawParam, Fill: obj.Fill, Stroke: obj.Stroke, FillColor: obj.FillColor, StrokeColor: obj.StrokeColor, Clips: obj.Clips}
-			case "ImageObject":
-				graphic.ImageObject = ImageObject{Border: obj.Border, Clips: obj.Clips}
-			}
-			p.renderer.countObjectFonts(graphic, p.usage, defaults, nil)
-			return nil
-		}
-		var layer Layer
-		if err := layer.decodeObject(d, node); err != nil {
-			return err
-		}
-		for _, obj := range layer.Objects {
-			p.renderer.countObjectFonts(obj, p.usage, defaults, nil)
-		}
-		return nil
-	})
-}
-
-// countPageFonts 统计页面字体使用次数
+// countPageFonts 统计页面及其实际绑定模板的字体使用次数
 // 入参: page 页面内容, usage 字体使用次数
 func (r *Renderer) countPageFonts(page *PageContent, usage map[string]int) {
+	restore := r.bindPageResources(page)
 	for _, layer := range page.Content.Layer {
 		r.countLayerFonts(layer, usage)
 	}
 	r.countAnnotationFonts(page.ID, usage)
+	restore()
+	for _, ref := range page.Template {
+		if tpl := r.loadTemplate(ref.TemplateID); tpl != nil {
+			r.countTemplateFonts(tpl, usage)
+		}
+	}
+}
+
+// countTemplateFonts 绑定模板页自身局部资源作用域并统计其图层字体使用次数
+// 入参: tpl 模板页面内容, usage 字体使用次数
+func (r *Renderer) countTemplateFonts(tpl *PageContent, usage map[string]int) {
+	defer r.bindParsedResources(tpl.pageResources)()
+	for _, layer := range tpl.Content.Layer {
+		r.countLayerFonts(layer, usage)
+	}
 }
 
 // countAnnotationFonts 统计页面注释中的字体使用次数
 // 入参: pageID 页面标识, usage 字体使用次数
 func (r *Renderer) countAnnotationFonts(pageID string, usage map[string]int) {
-	if r.RenderAnnotations {
-		for _, annot := range r.Reader.Annots[pageID] {
+	if r.RenderAnnotations && r.Reader != nil {
+		annots, _ := r.Reader.pageAnnotationsContext(r.outputContext(), pageID)
+		for _, annot := range annots {
+			if r.printing && annot.Print != nil && !*annot.Print {
+				continue
+			}
 			if annot.Visible != nil && !*annot.Visible {
 				continue
 			}
-			for _, obj := range annot.Appearance.Objects {
-				r.countObjectFonts(obj, usage, nil, nil)
+			for obj := range annot.Appearance.objects() {
+				r.countObjectFonts(*obj, usage, nil, nil)
 			}
 		}
 	}
@@ -649,8 +901,11 @@ func (r *Renderer) countObjectFonts(obj GraphicObject, usage map[string]int, def
 	switch obj.Type {
 	case "TextObject":
 		text := obj.TextObject
-		r.countTextFont(text, usage)
 		defaults = r.drawParamDefaults(text.DrawParam, defaults)
+		if text.Font == "" && defaults != nil && defaults.Font != "" {
+			text.Font = defaults.Font
+		}
+		r.countTextFont(text, usage)
 		fill, stroke = text.FillColor, text.StrokeColor
 		shouldFill = text.Fill == nil || *text.Fill
 		shouldStroke = text.Stroke != nil && *text.Stroke
@@ -691,9 +946,9 @@ func (r *Renderer) countObjectFonts(obj GraphicObject, usage map[string]int, def
 // 入参: cgu 复合图元, usage 字体使用次数, defaults 默认绘制参数, visited 当前引用路径
 func (r *Renderer) countCompositeFonts(cgu CompositeGraphicUnit, usage map[string]int, defaults *DrawParam, visited *fontUsageReferences) {
 	r.countClipFonts(cgu.Clips, usage)
-	defaults = r.drawParamDefaults(cgu.DrawParam, defaults)
+	defaults = r.compositeGraphicUnitDefaults(cgu, defaults)
 	if cgu.ResourceID != "" {
-		if ref, _ := resourceValue(r.CompositeGraphicUnits, cgu.ResourceID); ref != nil {
+		if ref := r.compositeDefinition(cgu.ResourceID); ref != nil {
 			if visited == nil {
 				visited = &fontUsageReferences{}
 			}
@@ -735,11 +990,32 @@ func (r *Renderer) countPatternFonts(fill *FillColor, usage map[string]int, visi
 	}
 }
 
+// scopedFontUsageKey 按当前页面局部资源优先的作用域解析字体统计键
+// 入参: id 字体引用标识
+// 返回: string 绑定声明文件的作用域键或未声明原始标识
+func (r *Renderer) scopedFontUsageKey(id string) string {
+	if r.Reader == nil || id == "" {
+		return id
+	}
+	for i := len(r.pageResources) - 1; i >= 0; i-- {
+		if font, ok := r.pageResources[i].fonts.get(id); ok && font != nil {
+			return cleanPackagePath(r.pageResources[i].path) + "\x00" + imageResourceKey(font.ID)
+		}
+	}
+	if font, ok := r.Reader.docFonts.get(id); ok && font != nil {
+		return "\x00" + imageResourceKey(font.ID)
+	}
+	if font, ok := resourceValue(r.Reader.fontCache, id); ok && font != nil {
+		return "\x00" + imageResourceKey(font.ID)
+	}
+	return id
+}
+
 // countTextFont 统计文本字体使用次数
 // 入参: text 文本对象, usage 字体使用次数
 func (r *Renderer) countTextFont(text TextObject, usage map[string]int) {
 	if fontID := r.textObjectFontID(text); fontID != "" {
-		usage[fontID]++
+		usage[r.scopedFontUsageKey(fontID)]++
 	}
 	r.countClipFonts(text.Clips, usage)
 }

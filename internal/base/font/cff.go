@@ -27,9 +27,6 @@ import (
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
-// cffDict 使用float64存储所有数值，以统一处理整数和实数
-type cffDict map[int][]float64
-
 // WrapCFFToOTF 将CFF裸数据包装为OpenType字体格式
 // 入参: cffData CFF字体数据
 // 返回: []byte OTF字体数据, map[rune]uint16 字符映射, error 错误信息
@@ -63,25 +60,23 @@ func WrapCFFToOTF(cffData []byte) ([]byte, map[rune]uint16, error) {
 		return nil, nil, err
 	}
 	unitsPerEm := cffUnitsPerEm(matrix)
-	tables := make(map[string][]byte)
+	if mapping == nil {
+		mapping = make(map[rune]uint16)
+	}
+	maxGlyphs := uint16(min(numGlyphs, 0xFFFF))
+	tables := make(map[string][]byte, 9)
 	tables["CFF "] = cffData
 	tables["head"] = buildHeadTable(unitsPerEm)
-	tables["hhea"] = buildHheaTable(uint16(numGlyphs))
-	tables["maxp"] = buildCFFMaxpTable(uint16(numGlyphs))
+	tables["hhea"] = buildHheaTable(maxGlyphs)
+	tables["maxp"] = buildCFFMaxpTable(maxGlyphs)
 	tables["OS/2"] = buildOS2Table()
 	tables["name"] = buildNameTable()
 	tables["post"] = BuildPostTable()
 	tables["hmtx"] = buildHmtxTable(widths)
-	tables["cmap"] = BuildCmapTable(uint16(numGlyphs), mapping)
+	tables["cmap"] = buildPackedCmapTable(maxGlyphs, mapping)
+	AddPackedGlyphMapping(mapping, maxGlyphs)
 	data, err := SerializeOTF(tables)
 	return data, mapping, err
-}
-
-// normalizeCFFCharstrings 展开预定义字符集并规范化Type2提示编码，保留轮廓和字宽
-// 入参: data CFF字体数据
-// 返回: []byte 标准化后的CFF数据, error 错误信息
-func normalizeCFFCharstrings(data []byte) ([]byte, error) {
-	return NormalizeCFFCharstringsAt(data, 0)
 }
 
 // NormalizeCFFCharstringsAt 统一CFF设计坐标，现有OpenType字体使用head表的设计单位
@@ -142,7 +137,9 @@ func NormalizeCFFCharstringsAt(data []byte, unitsPerEm uint16) ([]byte, error) {
 	if transform != nil {
 		scale := 1 / float64(unitsPerEm)
 		dict[1207] = []float64{scale, 0, 0, scale, 0, 0}
-		delete(dict, 18)
+		if _, cid := dict[1230]; !cid {
+			dict[18] = []float64{0, 0}
+		}
 		if err := transformCFFBounds(dict, matrix); err != nil {
 			return nil, err
 		}
@@ -164,62 +161,6 @@ func NormalizeCFFCharstringsAt(data []byte, unitsPerEm uint16) ([]byte, error) {
 		return data, nil
 	}
 	return replaceCFFCharstrings(data, dict, topStart, topSize, charStart, charSize, chars, explicitCharset), nil
-}
-
-// replaceCFFCharstrings 替换字形索引并调整后续数据及顶层字典的偏移
-// 入参: data 原始字体, dict 输出字典, topStart 顶层索引起点, topSize 顶层索引大小
-// 入参: charStart 字形索引起点, charSize 字形索引大小, chars 字形程序, explicitCharset 追加字符集
-// 返回: []byte 重建后的字体数据
-func replaceCFFCharstrings(data []byte, dict cffDict, topStart, topSize, charStart, charSize int, chars [][]byte, explicitCharset []byte) []byte {
-	encodedChars := encodeCFFIndex(chars)
-	topEnd := topStart + topSize
-	topData, _ := getCFFIndexData(data, topStart)
-	originalDict := parseCFFDict(topData)
-	newTop := encodeCFFIndex([][]byte{encodeCFFDict(dict)})
-	for range 6 {
-		shift := len(newTop) - topSize
-		shiftTail := shift + len(encodedChars) - charSize
-		for _, op := range []int{15, 16, 17, 1236, 1237} {
-			if op == 15 && explicitCharset != nil {
-				dict[op] = []float64{float64(len(data) + shiftTail)}
-				continue
-			}
-			values := dict[op]
-			if len(values) != 1 || op == 15 && values[0] <= 2 || op == 16 && values[0] <= 1 {
-				continue
-			}
-			original := originalDict[op]
-			offset := int(original[0])
-			if offset >= charStart+charSize {
-				dict[op] = []float64{float64(offset + shiftTail)}
-			} else if offset >= topEnd {
-				dict[op] = []float64{float64(offset + shift)}
-			}
-		}
-		if values := dict[18]; len(values) == 2 && values[0] != 0 {
-			original := originalDict[18]
-			offset := int(original[1])
-			if offset >= charStart+charSize {
-				dict[18] = []float64{values[0], float64(offset + shiftTail)}
-			} else if offset >= topEnd {
-				dict[18] = []float64{values[0], float64(offset + shift)}
-			}
-		}
-		updated := encodeCFFIndex([][]byte{encodeCFFDict(dict)})
-		if len(updated) == len(newTop) {
-			newTop = updated
-			break
-		}
-		newTop = updated
-	}
-	result := make([]byte, 0, len(data)+len(newTop)-topSize+len(encodedChars)-charSize+len(explicitCharset))
-	result = append(result, data[:topStart]...)
-	result = append(result, newTop...)
-	result = append(result, data[topEnd:charStart]...)
-	result = append(result, encodedChars...)
-	result = append(result, data[charStart+charSize:]...)
-	result = append(result, explicitCharset...)
-	return result
 }
 
 // SanitizeCFF 尝试清洗CFF数据，转换CID字体并合并FontMatrix
@@ -361,7 +302,141 @@ func SanitizeCFF(data []byte) ([]byte, error) {
 		}
 		finalPrivData = encodeCFFDict(pDict)
 	}
-	return encodeSanitizedCFF(data[:hdrSize], nameIndexData, topDict, stringIndexData, globalSubrIndexData, charStringsData, finalPrivData, localSubrData), nil
+	stringIndexData, charsetData := sanitizedCFFCharset(stringIndexData, len(chars))
+	return encodeSanitizedCFF(data[:hdrSize], nameIndexData, topDict, stringIndexData, globalSubrIndexData, charsetData, charStringsData, finalPrivData, localSubrData), nil
+}
+
+// GetCFFCIDRuneMap 获取CID到包装字体字符的映射
+// 入参: data CFF或OpenType字体数据
+// 返回: map[uint16]rune CID映射
+func GetCFFCIDRuneMap(data []byte) map[uint16]rune {
+	cffData := getCFFData(data)
+	if cffData == nil {
+		return nil
+	}
+	numGlyphs, err := parseCFFAndCountGlyphs(cffData)
+	if err != nil {
+		return nil
+	}
+	sids, registry, ordering, stringIndexOff, ok := getCFFCharsetInfo(cffData, numGlyphs)
+	if !ok || registry == "" {
+		return nil
+	}
+	mapping := cffCharsetMapping(cffData, sids, registry, ordering, stringIndexOff)
+	var gidRunes map[uint16]rune
+	if len(mapping) != 0 {
+		gidRunes = make(map[uint16]rune, len(mapping))
+		for run, gid := range mapping {
+			if run != PackedGlyphRune(gid) {
+				gidRunes[gid] = run
+			}
+		}
+	}
+	result := make(map[uint16]rune, max(0, len(sids)-1))
+	for gid, cid := range sids {
+		if gid == 0 || cid < 0 || cid > 0xFFFF {
+			continue
+		}
+		if run, ok := gidRunes[uint16(gid)]; ok {
+			result[uint16(cid)] = run
+		} else {
+			result[uint16(cid)] = PackedGlyphRune(uint16(gid))
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// CFFCIDToGID 返回CID编码CFF字体的CID到GID反查表，非CID字体返回nil
+// 入参: data CFF或OpenType字体数据
+// 返回: map[uint16]uint16 CID到GID映射
+func CFFCIDToGID(data []byte) map[uint16]uint16 {
+	cffData := getCFFData(data)
+	if cffData == nil {
+		return nil
+	}
+	numGlyphs, err := parseCFFAndCountGlyphs(cffData)
+	if err != nil || numGlyphs <= 0 {
+		return nil
+	}
+	sids, registry, _, _, ok := getCFFCharsetInfo(cffData, numGlyphs)
+	if !ok || registry == "" {
+		return nil
+	}
+	result := make(map[uint16]uint16, len(sids))
+	for gid, cid := range sids {
+		if gid > 0 && gid <= 0xFFFF && cid >= 0 && cid <= 0xFFFF {
+			result[uint16(cid)] = uint16(gid)
+		}
+	}
+	return result
+}
+
+// cffDict 使用float64存储所有数值，以统一处理整数和实数
+type cffDict map[int][]float64
+
+// normalizeCFFCharstrings 展开预定义字符集并规范化Type2提示编码，保留轮廓和字宽
+// 入参: data CFF字体数据
+// 返回: []byte 标准化后的CFF数据, error 错误信息
+func normalizeCFFCharstrings(data []byte) ([]byte, error) {
+	return NormalizeCFFCharstringsAt(data, 0)
+}
+
+// replaceCFFCharstrings 替换字形索引并调整后续数据及顶层字典的偏移
+// 入参: data 原始字体, dict 输出字典, topStart 顶层索引起点, topSize 顶层索引大小, charStart 字形索引起点, charSize 字形索引大小, chars 字形程序, explicitCharset 追加字符集
+// 返回: []byte 重建后的字体数据
+func replaceCFFCharstrings(data []byte, dict cffDict, topStart, topSize, charStart, charSize int, chars [][]byte, explicitCharset []byte) []byte {
+	encodedChars := encodeCFFIndex(chars)
+	topEnd := topStart + topSize
+	topData, _ := getCFFIndexData(data, topStart)
+	originalDict := parseCFFDict(topData)
+	newTop := encodeCFFIndex([][]byte{encodeCFFDict(dict)})
+	for range 6 {
+		shift := len(newTop) - topSize
+		shiftTail := shift + len(encodedChars) - charSize
+		for _, op := range []int{15, 16, 17, 1236, 1237} {
+			if op == 15 && explicitCharset != nil {
+				dict[op] = []float64{float64(len(data) + shiftTail)}
+				continue
+			}
+			values := dict[op]
+			if len(values) != 1 || op == 15 && values[0] <= 2 || op == 16 && values[0] <= 1 {
+				continue
+			}
+			original := originalDict[op]
+			offset := int(original[0])
+			if offset >= charStart+charSize {
+				dict[op] = []float64{float64(offset + shiftTail)}
+			} else if offset >= topEnd {
+				dict[op] = []float64{float64(offset + shift)}
+			}
+		}
+		if values := dict[18]; len(values) == 2 && values[0] != 0 {
+			original := originalDict[18]
+			offset := int(original[1])
+			if offset >= charStart+charSize {
+				dict[18] = []float64{values[0], float64(offset + shiftTail)}
+			} else if offset >= topEnd {
+				dict[18] = []float64{values[0], float64(offset + shift)}
+			}
+		}
+		updated := encodeCFFIndex([][]byte{encodeCFFDict(dict)})
+		if len(updated) == len(newTop) {
+			newTop = updated
+			break
+		}
+		newTop = updated
+	}
+	result := make([]byte, 0, len(data)+len(newTop)-topSize+len(encodedChars)-charSize+len(explicitCharset))
+	result = append(result, data[:topStart]...)
+	result = append(result, newTop...)
+	result = append(result, data[topEnd:charStart]...)
+	result = append(result, encodedChars...)
+	result = append(result, data[charStart+charSize:]...)
+	result = append(result, explicitCharset...)
+	return result
 }
 
 // normalizeCFFPrivate 移除废弃的加粗阈值及未加密标记，拒绝加密字形程序
@@ -384,8 +459,7 @@ func normalizeCFFPrivate(dict cffDict) error {
 }
 
 // sanitizeMultiFDCFF 清洗多FD的CID CFF数据
-// 入参: data 原始CFF数据, hdrSize 头部大小, nameIndexData 名称索引, topDict 顶层字典
-// 入参: stringIndexData 字符串索引, globalSubrIndexData 全局子程序索引, fdArrOff FDArray偏移, fdCount FD数量
+// 入参: data 原始CFF数据, hdrSize 头部大小, nameIndexData 名称索引, topDict 顶层字典, stringIndexData 字符串索引, globalSubrIndexData 全局子程序索引, fdArrOff FDArray偏移, fdCount FD数量
 // 返回: []byte 清洗后的CFF数据, error 错误信息
 func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict cffDict, stringIndexData []byte, globalSubrIndexData []byte, fdArrOff int, fdCount int) ([]byte, error) {
 	kind, err := cffCharstringType(topDict)
@@ -515,8 +589,8 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 		}
 	}
 	privateDict := make(cffDict)
-	if len(privateDicts) > 0 {
-		for k, v := range privateDicts[0] {
+	for _, pd := range privateDicts[:min(1, len(privateDicts))] {
+		for k, v := range pd {
 			privateDict[k] = v
 		}
 	}
@@ -529,31 +603,76 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 	}
 	finalPrivData := encodeCFFDict(privateDict)
 	charStringsData := encodeCFFIndex(inlined)
-	return encodeSanitizedCFF(data[:hdrSize], nameIndexData, topDict, stringIndexData, encodeCFFIndex(nil), charStringsData, finalPrivData, nil), nil
+	stringIndexData, charsetData := sanitizedCFFCharset(stringIndexData, len(inlined))
+	return encodeSanitizedCFF(data[:hdrSize], nameIndexData, topDict, stringIndexData, encodeCFFIndex(nil), charsetData, charStringsData, finalPrivData, nil), nil
+}
+
+// sanitizedCFFCharset 为转换后的非CID字体生成显式字符集并按需补充字符串索引
+// 入参: stringIndexData 原始字符串索引, numGlyphs 字形总数
+// 返回: []byte 字符串索引数据, []byte 字符集数据
+func sanitizedCFFCharset(stringIndexData []byte, numGlyphs int) ([]byte, []byte) {
+	if numGlyphs <= 1 {
+		return stringIndexData, nil
+	}
+	nLeft := numGlyphs - 2
+	singleRange := []byte{2, 0, 1, byte(nLeft >> 8), byte(nLeft)}
+	maxStd := len(cffStandardStrings) - 1
+	if numGlyphs-1 <= maxStd {
+		return stringIndexData, singleRange
+	}
+	origStrings, _, _ := readType2Index(stringIndexData, 0)
+	extendStrings := func(startSID, count int) []byte {
+		combined := make([][]byte, len(origStrings)+count)
+		copy(combined, origStrings)
+		for i := range count {
+			combined[len(origStrings)+i] = strconv.AppendInt([]byte{'g'}, int64(startSID+i), 10)
+		}
+		return encodeCFFIndex(combined)
+	}
+	if numGlyphs-1+len(origStrings) <= 64999 {
+		stringIndexData = extendStrings(maxStd+1, numGlyphs-1-maxStd)
+		if len(origStrings) == 0 {
+			return stringIndexData, singleRange
+		}
+		stdLeft := maxStd - 1
+		first2 := maxStd + 1 + len(origStrings)
+		nLeft2 := numGlyphs - 2 - maxStd
+		return stringIndexData, []byte{2, 0, 1, byte(stdLeft >> 8), byte(stdLeft), byte(first2 >> 8), byte(first2), byte(nLeft2 >> 8), byte(nLeft2)}
+	}
+	if need := numGlyphs - 1 - maxStd - len(origStrings); need > 0 {
+		stringIndexData = extendStrings(maxStd+1+len(origStrings), need)
+	}
+	return stringIndexData, singleRange
 }
 
 // encodeSanitizedCFF 按字典编码长度收敛偏移并组装规范化字体
-// 入参: header 头部, names 名称索引, dict 顶层字典, strings 字符串索引, globals 全局子程序索引
-// 入参: chars 字形索引, private 私有字典, locals 局部子程序索引
+// 入参: header 头部, names 名称索引, dict 顶层字典, strings 字符串索引, globals 全局子程序索引, charset 字符集, chars 字形索引, private 私有字典, locals 局部子程序索引
 // 返回: []byte CFF字体数据
-func encodeSanitizedCFF(header, names []byte, dict cffDict, strings, globals, chars, private, locals []byte) []byte {
+func encodeSanitizedCFF(header, names []byte, dict cffDict, strings, globals, charset, chars, private, locals []byte) []byte {
+	if len(charset) > 0 {
+		dict[15] = []float64{0}
+	}
 	dict[17] = []float64{0}
 	dict[18] = []float64{float64(len(private)), 0}
 	prefix := len(header) + len(names) + len(strings) + len(globals)
 	var top []byte
 	for {
 		top = encodeCFFIndex([][]byte{encodeCFFDict(dict)})
-		charOffset := prefix + len(top)
+		charsetOffset := prefix + len(top)
+		charOffset := charsetOffset + len(charset)
 		privateOffset := charOffset + len(chars)
-		if dict[17][0] == float64(charOffset) && dict[18][1] == float64(privateOffset) {
+		if (len(charset) == 0 || dict[15][0] == float64(charsetOffset)) && dict[17][0] == float64(charOffset) && dict[18][1] == float64(privateOffset) {
 			break
+		}
+		if len(charset) > 0 {
+			dict[15][0] = float64(charsetOffset)
 		}
 		dict[17][0] = float64(charOffset)
 		dict[18][1] = float64(privateOffset)
 	}
 	var out bytes.Buffer
-	out.Grow(prefix + len(top) + len(chars) + len(private) + len(locals))
-	for _, part := range [][]byte{header, names, top, strings, globals, chars, private, locals} {
+	out.Grow(prefix + len(top) + len(charset) + len(chars) + len(private) + len(locals))
+	for _, part := range [][]byte{header, names, top, strings, globals, charset, chars, private, locals} {
 		out.Write(part)
 	}
 	return out.Bytes()
@@ -849,7 +968,7 @@ func encodeNumberCFF(buf *bytes.Buffer, val float64) {
 // encodeCFFIndex 编码CFF索引结构
 // 入参: items 数据项列表
 // 返回: []byte 编码后的索引数据
-func encodeCFFIndex(items []([]byte)) []byte {
+func encodeCFFIndex(items [][]byte) []byte {
 	count := len(items)
 	if count == 0 {
 		return []byte{0, 0}
@@ -1098,36 +1217,33 @@ func getCmapFromCFF(data []byte, numGlyphs int) map[rune]uint16 {
 	return cffCharsetMapping(data, sids, registry, ordering, stringIndexOff)
 }
 
-// cffCharsetMapping 根据已解析的CFF字符集恢复Unicode映射
+// cffCharsetMapping 根据已解析的CFF字符集恢复Unicode及字形私有映射
 // 入参: data CFF数据, sids 字符标识, registry 注册机构, ordering 字符集, stringIndexOff 字符串索引偏移
 // 返回: map[rune]uint16 恢复的映射表
 func cffCharsetMapping(data []byte, sids []int, registry, ordering string, stringIndexOff int) map[rune]uint16 {
-	capacity := max(0, len(sids)-1)
-	if registry == "" || registry == "Adobe" && ordering == "GB1" {
-		capacity *= 2
-	}
-	mapping := make(map[rune]uint16, capacity)
+	numGlyphs := uint16(min(len(sids), 0xFFFF))
 	if registry == "Adobe" && ordering == "GB1" {
+		mapping := make(map[rune]uint16, len(sids))
 		for gid, cid := range sids {
 			if gid == 0 {
 				continue
 			}
-			mapping[PackedGlyphRune(uint16(gid))] = uint16(gid)
-			if r, ok := adobeGB1CIDToUnicode(cid); ok {
+			if r, ok := adobeGB1CIDToUnicode(cid); ok && r != 0 {
 				mapping[r] = uint16(gid)
 			}
 		}
+		AddPackedGlyphMapping(mapping, numGlyphs)
 		return mapping
 	}
 	if registry != "" {
-		for gid := range sids {
-			if gid == 0 {
-				continue
-			}
-			mapping[PackedGlyphRune(uint16(gid))] = uint16(gid)
+		if numGlyphs == 0 {
+			return nil
 		}
+		mapping := make(map[rune]uint16, numGlyphs)
+		AddPackedGlyphMapping(mapping, numGlyphs)
 		return mapping
 	}
+	mapping := make(map[rune]uint16, len(sids))
 	for gid, sid := range sids {
 		if gid == 0 {
 			continue
@@ -1141,63 +1257,14 @@ func cffCharsetMapping(data []byte, sids []int, registry, ordering string, strin
 			idx := sid - 391
 			name = string(readStringIndexItem(data, stringIndexOff, idx))
 		}
-		r := rune(0)
 		if name != "" {
-			r = getUnicodeFromName(name)
+			if r := getUnicodeFromName(name); r != 0 {
+				mapping[r] = uint16(gid)
+			}
 		}
-		if r == 0 {
-			r = PackedGlyphRune(uint16(gid))
-		}
-		mapping[PackedGlyphRune(uint16(gid))] = uint16(gid)
-		mapping[r] = uint16(gid)
 	}
+	AddPackedGlyphMapping(mapping, numGlyphs)
 	return mapping
-}
-
-// GetCFFCIDRuneMap 获取CID到包装字体字符的映射
-// 入参: data CFF或OpenType字体数据
-// 返回: map[uint16]rune CID映射
-func GetCFFCIDRuneMap(data []byte) map[uint16]rune {
-	cffData := getCFFData(data)
-	if cffData == nil {
-		return nil
-	}
-	numGlyphs, err := parseCFFAndCountGlyphs(cffData)
-	if err != nil {
-		return nil
-	}
-	sids, registry, ordering, stringIndexOff, ok := getCFFCharsetInfo(cffData, numGlyphs)
-	if !ok || registry == "" {
-		return nil
-	}
-	mapping := cffCharsetMapping(cffData, sids, registry, ordering, stringIndexOff)
-	if len(mapping) == 0 {
-		return nil
-	}
-	gidRunes := make(map[uint16]rune)
-	for run, gid := range mapping {
-		if run != PackedGlyphRune(gid) {
-			gidRunes[gid] = run
-		}
-	}
-	for run, gid := range mapping {
-		if _, ok := gidRunes[gid]; !ok {
-			gidRunes[gid] = run
-		}
-	}
-	result := make(map[uint16]rune)
-	for gid, cid := range sids {
-		if gid == 0 || cid < 0 || cid > 0xFFFF {
-			continue
-		}
-		if run, ok := gidRunes[uint16(gid)]; ok {
-			result[uint16(cid)] = run
-		}
-	}
-	if len(result) == 0 {
-		return nil
-	}
-	return result
 }
 
 // getCFFData 获取字体中的CFF数据

@@ -19,11 +19,16 @@ import (
 	"image/color"
 	"math"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/xiaoqidun/pdfgo"
 )
+
+// colorProfileKey 按颜色模型与包内路径标识ICC解析缓存
+type colorProfileKey struct {
+	kind string
+	name string
+}
 
 // colorProfile 保存包内配置的不可变解析结果，不跨阅读器或文档共享
 type colorProfile struct {
@@ -31,11 +36,76 @@ type colorProfile struct {
 	err   error
 }
 
+// srgb 转换归一化源分量，不在ICC变换前量化为8位
+// 入参: values 源分量
+// 返回: [3]float64 sRGB分量, error 变换错误
+func (p *colorProfile) srgb(values [4]float64) ([3]float64, error) {
+	return p.space.SRGB(values[:p.space.Components()], p.space.DefaultIntent())
+}
+
 // colorProfileUsed 判断新增ICC文件是否被颜色空间引用，不作为资源XML登记
 // 入参: spaces 当前使用的新增颜色空间
 // 返回: bool 是否保留文件
 func (r editorResource) colorProfileUsed(spaces []ColorSpace) bool {
 	return r.space != nil && r.name != "" && r.space.Profile != "" && slices.ContainsFunc(spaces, func(space ColorSpace) bool { return space.Profile == r.space.Profile })
+}
+
+// colorProfile 按文件及模型在阅读器内复用只读配置，不修改共享的颜色空间定义
+// 入参: space 颜色空间
+// 返回: *colorProfile 配置，未声明时为nil, error 读取或配置错误
+func (r *Reader) colorProfile(space *ColorSpace) (*colorProfile, error) {
+	if space == nil {
+		return nil, nil
+	}
+	if space.profile != nil {
+		return space.profile, space.profile.err
+	}
+	if space.Profile == "" {
+		return nil, nil
+	}
+	if r == nil {
+		return nil, fmt.Errorf("color profile %q is unavailable", space.Profile)
+	}
+	key := colorProfileKey{kind: strings.ToUpper(space.Type), name: r.ResPath(space.Profile)}
+	if cached := r.colorProfiles[key]; cached != nil {
+		return cached, cached.err
+	}
+	for _, other := range r.colorSpaceCache {
+		if other != nil && other.profile != nil && strings.EqualFold(other.Type, space.Type) && r.ResPath(other.Profile) == key.name {
+			if r.colorProfiles == nil {
+				r.colorProfiles = make(map[colorProfileKey]*colorProfile)
+			}
+			r.colorProfiles[key] = other.profile
+			return other.profile, other.profile.err
+		}
+	}
+	var parsed *colorProfile
+	data, err := r.readFile(key.name)
+	if err == nil {
+		parsed, err = parseColorProfile(space.Type, data)
+	}
+	if err != nil {
+		parsed = &colorProfile{err: fmt.Errorf("color profile %q: %w", space.Profile, err)}
+	}
+	if r.colorProfiles == nil {
+		r.colorProfiles = make(map[colorProfileKey]*colorProfile)
+	}
+	r.colorProfiles[key] = parsed
+	return parsed, parsed.err
+}
+
+// colorDefinition 获取页面局部优先或文档默认颜色空间，统一资源标识别名
+// 入参: id 颜色空间标识
+// 返回: *ColorSpace 已加载定义，未声明时为nil
+func (r *Renderer) colorDefinition(id string) *ColorSpace {
+	if r == nil || r.Reader == nil {
+		return nil
+	}
+	if id == "" && r.Reader.doc != nil {
+		id = formatUnitID(uint64(r.Reader.doc.CommonData.DefaultCS))
+	}
+	space, _ := r.Reader.resolveColorSpaceScoped(r.pageResources, id)
+	return space
 }
 
 // parseColorProfile 验证OFD模型与ICC源模型一致，不以设备色替代声明的配置
@@ -51,57 +121,6 @@ func parseColorProfile(kind string, data []byte) (*colorProfile, error) {
 		return nil, err
 	}
 	return &colorProfile{space: space}, nil
-}
-
-// colorProfile 按文件及模型复用只读配置，读取失败也保留结果以免重复读取
-// 入参: space 颜色空间
-// 返回: *colorProfile 配置，未声明时为nil, error 读取或配置错误
-func (r *Reader) colorProfile(space *ColorSpace) (*colorProfile, error) {
-	if space == nil || space.Profile == "" {
-		return nil, nil
-	}
-	if space.profile != nil {
-		return space.profile, space.profile.err
-	}
-	if r == nil {
-		return nil, fmt.Errorf("color profile %q is unavailable", space.Profile)
-	}
-	name := r.ResPath(space.Profile)
-	for _, other := range r.colorSpaceCache {
-		if other != nil && other.profile != nil && strings.EqualFold(other.Type, space.Type) && r.ResPath(other.Profile) == name {
-			space.profile = other.profile
-			return space.profile, space.profile.err
-		}
-	}
-	data, err := r.readFile(name)
-	if err == nil {
-		space.profile, err = parseColorProfile(space.Type, data)
-	}
-	if err != nil {
-		space.profile = &colorProfile{err: fmt.Errorf("color profile %q: %w", space.Profile, err)}
-	}
-	return space.profile, space.profile.err
-}
-
-// colorDefinition 获取显式或文档默认颜色空间，统一资源标识别名
-// 入参: id 颜色空间标识
-// 返回: *ColorSpace 已加载定义，未声明时为nil
-func (r *Renderer) colorDefinition(id string) *ColorSpace {
-	if r.Reader == nil {
-		return nil
-	}
-	if id == "" && r.Reader.doc != nil {
-		id = strconv.Itoa(r.Reader.doc.CommonData.DefaultCS)
-	}
-	space, _ := resourceValue(r.Reader.colorSpaceCache, id)
-	return space
-}
-
-// srgb 转换归一化源分量，不在ICC变换前量化为8位
-// 入参: values 源分量
-// 返回: [3]float64 sRGB分量, error 变换错误
-func (p *colorProfile) srgb(values [4]float64) ([3]float64, error) {
-	return p.space.SRGB(values[:p.space.Components()], p.space.DefaultIntent())
 }
 
 // displayColor 按源模型及配置转换显示颜色，保持源分量精度

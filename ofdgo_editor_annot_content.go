@@ -47,102 +47,6 @@ func (e *Editor) AddAnnotation(index int, annotation Annotation) (string, error)
 	return id, nil
 }
 
-// prepareAnnotation 校验注解并分配外观标识，提交由调用方事务或独立导入文档负责
-// 入参: index 页面索引, annotation 注解内容
-// 返回: string 注解标识, []byte 标准XML, error 校验错误
-func (e *Editor) prepareAnnotation(index int, annotation Annotation) (string, []byte, error) {
-	if index < 0 || index >= len(e.pages) {
-		return "", nil, fmt.Errorf("page index %d out of range", index)
-	}
-	if !slices.Contains([]string{"Link", "Path", "Highlight", "Stamp", "Watermark"}, annotation.Type) {
-		return "", nil, fmt.Errorf("invalid annotation type %q", annotation.Type)
-	}
-	if _, err := creationBox(annotation.Appearance.Boundary); err != nil {
-		return "", nil, err
-	}
-	if err := e.prepareSourceIDs(); err != nil {
-		return "", nil, err
-	}
-	id := e.nextID()
-	objects := annotation.Appearance.Objects
-	if len(objects) == 0 {
-		objects = nil
-		for _, object := range annotation.Appearance.TextObject {
-			objects = append(objects, GraphicObject{Type: "TextObject", TextObject: object})
-		}
-		for _, object := range annotation.Appearance.PathObject {
-			objects = append(objects, GraphicObject{Type: "PathObject", PathObject: object})
-		}
-		for _, object := range annotation.Appearance.ImageObject {
-			objects = append(objects, GraphicObject{Type: "ImageObject", ImageObject: object})
-		}
-		if len(annotation.Appearance.CompositeGraphicUnit) != 0 {
-			return "", nil, fmt.Errorf("use composite copy to insert existing complex content")
-		}
-	}
-	var content []byte
-	for _, object := range objects {
-		prepared, err := e.prepareObject(e.nextID(), cloneEditorData(object))
-		if err != nil {
-			return "", nil, err
-		}
-		data, err := editorObjectXML(prepared)
-		if err != nil {
-			return "", nil, err
-		}
-		content = append(content, bytes.TrimPrefix(data, []byte(xml.Header))...)
-	}
-	appearance, err := editorXMLContainer("Appearance", ofdAttrs{{Name: xml.Name{Local: "Boundary"}, Value: annotation.Appearance.Boundary}}, content)
-	if err != nil {
-		return "", nil, err
-	}
-	date := annotation.LastModDate
-	if date == "" {
-		date = time.Now().Format("2006-01-02")
-	} else if _, err := time.Parse("2006-01-02", date); err != nil {
-		return "", nil, fmt.Errorf("invalid annotation date %q: %w", date, err)
-	}
-	attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: id}, {Name: xml.Name{Local: "Type"}, Value: annotation.Type},
-		{Name: xml.Name{Local: "Creator"}, Value: annotation.Creator}, {Name: xml.Name{Local: "LastModDate"}, Value: date}}
-	attrs.add("Subtype", annotation.Subtype)
-	attrs.flag("Visible", annotation.Visible)
-	if annotation.NoZoom {
-		attrs.add("NoZoom", "true")
-	}
-	if annotation.NoRotate {
-		attrs.add("NoRotate", "true")
-	}
-	content = nil
-	if annotation.Remark != "" {
-		content = editorXMLText("Remark", annotation.Remark)
-	}
-	if annotation.Parameters != nil && len(annotation.Parameters.Parameter) != 0 {
-		var parameters []byte
-		for _, parameter := range annotation.Parameters.Parameter {
-			if parameter.Name == "" {
-				return "", nil, fmt.Errorf("empty annotation parameter name")
-			}
-			var value bytes.Buffer
-			if err := xml.EscapeText(&value, []byte(parameter.Value)); err != nil {
-				return "", nil, err
-			}
-			data, err := editorXMLContainer("Parameter", ofdAttrs{{Name: xml.Name{Local: "Name"}, Value: parameter.Name}}, value.Bytes())
-			if err != nil {
-				return "", nil, err
-			}
-			parameters = append(parameters, bytes.TrimPrefix(data, []byte(xml.Header))...)
-		}
-		data, err := editorXMLContainer("Parameters", nil, parameters)
-		if err != nil {
-			return "", nil, err
-		}
-		content = append(content, bytes.TrimPrefix(data, []byte(xml.Header))...)
-	}
-	content = append(content, bytes.TrimPrefix(appearance, []byte(xml.Header))...)
-	data, err := editorXMLContainer("Annot", attrs, content)
-	return id, data, err
-}
-
 // Annotation 获取注解的独立内容快照，修改原注解应使用局部编辑方法以保留扩展字段
 // 入参: index 页面索引, id 注解标识
 // 返回: Annotation 注解内容, error 错误信息
@@ -159,6 +63,7 @@ func (e *Editor) Annotation(index int, id string) (Annotation, error) {
 // 入参: index 页面索引, id 注解标识
 // 返回: []string 文字列表, error 注解读取或资源引用错误
 func (e *Editor) AnnotationTexts(index int, id string) ([]string, error) {
+	defer e.bindPageIndex(index)()
 	annotation, err := e.Annotation(index, id)
 	if err != nil {
 		return nil, err
@@ -168,7 +73,8 @@ func (e *Editor) AnnotationTexts(index int, id string) ([]string, error) {
 		return nil, err
 	}
 	defer reader.Close()
-	if _, err := reader.PageContentByIndex(index); err != nil {
+	content, err := reader.PageContentByIndex(index)
+	if err != nil {
 		return nil, err
 	}
 	texts := make([]string, 0)
@@ -178,7 +84,7 @@ func (e *Editor) AnnotationTexts(index int, id string) ([]string, error) {
 	var collect func(CompositeGraphicUnit) error
 	collect = func(unit CompositeGraphicUnit) error {
 		if unit.ResourceID != "" {
-			ref, _ := resourceValue(reader.compositeGraphicUnitCache, unit.ResourceID)
+			ref, _ := reader.resolveCompositeScoped(content.pageResources, unit.ResourceID)
 			if ref == nil || visiting[ref] {
 				return fmt.Errorf("invalid composite resource %q", unit.ResourceID)
 			}
@@ -211,6 +117,118 @@ func (e *Editor) AnnotationTexts(index int, id string) ([]string, error) {
 		return nil, err
 	}
 	return texts, nil
+}
+
+// editorFileBackup 保存单次增量提交覆盖前的文件快照，用于失败回滚与撤销重做
+type editorFileBackup struct {
+	data    []byte
+	existed bool
+	inIndex bool
+}
+
+// prepareAnnotation 校验注解并分配外观标识，提交由调用方事务或独立导入文档负责
+// 入参: index 页面索引, annotation 注解内容
+// 返回: string 注解标识, []byte 标准XML, error 校验错误
+func (e *Editor) prepareAnnotation(index int, annotation Annotation) (string, []byte, error) {
+	if index < 0 || index >= len(e.pages) {
+		return "", nil, fmt.Errorf("page index %d out of range", index)
+	}
+	defer e.bindPageIndex(index)()
+	if !slices.Contains([]string{"Link", "Path", "Highlight", "Stamp", "Watermark"}, annotation.Type) {
+		return "", nil, fmt.Errorf("invalid annotation type %q", annotation.Type)
+	}
+	if _, err := creationBox(annotation.Appearance.Boundary); err != nil {
+		return "", nil, err
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return "", nil, err
+	}
+	if e.maxID >= maxUnitID {
+		return "", nil, fmt.Errorf("MaxUnitID exceeds uint32 range")
+	}
+	id := e.nextID()
+	objects := annotation.Appearance.Objects
+	if len(objects) == 0 {
+		objects = nil
+		for _, object := range annotation.Appearance.TextObject {
+			objects = append(objects, GraphicObject{Type: "TextObject", TextObject: object})
+		}
+		for _, object := range annotation.Appearance.PathObject {
+			objects = append(objects, GraphicObject{Type: "PathObject", PathObject: object})
+		}
+		for _, object := range annotation.Appearance.ImageObject {
+			objects = append(objects, GraphicObject{Type: "ImageObject", ImageObject: object})
+		}
+		if len(annotation.Appearance.CompositeGraphicUnit) != 0 {
+			return "", nil, fmt.Errorf("use composite copy to insert existing complex content")
+		}
+	}
+	if uint64(len(objects)) > maxUnitID-e.maxID {
+		return "", nil, fmt.Errorf("MaxUnitID exceeds uint32 range")
+	}
+	var content []byte
+	for _, object := range objects {
+		prepared, err := e.prepareObject(e.nextID(), cloneEditorData(object))
+		if err != nil {
+			return "", nil, err
+		}
+		data, err := editorObjectXML(prepared)
+		if err != nil {
+			return "", nil, err
+		}
+		content = append(content, bytes.TrimPrefix(data, []byte(xml.Header))...)
+	}
+	appearance, err := editorXMLContainer("Appearance", ofdAttrs{{Name: xml.Name{Local: "Boundary"}, Value: annotation.Appearance.Boundary}}, content)
+	if err != nil {
+		return "", nil, err
+	}
+	date := annotation.LastModDate
+	if date == "" {
+		date = time.Now().Format("2006-01-02")
+	} else if _, err := time.Parse("2006-01-02", date); err != nil {
+		return "", nil, fmt.Errorf("invalid annotation date %q: %w", date, err)
+	}
+	attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: id}, {Name: xml.Name{Local: "Type"}, Value: annotation.Type},
+		{Name: xml.Name{Local: "Creator"}, Value: annotation.Creator}, {Name: xml.Name{Local: "LastModDate"}, Value: date}}
+	attrs.add("Subtype", annotation.Subtype)
+	attrs.flag("Visible", annotation.Visible)
+	attrs.flag("Print", annotation.Print)
+	if annotation.NoZoom {
+		attrs.add("NoZoom", "true")
+	}
+	if annotation.NoRotate {
+		attrs.add("NoRotate", "true")
+	}
+	attrs.flag("ReadOnly", annotation.ReadOnly)
+	content = nil
+	if annotation.Remark != "" {
+		content = editorXMLText("Remark", annotation.Remark)
+	}
+	if annotation.Parameters != nil && len(annotation.Parameters.Parameter) != 0 {
+		var parameters []byte
+		for _, parameter := range annotation.Parameters.Parameter {
+			if parameter.Name == "" {
+				return "", nil, fmt.Errorf("empty annotation parameter name")
+			}
+			var value bytes.Buffer
+			if err := xml.EscapeText(&value, []byte(parameter.Value)); err != nil {
+				return "", nil, err
+			}
+			data, err := editorXMLContainer("Parameter", ofdAttrs{{Name: xml.Name{Local: "Name"}, Value: parameter.Name}}, value.Bytes())
+			if err != nil {
+				return "", nil, err
+			}
+			parameters = append(parameters, bytes.TrimPrefix(data, []byte(xml.Header))...)
+		}
+		data, err := editorXMLContainer("Parameters", nil, parameters)
+		if err != nil {
+			return "", nil, err
+		}
+		content = append(content, bytes.TrimPrefix(data, []byte(xml.Header))...)
+	}
+	content = append(content, bytes.TrimPrefix(appearance, []byte(xml.Header))...)
+	data, err := editorXMLContainer("Annot", attrs, content)
+	return id, data, err
 }
 
 // annotationXML 按ST_ID数值读取唯一注解的原文，不以类型、大小或可见性筛选
@@ -278,15 +296,53 @@ func (e *Editor) annotationXML(index int, id string) ([]byte, error) {
 // 入参: index 页面索引, annotations 注解XML片段, generated 是否为自产内容
 // 返回: error 错误信息
 func (e *Editor) appendAnnotations(index int, annotations []byte, generated bool) error {
+	return e.appendPageAnnotations(context.Background(), []int{index}, [][]byte{annotations}, generated)
+}
+
+// appendPageAnnotations 向多个页面批量追加注解原文，单次解析与提交包快照
+// 入参: ctx 取消上下文, indexes 页面索引列表, annotations 按页对应的注解XML片段, generated 是否为自产内容
+// 返回: error 错误信息
+func (e *Editor) appendPageAnnotations(ctx context.Context, indexes []int, annotations [][]byte, generated bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(indexes) == 0 {
+		return nil
+	}
 	base := e.source
 	var err error
 	if base == nil {
-		base, err = e.importBase()
+		base, err = e.importBaseContext(ctx)
 		if err != nil {
 			return err
 		}
 	}
 	reader := base.reader
+	if generated && len(indexes) == 1 && base.document.Annotations != "" {
+		pageID := e.pages[indexes[0]].ID
+		if files := reader.pageAnnotFiles[pageID]; len(files) > 0 {
+			existing := files[0]
+			if len(reader.annotationFiles[existing]) == 1 {
+				if content, readErr := reader.readFileViewContext(ctx, existing); readErr == nil {
+					added := bytes.TrimPrefix(annotations[0], []byte(xml.Header))
+					if patched, ok := appendOFDXMLBeforeClosing(content, "PageAnnot", added); ok {
+						if err := e.commitAnnotationPartsContext(ctx, base, map[string][]byte{existing: patched}); err != nil {
+							return err
+						}
+						if !e.source.annotationPages[pageID] {
+							pages := maps.Clone(e.source.annotationPages)
+							if pages == nil {
+								pages = make(map[string]bool)
+							}
+							pages[pageID] = true
+							e.source.annotationPages = pages
+						}
+						return nil
+					}
+				}
+			}
+		}
+	}
 	name := reader.ResPath(base.document.Annotations)
 	var data []byte
 	if base.document.Annotations == "" {
@@ -296,100 +352,142 @@ func (e *Editor) appendAnnotations(index int, annotations []byte, generated bool
 		if file, ok := reader.packageFile(name); ok {
 			name = cleanPackagePath(file.Name)
 		}
-		data, err = reader.readFile(name)
+		data, err = reader.readFileViewContext(ctx, name)
 	}
 	if err != nil {
 		return err
 	}
-	root, err := parseEditorXML(data)
+	root, err := parseEditorXMLContext(ctx, data)
 	if err != nil {
 		return err
 	}
-	var ref *editorXML
-	var existing string
-	content, err := editorXMLContainer("PageAnnot", nil, nil)
-	if err != nil {
-		return err
-	}
-	pageID := editorResourceID(e.pages[index].ID)
+	refs := make(map[string]*editorXML)
+	existingFiles := make(map[string]string)
+	fileCounts := make(map[string]int)
 	for _, item := range root.children {
-		if item.matchesOFD("Page") && pageID != "" && editorResourceID(item.attr("PageID")) == pageID {
-			ref = item
-			loc := item.child("FileLoc")
-			if loc == nil {
+		if !item.matchesOFD("Page") {
+			continue
+		}
+		pid := editorResourceID(item.attr("PageID"))
+		loc := item.child("FileLoc")
+		if loc != nil {
+			shared, locErr := editorPageLocation(reader, nil, name, strings.TrimSpace(editorImportText(data, loc)))
+			if locErr == nil {
+				fileCounts[shared]++
+				if pid != "" && refs[pid] == nil {
+					refs[pid] = item
+					existingFiles[pid] = shared
+				}
+			}
+		} else if pid != "" && refs[pid] == nil {
+			refs[pid] = item
+		}
+	}
+	parts := make(map[string][]byte, len(indexes)+2)
+	reserved := map[string][]byte{name: nil}
+	var dataPatches []editorXMLPatch
+	var newEntries []byte
+	for i, index := range indexes {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		pageID := editorResourceID(e.pages[index].ID)
+		ref := refs[pageID]
+		existing := existingFiles[pageID]
+		var content []byte
+		if ref != nil {
+			if ref.child("FileLoc") == nil {
 				return fmt.Errorf("annotation page has no FileLoc")
 			}
-			file, err := editorPageLocation(reader, nil, name, strings.TrimSpace(editorImportText(data, loc)))
+			if existing == "" {
+				loc := ref.child("FileLoc")
+				existing, err = editorPageLocation(reader, nil, name, strings.TrimSpace(editorImportText(data, loc)))
+				if err != nil {
+					return err
+				}
+			}
+			content, err = reader.readFileViewContext(ctx, existing)
 			if err != nil {
 				return err
 			}
-			content, err = reader.readFile(file)
-			if err != nil {
-				return err
-			}
-			existing = file
-			break
-		}
-	}
-	page, err := parseEditorXML(content)
-	if err != nil {
-		return err
-	}
-	added := bytes.TrimPrefix(annotations, []byte(xml.Header))
-	if generated {
-		added, err = editorXMLGenerated(added, page.name.Space)
-		if err != nil {
-			return err
-		}
-	}
-	if page.open == page.end {
-		content = editorPatchXML(content, []editorXMLPatch{editorXMLContent(content, page, added)})
-	} else {
-		content = editorPatchXML(content, []editorXMLPatch{{page.close, page.close, added}})
-	}
-	file := existing
-	if file != "" {
-		for _, other := range root.children {
-			if other == ref || !other.matchesOFD("Page") || other.child("FileLoc") == nil {
-				continue
-			}
-			shared, err := editorPageLocation(reader, nil, name, strings.TrimSpace(editorImportText(data, other.child("FileLoc"))))
-			if err == nil && shared == existing {
-				file = ""
-				break
-			}
-		}
-	}
-	if file == "" {
-		file = e.packageName(path.Join("Annotations", "Page_"+e.pages[index].ID+".xml"))
-	}
-	if ref != nil {
-		if file != existing {
-			loc := ref.child("FileLoc")
-			var value bytes.Buffer
-			_ = xml.EscapeText(&value, []byte("/"+file))
-			data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, loc, value.Bytes())})
-		}
-	} else {
-		entry, err := root.containerXML("Page", ofdAttrs{{Name: xml.Name{Local: "PageID"}, Value: e.pages[index].ID}}, root.textXML("FileLoc", "/"+file))
-		if err != nil {
-			return err
-		}
-		entry = bytes.TrimPrefix(entry, []byte(xml.Header))
-		if root.open == root.end {
-			data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, root, entry)})
 		} else {
-			data = editorPatchXML(data, []editorXMLPatch{{root.close, root.close, entry}})
+			content, err = editorXMLContainer("PageAnnot", nil, nil)
+			if err != nil {
+				return err
+			}
+		}
+		added := bytes.TrimPrefix(annotations[i], []byte(xml.Header))
+		if generated {
+			if patched, ok := appendOFDXMLBeforeClosing(content, "PageAnnot", added); ok {
+				content = patched
+			} else {
+				page, err := parseEditorXMLContext(ctx, content)
+				if err != nil {
+					return err
+				}
+				added, err = editorXMLGenerated(added, page.name.Space)
+				if err != nil {
+					return err
+				}
+				if page.open == page.end {
+					content = editorPatchXML(content, []editorXMLPatch{editorXMLContent(content, page, added)})
+				} else {
+					content = editorPatchXML(content, []editorXMLPatch{{page.close, page.close, added}})
+				}
+			}
+		} else {
+			page, err := parseEditorXMLContext(ctx, content)
+			if err != nil {
+				return err
+			}
+			if page.open == page.end {
+				content = editorPatchXML(content, []editorXMLPatch{editorXMLContent(content, page, added)})
+			} else {
+				content = editorPatchXML(content, []editorXMLPatch{{page.close, page.close, added}})
+			}
+		}
+		file := existing
+		if file != "" && fileCounts[file] > 1 {
+			file = ""
+		}
+		if file == "" {
+			file = packageAvailableName(reader, reserved, e.packageName(path.Join("Annotations", "Page_"+e.pages[index].ID+".xml")))
+		}
+		reserved[file] = nil
+		parts[file] = content
+		if ref != nil {
+			if file != existing {
+				loc := ref.child("FileLoc")
+				var value bytes.Buffer
+				_ = xml.EscapeText(&value, []byte("/"+file))
+				dataPatches = append(dataPatches, editorXMLContent(data, loc, value.Bytes()))
+			}
+		} else {
+			entry, err := root.containerXML("Page", ofdAttrs{{Name: xml.Name{Local: "PageID"}, Value: e.pages[index].ID}}, root.textXML("FileLoc", "/"+file))
+			if err != nil {
+				return err
+			}
+			newEntries = append(newEntries, bytes.TrimPrefix(entry, []byte(xml.Header))...)
 		}
 	}
-	parts := map[string][]byte{name: data, file: content}
+	if len(newEntries) > 0 {
+		if root.open == root.end {
+			dataPatches = append(dataPatches, editorXMLContent(data, root, newEntries))
+		} else {
+			dataPatches = append(dataPatches, editorXMLPatch{root.close, root.close, newEntries})
+		}
+	}
+	if len(dataPatches) > 0 {
+		data = editorPatchXML(data, dataPatches)
+	}
+	parts[name] = data
 	if base.document.Annotations == "" {
 		docName := reader.documentRoot
-		docData, err := reader.readFile(docName)
+		docData, err := reader.readFileViewContext(ctx, docName)
 		if err != nil {
 			return err
 		}
-		doc, err := parseEditorXML(docData)
+		doc, err := parseEditorXMLContext(ctx, docData)
 		if err != nil {
 			return err
 		}
@@ -408,14 +506,16 @@ func (e *Editor) appendAnnotations(index int, annotations []byte, generated bool
 		}
 		parts[docName] = editorPatchXML(docData, []editorXMLPatch{patch})
 	}
-	if err := e.commitAnnotationParts(base, parts); err != nil {
+	if err := e.commitAnnotationPartsContext(ctx, base, parts); err != nil {
 		return err
 	}
 	pages := maps.Clone(e.source.annotationPages)
 	if pages == nil {
 		pages = make(map[string]bool)
 	}
-	pages[e.pages[index].ID] = true
+	for _, index := range indexes {
+		pages[e.pages[index].ID] = true
+	}
 	e.source.annotationPages = pages
 	return nil
 }
@@ -456,7 +556,7 @@ func (e *Editor) commitAnnotationParts(base *editorSource, parts map[string][]by
 	return e.commitAnnotationPartsContext(context.Background(), base, parts)
 }
 
-// commitAnnotationPartsContext 准备并提交独立包快照，取消时不更新编辑状态
+// commitAnnotationPartsContext 准备并增量提交包快照，避免每次写入全量复制与重建索引
 // 入参: ctx 取消上下文, base 原包, parts 修改的文件
 // 返回: error 结构、读取或取消错误
 func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorSource, parts map[string][]byte) error {
@@ -464,6 +564,276 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 	if err != nil {
 		return err
 	}
+	if !canCommitIncrementalParts(base, parts) {
+		return e.commitAnnotationPartsFullContext(ctx, base, parts)
+	}
+	updates := make(map[string][]byte, len(parts))
+	docPath := cleanPackagePath(base.reader.documentRoot)
+	annPath := ""
+	if base.document.Annotations != "" {
+		annPath = cleanPackagePath(base.reader.ResPath(base.document.Annotations))
+	}
+	attPath := ""
+	if strings.TrimSpace(base.document.Attachments.Path) != "" {
+		attPath = cleanPackagePath(base.reader.ResPath(base.document.Attachments.Path))
+	}
+	tagPath := ""
+	if strings.TrimSpace(base.document.CustomTags.Path) != "" {
+		tagPath = cleanPackagePath(base.reader.ResPath(base.document.CustomTags.Path))
+	}
+	docChanged, annChanged, attChanged, tagChanged := false, false, false, false
+	for name, data := range parts {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if file, ok := base.reader.packageFile(name); ok {
+			name = cleanPackagePath(file.Name)
+		} else {
+			name = cleanPackagePath(name)
+		}
+		if !validPackagePath(name) {
+			return fmt.Errorf("invalid package path: %q", name)
+		}
+		updates[name] = data
+		if name == docPath {
+			docChanged = true
+		}
+		if annPath != "" && name == annPath {
+			annChanged = true
+		}
+		if attPath != "" && name == attPath {
+			attChanged = true
+		}
+		if tagPath != "" && name == tagPath {
+			tagChanged = true
+		}
+	}
+	inPlace := base.reader == e.ownedReader && e.ownedOwner == e && e.ownedTx == e.transactionChanges && (e.historyLimit == 0 || e.ownedRevision == e.revision)
+	var reader *Reader
+	var backups map[string]editorFileBackup
+	prevDoc := base.reader.doc
+	prevAnnFiles := base.reader.annotationFiles
+	prevPageAnnFiles := base.reader.pageAnnotFiles
+	if inPlace {
+		reader = base.reader
+		backups = make(map[string]editorFileBackup, len(updates))
+		if reader.files == nil {
+			reader.files = make(map[string][]byte, len(updates))
+		}
+		for name, data := range updates {
+			oldData, existed := reader.files[name]
+			_, inIndex := reader.fileIndex[name]
+			backups[name] = editorFileBackup{data: oldData, existed: existed, inIndex: inIndex || reader.encryptedSource().has(name)}
+			reader.files[name] = data
+			reader.fileNames[name] = true
+		}
+	} else {
+		files := maps.Clone(base.reader.files)
+		if files == nil {
+			files = make(map[string][]byte, len(updates))
+		}
+		fileNames := maps.Clone(base.reader.fileNames)
+		for name, data := range updates {
+			files[name] = data
+			fileNames[name] = true
+		}
+		copied := *base.reader
+		copied.files = files
+		copied.fileNames = fileNames
+		copied.resources = e.runtimeResources
+		reader = &copied
+	}
+	restoreInPlace := func() {
+		if !inPlace {
+			return
+		}
+		for name, backup := range backups {
+			if backup.existed {
+				reader.files[name] = backup.data
+			} else {
+				delete(reader.files, name)
+				if !backup.inIndex {
+					delete(reader.fileNames, name)
+				}
+			}
+		}
+	}
+	doc := base.document
+	if docChanged {
+		probe := *reader
+		probe.doc = nil
+		var docErr error
+		doc, docErr = probe.docStructureContext(ctx)
+		if docErr != nil {
+			restoreInPlace()
+			return docErr
+		}
+		if doc.Annotations != base.document.Annotations {
+			annChanged = true
+		}
+	}
+	newAnnFiles, newPageAnnFiles := reader.annotationFiles, reader.pageAnnotFiles
+	if annChanged {
+		probe := *reader
+		probe.doc = doc
+		probe.annotationFiles = nil
+		probe.pageAnnotFiles = nil
+		_, _ = probe.annotationIndexContext(ctx, doc)
+		if err := ctx.Err(); err != nil {
+			restoreInPlace()
+			return err
+		}
+		newAnnFiles, newPageAnnFiles = probe.annotationFiles, probe.pageAnnotFiles
+	}
+	if err := ctx.Err(); err != nil {
+		restoreInPlace()
+		return err
+	}
+	before, after := e.source, *base
+	resources := e.resources
+	if before == nil {
+		resources = slices.Clone(resources)
+		for i := range resources {
+			if err := ctx.Err(); err != nil {
+				restoreInPlace()
+				return err
+			}
+			resource := &resources[i]
+			if resource.font != nil {
+				resource.font = cloneEditorData(resource.font)
+				if resource.name != "" {
+					resource.font.FontFile = "/" + resource.name
+				}
+			}
+			if resource.image != nil {
+				resource.image = cloneEditorData(resource.image)
+				resource.image.MediaFile = "/" + resource.name
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		restoreInPlace()
+		return err
+	}
+	reader.doc = doc
+	if annChanged {
+		reader.annotationFiles = newAnnFiles
+		reader.pageAnnotFiles = newPageAnnFiles
+		reader.Annots = nil
+		reader.pageAnnotsLoaded = nil
+	} else if len(reader.Annots) != 0 || len(reader.pageAnnotsLoaded) != 0 {
+		var dirtyPages []string
+		for name := range updates {
+			if pages := reader.annotationFiles[name]; len(pages) > 0 {
+				dirtyPages = append(dirtyPages, pages...)
+			}
+		}
+		if len(dirtyPages) > 0 {
+			if !inPlace {
+				reader.Annots = maps.Clone(reader.Annots)
+				reader.pageAnnotsLoaded = maps.Clone(reader.pageAnnotsLoaded)
+			}
+			for _, pageID := range dirtyPages {
+				delete(reader.Annots, pageID)
+				delete(reader.pageAnnotsLoaded, pageID)
+			}
+		}
+	}
+	if docChanged || attChanged {
+		after.attachmentIDs = nil
+	}
+	if docChanged || tagChanged {
+		after.customTagCountReady = false
+		after.richTextTagKnown = false
+	}
+	after.reader, after.document = reader, doc
+	e.resources = resources
+	e.source = &after
+	e.ownedReader = reader
+	e.ownedOwner = e
+	e.ownedTx = e.transactionChanges
+	e.syncPackageNameCache(before, &after)
+	if change := e.recordChange(); change != nil {
+		if inPlace {
+			change.undo = func(e *Editor) {
+				for name, backup := range backups {
+					if backup.existed {
+						reader.files[name] = backup.data
+					} else {
+						delete(reader.files, name)
+						if !backup.inIndex {
+							delete(reader.fileNames, name)
+						}
+					}
+				}
+				reader.doc = prevDoc
+				reader.annotationFiles = prevAnnFiles
+				reader.pageAnnotFiles = prevPageAnnFiles
+				reader.Annots = nil
+				reader.pageAnnotsLoaded = nil
+				e.source = before
+			}
+			change.redo = func(e *Editor) {
+				for name, data := range updates {
+					reader.files[name] = data
+					reader.fileNames[name] = true
+				}
+				reader.doc = doc
+				reader.annotationFiles = newAnnFiles
+				reader.pageAnnotFiles = newPageAnnFiles
+				reader.Annots = nil
+				reader.pageAnnotsLoaded = nil
+				e.source = &after
+			}
+		} else {
+			change.undo = func(e *Editor) { e.source = before }
+			change.redo = func(e *Editor) { e.source = &after }
+		}
+	}
+	e.ownedRevision = e.revision
+	return nil
+}
+
+// canCommitIncrementalParts 判断本次改动能否在不重建整包根索引的前提下增量提交
+// 入参: base 原包, parts 待写入条目
+// 返回: bool 是否允许走增量提交快路径
+func canCommitIncrementalParts(base *editorSource, parts map[string][]byte) bool {
+	if base == nil || base.reader == nil || base.reader.OFD == nil || base.document == nil || base.reader.fileNames == nil || base.reader.versionInfo != nil || len(parts) == 0 {
+		return false
+	}
+	reader := base.reader
+	for name := range parts {
+		clean := cleanPackagePath(name)
+		if file, ok := reader.packageFile(name); ok {
+			clean = cleanPackagePath(file.Name)
+		}
+		if clean == "OFD.xml" || !validPackagePath(clean) {
+			return false
+		}
+		if reader.resFileCache[clean] != nil || reader.resourcesRead[clean] {
+			return false
+		}
+		if _, isPage := reader.pageHeaderCache[clean]; isPage {
+			return false
+		}
+		for _, res := range base.document.CommonData.PublicRes {
+			if cleanPackagePath(reader.ResPath(res)) == clean {
+				return false
+			}
+		}
+		for _, res := range base.document.CommonData.DocumentRes {
+			if cleanPackagePath(reader.ResPath(res)) == clean {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// commitAnnotationPartsFullContext 完整重建包快照与索引，用于根入口或资源索引变更时的回退路径
+// 入参: ctx 取消上下文, base 原包, parts 修改的文件
+// 返回: error 结构、读取或取消错误
+func (e *Editor) commitAnnotationPartsFullContext(ctx context.Context, base *editorSource, parts map[string][]byte) error {
 	files := maps.Clone(base.reader.files)
 	if files == nil {
 		files = make(map[string][]byte)
@@ -477,7 +847,7 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 		}
 		files[name] = data
 	}
-	reader := &Reader{Zip: base.reader.Zip, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex, selectedVersion: base.reader.selectedVersion, pageContents: base.reader.pageContents, resources: e.runtimeResources}
+	reader := &Reader{Zip: base.reader.Zip, encrypted: base.reader.encryptedSource(), sourceFile: base.reader.sourceFile, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex, selectedVersion: base.reader.selectedVersion, pageContents: base.reader.pageContents, resources: e.runtimeResources}
 	if err := reader.initRootContext(ctx); err != nil {
 		return err
 	}
@@ -491,6 +861,9 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 	}
 	before, after := e.source, *base
 	after.reader, after.document = reader, doc
+	after.attachmentIDs = nil
+	after.customTagCountReady = false
+	after.richTextTagKnown = false
 	resources := e.resources
 	if before == nil {
 		resources = slices.Clone(resources)
@@ -516,10 +889,15 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 	}
 	e.resources = resources
 	e.source = &after
+	e.ownedReader = reader
+	e.ownedOwner = e
+	e.ownedTx = e.transactionChanges
+	e.syncPackageNameCache(before, &after)
 	if change := e.recordChange(); change != nil {
 		change.undo = func(e *Editor) { e.source = before }
 		change.redo = func(e *Editor) { e.source = &after }
 	}
+	e.ownedRevision = e.revision
 	return nil
 }
 
@@ -527,6 +905,7 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 // 入参: page 页面索引, path 注解内部路径
 // 返回: *Reader 预览, *Renderer 度量器, *editorCompositeNode 根, []*editorCompositeNode 成员, error 错误信息
 func (e *Editor) annotationScope(page int, path ObjectPath) (*Reader, *Renderer, *editorCompositeNode, []*editorCompositeNode, error) {
+	defer e.bindPageIndex(page)()
 	data, err := e.annotationXML(page, path.Annotation)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -547,16 +926,19 @@ func (e *Editor) annotationScope(page int, path ObjectPath) (*Reader, *Renderer,
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	root.pageID = e.pages[page].ID
 	root.setStates(e.source.annotationStates[e.pages[page].ID+"/"+editorResourceID(path.Annotation)])
 	reader, err := e.reader(nil)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	if _, err = reader.PageContentByIndex(page); err != nil {
+	content, err := reader.PageContentByIndex(page)
+	if err != nil {
 		reader.Close()
 		return nil, nil, nil, nil, err
 	}
 	renderer := e.newRenderer(reader)
+	renderer.bindPageResources(content)
 	root.parent, root.visible = IdentityMatrix, true
 	scope := root
 	for depth := 0; ; depth++ {

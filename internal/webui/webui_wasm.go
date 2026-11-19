@@ -26,6 +26,7 @@ import (
 	"github.com/xiaoqidun/ofdgo"
 )
 
+// 浏览器JS参数类型常量
 const (
 	platformTypeNumber   = js.TypeNumber
 	platformTypeString   = js.TypeString
@@ -33,15 +34,6 @@ const (
 	platformTypeObject   = js.TypeObject
 	platformTypeFunction = js.TypeFunction
 )
-
-// platformValue 浏览器参数值
-type platformValue = js.Value
-
-// wasmEngines 管理共享资源的独立浏览器业务会话
-type wasmEngines struct {
-	resources *ofdgo.Resources
-	engines   map[string]*businessEngine
-}
 
 // RunWASM 注册浏览器WASM接口并阻塞运行
 func RunWASM() {
@@ -51,6 +43,15 @@ func RunWASM() {
 	registerAsyncCallback("ofdgoEngineCall", engines.call)
 	registerCallback("ofdgoEngineClose", engines.close)
 	select {}
+}
+
+// platformValue 浏览器参数值
+type platformValue = js.Value
+
+// wasmEngines 管理共享资源的独立浏览器业务会话
+type wasmEngines struct {
+	resources *ofdgo.Resources
+	engines   map[string]*businessEngine
 }
 
 // open 创建具有稳定标识的独立业务会话
@@ -80,6 +81,21 @@ func (w *wasmEngines) call(args []js.Value) (any, error) {
 		return nil, fmt.Errorf("unknown engine: %s", args[0].String())
 	}
 	name := args[1].String()
+	if name == "ofdgoSaveSnapshot" {
+		snapshot := e.saveSnapshot
+		e.saveSnapshot = nil
+		if snapshot == nil {
+			return nil, fmt.Errorf("save snapshot is not prepared")
+		}
+		output := &businessEngine{resources: e.resources, ctx: context.Background()}
+		if args[2].Type() == js.TypeFunction {
+			output.ctx = output.newOutputContext(args[2])
+		}
+		if err := output.ctx.Err(); err != nil {
+			return nil, err
+		}
+		return output.saveEditor(snapshot, args[3:])
+	}
 	fn := e.businessCommands()[name]
 	if fn == nil {
 		return nil, fmt.Errorf("unknown operation: %s", name)
@@ -92,14 +108,14 @@ func (w *wasmEngines) call(args []js.Value) (any, error) {
 		e.ctx = e.newOutputContext(args[2])
 	}
 	ctx := e.ctx
-	if name != "ofdgoSaveSnapshot" && e.currentSession != nil {
+	if e.currentSession != nil {
 		e.currentSession.Renderer.OutputContext = ctx
 	}
 	defer func() {
 		if e.ctx == ctx {
 			e.ctx = nil
 		}
-		if name != "ofdgoSaveSnapshot" && e.currentSession != nil {
+		if e.currentSession != nil {
 			e.currentSession.Renderer.OutputContext = context.Background()
 		}
 	}()
@@ -260,20 +276,29 @@ func (e *businessEngine) bytesFromJS(value js.Value) ([]byte, error) {
 }
 
 // platformValueOf 转换浏览器参数
+// 入参: v Go值
+// 返回: platformValue 浏览器参数值
 func platformValueOf(v any) platformValue { return js.ValueOf(v) }
 
 // platformNull 返回空参数
+// 返回: platformValue 空参数值
 func platformNull() platformValue { return js.Null() }
 
 // platformCopyBytes 复制浏览器字节
+// 入参: dst 目标切片, src 浏览器字节对象
+// 返回: int 复制字节数
 func platformCopyBytes(dst []byte, src platformValue) int { return js.CopyBytesToGo(dst, src) }
 
 // platformJSON 编码小参数
+// 入参: v 浏览器参数值
+// 返回: string JSON字符串
 func platformJSON(v platformValue) string {
 	return js.Global().Get("JSON").Call("stringify", v).String()
 }
 
 // platformParseJSON 解析结构参数
+// 入参: data JSON字节
+// 返回: map[string]any 解析后的键值结构
 func platformParseJSON(data []byte) map[string]any {
 	var result map[string]any
 	if err := json.Unmarshal(data, &result); err != nil {
@@ -283,6 +308,8 @@ func platformParseJSON(data []byte) map[string]any {
 }
 
 // inputFromValue 读取浏览器随机输入或二进制数据
+// 入参: value 浏览器输入参数
+// 返回: *ofdgo.Input 文档输入源, error 读取错误
 func (e *businessEngine) inputFromValue(value platformValue) (*ofdgo.Input, error) {
 	if value.Type() == platformTypeObject && !value.IsNull() && value.Get("read").Type() == platformTypeFunction {
 		return ofdgo.NewInput(&browserReaderAt{read: value.Get("read"), size: int64(value.Get("size").Float())}, int64(value.Get("size").Float()))

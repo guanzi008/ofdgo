@@ -26,14 +26,45 @@ import (
 
 // editorFontDocument 保存一个文档的字体声明与完整内容引用，不进入附件和签名封装
 type editorFontDocument struct {
-	reader     *Reader
-	index      int
-	files      map[string]*editorFontXML
-	fonts      map[string]*editorFontDeclaration
-	texts      map[string][]editorFontText
-	fontCache  editorBindingFontCache
-	fontReader *Reader
-	unsafe     bool
+	reader       *Reader
+	index        int
+	files        map[string]*editorFontXML
+	fonts        map[string]*editorFontDeclaration
+	duplicateIDs map[string]bool
+	texts        map[string][]editorFontText
+	fontCache    editorBindingFontCache
+	fontReader   *Reader
+	unsafe       bool
+}
+
+// apply 隔离其他文档及版本的共享文件，提交字体修改和路径引用
+// 入参: ctx 取消上下文, changes 按原文件路径保存的修改
+// 返回: error 引用扫描或XML修改错误
+func (s *editorFontDocument) apply(ctx context.Context, changes map[string][]byte) error {
+	view := *s.reader
+	if s.index != view.documentIndex {
+		view.selectedVersion = nil
+	}
+	view.documentIndex = s.index
+	view.documentRoot, view.versionInfo = "", nil
+	parts, err := view.versionChanges(ctx, changes)
+	if err != nil {
+		return err
+	}
+	next := *s.reader
+	next.files = maps.Clone(next.files)
+	if next.files == nil {
+		next.files = make(map[string][]byte)
+	}
+	maps.Copy(next.files, parts)
+	if err := next.initRootContext(ctx); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	*s.reader = next
+	return nil
 }
 
 // editorFontXML 保存字体声明及文字引用所在的XML
@@ -71,11 +102,10 @@ func scanEditorFontFiles(ctx context.Context, reader *Reader, index int, inspect
 }
 
 // scanEditorFontFilesMode 按需保留文字节点及原文，只读访问在扫描后释放非资源文件原文
-// 入参: ctx 取消上下文, reader 包快照, index 文档索引, inspect 可选的文件节点访问器, retain 是否保留编辑数据
-// stream 为可选的只读访问器，依次返回是否已处理、是否不安全、依赖路径及错误
+// 入参: ctx 取消上下文, reader 包快照, index 文档索引, inspect 可选的文件节点访问器, retain 是否保留编辑数据, stream 可选的只读访问器
 // 返回: *editorFontDocument 扫描结果, error 读取、结构或访问错误
 func scanEditorFontFilesMode(ctx context.Context, reader *Reader, index int, inspect func(*editorFontXML, *editorXML) error, retain bool, stream func(*editorFontXML) (bool, bool, []string, error)) (*editorFontDocument, error) {
-	scan := &editorFontDocument{reader: reader, index: index, files: make(map[string]*editorFontXML), fonts: make(map[string]*editorFontDeclaration), texts: make(map[string][]editorFontText)}
+	scan := &editorFontDocument{reader: reader, index: index, files: make(map[string]*editorFontXML), fonts: make(map[string]*editorFontDeclaration), duplicateIDs: make(map[string]bool), texts: make(map[string][]editorFontText)}
 	entry, err := reader.documentEntryContext(ctx, index)
 	if err != nil {
 		return nil, err
@@ -114,8 +144,10 @@ func scanEditorFontFilesMode(ctx context.Context, reader *Reader, index int, ins
 		}
 		scan.files[name] = file
 		base := ""
+		var fileFonts map[string]bool
 		if root.matchesOFD("Res") {
 			base = root.attr("BaseLoc")
+			fileFonts = make(map[string]bool)
 		}
 		var visit func(*editorXML) error
 		visit = func(node *editorXML) error {
@@ -131,7 +163,12 @@ func scanEditorFontFilesMode(ctx context.Context, reader *Reader, index int, ins
 			}
 			if slices.Contains([]string{"CustomTags", "Extensions", "ExtendData", "Data"}, node.name.Local) {
 				if node.matchesOFD("CustomTags") {
-					safe, err := richTextTagsFontSafe(ctx, reader, index)
+					var safe bool
+					if stream == nil {
+						safe, err = richTextTagsFontSafe(ctx, reader, index)
+					} else {
+						safe, err = customTagsResourceSafe(ctx, reader, index)
+					}
 					if err != nil {
 						return err
 					}
@@ -143,7 +180,7 @@ func scanEditorFontFilesMode(ctx context.Context, reader *Reader, index int, ins
 				return nil
 			}
 			for _, attr := range node.attrs {
-				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace && !textMetadataAttribute(node.name, attr) {
+				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace {
 					scan.unsafe = true
 				}
 			}
@@ -156,14 +193,19 @@ func scanEditorFontFilesMode(ctx context.Context, reader *Reader, index int, ins
 					return err
 				}
 				id := editorResourceID(font.ID)
-				if id == "" || scan.fonts[id] != nil {
+				if id == "" || fileFonts[id] {
 					return fmt.Errorf("missing or duplicate font ID %q", font.ID)
 				}
+				fileFonts[id] = true
 				location := ""
 				if font.FontFile != "" {
 					location = resolveResourcePath(name, base, font.FontFile)
 				}
-				scan.fonts[id] = &editorFontDeclaration{font: font, file: file, node: node, location: location}
+				if scan.fonts[id] != nil {
+					scan.duplicateIDs[id] = true
+				} else {
+					scan.fonts[id] = &editorFontDeclaration{font: font, file: file, node: node, location: location}
+				}
 			}
 			if node.matchesOFD("TextObject") || node.matchesOFD("Text") && node.parent != nil && node.parent.matchesOFD("Area") {
 				id := editorResourceID(node.attr("Font"))
@@ -217,36 +259,6 @@ func scanEditorFontFilesMode(ctx context.Context, reader *Reader, index int, ins
 	return scan, nil
 }
 
-// apply 隔离其他文档及版本的共享文件，提交字体修改和路径引用
-// 入参: ctx 取消上下文, changes 按原文件路径保存的修改
-// 返回: error 引用扫描或XML修改错误
-func (s *editorFontDocument) apply(ctx context.Context, changes map[string][]byte) error {
-	view := *s.reader
-	if s.index != view.documentIndex {
-		view.selectedVersion = nil
-	}
-	view.documentIndex = s.index
-	view.documentRoot, view.versionInfo = "", nil
-	parts, err := view.versionChanges(ctx, changes)
-	if err != nil {
-		return err
-	}
-	next := *s.reader
-	next.files = maps.Clone(next.files)
-	if next.files == nil {
-		next.files = make(map[string][]byte)
-	}
-	maps.Copy(next.files, parts)
-	if err := next.initRootContext(ctx); err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	*s.reader = next
-	return nil
-}
-
 // editorFontXMLText 编码资源路径文本，不改变包内名称
 // 入参: value 原始文本
 // 返回: []byte XML文本
@@ -254,4 +266,42 @@ func editorFontXMLText(value string) []byte {
 	var data bytes.Buffer
 	_ = xml.EscapeText(&data, []byte(value))
 	return data.Bytes()
+}
+
+// customTagsResourceSafe 按已知命名空间白名单核验自定义标引，未知行业命名空间不推定其资源引用语义
+// 入参: ctx 取消上下文, reader 包阅读器, index 文档索引
+// 返回: bool 是否满足已知命名空间资源引用完整性, error 读取或取消错误
+func customTagsResourceSafe(ctx context.Context, reader *Reader, index int) (bool, error) {
+	view, err := reader.DocumentContext(ctx, index)
+	if err != nil {
+		return false, err
+	}
+	defer view.Close()
+	tags, err := view.CustomTagsContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, tag := range tags {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if strings.TrimSpace(tag.FileLoc) == "" || !isKnownResourceSafeTagMeta(tag) {
+			return false, nil
+		}
+		if tag.SchemaLoc != "" {
+			schemaFile, err := view.openFile(view.ResPath(tag.SchemaLoc))
+			if err != nil {
+				return false, nil
+			}
+			_ = schemaFile.Close()
+		}
+		structure, err := view.readStructureContext(ctx, tag)
+		if err != nil {
+			return false, ctx.Err()
+		}
+		if !knownResourceSafeCustomTag(tag, structure.Root) {
+			return false, nil
+		}
+	}
+	return true, ctx.Err()
 }

@@ -113,7 +113,7 @@ func (r *Reader) DocumentVersion(id string) (*Reader, error) {
 // 入参: ctx 取消上下文, id 版本标识，空值选择主入口
 // 返回: *Reader 版本阅读器, error 读取或取消错误
 func (r *Reader) DocumentVersionContext(ctx context.Context, id string) (*Reader, error) {
-	next := &Reader{Path: r.Path, Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: r.documentIndex, selectedVersion: &id, pageReady: r.pageReady, pdfDestinations: r.pdfDestinations.clone()}
+	next := &Reader{Path: r.Path, Zip: r.Zip, encrypted: r.encryptedSource(), sourceFile: r.sourceFile, archiveID: r.archiveID, files: r.files, encryption: r.encryption, documentIndex: r.documentIndex, selectedVersion: &id, pageReady: r.pageReady, pageContents: r.pageContents, pdfDestinations: r.pdfDestinations.clone(), resources: r.resources}
 	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}
@@ -121,38 +121,6 @@ func (r *Reader) DocumentVersionContext(ctx context.Context, id string) (*Reader
 		return nil, err
 	}
 	return next, nil
-}
-
-// documentEntryContext 解析指定文档的阅读入口，当前文档保留显式选择
-// 入参: ctx 取消上下文, index 文档索引
-// 返回: string 包内路径, error 选择、读取或取消错误
-func (r *Reader) documentEntryContext(ctx context.Context, index int) (string, error) {
-	if index == r.documentIndex {
-		return r.DocumentRootContext(ctx)
-	}
-	view := *r
-	view.documentIndex, view.documentRoot = index, ""
-	view.selectedVersion, view.versionInfo = nil, nil
-	return view.DocumentRootContext(ctx)
-}
-
-// versionSignatures 按OFD入口解析包级签名路径，选中版本仅使用文件清单内的签名入口
-// 入参: location OFD入口中的签名路径
-// 返回: string 签名路径，不属于该版本时为空
-func (r *Reader) versionSignatures(location string) string {
-	if location == "" {
-		return ""
-	}
-	name := resolveResourcePath("OFD.xml", "", location)
-	if r.versionInfo == nil {
-		return "/" + name
-	}
-	for _, file := range r.versionInfo.Files {
-		if file.Location == name {
-			return "/" + name
-		}
-	}
-	return ""
 }
 
 // ExtractVersion 将当前文档的指定版本提取为独立阅读器，可继续编辑或另存，不改变原包
@@ -210,7 +178,7 @@ func (r *Reader) ExtractVersionContext(ctx context.Context, id string) (*Reader,
 	if err != nil {
 		return nil, err
 	}
-	next := &Reader{Path: r.Path, files: map[string][]byte{"OFD.xml": root}, encryption: r.encryption}
+	next := &Reader{Path: r.Path, sourceFile: r.sourceFile, files: map[string][]byte{"OFD.xml": root}, encryption: r.encryption, resources: r.resources}
 	for name := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -233,6 +201,15 @@ func (r *Reader) ExtractVersionContext(ctx context.Context, id string) (*Reader,
 			}
 		}
 	}
+	if src := r.encryptedSource(); src != nil {
+		keep := make(map[string]bool, len(files))
+		for name := range files {
+			if name != "OFD.xml" {
+				keep[name] = true
+			}
+		}
+		next.setEncryptedSource(src.filter(keep))
+	}
 	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}
@@ -240,6 +217,38 @@ func (r *Reader) ExtractVersionContext(ctx context.Context, id string) (*Reader,
 		return nil, err
 	}
 	return next, nil
+}
+
+// documentEntryContext 解析指定文档的阅读入口，当前文档保留显式选择
+// 入参: ctx 取消上下文, index 文档索引
+// 返回: string 包内路径, error 选择、读取或取消错误
+func (r *Reader) documentEntryContext(ctx context.Context, index int) (string, error) {
+	if index == r.documentIndex {
+		return r.DocumentRootContext(ctx)
+	}
+	view := *r
+	view.documentIndex, view.documentRoot = index, ""
+	view.selectedVersion, view.versionInfo = nil, nil
+	return view.DocumentRootContext(ctx)
+}
+
+// versionSignatures 按OFD入口解析包级签名路径，选中版本仅使用文件清单内的签名入口
+// 入参: location OFD入口中的签名路径
+// 返回: string 签名路径，不属于该版本时为空
+func (r *Reader) versionSignatures(location string) string {
+	if location == "" {
+		return ""
+	}
+	name := resolveResourcePath("OFD.xml", "", location)
+	if r.versionInfo == nil {
+		return "/" + name
+	}
+	for _, file := range r.versionInfo.Files {
+		if file.Location == name {
+			return "/" + name
+		}
+	}
+	return ""
 }
 
 // extractedVersionRoot 重建版本副本入口，保留元数据及命名空间，移除其他文档与版本列表

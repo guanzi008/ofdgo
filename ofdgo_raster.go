@@ -29,22 +29,6 @@ import (
 	"golang.org/x/image/draw"
 )
 
-// 光栅后端接收的路径指令
-const (
-	RasterMove RasterVerb = iota
-	RasterLine
-	RasterQuad
-	RasterCubic
-	RasterClose
-)
-
-// 光栅渐变类型：轴向、径向和网格
-const (
-	RasterLinear RasterGradientKind = iota
-	RasterRadial
-	RasterMesh
-)
-
 // RasterPage 已解析的光栅绘制页面，单位为毫米，页面坐标原点在左上角
 // DPI决定像素尺寸和编译时的字形、描边精度，修改DPI后应重新编译
 // 页面及其引用资源在渲染期间只读，不用于重建或保存OFD
@@ -63,6 +47,15 @@ type RasterPoint struct{ X, Y float64 }
 // RasterVerb 路径指令
 type RasterVerb uint8
 
+// 光栅后端接收的路径指令
+const (
+	RasterMove RasterVerb = iota
+	RasterLine
+	RasterQuad
+	RasterCubic
+	RasterClose
+)
+
 // RasterSegment 路径片段，RasterMove和RasterLine使用End，RasterQuad使用Control1和End
 type RasterSegment struct {
 	Verb               RasterVerb
@@ -70,19 +63,32 @@ type RasterSegment struct {
 	End                RasterPoint
 }
 
-// RasterCommand 填充路径或绘制图像，Image非空时为图像指令
+// RasterGroupKind 光栅透明组指令类型
+type RasterGroupKind uint8
+
+// 光栅透明组指令：常规绘制、开启透明组与结束透明组
+const (
+	RasterGroupNone RasterGroupKind = iota
+	RasterGroupBegin
+	RasterGroupEnd
+)
+
+// RasterCommand 填充路径、绘制图像或管理透明组，Image非空时为图像指令
+// Group非零时为透明组边界指令，GroupAlpha为开启透明组时的整体透明度
 // EvenOdd仅控制填充规则，不影响描边
 // Transform将局部坐标映射到页面，图像局部坐标与image.Image的像素坐标一致
-// Clip为页面坐标裁剪，适用于路径和图像，nil表示不裁剪，空切片表示全部裁去
+// Clip为页面坐标裁剪，适用于路径、图像和透明组，nil表示不裁剪，空切片表示全部裁去
 // Stroke非空时为描边，宽度与虚线使用页面毫米，不随Transform再次缩放
 type RasterCommand struct {
-	Path      []RasterSegment
-	Paint     RasterPaint
-	EvenOdd   bool
-	Transform RasterMatrix
-	Image     image.Image
-	Clip      []RasterSegment
-	Stroke    *StrokeOptions
+	Path       []RasterSegment
+	Paint      RasterPaint
+	EvenOdd    bool
+	Transform  RasterMatrix
+	Image      image.Image
+	Clip       []RasterSegment
+	Stroke     *StrokeOptions
+	Group      RasterGroupKind
+	GroupAlpha uint8
 }
 
 // RasterPaint 预乘RGBA纯色或渐变，Gradient非空时忽略Color
@@ -93,6 +99,13 @@ type RasterPaint struct {
 
 // RasterGradientKind 渐变类型
 type RasterGradientKind uint8
+
+// 光栅渐变类型：轴向、径向和网格
+const (
+	RasterLinear RasterGradientKind = iota
+	RasterRadial
+	RasterMesh
+)
 
 // RasterGradient 局部坐标下的轴向、双圆径向或三角网格渐变
 // 轴向及径向渐变的Spread为空时延续边界颜色，网格渐变使用Mesh
@@ -141,21 +154,6 @@ type RasterSceneReuseBackend interface {
 	PrepareReuse(page *RasterPage, previous RasterScene) (RasterScene, error)
 }
 
-// rasterPreparationKey 隔离渲染器私有的前次场景
-type rasterPreparationKey struct{}
-
-// rasterPreparationState 记录前次场景及实际后端配置
-type rasterPreparationState struct {
-	backend RasterBackend
-	scene   RasterScene
-}
-
-// rasterScene 复用后端无关指令，图片保持只读引用
-type rasterScene struct {
-	backend RasterBackend
-	page    *RasterPage
-}
-
 // PixelSize 检查页面尺寸并计算目标像素大小，合法正尺寸至少保留一个像素
 // 返回: int 宽度, int 高度, error 无效尺寸
 func (p *RasterPage) PixelSize() (int, int, error) {
@@ -171,6 +169,60 @@ func (p *RasterPage) PixelSize() (int, int, error) {
 		return 0, 0, fmt.Errorf("invalid raster pixel dimensions: %g x %g", w, h)
 	}
 	return int(w), int(h), nil
+}
+
+// Bounds 度量已编译指令的页面坐标范围，不重新定位文字或读取图片像素
+// 包含描边与指令裁剪，不应用页面边界，不排除图片透明像素或渐变透明区域
+// 入参: geometry 几何后端
+// 返回: Box 毫米坐标范围, error 几何或指令错误
+func (p *RasterPage) Bounds(geometry GeometryBackend) (Box, error) {
+	return p.BoundsContext(context.Background(), geometry)
+}
+
+// BoundsContext 按上下文度量只读绘制指令，取消或失败时不返回部分范围
+// 入参: ctx 取消上下文, geometry 几何后端
+// 返回: Box 毫米坐标范围, error 取消、几何或指令错误
+func (p *RasterPage) BoundsContext(ctx context.Context, geometry GeometryBackend) (Box, error) {
+	if err := ctx.Err(); err != nil {
+		return Box{}, err
+	}
+	if p == nil {
+		return Box{}, fmt.Errorf("invalid raster page")
+	}
+	if geometry == nil {
+		return Box{}, fmt.Errorf("raster bounds: %w", ErrBackendUnavailable)
+	}
+	var box Box
+	for index, command := range p.Commands {
+		if err := ctx.Err(); err != nil {
+			return Box{}, err
+		}
+		path, err := rasterCommandGeometry(geometry, command)
+		if err == nil {
+			var bounds Box
+			bounds, err = geometry.Bounds(path)
+			box = unionTextBox(box, bounds)
+		}
+		if err != nil {
+			return Box{}, fmt.Errorf("raster command %d bounds: %w", index, err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return Box{}, err
+	}
+	return box, nil
+}
+
+// PixelTransform 将页面毫米变换转换为像素变换，保留尺寸取整后的原点位置
+// 入参: m 局部到页面变换, height 目标像素高度
+// 返回: RasterMatrix 局部到像素变换
+func (p *RasterPage) PixelTransform(m RasterMatrix, height int) RasterMatrix {
+	scale := p.DPI / 25.4
+	for i := range m {
+		m[i] *= scale
+	}
+	m[5] += float64(height) - p.Height*scale
+	return m
 }
 
 // Apply 将局部点映射到目标坐标
@@ -232,13 +284,80 @@ func (g *RasterGradient) At(x, y float64) color.RGBA {
 		}
 		switch spread.MapType {
 		case "Repeat":
-			t = t/period - math.Floor(t/period)
+			t = math.Mod(t, period)
+			if t < 0 {
+				t += period
+			}
+			t /= period
 		case "Reflect":
-			t = reflectShdPosition(t / period)
+			t = reflectShdPosition(math.Mod(t, 2*period) / period)
 		}
 	}
 	return g.colorAt(t)
 }
+
+// PrepareRasterScene 准备绘制快照，未实现预编译的后端复用公共指令
+// 入参: backend 光栅后端, page 绘制页面
+// 返回: RasterScene 可重复绘制场景, error 准备错误
+func PrepareRasterScene(backend RasterBackend, page *RasterPage) (RasterScene, error) {
+	if backend == nil {
+		return nil, fmt.Errorf("raster scene: %w", ErrBackendUnavailable)
+	}
+	if _, _, err := page.PixelSize(); err != nil {
+		return nil, err
+	}
+	if provider, ok := backend.(RasterSceneBackend); ok {
+		return provider.Prepare(page)
+	}
+	return &rasterScene{backend: backend, page: cloneRasterPage(page)}, nil
+}
+
+// PreparePage 编译并准备当前配置的独立页面快照，按后端能力复用未修改指令
+// 每次重新解释源页面，按内容使模板、签章、字体及样式派生数据失效
+// 入参: page 源页面
+// 返回: RasterScene 可重复绘制场景, error 编译或准备错误
+func (r *Renderer) PreparePage(page *PageContent) (RasterScene, error) {
+	if r.backends.Raster == nil {
+		return nil, fmt.Errorf("raster scene: %w", ErrBackendUnavailable)
+	}
+	compiled, err := r.CompilePage(page)
+	if err != nil {
+		return nil, err
+	}
+	if backend, ok := r.backends.Raster.(RasterSceneReuseBackend); ok {
+		state, _ := r.backendStates[rasterPreparationKey{}].(rasterPreparationState)
+		var previous RasterScene
+		if sameBackend(state.backend, r.backends.Raster) {
+			previous = state.scene
+		}
+		scene, err := backend.PrepareReuse(compiled, previous)
+		if err != nil {
+			return nil, err
+		}
+		r.backendStates[rasterPreparationKey{}] = rasterPreparationState{backend: r.backends.Raster, scene: scene}
+		return scene, nil
+	}
+	return PrepareRasterScene(r.backends.Raster, compiled)
+}
+
+// rasterPreparationKey 隔离渲染器私有的前次场景
+type rasterPreparationKey struct{}
+
+// rasterPreparationState 记录前次场景及实际后端配置
+type rasterPreparationState struct {
+	backend RasterBackend
+	scene   RasterScene
+}
+
+// rasterScene 复用后端无关指令，图片保持只读引用
+type rasterScene struct {
+	backend RasterBackend
+	page    *RasterPage
+}
+
+// Render 绘制固定快照
+// 返回: image.Image 独立图像, error 绘制错误
+func (s *rasterScene) Render() (image.Image, error) { return s.backend.Render(s.page) }
 
 // rasterPositive 判断正有限数
 // 入参: v 待检查数值
@@ -329,52 +448,13 @@ func (g *RasterGradient) colorAt(t float64) color.RGBA {
 	return g.Stops[len(g.Stops)-1].Color
 }
 
-// Bounds 度量已编译指令的页面坐标范围，不重新定位文字或读取图片像素
-// 包含描边与指令裁剪，不应用页面边界，不排除图片透明像素或渐变透明区域
-// 入参: geometry 几何后端
-// 返回: Box 毫米坐标范围, error 几何或指令错误
-func (p *RasterPage) Bounds(geometry GeometryBackend) (Box, error) {
-	return p.BoundsContext(context.Background(), geometry)
-}
-
-// BoundsContext 按上下文度量只读绘制指令，取消或失败时不返回部分范围
-// 入参: ctx 取消上下文, geometry 几何后端
-// 返回: Box 毫米坐标范围, error 取消、几何或指令错误
-func (p *RasterPage) BoundsContext(ctx context.Context, geometry GeometryBackend) (Box, error) {
-	if err := ctx.Err(); err != nil {
-		return Box{}, err
-	}
-	if p == nil {
-		return Box{}, fmt.Errorf("invalid raster page")
-	}
-	if geometry == nil {
-		return Box{}, fmt.Errorf("raster bounds: %w", ErrBackendUnavailable)
-	}
-	var box Box
-	for index, command := range p.Commands {
-		if err := ctx.Err(); err != nil {
-			return Box{}, err
-		}
-		path, err := rasterCommandGeometry(geometry, command)
-		if err == nil {
-			var bounds Box
-			bounds, err = geometry.Bounds(path)
-			box = unionTextBox(box, bounds)
-		}
-		if err != nil {
-			return Box{}, fmt.Errorf("raster command %d bounds: %w", index, err)
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return Box{}, err
-	}
-	return box, nil
-}
-
 // rasterCommandGeometry 共用指令的页面变换、描边与裁剪，不修改路径或样式
 // 入参: geometry 几何后端, command 绘制指令
 // 返回: GeometryPath 页面轮廓, error 几何或指令错误
 func rasterCommandGeometry(geometry GeometryBackend, command RasterCommand) (GeometryPath, error) {
+	if command.Group != RasterGroupNone {
+		return nil, nil
+	}
 	if command.Clip != nil && len(command.Clip) == 0 {
 		return nil, nil
 	}
@@ -520,25 +600,16 @@ func rasterClipMask(backend RasterBackend, page *RasterPage, path []RasterSegmen
 	return mask, nil
 }
 
-// PixelTransform 将页面毫米变换转换为像素变换，保留尺寸取整后的原点位置
-// 入参: m 局部到页面变换, height 目标像素高度
-// 返回: RasterMatrix 局部到像素变换
-func (p *RasterPage) PixelTransform(m RasterMatrix, height int) RasterMatrix {
-	scale := p.DPI / 25.4
-	for i := range m {
-		m[i] *= scale
-	}
-	m[5] += float64(height) - p.Height*scale
-	return m
-}
-
-// drawRasterImageCommand 使用当前后端生成裁剪蒙版，共用高质量图像采样
-// 入参: backend 当前后端, page 页面, dst 目标图像, src 原始图像, command 图像指令, cache 蒙版缓存
+// drawRasterImageCommandOffset 在带页面像素偏移的目标缓冲上绘制图像与裁剪蒙版
+// 入参: backend 当前后端, page 页面, dst 目标图像, offset 目标左上角在整页像素中的偏移, pageH 整页像素高度, src 原始图像, command 图像指令, cache 蒙版缓存
 // 返回: error 裁剪绘制错误
-func drawRasterImageCommand(backend RasterBackend, page *RasterPage, dst draw.Image, src image.Image, command RasterCommand, cache *renderCache[[32]byte, *image.Alpha]) error {
-	m := page.PixelTransform(command.Transform, dst.Bounds().Dy())
+func drawRasterImageCommandOffset(backend RasterBackend, page *RasterPage, dst draw.Image, offset image.Point, pageH int, src image.Image, command RasterCommand, cache *renderCache[[32]byte, *image.Alpha]) error {
+	m := page.PixelTransform(command.Transform, pageH)
+	localM := m
+	localM[4] -= float64(offset.X)
+	localM[5] -= float64(offset.Y)
 	if command.Clip == nil {
-		baseimage.DrawPixels(dst, src, m, draw.Over)
+		baseimage.DrawPixels(dst, src, localM, draw.Over)
 		return nil
 	}
 	mask, err := rasterClipMask(backend, page, command.Clip, cache)
@@ -548,63 +619,16 @@ func drawRasterImageCommand(backend RasterBackend, page *RasterPage, dst draw.Im
 	if mask.Rect.Empty() {
 		return nil
 	}
-	bounds := mask.Rect.Intersect(dst.Bounds()).Intersect(baseimage.TransformBounds(src.Bounds(), m, dst.Bounds()))
+	dstPageBounds := dst.Bounds().Add(offset)
+	bounds := mask.Rect.Intersect(dstPageBounds).Intersect(baseimage.TransformBounds(src.Bounds(), m, dstPageBounds))
 	if bounds.Empty() {
 		return nil
 	}
 	layer := image.NewRGBA64(bounds)
 	baseimage.DrawPixels(layer, baseimage.PixelSource(src), m, draw.Src)
-	draw.DrawMask(dst, bounds, layer, bounds.Min, mask, bounds.Min, draw.Over)
+	draw.DrawMask(dst, bounds.Sub(offset), layer, bounds.Min, mask, bounds.Min, draw.Over)
 	return nil
 }
-
-// PreparePage 编译并准备当前配置的独立页面快照，按后端能力复用未修改指令
-// 每次重新解释源页面，按内容使模板、签章、字体及样式派生数据失效
-// 入参: page 源页面
-// 返回: RasterScene 可重复绘制场景, error 编译或准备错误
-func (r *Renderer) PreparePage(page *PageContent) (RasterScene, error) {
-	if r.backends.Raster == nil {
-		return nil, fmt.Errorf("raster scene: %w", ErrBackendUnavailable)
-	}
-	compiled, err := r.CompilePage(page)
-	if err != nil {
-		return nil, err
-	}
-	if backend, ok := r.backends.Raster.(RasterSceneReuseBackend); ok {
-		state, _ := r.backendStates[rasterPreparationKey{}].(rasterPreparationState)
-		var previous RasterScene
-		if sameBackend(state.backend, r.backends.Raster) {
-			previous = state.scene
-		}
-		scene, err := backend.PrepareReuse(compiled, previous)
-		if err != nil {
-			return nil, err
-		}
-		r.backendStates[rasterPreparationKey{}] = rasterPreparationState{backend: r.backends.Raster, scene: scene}
-		return scene, nil
-	}
-	return PrepareRasterScene(r.backends.Raster, compiled)
-}
-
-// PrepareRasterScene 准备绘制快照，未实现预编译的后端复用公共指令
-// 入参: backend 光栅后端, page 绘制页面
-// 返回: RasterScene 可重复绘制场景, error 准备错误
-func PrepareRasterScene(backend RasterBackend, page *RasterPage) (RasterScene, error) {
-	if backend == nil {
-		return nil, fmt.Errorf("raster scene: %w", ErrBackendUnavailable)
-	}
-	if _, _, err := page.PixelSize(); err != nil {
-		return nil, err
-	}
-	if provider, ok := backend.(RasterSceneBackend); ok {
-		return provider.Prepare(page)
-	}
-	return &rasterScene{backend: backend, page: cloneRasterPage(page)}, nil
-}
-
-// Render 绘制固定快照
-// 返回: image.Image 独立图像, error 绘制错误
-func (s *rasterScene) Render() (image.Image, error) { return s.backend.Render(s.page) }
 
 // cloneRasterPage 隔离可变指令，源图片按接口约定只读借用
 // 入参: page 绘制页面

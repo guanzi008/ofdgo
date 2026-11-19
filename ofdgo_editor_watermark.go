@@ -91,6 +91,29 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 	extent, _ := ParseBox(*boundary)
 	extent.X, extent.Y = 0, 0
 	*boundary = editorBoxString(extent)
+	var srcScope []*parsedRes
+	srcOrigin := e.snapshotOrigin(object)
+	if e.source != nil {
+		if srcOrigin != nil && srcOrigin.page != nil {
+			for pageIdx := range e.pages {
+				if e.pages[pageIdx].ID == srcOrigin.page.ref.ID {
+					if _, err := e.pageContext(ctx, pageIdx); err != nil {
+						return nil, err
+					}
+					break
+				}
+			}
+			if srcOrigin.page.original != nil {
+				srcScope = srcOrigin.page.original.pageResources
+			}
+		} else {
+			srcScope, err = e.watermarkPageScope(ctx, indexes[0])
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	rawObject := cloneEditorData(object)
 	preview := e.transactionSnapshot()
 	preview.SetHistoryLimit(0)
 	id, err := preview.AddObject(indexes[0], object)
@@ -101,16 +124,21 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 	if err != nil {
 		return nil, err
 	}
-	reader, err := preview.reader(nil)
+	reader, err := preview.readerContext(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer reader.Close()
-	page, err := reader.PageContentByIndex(indexes[0])
+	doc, err := reader.docStructureContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	page0, err := reader.PageContentByIndexContext(ctx, indexes[0])
 	if err != nil {
 		return nil, err
 	}
 	renderer := e.newRenderer(reader)
+	unbindRenderer := renderer.bindPageResources(page0)
 	measured := cloneEditorData(object)
 	if measured.Type == "TextObject" {
 		measured.TextObject.Alpha = nil
@@ -118,6 +146,7 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 		measured.ImageObject.Alpha = nil
 	}
 	bounds, err := renderer.ObjectBounds(measured, "")
+	unbindRenderer()
 	if err != nil {
 		return nil, err
 	}
@@ -126,31 +155,62 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 	}
 	var ids []string
 	err = e.Transaction(func(edit *Editor) error {
+		restoreSrc := edit.bindParsedScope(srcScope)
+		validation := &editorValidation{Editor: edit}
+		baseObject, prepErr := validation.prepareCopiedObject("", rawObject)
+		restoreSrc()
+		if prepErr != nil {
+			return prepErr
+		}
+		items := make([][]byte, 0, len(indexes))
+		ids = make([]string, 0, len(indexes))
+		if len(indexes) >= 32 {
+			selected := make([]Page, len(indexes))
+			for i, index := range indexes {
+				selected[i] = doc.Pages.Page[index]
+			}
+			if err := reader.preloadPageHeadersContext(ctx, selected); err != nil {
+				return err
+			}
+		}
 		for _, index := range indexes {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if index != indexes[0] {
-				page, err = reader.PageContentByIndex(index)
-				if err != nil {
-					return err
-				}
-			}
-			pageBox, err := renderer.GetPageBox(page)
+			dstScope, area, err := edit.watermarkPageMeta(ctx, index, reader, doc.Pages.Page[index])
 			if err != nil {
 				return err
 			}
-			annotation, err := layoutWatermark(ctx, object, bounds, box, options, pageBox)
+			pageObject, _, err := edit.remapCopiedObject(cloneEditorData(baseObject), srcOrigin, srcScope, dstScope, index)
 			if err != nil {
 				return err
 			}
-			id, err := edit.AddAnnotation(index, annotation)
+			boxStr := area.PhysicalBox
+			if boxStr == "" {
+				boxStr = area.ApplicationBox
+			}
+			if boxStr == "" {
+				boxStr = area.ContentBox
+			}
+			if boxStr == "" {
+				boxStr = "0 0 210 297"
+			}
+			pageBox, err := ParseBox(boxStr)
+			if err != nil {
+				return err
+			}
+			annotation, err := layoutWatermark(ctx, pageObject, bounds, box, options, pageBox)
+			if err != nil {
+				return err
+			}
+			id, data, err := edit.prepareAnnotation(index, annotation)
 			if err != nil {
 				return err
 			}
 			ids = append(ids, id)
+			items = append(items, data)
 		}
-		return ctx.Err()
+		return edit.appendPageAnnotations(ctx, indexes, items, true)
 	})
 	if err != nil {
 		return nil, err
@@ -217,4 +277,54 @@ func layoutWatermark(ctx context.Context, base GraphicObject, bounds, box Box, o
 		}
 	}
 	return annotation, nil
+}
+
+// watermarkPageScope 仅读取单页页头资源作用域，避免全量解析页面正文图元
+// 入参: ctx 取消上下文, index 页面索引
+// 返回: []*parsedRes 页面局部资源作用域, error 读取或取消错误
+func (e *Editor) watermarkPageScope(ctx context.Context, index int) ([]*parsedRes, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if scope := e.pageLocalScope(index); len(scope) > 0 {
+		return scope, nil
+	}
+	if e.originalPage(index) {
+		if source := e.source.pages[e.pages[index].ID]; source != nil {
+			header, err := e.source.reader.readPageHeaderContext(ctx, source.ref)
+			if err != nil {
+				return nil, err
+			}
+			if len(header.PageRes) == 0 {
+				return nil, nil
+			}
+			return e.source.reader.collectPageResourcesContext(ctx, e.source.reader.ResPath(source.ref.BaseLoc), &header)
+		}
+	}
+	return nil, nil
+}
+
+// watermarkPageMeta 按轻量页头一次获取水印目标页的资源作用域与页面尺寸，不解析正文图元DOM
+// 入参: ctx 取消上下文, index 页面索引, reader 预览阅读器, pageRef 预览页面引用
+// 返回: []*parsedRes 页面局部资源作用域, PageArea 页面尺寸, error 读取或取消错误
+func (e *Editor) watermarkPageMeta(ctx context.Context, index int, reader *Reader, pageRef Page) ([]*parsedRes, PageArea, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, PageArea{}, err
+	}
+	scope := e.pageLocalScope(index)
+	header, err := reader.readPageHeaderContext(ctx, pageRef)
+	if err != nil {
+		return nil, PageArea{}, err
+	}
+	if len(scope) == 0 && len(header.PageRes) != 0 {
+		scope, err = reader.collectPageResourcesContext(ctx, reader.ResPath(pageRef.BaseLoc), &header)
+		if err != nil {
+			return nil, PageArea{}, err
+		}
+	}
+	area, err := reader.resolvePageAreaContext(ctx, header.Area, header.Template)
+	if err != nil {
+		return nil, PageArea{}, err
+	}
+	return scope, area, nil
 }

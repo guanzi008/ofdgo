@@ -19,8 +19,18 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"strings"
 	"unicode/utf8"
+)
+
+const (
+	// maxFaceCount 限制单个集合流式读取的最大字体数量
+	maxFaceCount = 4096
+	// maxFaceTableCount 限制单个字体的最大表目录项数
+	maxFaceTableCount = 4096
+	// maxFaceTableSize 限制流式读取名称与度量单表的最大字节数
+	maxFaceTableSize = 4 << 20
 )
 
 // Face 字体文件中的字体名称与零起始索引，不依赖文件名
@@ -45,49 +55,6 @@ type Face struct {
 // 返回: Face 字体信息
 func FaceInfo(data []byte, index int) Face {
 	return faceInfoLanguage(data, index, 0xffff, 0xffff)
-}
-
-// faceInfoLanguage 优先读取指定平台和语言的显示名称，保留标识及全部别名
-// 入参: data 名称表数据, index 字体索引, platform 平台标识, language 语言标识
-// 返回: Face 字体信息
-func faceInfoLanguage(data []byte, index int, platform, language uint16) Face {
-	records, values := fontNameValues(data)
-	name := func(ids ...uint16) string {
-		for _, id := range ids {
-			for _, record := range records {
-				if record.Name == id {
-					if value := strings.TrimSpace(values[[4]uint16{record.Platform, record.Encoding, record.Language, id}]); value != "" {
-						return value
-					}
-				}
-			}
-		}
-		return ""
-	}
-	localized := func(ids ...uint16) string {
-		for _, id := range ids {
-			for _, record := range records {
-				if record.Platform == platform && record.Language == language && record.Name == id {
-					if value := strings.TrimSpace(values[[4]uint16{record.Platform, record.Encoding, record.Language, id}]); value != "" {
-						return value
-					}
-				}
-			}
-		}
-		return name(ids...)
-	}
-	key := ""
-	if family, version := name(1), name(5); family != "" && version != "" {
-		key = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join([]string{family, version, name(8)}, "\x00"))))
-	}
-	family, style := localized(1), localized(2)
-	if family == "" {
-		family = localized(16, 4, 6)
-	}
-	if style == "" {
-		style = localized(17)
-	}
-	return Face{Index: index, FullName: localized(4, 6, 16, 1), Family: localized(16, 1), Style: localized(17, 2), PostScriptName: name(6), Names: fontNamesFromValues(records, values), MenuFamily: family, MenuStyle: style, FamilyKey: key}
 }
 
 // TableFaceInfo 读取名称及字体固有款式，名称键不随显示语言变化
@@ -164,6 +131,105 @@ func ReadLocalizedFaces(data []byte, platform, language uint16) ([]Face, error) 
 	return faces, nil
 }
 
+// ReadLocalizedFacesAt 通过随机读取流按需读取字体头、表目录及名称和款式表，避免整文件读盘
+// 入参: reader 随机读取流, size 文件总字节数, platform 名称表平台标识, language 名称表语言标识
+// 返回: []Face 字体列表, error 读取、格式或名称表错误
+func ReadLocalizedFacesAt(reader io.ReaderAt, size int64, platform, language uint16) ([]Face, error) {
+	if reader == nil || size < 12 {
+		return nil, fmt.Errorf("invalid font header")
+	}
+	fileSize := uint64(size)
+	var header [12]byte
+	if err := readAtFull(reader, header[:], 0); err != nil {
+		return nil, err
+	}
+	var offsets []uint64
+	switch string(header[:4]) {
+	case "\x00\x01\x00\x00", "OTTO", "true":
+		offsets = []uint64{0}
+	case "ttcf":
+		version := binary.BigEndian.Uint32(header[4:])
+		count := uint64(binary.BigEndian.Uint32(header[8:]))
+		if (version != 0x00010000 && version != 0x00020000) || count == 0 || count > (fileSize-12)/4 || count > maxFaceCount {
+			return nil, fmt.Errorf("invalid font collection header")
+		}
+		rawOffsets := make([]byte, count*4)
+		if err := readAtFull(reader, rawOffsets, 12); err != nil {
+			return nil, err
+		}
+		offsets = make([]uint64, count)
+		for i := range offsets {
+			offsets[i] = uint64(binary.BigEndian.Uint32(rawOffsets[i*4:]))
+			if offsets[i] > fileSize-12 {
+				return nil, fmt.Errorf("invalid font offset")
+			}
+		}
+	default:
+		return nil, fmt.Errorf("invalid OpenType header")
+	}
+	faces := make([]Face, 0, len(offsets))
+	cache := make(map[[2]uint64][]byte)
+	for index, faceOffset := range offsets {
+		var sfntHeader [12]byte
+		if faceOffset == 0 {
+			sfntHeader = header
+		} else if err := readAtFull(reader, sfntHeader[:], int64(faceOffset)); err != nil {
+			return nil, err
+		}
+		if string(sfntHeader[:4]) != "\x00\x01\x00\x00" && string(sfntHeader[:4]) != "OTTO" && string(sfntHeader[:4]) != "true" {
+			return nil, fmt.Errorf("invalid OpenType header")
+		}
+		tableCount := uint64(binary.BigEndian.Uint16(sfntHeader[4:]))
+		dirOffset := faceOffset + 12
+		if tableCount == 0 || tableCount > (fileSize-dirOffset)/16 || tableCount > maxFaceTableCount {
+			return nil, fmt.Errorf("invalid font table directory")
+		}
+		directory := make([]byte, tableCount*16)
+		if err := readAtFull(reader, directory, int64(dirOffset)); err != nil {
+			return nil, err
+		}
+		seen := make(map[string]bool, tableCount)
+		tables := make(map[string][]byte, 3)
+		for i := uint64(0); i < tableCount; i++ {
+			entry := directory[i*16 : (i+1)*16]
+			tag := string(entry[:4])
+			start := uint64(binary.BigEndian.Uint32(entry[8:]))
+			length := uint64(binary.BigEndian.Uint32(entry[12:]))
+			if start > fileSize || length > fileSize-start {
+				return nil, fmt.Errorf("invalid %s font table range", tag)
+			}
+			if seen[tag] {
+				return nil, fmt.Errorf("duplicate %s font table", tag)
+			}
+			seen[tag] = true
+			if tag != "name" && tag != "head" && tag != "OS/2" {
+				continue
+			}
+			if length > maxFaceTableSize {
+				return nil, fmt.Errorf("%s font table too large", tag)
+			}
+			key := [2]uint64{start, length}
+			data, ok := cache[key]
+			if !ok {
+				data = make([]byte, length)
+				if length > 0 {
+					if err := readAtFull(reader, data, int64(start)); err != nil {
+						return nil, err
+					}
+				}
+				cache[key] = data
+			}
+			tables[tag] = data
+		}
+		face := TableFaceInfo(tables, index, platform, language)
+		if face.FullName == "" {
+			return nil, fmt.Errorf("font %d has no usable name", index)
+		}
+		faces = append(faces, face)
+	}
+	return faces, nil
+}
+
 // ExtractFace 提取已解封装字体中的集合项，规范字符映射并保留原始表
 // 入参: data OpenType数据, index 零起始字体索引
 // 返回: []byte 独立字体数据, error 格式或索引错误
@@ -218,4 +284,61 @@ func MissingGlyphs(data []byte, text string) (string, error) {
 		}
 	}
 	return missing.String(), nil
+}
+
+// faceInfoLanguage 优先读取指定平台和语言的显示名称，保留标识及全部别名
+// 入参: data 名称表数据, index 字体索引, platform 平台标识, language 语言标识
+// 返回: Face 字体信息
+func faceInfoLanguage(data []byte, index int, platform, language uint16) Face {
+	records, values := fontNameValues(data)
+	name := func(ids ...uint16) string {
+		for _, id := range ids {
+			for _, record := range records {
+				if record.Name == id {
+					if value := strings.TrimSpace(values[[4]uint16{record.Platform, record.Encoding, record.Language, id}]); value != "" {
+						return value
+					}
+				}
+			}
+		}
+		return ""
+	}
+	localized := func(ids ...uint16) string {
+		for _, id := range ids {
+			for _, record := range records {
+				if record.Platform == platform && record.Language == language && record.Name == id {
+					if value := strings.TrimSpace(values[[4]uint16{record.Platform, record.Encoding, record.Language, id}]); value != "" {
+						return value
+					}
+				}
+			}
+		}
+		return name(ids...)
+	}
+	key := ""
+	if family, version := name(1), name(5); family != "" && version != "" {
+		key = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join([]string{family, version, name(8)}, "\x00"))))
+	}
+	family, style := localized(1), localized(2)
+	if family == "" {
+		family = localized(16, 4, 6)
+	}
+	if style == "" {
+		style = localized(17)
+	}
+	return Face{Index: index, FullName: localized(4, 6, 16, 1), Family: localized(16, 1), Style: localized(17, 2), PostScriptName: name(6), Names: fontNamesFromValues(records, values), MenuFamily: family, MenuStyle: style, FamilyKey: key}
+}
+
+// readAtFull 从随机读取流读取完整缓冲区，允许末尾恰好返回EOF
+// 入参: reader 随机读取流, buf 目标缓冲区, offset 读取偏移
+// 返回: error 读取错误
+func readAtFull(reader io.ReaderAt, buf []byte, offset int64) error {
+	n, err := reader.ReadAt(buf, offset)
+	if err != nil && !(err == io.EOF && n == len(buf)) {
+		return err
+	}
+	if n != len(buf) {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
 }

@@ -25,7 +25,9 @@ import (
 	"image/jpeg"
 	"io"
 	"math"
+	"runtime"
 	"strconv"
+	"sync"
 
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/canvas/renderers/pdf"
@@ -34,20 +36,6 @@ import (
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
-
-// canvasEPSWriter 在EPS头部写入本库制作软件，不改动绘图内容
-type canvasEPSWriter struct {
-	io.Writer
-}
-
-// epsImageRenderer 在EPS输出端优化图片，不修改页面及渲染缓存
-type epsImageRenderer struct {
-	*ps.PS
-	writer  io.Writer
-	options CompressionOptions
-	ctx     context.Context
-	err     error
-}
 
 // RenderSVG 使用canvas输出SVG，按模式保留资源和对象分组
 // 入参: r 渲染器, page 页面内容, writer 输出流, mode 资源模式
@@ -110,19 +98,6 @@ func (CanvasBackend) RenderEPS(r *Renderer, page *PageContent, writer io.Writer)
 	return buffer.Flush()
 }
 
-// Write 写入EPS片段并替换独立的制作软件声明
-// 入参: data EPS片段
-// 返回: int 已处理字节数, error 写入错误
-func (w canvasEPSWriter) Write(data []byte) (int, error) {
-	if bytes.Equal(data, []byte("%%Creator: tdewolff/canvas\n")) {
-		if _, err := io.WriteString(w.Writer, "%%Creator: "+ofdCreator+"\n"); err != nil {
-			return 0, err
-		}
-		return len(data), nil
-	}
-	return w.Writer.Write(data)
-}
-
 // RenderPDF 使用canvas输出PDF，保留导航与文字并分块保存中间输出
 // 入参: r 渲染器, pages 页面列表, writer 输出流, progress 页面处理进度
 // 返回: error 错误信息
@@ -138,6 +113,11 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	if len(pages) == 0 {
 		return fmt.Errorf("no pages found")
 	}
+	for i, page := range pages {
+		if !rasterPositive(page.Box.W) || !rasterPositive(page.Box.H) {
+			return fmt.Errorf("invalid PDF page %d size: %g x %g", i+1, page.Box.W, page.Box.H)
+		}
+	}
 	doc := r.Reader.doc
 	navigation := &pdfNavigation{}
 	if !r.printing {
@@ -148,15 +128,11 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		}
 	}
 	var buf editorSnapshotBuffer
+	defer func() { _ = buf.Close() }()
 	settings := pdf.DefaultOptions
 	settings.Compress = r.Compression.Mode == CompressionUnchanged
 	p := pdf.New(&buf, pages[0].Box.W, pages[0].Box.H, &settings)
 	renderer := &pdfRenderer{PDF: p, glyphPaths: *resourceCache[*canvas.Path, *canvas.Path](r.Reader.resources, 16<<20), images: make([][]image.Image, 1), text: make([]codecpdf.TextPage, 1), navigation: navigation}
-	defer func() {
-		if renderer.imageError != nil {
-			r.canvasState().images = *resourceCache[*EncodedImage, image.Image](r.Reader.resources, imageCacheLimit)
-		}
-	}()
 	var info DocInfo
 	if docInfo, err := r.Reader.DocInfo(); err == nil {
 		info = *docInfo
@@ -175,8 +151,78 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		}
 		renderer.information[field.key] = encoded
 	}
+	type pdfPrefetchResult struct {
+		content *PageContent
+		err     error
+	}
+	prefetchCtx, prefetchCancel := context.WithCancel(ctx)
+	var prefetchWG sync.WaitGroup
+	var prefetchJobs chan int
+	var prefetchSlots []chan pdfPrefetchResult
+	prefetchNext := 1
+	prefetchWindow := 0
+	stopPrefetch := func() {
+		prefetchCancel()
+		if prefetchJobs != nil {
+			close(prefetchJobs)
+			prefetchJobs = nil
+		}
+		prefetchWG.Wait()
+	}
+	defer stopPrefetch()
 	for i, page := range pages {
-		content, err := page.ReadContent(ctx, r.Reader)
+		var content *PageContent
+		var err error
+		if i == 0 || prefetchSlots == nil {
+			content, err = page.ReadContent(ctx, r.Reader)
+			if i == 0 && err == nil && len(pages) > 1 && r.Reader != nil {
+				workers := min(len(pages)-1, min(max(1, runtime.GOMAXPROCS(0)), 4))
+				if workers > 1 {
+					forks := make([]*Reader, 0, workers)
+					for range workers {
+						fork, forkErr := r.Reader.Fork(prefetchCtx)
+						if forkErr != nil {
+							if ctx.Err() != nil {
+								return ctx.Err()
+							}
+							forks = nil
+							break
+						}
+						forks = append(forks, fork)
+					}
+					if len(forks) > 0 {
+						prefetchWindow = min(len(pages)-1, len(forks)*2)
+						prefetchJobs = make(chan int, prefetchWindow)
+						prefetchSlots = make([]chan pdfPrefetchResult, len(pages))
+						for k := 1; k < len(pages); k++ {
+							prefetchSlots[k] = make(chan pdfPrefetchResult, 1)
+						}
+						for _, fork := range forks {
+							prefetchWG.Add(1)
+							go func(reader *Reader) {
+								defer prefetchWG.Done()
+								for idx := range prefetchJobs {
+									c, e := pages[idx].ReadContent(prefetchCtx, reader)
+									prefetchSlots[idx] <- pdfPrefetchResult{content: c, err: e}
+								}
+							}(fork)
+						}
+						for prefetchNext < len(pages) && prefetchNext <= prefetchWindow {
+							prefetchJobs <- prefetchNext
+							prefetchNext++
+						}
+					}
+				}
+			}
+		} else {
+			res := <-prefetchSlots[i]
+			prefetchSlots[i] = nil
+			content, err = res.content, res.err
+			if prefetchJobs != nil && prefetchNext < len(pages) {
+				prefetchJobs <- prefetchNext
+				prefetchNext++
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("failed to read page %d: %w", i+1, err)
 		}
@@ -212,6 +258,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 			return err
 		}
 	}
+	stopPrefetch()
 	if doc != nil && !r.printing {
 		if err := navigation.addOutlines(doc.Outlines.OutlineElem, 0, navigation.bookmarks, navigation.pageIndex, pages); err != nil {
 			return err
@@ -230,6 +277,33 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		}
 	}
 	return renderer.writePDF(r.outputContext(), &buf, buf.size, writer, options)
+}
+
+// canvasEPSWriter 在EPS头部写入本库制作软件，不改动绘图内容
+type canvasEPSWriter struct {
+	io.Writer
+}
+
+// Write 写入EPS片段并替换独立的制作软件声明
+// 入参: data EPS片段
+// 返回: int 已处理字节数, error 写入错误
+func (w canvasEPSWriter) Write(data []byte) (int, error) {
+	if bytes.Equal(data, []byte("%%Creator: tdewolff/canvas\n")) {
+		if _, err := io.WriteString(w.Writer, "%%Creator: "+ofdCreator+"\n"); err != nil {
+			return 0, err
+		}
+		return len(data), nil
+	}
+	return w.Writer.Write(data)
+}
+
+// epsImageRenderer 在EPS输出端优化图片，不修改页面及渲染缓存
+type epsImageRenderer struct {
+	*ps.PS
+	writer  io.Writer
+	options CompressionOptions
+	ctx     context.Context
+	err     error
 }
 
 // RenderImage 写出Flate或更小的JPEG图片，保留显示尺寸与变换

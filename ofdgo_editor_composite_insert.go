@@ -90,11 +90,19 @@ func (e *Editor) copyObjectsToComposite(page int, path ObjectPath, objects []Gra
 				}
 			}
 		}
+		dstScope := e.pageLocalScope(page)
 		var content []byte
 		validation := &editorValidation{Editor: e}
 		for _, source := range objects {
+			var srcScope []*parsedRes
+			restoreOrigin := func() {}
+			if srcOrigin := e.snapshotOrigin(source); srcOrigin != nil && srcOrigin.page != nil && srcOrigin.page.original != nil {
+				srcScope = srcOrigin.page.original.pageResources
+				restoreOrigin = e.bindPageResources(srcOrigin.page.original)
+			}
 			id := e.nextID()
 			object, err := validation.prepareCopiedObject(id, source)
+			restoreOrigin()
 			if err != nil {
 				return err
 			}
@@ -104,6 +112,15 @@ func (e *Editor) copyObjectsToComposite(page int, path ObjectPath, objects []Gra
 				return err
 			}
 			e.maxID = maximum
+			srcLayerStyle := e.copiedLayerStyle(source)
+			object, origin, err = e.remapCopiedObject(object, origin, srcScope, dstScope, page)
+			if err != nil {
+				return err
+			}
+			targetLayerStyle, err := e.copiedTargetLayerStyle(srcLayerStyle, srcScope, dstScope)
+			if err != nil {
+				return err
+			}
 			var data []byte
 			if origin != nil {
 				data, err = editorXMLObject(origin.data, origin.node, origin.object, object)
@@ -121,10 +138,12 @@ func (e *Editor) copyObjectsToComposite(page int, path ObjectPath, objects []Gra
 				return err
 			}
 			if node.object.Type == "PathObject" {
-				node.defaults = renderer.drawParamDefaults(e.copiedLayerStyle(source), nil)
-				style, styleErr := e.resolveEditorStyle(node.object, e.copiedLayerStyle(source))
+				restoreSrc := e.bindParsedScope(srcScope)
+				node.defaults = renderer.drawParamDefaults(srcLayerStyle, nil)
+				style, styleErr := e.resolveEditorStyle(node.object, targetLayerStyle)
 				_, fillErr := e.Color(style.PathObject.FillColor)
 				_, strokeErr := e.Color((*FillColor)(style.PathObject.StrokeColor))
+				restoreSrc()
 				if styleErr != nil && editReason(styleErr) == EditUnsupportedColor || fillErr != nil || strokeErr != nil {
 					node, err = e.wrapCompositePath(renderer, node)
 					if err != nil {
@@ -134,7 +153,7 @@ func (e *Editor) copyObjectsToComposite(page int, path ObjectPath, objects []Gra
 			}
 			node.parent, node.boundaryInCTM = IdentityMatrix, true
 			node.setStates(object.CompositeGraphicUnit.states)
-			node.drawParams = []string{e.copiedLayerStyle(source)}
+			node.drawParams = []string{targetLayerStyle}
 			if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
 				if err := node.convertCoordinates(IdentityMatrix, true); err != nil {
 					return err
@@ -443,7 +462,7 @@ func (e *Editor) addEditorDrawParamContext(ctx context.Context, draw DrawParam) 
 		x.root("Res", ofdAttrs{{Name: xml.Name{Local: "BaseLoc"}, Value: "."}})
 		x.start("DrawParams", nil)
 		attrs := ofdAttrs{}
-		for _, pair := range [][2]string{{"ID", draw.ID}, {"Relative", draw.Relative}, {"Cap", draw.Cap}, {"Join", draw.Join}, {"Font", draw.Font}} {
+		for _, pair := range [][2]string{{"ID", draw.ID}, {"Relative", draw.Relative}, {"Cap", draw.Cap}, {"Join", draw.Join}} {
 			attrs.add(pair[0], pair[1])
 		}
 		attrs.number("LineWidth", draw.LineWidth)
@@ -454,16 +473,11 @@ func (e *Editor) addEditorDrawParamContext(ctx context.Context, draw DrawParam) 
 		if draw.MiterLimitSet && draw.MiterLimit == 0 {
 			attrs.add("MiterLimit", "0")
 		}
-		if draw.Relative == "" || draw.dashPatternSet || draw.DashPattern != "" {
+		if draw.DashPattern != "" || draw.dashPatternSet && draw.Relative != "" {
 			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: draw.DashPattern})
 		}
 		if draw.DashOffset != nil {
 			attrs.add("DashOffset", ofdNumber(*draw.DashOffset))
-		}
-		attrs.number("Size", draw.Size)
-		attrs.number("Weight", float64(draw.Weight))
-		if draw.Italic {
-			attrs.add("Italic", "true")
 		}
 		x.start("DrawParam", attrs)
 		x.color("FillColor", draw.FillColor)

@@ -42,163 +42,6 @@ type compressionImages struct {
 	patternVisits map[compressionPatternKey]bool
 }
 
-// compressionPatternKey 复用相同底纹的尺寸分析，平移不影响像素需求
-type compressionPatternKey struct {
-	pattern *Pattern
-	linear  [4]float64
-}
-
-// compressionImagePlan 分文档合并图片需求，版本文件的当前入口独立于其他文档处理
-// 入参: ctx 取消上下文, options 压缩配置
-// 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
-func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOptions) (map[string]bool, map[string]image.Point, error) {
-	if options.Mode != CompressionLossy {
-		return nil, nil, ctx.Err()
-	}
-	images := make(map[string]bool)
-	sizes := make(map[string]image.Point)
-	blocked := make(map[string]bool)
-	isolated := r.OFD.DocBody[r.documentIndex].versioned
-	current := make(map[string]bool)
-	for offset := 0; offset < r.DocumentCount(); offset++ {
-		if err := ctx.Err(); err != nil {
-			return nil, nil, err
-		}
-		index := offset
-		if isolated {
-			index = (r.documentIndex + offset) % r.DocumentCount()
-		}
-		document := r
-		if index != r.DocumentIndex() {
-			var err error
-			document, err = r.DocumentContext(ctx, index)
-			if err != nil {
-				return nil, nil, err
-			}
-		}
-		catalog, err := document.Images(ctx)
-		if err != nil {
-			if document != r {
-				document.Close()
-			}
-			return nil, nil, err
-		}
-		if len(catalog) == 0 {
-			if document != r {
-				document.Close()
-			}
-			continue
-		}
-		var demands map[string]image.Point
-		masks, geometry, err := document.compressionImageSafety(ctx, catalog)
-		if err == nil && geometry {
-			demands, err = document.compressionImageSizes(ctx, catalog, options.ImageDPI())
-		}
-		if document != r {
-			document.Close()
-		}
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, img := range catalog {
-			name := cleanPackagePath(img.Location)
-			if isolated {
-				if index == r.documentIndex {
-					current[name] = true
-				} else if current[name] {
-					continue
-				}
-			}
-			if old, ok := images[name]; !ok || old {
-				images[name] = !masks[name]
-			}
-			size := demands[name]
-			if size.X <= 0 || size.Y <= 0 || masks[name] {
-				blocked[name] = true
-				delete(sizes, name)
-				continue
-			}
-			if !blocked[name] {
-				old := sizes[name]
-				sizes[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
-			}
-		}
-	}
-	return images, sizes, ctx.Err()
-}
-
-// compressionImageSize 将毫米显示尺寸换算为像素，非法尺寸不降采样
-// 整像素边界消除单位换算产生的单ULP上溢，不降低实际像素需求
-// 入参: width 显示宽度, height 显示高度, dpi 分辨率上限
-// 返回: image.Point 像素需求
-func compressionImageSize(width, height float64, dpi int) image.Point {
-	w := math.Ceil(math.Nextafter(width*float64(dpi)/25.4, math.Inf(-1)))
-	h := math.Ceil(math.Nextafter(height*float64(dpi)/25.4, math.Inf(-1)))
-	if w <= 0 || h <= 0 || math.IsNaN(w) || math.IsNaN(h) || math.IsInf(w, 0) || math.IsInf(h, 0) || w > 1<<30 || h > 1<<30 {
-		return image.Point{}
-	}
-	return image.Pt(int(w), int(h))
-}
-
-// compressionImageSizes 按正文、模板、注解及底纹的实际变换汇总图片尺寸，包括隐藏内容
-// 模板使用独立页面坐标，统一分析一次，避免随引用页数重复展开
-// 入参: ctx 取消上下文, images 图片资源, dpi 分辨率上限
-// 返回: map[string]image.Point 资源像素需求, error 取消错误
-func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, dpi int) (map[string]image.Point, error) {
-	if dpi == 0 {
-		return nil, nil
-	}
-	doc, err := r.DocContext(ctx)
-	if err != nil {
-		return nil, ctx.Err()
-	}
-	renderer := NewRenderer(r, WithRenderBackends(RenderBackends{}))
-	renderer.pageContext = ctx
-	defer renderer.ClearCache()
-	visitor := &compressionImages{ctx: ctx, dpi: dpi, sizes: make(map[string]image.Point), renderer: renderer}
-	for _, ref := range doc.Pages.Page {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		page, err := r.PageContentContext(ctx, ref)
-		if err != nil {
-			return nil, ctx.Err()
-		}
-		for _, ref := range page.Template {
-			if renderer.loadTemplate(ref.TemplateID) == nil {
-				return nil, ctx.Err()
-			}
-		}
-		content := *page
-		content.Template = nil
-		if err := renderer.WalkPage(&content, visitor); err != nil {
-			return nil, ctx.Err()
-		}
-	}
-	for _, ref := range r.doc.CommonData.TemplatePage {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		template := renderer.loadTemplate(ref.ID)
-		if template == nil {
-			return nil, ctx.Err()
-		}
-		for order := range 3 {
-			if err := renderer.walkLayers(template.Content.Layer, order, visitor); err != nil {
-				return nil, ctx.Err()
-			}
-		}
-	}
-	result := make(map[string]image.Point)
-	for _, img := range images {
-		name := cleanPackagePath(img.Location)
-		size := visitor.sizes[editorResourceID(img.ID)]
-		old := result[name]
-		result[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
-	}
-	return result, ctx.Err()
-}
-
 // DrawObject 汇总图片、替换图及文字、路径和图像边框底纹的尺寸，不使用裁剪后的局部面积
 // 入参: object 图形对象, state 继承状态
 // 返回: error 取消或几何错误
@@ -262,23 +105,6 @@ func (v *compressionImages) VisitComposite(object *CompositeGraphicUnit, state R
 	return v.recordSize(ids, size)
 }
 
-// recordSize 合并同一图像资源在不同位置的最大像素需求
-// 入参: ids 图像标识，空值不统计, size 当前像素需求
-// 返回: error 尺寸无效时返回错误
-func (v *compressionImages) recordSize(ids [2]string, size image.Point) error {
-	if size.X == 0 || size.Y == 0 {
-		return fmt.Errorf("invalid image placement")
-	}
-	for _, id := range ids {
-		if id == "" {
-			continue
-		}
-		old := v.sizes[id]
-		v.sizes[id] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
-	}
-	return nil
-}
-
 // DrawStamp 保留签章内容，不参与图片降采样
 // 入参: stamp 印章
 // 返回: error 始终为空
@@ -291,6 +117,32 @@ func (v *compressionImages) IncludeHidden() bool { return true }
 // SkipClips 按完整图片尺寸分析，不加载裁剪几何或文字轮廓
 // 返回: bool 始终为真
 func (v *compressionImages) SkipClips() bool { return true }
+
+// recordSize 按当前资源作用域解析包内媒体路径并合并同一文件的最大像素需求
+// 入参: ids 图像标识，空值不统计, size 当前像素需求
+// 返回: error 尺寸无效时返回错误
+func (v *compressionImages) recordSize(ids [2]string, size image.Point) error {
+	if size.X == 0 || size.Y == 0 {
+		return fmt.Errorf("invalid image placement")
+	}
+	r := v.renderer.Reader
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		rel, ok := r.resolveResPathScoped(v.renderer.pageResources, id)
+		if !ok {
+			continue
+		}
+		name := r.ResPath(rel)
+		if name == "" || name == "." {
+			continue
+		}
+		old := v.sizes[name]
+		v.sizes[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
+	}
+	return nil
+}
 
 // objectPatterns 统计文字和路径的填充及描边底纹，保留绘制参数继承关系
 // 入参: object 对象样式及坐标, state 继承状态
@@ -308,7 +160,7 @@ func (v *compressionImages) objectPatterns(object PathObject, state RenderState)
 	if (fill == nil || fill.Pattern == nil) && (stroke == nil || stroke.Pattern == nil) {
 		return nil
 	}
-	matrix, _ := renderObjectMatrix(object.Boundary, NewMatrix(object.CTM), state)
+	matrix, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
 	for _, color := range [2]*FillColor{fill, stroke} {
 		if color != nil && color.Pattern != nil {
 			if err := v.patternImages(color, matrix); err != nil {
@@ -403,6 +255,180 @@ func (v *compressionImages) patternImages(color *FillColor, object Matrix) error
 		}
 	}
 	return nil
+}
+
+// compressionPatternKey 复用相同底纹的尺寸分析，平移不影响像素需求
+type compressionPatternKey struct {
+	pattern *Pattern
+	linear  [4]float64
+}
+
+// compressionImagePlan 分文档合并图片需求，版本文件的当前入口独立于其他文档处理
+// 入参: ctx 取消上下文, options 压缩配置
+// 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
+func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOptions) (map[string]bool, map[string]image.Point, error) {
+	return r.compressionImagePlanProtected(ctx, options, nil, nil)
+}
+
+// compressionImagePlanProtected 按签名保护边界分文档合并图片需求，受保护文档和文件不参与有损降采样
+// 入参: ctx 取消上下文, options 压缩配置, protectedDocs 受签名保护的文档索引, protectedFiles 受签名保护的文件路径
+// 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
+func (r *Reader) compressionImagePlanProtected(ctx context.Context, options CompressionOptions, protectedDocs map[int]bool, protectedFiles map[string]bool) (map[string]bool, map[string]image.Point, error) {
+	if options.Mode != CompressionLossy {
+		return nil, nil, ctx.Err()
+	}
+	images := make(map[string]bool)
+	sizes := make(map[string]image.Point)
+	blocked := make(map[string]bool)
+	isolated := r.OFD.DocBody[r.documentIndex].versioned
+	current := make(map[string]bool)
+	for offset := 0; offset < r.DocumentCount(); offset++ {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		index := offset
+		if isolated {
+			index = (r.documentIndex + offset) % r.DocumentCount()
+		}
+		if protectedDocs[index] {
+			continue
+		}
+		document := r
+		if index != r.DocumentIndex() {
+			var err error
+			document, err = r.DocumentContext(ctx, index)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		catalog, err := document.Images(ctx)
+		if err != nil {
+			if document != r {
+				document.Close()
+			}
+			return nil, nil, err
+		}
+		if len(catalog) == 0 {
+			if document != r {
+				document.Close()
+			}
+			continue
+		}
+		var demands map[string]image.Point
+		masks, geometry, err := document.compressionImageSafety(ctx, catalog)
+		if err == nil && geometry {
+			demands, err = document.compressionImageSizes(ctx, catalog, options.ImageDPI())
+		}
+		if document != r {
+			document.Close()
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, img := range catalog {
+			name := cleanPackagePath(img.Location)
+			if protectedFiles[name] {
+				images[name] = false
+				blocked[name] = true
+				delete(sizes, name)
+				continue
+			}
+			if isolated {
+				if index == r.documentIndex {
+					current[name] = true
+				} else if current[name] {
+					continue
+				}
+			}
+			if old, ok := images[name]; !ok || old {
+				images[name] = !masks[name]
+			}
+			size := demands[name]
+			if size.X <= 0 || size.Y <= 0 || masks[name] {
+				blocked[name] = true
+				delete(sizes, name)
+				continue
+			}
+			if !blocked[name] {
+				old := sizes[name]
+				sizes[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
+			}
+		}
+	}
+	return images, sizes, ctx.Err()
+}
+
+// compressionImageSizes 按正文、模板、注解及底纹的实际变换汇总图片尺寸，包括隐藏内容
+// 模板使用独立页面坐标，统一分析一次，避免随引用页数重复展开
+// 入参: ctx 取消上下文, images 图片资源, dpi 分辨率上限
+// 返回: map[string]image.Point 资源像素需求, error 取消错误
+func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, dpi int) (map[string]image.Point, error) {
+	if dpi == 0 {
+		return nil, nil
+	}
+	doc, err := r.DocContext(ctx)
+	if err != nil {
+		return nil, ctx.Err()
+	}
+	renderer := NewRenderer(r, WithRenderBackends(RenderBackends{}))
+	renderer.pageContext = ctx
+	defer renderer.ClearCache()
+	visitor := &compressionImages{ctx: ctx, dpi: dpi, sizes: make(map[string]image.Point), renderer: renderer}
+	for _, ref := range doc.Pages.Page {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		page, err := r.PageContentContext(ctx, ref)
+		if err != nil {
+			return nil, ctx.Err()
+		}
+		content := *page
+		content.Template = nil
+		if err := renderer.WalkPage(&content, visitor); err != nil {
+			return nil, ctx.Err()
+		}
+	}
+	for _, ref := range r.doc.CommonData.TemplatePage {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		template := renderer.loadTemplate(ref.ID)
+		if template == nil {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		unbind := renderer.bindPageResources(template)
+		for order := range 3 {
+			if err := renderer.walkLayers(template.Content.Layer, order, nil, visitor); err != nil {
+				unbind()
+				return nil, ctx.Err()
+			}
+		}
+		unbind()
+	}
+	result := make(map[string]image.Point)
+	for _, img := range images {
+		name := cleanPackagePath(img.Location)
+		size := visitor.sizes[name]
+		old := result[name]
+		result[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
+	}
+	return result, ctx.Err()
+}
+
+// compressionImageSize 将毫米显示尺寸换算为像素，非法尺寸不降采样
+// 整像素边界消除单位换算产生的单ULP上溢，不降低实际像素需求
+// 入参: width 显示宽度, height 显示高度, dpi 分辨率上限
+// 返回: image.Point 像素需求
+func compressionImageSize(width, height float64, dpi int) image.Point {
+	w := math.Ceil(math.Nextafter(width*float64(dpi)/25.4, math.Inf(-1)))
+	h := math.Ceil(math.Nextafter(height*float64(dpi)/25.4, math.Inf(-1)))
+	if w <= 0 || h <= 0 || math.IsNaN(w) || math.IsNaN(h) || math.IsInf(w, 0) || math.IsInf(h, 0) || w > 1<<30 || h > 1<<30 {
+		return image.Point{}
+	}
+	return image.Pt(int(w), int(h))
 }
 
 // outputImageFormat 识别可由资源压缩生成的图片格式

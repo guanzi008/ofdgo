@@ -21,7 +21,6 @@ import (
 	"image/color"
 	"maps"
 	"slices"
-	"strconv"
 	"strings"
 )
 
@@ -32,15 +31,6 @@ type PatternStyle struct {
 	XStep  *float64
 	YStep  *float64
 	CTM    *string
-}
-
-// editorValidation 保存同次对象校验的引用路径及已验证几何，允许共享但拒绝循环
-type editorValidation struct {
-	*Editor
-	patterns   map[*Pattern]bool
-	composites map[string]bool
-	vectors    map[string]bool
-	paths      map[string]bool
 }
 
 // AddColorSpace 注册颜色空间和可选ICC快照，相同配置共用文件，ID与Profile由库生成
@@ -152,6 +142,7 @@ func (e *Editor) StylePatterns(page int, ids []string, stroke bool, style Patter
 	if err != nil {
 		return err
 	}
+	defer e.bindPageIndex(page)()
 	for i := range objects {
 		objects[i] = cloneEditorData(objects[i])
 		object := &objects[i]
@@ -231,12 +222,12 @@ func (e *Editor) Color(value *FillColor) (color.NRGBA, error) {
 	}
 	id := value.ColorSpace
 	if id == "" && e.source != nil && e.source.document.CommonData.DefaultCS != 0 {
-		id = strconv.Itoa(e.source.document.CommonData.DefaultCS)
+		id = formatUnitID(uint64(e.source.document.CommonData.DefaultCS))
 	}
 	if id != "" {
 		var found *ColorSpace
 		if e.source != nil {
-			found, _ = resourceValue(e.source.reader.colorSpaceCache, id)
+			found, _ = e.sourceColorSpace(id)
 		}
 		for _, resource := range e.resources {
 			if resource.space != nil && sameResourceID(resource.space.ID, id) {
@@ -319,19 +310,23 @@ func (e *Editor) RGBColor(value color.NRGBA) (*FillColor, error) {
 		alpha := int(value.A)
 		result.Alpha = &alpha
 	}
-	if e.sourceRGB() {
+	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
+		return result, nil
+	}
+	defaultID := formatUnitID(uint64(e.source.document.CommonData.DefaultCS))
+	if e.sourceRGB() && !e.colorSpaceShadowedNonRGB(defaultID) {
 		return result, nil
 	}
 	for _, id := range slices.Sorted(maps.Keys(e.source.reader.colorSpaceCache)) {
 		space := e.source.reader.colorSpaceCache[id]
-		if space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0 {
+		if isStandardRGBColorSpace(space) && !e.colorSpaceShadowedNonRGB(id) {
 			result.ColorSpace = id
 			return result, nil
 		}
 	}
 	for _, resource := range e.resources {
 		space := resource.space
-		if space != nil && space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0 {
+		if isStandardRGBColorSpace(space) && !e.colorSpaceShadowedNonRGB(space.ID) {
 			result.ColorSpace = space.ID
 			return result, nil
 		}
@@ -348,6 +343,7 @@ func (e *Editor) RGBColor(value color.NRGBA) (*FillColor, error) {
 // 入参: page 页面索引, ids 对象标识, paint 绘制颜色，nil恢复默认, stroke 是否修改描边
 // 返回: error 错误信息
 func (e *Editor) PaintObjects(page int, ids []string, paint *FillColor, stroke bool) error {
+	defer e.bindPageIndex(page)()
 	if err := e.editorColor(paint); err != nil {
 		return err
 	}
@@ -377,156 +373,13 @@ func (e *Editor) PaintObjects(page int, ids []string, paint *FillColor, stroke b
 	return e.updateObjects(page, objects, true)
 }
 
-// editorPaintable 判断文字与路径颜色能否在保留其他字段的前提下修改
-// 入参: object 图形对象
-// 返回: bool 是否支持绘制颜色编辑
-func (e *Editor) editorPaintable(object GraphicObject) bool {
-	var fill, stroke *FillColor
-	switch object.Type {
-	case "TextObject":
-		fill, stroke = object.TextObject.FillColor, (*FillColor)(object.TextObject.StrokeColor)
-	case "PathObject":
-		fill, stroke = object.PathObject.FillColor, (*FillColor)(object.PathObject.StrokeColor)
-	default:
-		return false
-	}
-	for _, value := range []*FillColor{fill, stroke} {
-		if err := e.editorColor(value); err != nil {
-			return false
-		}
-	}
-	return true
-}
-
-// collectPaintReferences 收集纯色、渐变和图案引用的资源
-// 入参: paint 绘制颜色, used 引用集合
-func collectPaintReferences(paint *FillColor, used map[string]bool) {
-	if paint == nil {
-		return
-	}
-	used[paint.ColorSpace] = true
-	var segments []ShdSegment
-	if paint.AxialShd != nil {
-		segments = paint.AxialShd.Segment
-	}
-	if paint.RadialShd != nil {
-		segments = paint.RadialShd.Segment
-	}
-	for _, segment := range segments {
-		used[segment.Color.ColorSpace] = true
-	}
-	var points []ShdPoint
-	var back *ShdColor
-	if node := paint.GouraudShd; node != nil {
-		points, back = node.Point, node.BackColor
-	}
-	if node := paint.LaGouraudShd; node != nil {
-		points, back = node.Point, node.BackColor
-	}
-	for _, point := range points {
-		used[point.Color.ColorSpace] = true
-	}
-	if back != nil {
-		used[back.ColorSpace] = true
-	}
-	if paint.Pattern != nil {
-		used[paint.Pattern.CellContent.Thumbnail] = true
-		for object := range paint.Pattern.CellContent.objects() {
-			collectObjectReferences(object, used)
-		}
-	}
-}
-
-// collectObjectReferences 收集对象和嵌套绘制内容引用的资源
-// 入参: object 图形对象, used 引用集合
-func collectObjectReferences(object GraphicObject, used map[string]bool) {
-	var clips *Clips
-	var actions []Action
-	switch object.Type {
-	case "TextObject", "Text":
-		used[object.TextObject.Font], used[object.TextObject.DrawParam] = true, true
-		collectPaintReferences(object.TextObject.FillColor, used)
-		collectPaintReferences((*FillColor)(object.TextObject.StrokeColor), used)
-		clips = object.TextObject.Clips
-		actions = object.TextObject.Actions
-	case "PathObject", "Path":
-		used[object.PathObject.DrawParam] = true
-		collectPaintReferences(object.PathObject.FillColor, used)
-		collectPaintReferences((*FillColor)(object.PathObject.StrokeColor), used)
-		clips = object.PathObject.Clips
-		actions = object.PathObject.Actions
-	case "ImageObject":
-		used[object.ImageObject.ResourceID], used[object.ImageObject.ImageMask] = true, true
-		used[object.ImageObject.Substitution] = true
-		if object.ImageObject.Border != nil {
-			collectPaintReferences((*FillColor)(object.ImageObject.Border.BorderColor), used)
-		}
-		clips = object.ImageObject.Clips
-		actions = object.ImageObject.Actions
-	case "CompositeObject", "CompositeGraphicUnit":
-		collectCompositeReferences(object.CompositeGraphicUnit, used)
-		actions = object.CompositeGraphicUnit.Actions
-	}
-	collectActionReferences(actions, used)
-	if clips == nil {
-		return
-	}
-	for _, clip := range clips.Clip {
-		for _, area := range clip.Area {
-			used[area.DrawParam] = true
-			for _, path := range area.Path {
-				collectObjectReferences(GraphicObject{Type: "Path", PathObject: path}, used)
-			}
-			for _, text := range area.Text {
-				collectObjectReferences(GraphicObject{Type: "Text", TextObject: text}, used)
-			}
-		}
-	}
-}
-
-// editorMeshColor 校验网格拓扑和文档颜色引用
-// 入参: value 网格颜色
-// 返回: error 非法拓扑或颜色
-func (e *Editor) editorMeshColor(value *FillColor) error {
-	if value.unsupported || value.Pattern != nil || value.AxialShd != nil || value.RadialShd != nil || value.GouraudShd != nil && value.LaGouraudShd != nil || value.Value != "" || value.Index != nil {
-		return fmt.Errorf("specify one paint source")
-	}
-	if value.Alpha != nil && (*value.Alpha < 0 || *value.Alpha > 255) {
-		return fmt.Errorf("color alpha must be between 0 and 255")
-	}
-	var points []ShdPoint
-	var back *ShdColor
-	var columns, extend int
-	if node := value.GouraudShd; node != nil {
-		points, back, extend = node.Point, node.BackColor, node.Extend
-	} else {
-		points, back = value.LaGouraudShd.Point, value.LaGouraudShd.BackColor
-		columns, extend = value.LaGouraudShd.VerticesPerRow, value.LaGouraudShd.Extend
-		if columns == 0 {
-			return fmt.Errorf("invalid lattice shading dimensions")
-		}
-	}
-	colors := make([]ShdColor, 0, len(points)+1)
-	for _, point := range points {
-		colors = append(colors, point.Color)
-	}
-	if back != nil {
-		colors = append(colors, *back)
-	}
-	for _, color := range colors {
-		if _, err := e.Color(&FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace, Alpha: color.Alpha}); err != nil {
-			return err
-		}
-	}
-	_, err := meshTriangleIndices(points, columns, extend)
-	return err
-}
-
-// editorColor 校验当前文档的纯色、渐变和底纹
-// 入参: value 颜色
-// 返回: error 错误信息
-func (e *Editor) editorColor(value *FillColor) error {
-	return (&editorValidation{Editor: e}).editorColor(value)
+// editorValidation 保存同次对象校验的引用路径及已验证几何，允许共享但拒绝循环
+type editorValidation struct {
+	*Editor
+	patterns   map[*Pattern]bool
+	composites map[string]bool
+	vectors    map[string]bool
+	paths      map[string]bool
 }
 
 // editorColor 沿当前引用路径校验底纹单元及绘制颜色
@@ -632,4 +485,186 @@ func (v *editorValidation) editorColor(value *FillColor) error {
 		}
 	}
 	return nil
+}
+
+// isStandardRGBColorSpace 判断颜色空间是否为无配置文件且无调色板的8位标准RGB
+// 入参: space 颜色空间定义
+// 返回: bool 是否为标准8位RGB
+func isStandardRGBColorSpace(space *ColorSpace) bool {
+	return space != nil && strings.EqualFold(space.Type, "RGB") && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0
+}
+
+// colorSpaceShadowedNonRGB 检查指定颜色空间标识是否在当前页或任一页的局部资源中被非标准RGB遮蔽
+// 入参: id 颜色空间标识
+// 返回: bool 是否存在非标准RGB同名遮蔽
+func (e *Editor) colorSpaceShadowedNonRGB(id string) bool {
+	checkList := func(list []*parsedRes) bool {
+		for _, parsed := range list {
+			if space, ok := parsed.colorSpaces.get(id); ok && !isStandardRGBColorSpace(space) {
+				return true
+			}
+		}
+		return false
+	}
+	if checkList(e.pageScope) {
+		return true
+	}
+	for i := range e.pages {
+		if checkList(e.pages[i].pageResources) {
+			return true
+		}
+	}
+	return e.source != nil && checkList(e.ensureSourcePageResources())
+}
+
+// editorPaintable 判断文字与路径颜色能否在保留其他字段的前提下修改
+// 入参: object 图形对象
+// 返回: bool 是否支持绘制颜色编辑
+func (e *Editor) editorPaintable(object GraphicObject) bool {
+	var fill, stroke *FillColor
+	switch object.Type {
+	case "TextObject":
+		fill, stroke = object.TextObject.FillColor, (*FillColor)(object.TextObject.StrokeColor)
+	case "PathObject":
+		fill, stroke = object.PathObject.FillColor, (*FillColor)(object.PathObject.StrokeColor)
+	default:
+		return false
+	}
+	for _, value := range []*FillColor{fill, stroke} {
+		if err := e.editorColor(value); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// collectPaintReferences 收集纯色、渐变和图案引用的资源
+// 入参: paint 绘制颜色, used 引用集合
+func collectPaintReferences(paint *FillColor, used map[string]bool) {
+	if paint == nil {
+		return
+	}
+	used[paint.ColorSpace] = true
+	var segments []ShdSegment
+	if paint.AxialShd != nil {
+		segments = paint.AxialShd.Segment
+	}
+	if paint.RadialShd != nil {
+		segments = paint.RadialShd.Segment
+	}
+	for _, segment := range segments {
+		used[segment.Color.ColorSpace] = true
+	}
+	var points []ShdPoint
+	var back *ShdColor
+	if node := paint.GouraudShd; node != nil {
+		points, back = node.Point, node.BackColor
+	}
+	if node := paint.LaGouraudShd; node != nil {
+		points, back = node.Point, node.BackColor
+	}
+	for _, point := range points {
+		used[point.Color.ColorSpace] = true
+	}
+	if back != nil {
+		used[back.ColorSpace] = true
+	}
+	if paint.Pattern != nil {
+		used[paint.Pattern.CellContent.Thumbnail] = true
+		for object := range paint.Pattern.CellContent.objects() {
+			collectObjectReferences(object, used)
+		}
+	}
+}
+
+// collectObjectReferences 收集对象和嵌套绘制内容引用的资源
+// 入参: object 图形对象, used 引用集合
+func collectObjectReferences(object GraphicObject, used map[string]bool) {
+	var clips *Clips
+	var actions []Action
+	switch object.Type {
+	case "TextObject", "Text":
+		used[object.TextObject.Font], used[object.TextObject.DrawParam] = true, true
+		collectPaintReferences(object.TextObject.FillColor, used)
+		collectPaintReferences((*FillColor)(object.TextObject.StrokeColor), used)
+		clips = object.TextObject.Clips
+		actions = object.TextObject.Actions
+	case "PathObject", "Path":
+		used[object.PathObject.DrawParam] = true
+		collectPaintReferences(object.PathObject.FillColor, used)
+		collectPaintReferences((*FillColor)(object.PathObject.StrokeColor), used)
+		clips = object.PathObject.Clips
+		actions = object.PathObject.Actions
+	case "ImageObject":
+		used[object.ImageObject.ResourceID], used[object.ImageObject.ImageMask] = true, true
+		used[object.ImageObject.Substitution], used[object.ImageObject.DrawParam] = true, true
+		if object.ImageObject.Border != nil {
+			collectPaintReferences((*FillColor)(object.ImageObject.Border.BorderColor), used)
+		}
+		clips = object.ImageObject.Clips
+		actions = object.ImageObject.Actions
+	case "CompositeObject", "CompositeGraphicUnit":
+		collectCompositeReferences(object.CompositeGraphicUnit, used)
+		actions = object.CompositeGraphicUnit.Actions
+	}
+	collectActionReferences(actions, used)
+	if clips == nil {
+		return
+	}
+	for _, clip := range clips.Clip {
+		for _, area := range clip.Area {
+			used[area.DrawParam] = true
+			for _, path := range area.Path {
+				collectObjectReferences(GraphicObject{Type: "Path", PathObject: path}, used)
+			}
+			for _, text := range area.Text {
+				collectObjectReferences(GraphicObject{Type: "Text", TextObject: text}, used)
+			}
+		}
+	}
+}
+
+// editorMeshColor 校验网格拓扑和文档颜色引用
+// 入参: value 网格颜色
+// 返回: error 非法拓扑或颜色
+func (e *Editor) editorMeshColor(value *FillColor) error {
+	if value.unsupported || value.Pattern != nil || value.AxialShd != nil || value.RadialShd != nil || value.GouraudShd != nil && value.LaGouraudShd != nil || value.Value != "" || value.Index != nil {
+		return fmt.Errorf("specify one paint source")
+	}
+	if value.Alpha != nil && (*value.Alpha < 0 || *value.Alpha > 255) {
+		return fmt.Errorf("color alpha must be between 0 and 255")
+	}
+	var points []ShdPoint
+	var back *ShdColor
+	var columns, extend int
+	if node := value.GouraudShd; node != nil {
+		points, back, extend = node.Point, node.BackColor, node.Extend
+	} else {
+		points, back = value.LaGouraudShd.Point, value.LaGouraudShd.BackColor
+		columns, extend = value.LaGouraudShd.VerticesPerRow, value.LaGouraudShd.Extend
+		if columns == 0 {
+			return fmt.Errorf("invalid lattice shading dimensions")
+		}
+	}
+	colors := make([]ShdColor, 0, len(points)+1)
+	for _, point := range points {
+		colors = append(colors, point.Color)
+	}
+	if back != nil {
+		colors = append(colors, *back)
+	}
+	for _, color := range colors {
+		if _, err := e.Color(&FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace, Alpha: color.Alpha}); err != nil {
+			return err
+		}
+	}
+	_, err := meshTriangleIndices(points, columns, extend)
+	return err
+}
+
+// editorColor 校验当前文档的纯色、渐变和底纹
+// 入参: value 颜色
+// 返回: error 错误信息
+func (e *Editor) editorColor(value *FillColor) error {
+	return (&editorValidation{Editor: e}).editorColor(value)
 }

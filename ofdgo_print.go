@@ -161,6 +161,131 @@ func PlanPrint(pages []Box, options PrintOptions) (PrintLayout, error) {
 	return planPrint(pages, o)
 }
 
+// Layout 返回可供第三方预览和检查的独立布局副本
+// 返回: PrintLayout 独立布局副本
+func (p *PrintDocument) Layout() PrintLayout {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	result := p.layout
+	result.Sides = slices.Clone(result.Sides)
+	for i := range result.Sides {
+		result.Sides[i].Placements = slices.Clone(result.Sides[i].Placements)
+	}
+	return result
+}
+
+// Reconfigure 在相同文档快照上创建新的打印任务，不改变原任务的布局
+// 入参: ctx 准备上下文, options 新排版选项
+// 返回: *PrintDocument 独立打印任务, error 权限、布局或读取错误
+func (p *PrintDocument) Reconfigure(ctx context.Context, options PrintOptions) (*PrintDocument, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil, fmt.Errorf("print document is closed")
+	}
+	return p.renderer.PreparePrint(ctx, options)
+}
+
+// Close 释放任务持有的派生缓存和快照，不关闭调用方借入的输入
+// 返回: error 资源释放错误
+func (p *PrintDocument) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil
+	}
+	p.closed = true
+	p.pages.clear()
+	p.renderer.ClearCache()
+	err := p.renderer.Reader.Close()
+	p.renderer = nil
+	return err
+}
+
+// PreparePrint 固定当前阅读入口、版本及配置，底层输入由调用方保持存活
+// 入参: ctx 准备上下文, options 内容排版选项
+// 返回: *PrintDocument 独立打印任务, error 权限、布局或读取错误
+func (r *Renderer) PreparePrint(ctx context.Context, options PrintOptions) (*PrintDocument, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("nil print context")
+	}
+	if r == nil || r.Reader == nil {
+		return nil, fmt.Errorf("missing print renderer")
+	}
+	o, err := normalizePrintOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	view, err := r.Fork(ctx)
+	if err != nil {
+		return nil, err
+	}
+	doc, err := view.Reader.docStructureContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !doc.Permissions.Print || doc.Permissions.Copies == 0 {
+		return nil, ErrPrintDenied
+	}
+	if doc.Permissions.Copies > 0 && o.Copies > doc.Permissions.Copies {
+		return nil, ErrPrintDenied
+	}
+	needed, err := selectedPrintPageSet(len(doc.Pages.Page), o)
+	if err != nil {
+		return nil, err
+	}
+	boxes := make([]Box, len(doc.Pages.Page))
+	for i, page := range doc.Pages.Page {
+		if !needed[i] {
+			boxes[i] = Box{W: 1, H: 1}
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		area, err := view.Reader.readPageHeaderContext(ctx, page)
+		if err != nil {
+			return nil, err
+		}
+		boxes[i], err = view.GetPageBox(&area)
+		if err != nil {
+			return nil, err
+		}
+	}
+	layout, err := planPrint(boxes, o)
+	if err != nil {
+		return nil, err
+	}
+	layout.CopiesLimit = doc.Permissions.Copies
+	view.printing = true
+	view.printContents = o.Contents
+	view.RenderAnnotations = true
+	return &PrintDocument{renderer: view, layout: layout, options: o, pages: resourceCache[int, []byte](view.Reader.resources, 32<<20)}, nil
+}
+
+// PreparePrint 从独立编辑快照创建打印任务，不修改源编辑器或撤销记录
+// 入参: ctx 准备上下文, options 排版选项, rendererOptions 字体及后端配置
+// 返回: *PrintDocument 打印任务, error 快照或准备错误
+func (e *Editor) PreparePrint(ctx context.Context, options PrintOptions, rendererOptions ...RendererOption) (*PrintDocument, error) {
+	if ctx == nil || e == nil {
+		return nil, fmt.Errorf("missing print editor or context")
+	}
+	snapshot, err := e.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := snapshot.Reader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	renderer := NewRenderer(reader, rendererOptions...)
+	return renderer.PreparePrint(ctx, options)
+}
+
 // planPrint 按已校验的选项计算纸面，供独立布局和打印任务共用
 // 入参: pages 按文档顺序排列的页面区域, o 规范排版选项
 // 返回: PrintLayout 有序纸面, error 尺寸、页码或排版错误
@@ -539,119 +664,38 @@ func printPlacement(index int, source, cell Box, o PrintOptions) PrintPlacement 
 	return PrintPlacement{Page: index, Width: source.W, Height: source.H, Transform: m, Clip: cell, Clipped: clipped}
 }
 
-// PreparePrint 固定当前阅读入口、版本及配置，底层输入由调用方保持存活
-// 入参: ctx 准备上下文, options 内容排版选项
-// 返回: *PrintDocument 独立打印任务, error 权限、布局或读取错误
-func (r *Renderer) PreparePrint(ctx context.Context, options PrintOptions) (*PrintDocument, error) {
-	if ctx == nil {
-		return nil, fmt.Errorf("nil print context")
+// selectedPrintPageSet 预先确定本次打印实际选中的零基页码集合，避免读取未打印页
+// 入参: pageCount 文档总页数, o 规范排版选项
+// 返回: map[int]bool 选中页码集合, error 页码越界或为空错误
+func selectedPrintPageSet(pageCount int, o PrintOptions) (map[int]bool, error) {
+	if pageCount == 0 {
+		return nil, fmt.Errorf("no pages to print")
 	}
-	if r == nil || r.Reader == nil {
-		return nil, fmt.Errorf("missing print renderer")
-	}
-	o, err := normalizePrintOptions(options)
-	if err != nil {
-		return nil, err
-	}
-	view, err := r.Fork(ctx)
-	if err != nil {
-		return nil, err
-	}
-	doc, err := view.Reader.DocContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if !doc.Permissions.Print || doc.Permissions.Copies == 0 {
-		return nil, ErrPrintDenied
-	}
-	if doc.Permissions.Copies > 0 && o.Copies > doc.Permissions.Copies {
-		return nil, ErrPrintDenied
-	}
-	boxes := make([]Box, len(doc.Pages.Page))
-	for i, page := range doc.Pages.Page {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		area, err := view.Reader.readPageHeaderContext(ctx, page)
+	indices := o.Pages
+	if o.PageRange != "" {
+		var err error
+		indices, err = ParsePageRange(o.PageRange, pageCount)
 		if err != nil {
 			return nil, err
 		}
-		boxes[i], err = view.GetPageBox(&area)
-		if err != nil {
-			return nil, err
+	} else if o.Pages == nil {
+		indices = make([]int, pageCount)
+		for i := range indices {
+			indices[i] = i
 		}
 	}
-	layout, err := planPrint(boxes, o)
-	if err != nil {
-		return nil, err
+	needed := make(map[int]bool, len(indices))
+	for _, index := range indices {
+		if index < 0 || index >= pageCount {
+			return nil, fmt.Errorf("print page index %d outside document", index)
+		}
+		if o.Parity == "odd" && index%2 != 0 || o.Parity == "even" && index%2 == 0 {
+			continue
+		}
+		needed[index] = true
 	}
-	layout.CopiesLimit = doc.Permissions.Copies
-	view.printing = true
-	view.printContents = o.Contents
-	view.RenderAnnotations = true
-	return &PrintDocument{renderer: view, layout: layout, options: o, pages: resourceCache[int, []byte](view.Reader.resources, 32<<20)}, nil
-}
-
-// PreparePrint 从独立编辑快照创建打印任务，不修改源编辑器或撤销记录
-// 入参: ctx 准备上下文, options 排版选项, rendererOptions 字体及后端配置
-// 返回: *PrintDocument 打印任务, error 快照或准备错误
-func (e *Editor) PreparePrint(ctx context.Context, options PrintOptions, rendererOptions ...RendererOption) (*PrintDocument, error) {
-	if ctx == nil || e == nil {
-		return nil, fmt.Errorf("missing print editor or context")
+	if len(needed) == 0 {
+		return nil, fmt.Errorf("no pages selected for printing")
 	}
-	snapshot, err := e.Snapshot(ctx)
-	if err != nil {
-		return nil, err
-	}
-	reader, err := snapshot.Reader(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
-	renderer := NewRenderer(reader, rendererOptions...)
-	return renderer.PreparePrint(ctx, options)
-}
-
-// Layout 返回可供第三方预览和检查的独立布局副本
-// 返回: PrintLayout 独立布局副本
-func (p *PrintDocument) Layout() PrintLayout {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	result := p.layout
-	result.Sides = slices.Clone(result.Sides)
-	for i := range result.Sides {
-		result.Sides[i].Placements = slices.Clone(result.Sides[i].Placements)
-	}
-	return result
-}
-
-// Reconfigure 在相同文档快照上创建新的打印任务，不改变原任务的布局
-// 入参: ctx 准备上下文, options 新排版选项
-// 返回: *PrintDocument 独立打印任务, error 权限、布局或读取错误
-func (p *PrintDocument) Reconfigure(ctx context.Context, options PrintOptions) (*PrintDocument, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
-		return nil, fmt.Errorf("print document is closed")
-	}
-	return p.renderer.PreparePrint(ctx, options)
-}
-
-// Close 释放任务持有的派生缓存和快照，不关闭调用方借入的输入
-// 返回: error 资源释放错误
-func (p *PrintDocument) Close() error {
-	if p == nil {
-		return nil
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
-		return nil
-	}
-	p.closed = true
-	p.pages.clear()
-	p.renderer.ClearCache()
-	err := p.renderer.Reader.Close()
-	p.renderer = nil
-	return err
+	return needed, nil
 }

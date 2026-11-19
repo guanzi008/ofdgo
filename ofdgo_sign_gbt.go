@@ -21,15 +21,20 @@ import (
 	"math/big"
 )
 
-// GB/T35275内容类型及消息摘要属性的对象标识
 const (
-	signContentData       = "1.2.156.10197.6.1.4.2.1"
+	// signContentData GB/T35275数据内容类型对象标识
+	signContentData = "1.2.156.10197.6.1.4.2.1"
+	// signContentSignedData GB/T35275签名数据内容类型对象标识
 	signContentSignedData = "1.2.156.10197.6.1.4.2.2"
+	// signContentCMSData 标准CMS数据内容类型对象标识
+	signContentCMSData = "1.2.840.113549.1.7.1"
+	// signAttrMessageDigest 消息摘要属性对象标识
 	signAttrMessageDigest = "1.2.840.113549.1.9.4"
 )
 
 // digitalVerifyResult 数字签名验证结果
 type digitalVerifyResult struct {
+	SignatureMethod string
 	Timestamps      []signatureTimestampEvidence
 	DataHashChecked bool
 	DataHashOK      bool
@@ -44,10 +49,34 @@ type digitalVerifyResult struct {
 
 // gbtSignedData GB/T35275 SignedData结构
 type gbtSignedData struct {
-	Version       int
-	ContentDigest []byte
-	Certs         []gbtCertificate
-	Signers       []gbtSignerInfo
+	Version    int
+	HasContent bool
+	Content    []byte
+	Certs      []gbtCertificate
+	Signers    []gbtSignerInfo
+}
+
+// findCert 查找签名者证书
+// 入参: issuer 颁发者DN, serial 证书序列号
+// 返回: *gbtCertificate 证书信息
+func (sd *gbtSignedData) findCert(issuer []byte, serial *big.Int) *gbtCertificate {
+	for i := range sd.Certs {
+		cert := &sd.Certs[i]
+		if bytes.Equal(cert.Issuer, issuer) && cert.Serial.Cmp(serial) == 0 {
+			return cert
+		}
+	}
+	return nil
+}
+
+// rawCerts 获取SignedData证书原文
+// 返回: [][]byte 证书列表
+func (sd *gbtSignedData) rawCerts() [][]byte {
+	certs := make([][]byte, 0, len(sd.Certs))
+	for _, cert := range sd.Certs {
+		certs = append(certs, cert.Raw)
+	}
+	return certs
 }
 
 // gbtCertificate SignedData证书索引信息
@@ -150,7 +179,7 @@ func verifyRawPublicKeySignature(method, digestMethod string, signedValue, signe
 	return result, nil
 }
 
-// verifyGBT35275SignedData 验证GB/T35275 SignedData签名值
+// verifyGBT35275SignedData 验证GB/T35275 SignedData签名值，逐一校验全部SignerInfo签名与证书
 // 入参: signedValue 签名值, signedData 被签名原文, options 验证选项
 // 返回: *digitalVerifyResult 验证结果, error 错误信息
 func verifyGBT35275SignedData(signedValue, signedData []byte, options *signatureVerifyOptions) (*digitalVerifyResult, error) {
@@ -176,7 +205,7 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 	if len(sd.Signers) == 0 {
 		return nil, fmt.Errorf("invalid signed data signer info")
 	}
-	result := &digitalVerifyResult{Certs: sd.rawCerts()}
+	result := &digitalVerifyResult{SignatureMethod: sd.Signers[0].SignatureAlg, Certs: sd.rawCerts()}
 	for index, signer := range sd.Signers {
 		if err := signatureSignerDigest(signer.SignatureAlg, signer.DigestAlg); err != nil {
 			return result, err
@@ -188,29 +217,37 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 		if err != nil {
 			return nil, err
 		}
-		if len(sd.ContentDigest) != 0 && !bytes.Equal(sd.ContentDigest, digest) {
+		if sd.HasContent && !bytes.Equal(sd.Content, signedData) && !bytes.Equal(sd.Content, digest) {
 			result.DataHashChecked = true
 			result.DataHashOK = false
 			return result, nil
 		}
 		result.DataHashOK = true
-		plain := sd.ContentDigest
+		var plains [][]byte
 		if len(signer.AuthAttrs) != 0 {
 			if !bytes.Equal(signer.AttrDigest, digest) {
 				result.DataHashChecked = true
 				result.DataHashOK = false
 				return result, nil
 			}
-			plain = signer.AuthAttrs
-		}
-		if len(plain) == 0 {
-			return nil, fmt.Errorf("invalid signed data content")
+			plains = [][]byte{signer.AuthAttrs}
+		} else {
+			plains = [][]byte{signedData}
+			if sd.HasContent && len(sd.Content) == len(digest) && !bytes.Equal(sd.Content, signedData) {
+				plains = append(plains, sd.Content)
+			}
 		}
 		result.DataHashChecked = index == len(sd.Signers)-1
 		cert := sd.findCert(signer.Issuer, signer.Serial)
 		if cert == nil {
+			result.CertChecked = true
 			result.CertOK = false
 			return result, nil
+		}
+		if _, err := parseSignatureCertificate(cert.Raw); err != nil {
+			result.CertChecked = true
+			result.CertOK = false
+			return result, err
 		}
 		result.SignerCerts = append(result.SignerCerts, cert.Raw)
 		tokens, err := signatureTimestampAttributes(signer.UnauthAttrs)
@@ -220,32 +257,48 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 		for _, token := range tokens {
 			result.Timestamps = append(result.Timestamps, signatureTimestampEvidence{Token: token, Data: signer.Signature})
 		}
-		result.CertInfo = signatureCertInfo(cert.Raw)
+		certInfo := signatureCertInfo(cert.Raw)
+		if index == 0 {
+			result.CertInfo = certInfo
+		}
+		verified := false
 		if isSM2SignatureMethod(signer.SignatureAlg) {
 			pub, err := parseSM2PublicKeyFromCert(cert.Raw)
 			if err != nil {
+				result.CertInfo = certInfo
+				result.CertChecked = true
 				result.CertOK = false
 				return result, err
 			}
-			if !verifySM2Signature(pub, nil, plain, signer.Signature) {
-				result.SignedChecked = true
-				result.CertChecked = index == len(sd.Signers)-1
-				result.CertOK = true
-				return result, nil
+			for _, plain := range plains {
+				if verifySM2Signature(pub, nil, plain, signer.Signature) {
+					verified = true
+					break
+				}
 			}
-			continue
-		}
-		if !isRSASignatureMethod(signer.SignatureAlg) && !isECDSASignatureMethod(signer.SignatureAlg) {
+		} else if isRSASignatureMethod(signer.SignatureAlg) || isECDSASignatureMethod(signer.SignatureAlg) {
+			for _, plain := range plains {
+				ok, err := verifyPublicKeySignature(signer.SignatureAlg, signer.DigestAlg, cert.Raw, plain, signer.Signature)
+				if err != nil {
+					result.CertInfo = certInfo
+					result.CertChecked = true
+					result.CertOK = false
+					return result, err
+				}
+				if ok {
+					verified = true
+					break
+				}
+			}
+		} else {
 			return nil, fmt.Errorf("unsupported signature method: %s", signer.SignatureAlg)
 		}
-		ok, err := verifyPublicKeySignature(signer.SignatureAlg, signer.DigestAlg, cert.Raw, plain, signer.Signature)
-		if err != nil {
-			result.CertOK = false
-			return result, err
-		}
-		if !ok {
+		if !verified {
+			result.CertInfo = certInfo
+			result.DataHashChecked = true
 			result.SignedChecked = true
-			result.CertChecked = index == len(sd.Signers)-1
+			result.SignedOK = false
+			result.CertChecked = true
 			result.CertOK = true
 			return result, nil
 		}
@@ -262,14 +315,14 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 // 返回: []byte 定长编码数据, bool 是否为SignedData
 func normalizeGBT35275SignedValue(data []byte) ([]byte, bool) {
 	if contentType, ok := gbtContentType(data); ok {
-		return data, contentType == signContentSignedData
+		return data, contentType == signContentSignedData || contentType == signContentCMS
 	}
 	der, err := berToDefinite(data)
 	if err != nil {
 		return nil, false
 	}
 	contentType, ok := gbtContentType(der)
-	if !ok || contentType != signContentSignedData {
+	if !ok || contentType != signContentSignedData && contentType != signContentCMS {
 		return nil, false
 	}
 	return der, true
@@ -299,7 +352,7 @@ func gbtContentType(data []byte) (string, bool) {
 // 入参: data BER编码数据
 // 返回: []byte 定长编码数据, error 错误信息
 func berToDefinite(data []byte) ([]byte, error) {
-	out, n, err := berValueToDefinite(data)
+	out, n, err := berValueToDefinite(data, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -310,9 +363,12 @@ func berToDefinite(data []byte) ([]byte, error) {
 }
 
 // berValueToDefinite 转换单个BER编码值
-// 入参: data BER编码数据
+// 入参: data BER编码数据, depth 当前嵌套深度
 // 返回: []byte 定长编码数据, int 已读取长度, error 错误信息
-func berValueToDefinite(data []byte) ([]byte, int, error) {
+func berValueToDefinite(data []byte, depth int) ([]byte, int, error) {
+	if depth > 128 {
+		return nil, 0, fmt.Errorf("BER nesting exceeds parsing budget")
+	}
 	if len(data) < 2 {
 		return nil, 0, fmt.Errorf("invalid BER value")
 	}
@@ -342,7 +398,7 @@ func berValueToDefinite(data []byte) ([]byte, int, error) {
 				pos += 2
 				break
 			}
-			child, n, err := berValueToDefinite(data[pos:])
+			child, n, err := berValueToDefinite(data[pos:], depth+1)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -367,11 +423,11 @@ func berValueToDefinite(data []byte) ([]byte, int, error) {
 		return nil, 0, fmt.Errorf("invalid BER truncated value")
 	}
 	end := pos + int(length)
-	content := append([]byte(nil), data[pos:end]...)
+	content := data[pos:end]
 	if tag[0]&0x20 != 0 {
-		content = content[:0]
+		content = nil
 		for pos < end {
-			child, n, err := berValueToDefinite(data[pos:end])
+			child, n, err := berValueToDefinite(data[pos:end], depth+1)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -405,7 +461,7 @@ func parseGBT35275SignedData(data []byte) (*gbtSignedData, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !ok || contentType != signContentSignedData {
+	if !ok || contentType != signContentSignedData && contentType != signContentCMS {
 		return nil, fmt.Errorf("invalid signed data content type")
 	}
 	items, ok := asn1Children(content.Bytes)
@@ -421,16 +477,32 @@ func parseGBT35275SignedData(data []byte) (*gbtSignedData, error) {
 	if err != nil {
 		return nil, err
 	}
+	if contentOID != signContentData && contentOID != signContentCMSData {
+		return nil, fmt.Errorf("invalid signed data inner content type")
+	}
 	if hasContent {
-		if contentOID != signContentData {
-			return nil, fmt.Errorf("invalid signed data inner content type")
+		if content.Class != asn1.ClassUniversal || content.Tag != asn1.TagOctetString {
+			return nil, fmt.Errorf("invalid signed data content")
 		}
-		if content.Tag == asn1.TagOctetString {
-			sd.ContentDigest, err = asn1OctetString(content)
+		if content.IsCompound {
+			chunks, ok := asn1Children(content.Bytes)
+			if !ok {
+				return nil, fmt.Errorf("invalid signed data content")
+			}
+			for _, chunk := range chunks {
+				part, err := asn1OctetString(chunk)
+				if err != nil {
+					return nil, err
+				}
+				sd.Content = append(sd.Content, part...)
+			}
+		} else {
+			sd.Content, err = asn1OctetString(content)
 			if err != nil {
 				return nil, err
 			}
 		}
+		sd.HasContent = true
 	}
 	for i := 3; i < len(items); i++ {
 		item := items[i]
@@ -665,29 +737,6 @@ func parseGBTMessageDigestAttr(raw asn1.RawValue) ([]byte, error) {
 		return digest, nil
 	}
 	return nil, fmt.Errorf("message digest attribute not found")
-}
-
-// findCert 查找签名者证书
-// 入参: issuer 颁发者DN, serial 证书序列号
-// 返回: *gbtCertificate 证书信息
-func (sd *gbtSignedData) findCert(issuer []byte, serial *big.Int) *gbtCertificate {
-	for i := range sd.Certs {
-		cert := &sd.Certs[i]
-		if bytes.Equal(cert.Issuer, issuer) && cert.Serial.Cmp(serial) == 0 {
-			return cert
-		}
-	}
-	return nil
-}
-
-// rawCerts 获取SignedData证书原文
-// 返回: [][]byte 证书列表
-func (sd *gbtSignedData) rawCerts() [][]byte {
-	certs := make([][]byte, 0, len(sd.Certs))
-	for _, cert := range sd.Certs {
-		certs = append(certs, cert.Raw)
-	}
-	return certs
 }
 
 // asn1Explicit 解析显式标签内容

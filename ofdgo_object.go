@@ -23,41 +23,6 @@ import (
 	"strings"
 )
 
-// graphicObjectTarget 图形对象集合
-type graphicObjectTarget struct {
-	objects   *[]GraphicObject
-	text      *[]TextObject
-	path      *[]PathObject
-	image     *[]ImageObject
-	composite *[]CompositeGraphicUnit
-}
-
-// graphicAttributeTokens 提供图形节点的起止令牌，仅用于解码无命名空间属性
-type graphicAttributeTokens struct {
-	start xml.StartElement
-	step  int
-}
-
-// Token 返回起始节点和结束节点，不读取图形子节点
-// 返回: xml.Token XML令牌, error 读取错误
-func (s *graphicAttributeTokens) Token() (xml.Token, error) {
-	s.step++
-	switch s.step {
-	case 1:
-		return s.start, nil
-	case 2:
-		return s.start.End(), nil
-	}
-	return nil, io.EOF
-}
-
-// decodeGraphicAttributes 按结构字段解析图形属性，忽略带命名空间的扩展属性
-// 入参: start 起始节点, value 不含自身解码方法的接收结构
-// 返回: error 解码错误
-func decodeGraphicAttributes(start xml.StartElement, value any) error {
-	return xml.NewTokenDecoder(&graphicAttributeTokens{start: ofdXMLStart(start)}).Decode(value)
-}
-
 // Actions 返回对象动作的独立副本，不修改原对象
 // 返回: []Action 动作列表
 func (o GraphicObject) Actions() []Action {
@@ -72,12 +37,6 @@ func (o GraphicObject) Actions() []Action {
 		return cloneEditorData(o.CompositeGraphicUnit.Actions)
 	}
 	return nil
-}
-
-// usesObjectMatrix 判断旧式扩展是否要求裁剪跟随对象变换，标准裁剪以外接矩形为基准
-// 返回: bool 是否叠加对象CTM
-func (clips *Clips) usesObjectMatrix() bool {
-	return clips != nil && clips.TransFlag != nil && *clips.TransFlag
 }
 
 // UnmarshalXML 兼容旧命名空间的对象变换裁剪，显式TransFlag优先
@@ -236,6 +195,7 @@ func (p *DrawParam) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 					return err
 				}
 				p.Weight = weight
+				p.WeightSet = true
 			}
 		case "Italic":
 			if value := strings.TrimSpace(attr.Value); value != "" {
@@ -244,6 +204,7 @@ func (p *DrawParam) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 					return err
 				}
 				p.Italic = italic
+				p.ItalicSet = true
 			}
 		}
 		if value := strings.TrimSpace(attr.Value); target != nil && value != "" {
@@ -330,13 +291,12 @@ func (l *Layer) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
 func (c *CompositeGraphicUnit) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	*c = CompositeGraphicUnit{}
-	c.ID = attrValue(start, "ID")
-	c.BaseLoc = attrValue(start, "BaseLoc")
-	c.ResourceID = attrValue(start, "ResourceID")
-	c.Boundary = attrValue(start, "Boundary")
-	c.CTM = attrValue(start, "CTM")
-	c.DrawParam = attrValue(start, "DrawParam")
+	*c = CompositeGraphicUnit{
+		ID: attrValue(start, "ID"), Name: attrValue(start, "Name"), BaseLoc: attrValue(start, "BaseLoc"),
+		ResourceID: attrValue(start, "ResourceID"), Boundary: attrValue(start, "Boundary"), CTM: attrValue(start, "CTM"),
+		DrawParam: attrValue(start, "DrawParam"), Cap: attrValue(start, "Cap"), Join: attrValue(start, "Join"),
+		DashPattern: attrValue(start, "DashPattern"),
+	}
 	for _, dimension := range []struct {
 		name  string
 		value *float64
@@ -348,6 +308,41 @@ func (c *CompositeGraphicUnit) UnmarshalXML(d *xml.Decoder, start xml.StartEleme
 			if err != nil {
 				return fmt.Errorf("invalid vector %s: %w", dimension.name, err)
 			}
+		}
+	}
+	for _, attr := range start.Attr {
+		if attr.Name.Space != "" {
+			continue
+		}
+		switch attr.Name.Local {
+		case "LineWidth":
+			if value := strings.TrimSpace(attr.Value); value != "" {
+				v, err := strconv.ParseFloat(value, 64)
+				if err != nil {
+					return err
+				}
+				c.LineWidth = v
+				c.LineWidthSet = v == 0
+			}
+		case "MiterLimit":
+			if value := strings.TrimSpace(attr.Value); value != "" {
+				v, err := strconv.ParseFloat(value, 64)
+				if err != nil {
+					return err
+				}
+				c.MiterLimit = v
+				c.MiterLimitSet = v == 0
+			}
+		case "DashOffset":
+			if value := strings.TrimSpace(attr.Value); value != "" {
+				v, err := strconv.ParseFloat(value, 64)
+				if err != nil {
+					return err
+				}
+				c.DashOffset = &v
+			}
+		case "DashPattern":
+			c.dashPatternSet = c.DashPattern == ""
 		}
 	}
 	if value := attrValue(start, "Alpha"); value != "" {
@@ -378,53 +373,6 @@ func (a *Appearance) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 func (p *PatternContent) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	*p = PatternContent{Thumbnail: attrValue(start, "Thumbnail")}
 	return decodeOFDChildren(d, start, p.decodeObject)
-}
-
-// objects 按绘制顺序访问底纹单元，Objects优先于分类数组
-// 返回: iter.Seq[GraphicObject] 图形对象序列
-func (p PatternContent) objects() iter.Seq[GraphicObject] {
-	return func(yield func(GraphicObject) bool) {
-		if len(p.Objects) != 0 {
-			for _, object := range p.Objects {
-				if !yield(object) {
-					return
-				}
-			}
-			return
-		}
-		for _, object := range p.TextObject {
-			if !yield(GraphicObject{Type: "TextObject", TextObject: object}) {
-				return
-			}
-		}
-		for _, object := range p.PathObject {
-			if !yield(GraphicObject{Type: "PathObject", PathObject: object}) {
-				return
-			}
-		}
-		for _, object := range p.ImageObject {
-			if !yield(GraphicObject{Type: "ImageObject", ImageObject: object}) {
-				return
-			}
-		}
-		for _, object := range p.CompositeGraphicUnit {
-			if !yield(GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: object}) {
-				return
-			}
-		}
-	}
-}
-
-// objects 按绘制顺序访问矢量内容，Objects优先于分类数组
-// 返回: iter.Seq[GraphicObject] 图形对象序列
-func (c CompositeGraphicUnit) objects() iter.Seq[GraphicObject] {
-	return (PatternContent{Objects: c.Objects, TextObject: c.TextObject, PathObject: c.PathObject, ImageObject: c.ImageObject, CompositeGraphicUnit: c.CompositeGraphicUnit}).objects()
-}
-
-// empty 检查底纹单元是否没有绘制内容，缩略图不参与绘制
-// 返回: bool 是否为空
-func (p PatternContent) empty() bool {
-	return len(p.Objects) == 0 && len(p.TextObject) == 0 && len(p.PathObject) == 0 && len(p.ImageObject) == 0 && len(p.CompositeGraphicUnit) == 0
 }
 
 // UnmarshalXML 解析渐变分段并保留位置的缺省状态
@@ -511,6 +459,104 @@ func (s *RadialShd) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	return decodeOFDCollection(d, start, "Segment", &s.Segment)
 }
 
+// UnmarshalXML 解析渐变使用的基本颜色，不读取扩展子节点
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (c *ShdColor) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if err := c.decodeAttributes(start); err != nil {
+		return err
+	}
+	return d.Skip()
+}
+
+// graphicObjectTarget 图形对象集合
+type graphicObjectTarget struct {
+	objects   *[]GraphicObject
+	text      *[]TextObject
+	path      *[]PathObject
+	image     *[]ImageObject
+	composite *[]CompositeGraphicUnit
+}
+
+// graphicAttributeTokens 提供图形节点的起止令牌，仅用于解码无命名空间属性
+type graphicAttributeTokens struct {
+	start xml.StartElement
+	step  int
+}
+
+// Token 返回起始节点和结束节点，不读取图形子节点
+// 返回: xml.Token XML令牌, error 读取错误
+func (s *graphicAttributeTokens) Token() (xml.Token, error) {
+	s.step++
+	switch s.step {
+	case 1:
+		return s.start, nil
+	case 2:
+		return s.start.End(), nil
+	}
+	return nil, io.EOF
+}
+
+// decodeGraphicAttributes 按结构字段解析图形属性，忽略带命名空间的扩展属性
+// 入参: start 起始节点, value 不含自身解码方法的接收结构
+// 返回: error 解码错误
+func decodeGraphicAttributes(start xml.StartElement, value any) error {
+	return xml.NewTokenDecoder(&graphicAttributeTokens{start: ofdXMLStart(start)}).Decode(value)
+}
+
+// usesObjectMatrix 判断旧式扩展是否要求裁剪跟随对象变换，标准裁剪以外接矩形为基准
+// 返回: bool 是否叠加对象CTM
+func (clips *Clips) usesObjectMatrix() bool {
+	return clips != nil && clips.TransFlag != nil && *clips.TransFlag
+}
+
+// objects 按绘制顺序访问底纹单元，Objects优先于分类数组
+// 返回: iter.Seq[GraphicObject] 图形对象序列
+func (p PatternContent) objects() iter.Seq[GraphicObject] {
+	return func(yield func(GraphicObject) bool) {
+		if len(p.Objects) != 0 {
+			for _, object := range p.Objects {
+				if !yield(object) {
+					return
+				}
+			}
+			return
+		}
+		for _, object := range p.TextObject {
+			if !yield(GraphicObject{Type: "TextObject", TextObject: object}) {
+				return
+			}
+		}
+		for _, object := range p.PathObject {
+			if !yield(GraphicObject{Type: "PathObject", PathObject: object}) {
+				return
+			}
+		}
+		for _, object := range p.ImageObject {
+			if !yield(GraphicObject{Type: "ImageObject", ImageObject: object}) {
+				return
+			}
+		}
+		for _, object := range p.CompositeGraphicUnit {
+			if !yield(GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: object}) {
+				return
+			}
+		}
+	}
+}
+
+// objects 按绘制顺序访问矢量内容，Objects优先于分类数组
+// 返回: iter.Seq[GraphicObject] 图形对象序列
+func (c CompositeGraphicUnit) objects() iter.Seq[GraphicObject] {
+	return (PatternContent{Objects: c.Objects, TextObject: c.TextObject, PathObject: c.PathObject, ImageObject: c.ImageObject, CompositeGraphicUnit: c.CompositeGraphicUnit}).objects()
+}
+
+// empty 检查底纹单元是否没有绘制内容，缩略图不参与绘制
+// 返回: bool 是否为空
+func (p PatternContent) empty() bool {
+	return len(p.Objects) == 0 && len(p.TextObject) == 0 && len(p.PathObject) == 0 && len(p.ImageObject) == 0 && len(p.CompositeGraphicUnit) == 0
+}
+
 // decodeAttributes 解析基本颜色属性，忽略带命名空间的扩展属性
 // 入参: start 颜色起始节点
 // 返回: error 属性格式错误
@@ -539,16 +585,6 @@ func (c *ShdColor) decodeAttributes(start xml.StartElement) error {
 		}
 	}
 	return nil
-}
-
-// UnmarshalXML 解析渐变使用的基本颜色，不读取扩展子节点
-// 入参: d XML解码器, start 起始节点
-// 返回: error 解码错误
-func (c *ShdColor) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	if err := c.decodeAttributes(start); err != nil {
-		return err
-	}
-	return d.Skip()
 }
 
 // decodeGraphicObject 解析图形对象

@@ -1,18 +1,9 @@
 import { setInputFiles } from "./ofdgo_util.js";
 
+const engineRuntimes = new Map();
 let engineModule = null;
 let engineScheduler = null;
 let engineSequence = 0;
-const engineRuntimes = new Map();
-
-function requestKey(worker, data) {
-	return worker.shared ? JSON.stringify([data.engineID, data.id]) : data.id;
-}
-
-export function engineLimits() {
-	engineScheduler ||= new BrowserScheduler();
-	return {parallelism: engineScheduler.capacity, memoryBytes: engineScheduler.budget};
-}
 
 class BrowserScheduler {
 	constructor() {
@@ -280,19 +271,6 @@ class BrowserSession {
 	}
 }
 
-export function createEngineWorker(options = {}) {
-	if (nativeHost) return nativeHost.worker();
-	if (options.page || options.batch) return new BrowserWorker(options);
-	if (options.primary) return new BrowserSession(options);
-	return new BrowserEngine(options);
-}
-
-export async function documentBytes(file) {
-	if (file?.nativeFile) return file;
-	if (file instanceof Blob) return new Response(file.stream()).blob();
-	return new Uint8Array(await file.arrayBuffer());
-}
-
 class BrowserEngine {
 	constructor(options) {
 		this.primary = createEngineWorker({primary:true, url:options.url});
@@ -476,9 +454,9 @@ class BrowserEngine {
 		}
 		if (!data.type && data.name !== "ofdgoRenderPage" && ![
 			"ofdgoLoadPDF", "ofdgoDocumentInfo", "ofdgoDocumentVersions", "ofdgoDocumentNavigation", "ofdgoOpenLinks", "ofdgoDestinationView", "ofdgoOutlineLinks", "ofdgoRenderBackends", "ofdgoSVGFontData",
-			"ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences", "ofdgoResourceTargets",
+			"ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoPagesText", "ofdgoResources", "ofdgoResourceReferences", "ofdgoResourceTargets",
 			"ofdgoResourceLocations", "ofdgoFontPreview", "ofdgoFontFaces", "ofdgoFontFace", "ofdgoMatchFontFiles",
-			"ofdgoImages", "ofdgoImagePageSize", "ofdgoImagePreview", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoPackageDocuments", "ofdgoVerifySignatures",
+			"ofdgoImages", "ofdgoImagePageSize", "ofdgoImagePreview", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoStructureXML", "ofdgoPackageDocuments", "ofdgoVerifySignatures",
 			"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoExportInvoice", "ofdgoValidateInvoice",
 			"ofdgoActionList", "ofdgoPageSettings", "ofdgoReadAnnotation", "ofdgoPreviewSignatureSeal",
 			"ofdgoExportFormats", "ofdgoOutputFormats", "ofdgoParsePageRange", "ofdgoExportPage", "ofdgoExportDocument",
@@ -544,21 +522,13 @@ class BrowserEngine {
 	}
 }
 
-export function saveFilePicker(options) {
-	return nativeHost ? nativeHost.savePicker(options) : window.showSaveFilePicker ? window.showSaveFilePicker(options) : null;
-}
-
-export function directoryPicker() {
-	return nativeHost ? nativeHost.directoryPicker() : window.showDirectoryPicker({mode:"readwrite"});
-}
-
 class NativeFile {
 	constructor(value) {
 		Object.assign(this, value);
 		if (value.handle) this.handle = new NativeHandle(nativeHost, value.handle);
 		this.byteLength = this.size;
 		this.type ||= "application/octet-stream";
-		if (value.temporary) nativeHost?.resources?.register(this, value.nativeFile);
+		if (value.nativeFile) nativeHost?.resources?.register(this, {file: value.nativeFile}, this);
 	}
 
 	async arrayBuffer(signal) {
@@ -580,6 +550,7 @@ class NativeHandle {
 	constructor(host, value) {
 		this.host = host;
 		Object.assign(this, value);
+		if (value.nativeHandle) host?.resources?.register(this, {handle: value.nativeHandle}, this);
 	}
 
 	toJSON() {
@@ -619,8 +590,8 @@ class NativeHost {
 		this.cacheBytes = 32 * 1024 * 1024;
 		this.reading = 0;
 		this.readQueue = [];
-		this.resources = typeof FinalizationRegistry === "function" ? new FinalizationRegistry(file => {
-			this.call("release", {file}).catch(() => {});
+		this.resources = typeof FinalizationRegistry === "function" ? new FinalizationRegistry(entry => {
+			this.call("release", entry).catch(() => {});
 		}) : null;
 	}
 
@@ -652,13 +623,11 @@ class NativeHost {
 			signal?.throwIfAborted();
 			return await file.arrayBuffer(signal);
 		} finally {
-			try { await this.call("release", {file:file.nativeFile}); }
-			finally {
-				if (acquired) {
-					const next = this.readQueue.shift();
-					if (next) next();
-					else this.reading--;
-				}
+			await this.call("release", {file:file.nativeFile}).catch(() => {});
+			if (acquired) {
+				const next = this.readQueue.shift();
+				if (next) next();
+				else this.reading--;
 			}
 		}
 	}
@@ -684,15 +653,32 @@ class NativeHost {
 		return value;
 	}
 
-	async release(value) {
-		if (value instanceof Blob || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return;
-		if (value?.nativeFile && value.temporary) {
-			await this.call("release", {file:value.nativeFile}).catch(() => {});
+	async release(value, options = {}, visited = new Set()) {
+		if (!value || typeof value !== "object" || value instanceof Blob || value instanceof ArrayBuffer || ArrayBuffer.isView(value) || value === this || visited.has(value)) return;
+		visited.add(value);
+		const temporaryOnly = !!options.temporaryOnly;
+		const includeHandle = options.includeHandle !== false;
+		const exclude = options.exclude;
+		if (value.nativeHandle) {
+			if (!temporaryOnly && !exclude?.has(value.nativeHandle)) {
+				this.resources?.unregister(value);
+				await this.call("release", {handle:value.nativeHandle}).catch(() => {});
+			}
 			return;
 		}
-		if (value && typeof value === "object") {
-			for (const item of Object.values(value)) await this.release(item);
+		if (value.nativeFile) {
+			if ((!temporaryOnly || value.temporary) && !exclude?.has(value.nativeFile)) {
+				this.resources?.unregister(value);
+				await this.call("release", {file:value.nativeFile}).catch(() => {});
+			}
+			if (!temporaryOnly && includeHandle && value.handle?.nativeHandle && !exclude?.has(value.handle.nativeHandle)) {
+				this.resources?.unregister(value.handle);
+				await this.call("release", {handle:value.handle.nativeHandle}).catch(() => {});
+			}
+			return;
 		}
+		const items = Array.isArray(value) ? value : Object.values(value);
+		for (const item of items) await this.release(item, options, visited);
 	}
 
 	worker() {
@@ -768,15 +754,15 @@ class NativeHost {
 							completions.delete(data.id);
 						}
 					} else result = await host.call("engine.call", args, controller.signal);
-					if (closed) { await host.release(result); return; }
+					if (closed) { await host.release(result, {temporaryOnly:true}); return; }
 					let decoded;
 					try {
 						controller.signal.throwIfAborted();
 						decoded = await host.decode(result, controller.signal);
 						controller.signal.throwIfAborted();
 					}
-					catch (error) { await host.release(result); throw error; }
-					if (closed) { await host.release(result); return; }
+					catch (error) { await host.release(result, {temporaryOnly:true}); throw error; }
+					if (closed) { await host.release(result, {temporaryOnly:true}); return; }
 					emit({id:data.id, ...decoded});
 				}).catch(error => emit({id:data.id, ok:false, error:error.message, code:error.code, canceled:error.name === "AbortError"})).finally(() => requests.delete(data.id));
 				if (parallel) {
@@ -808,6 +794,15 @@ class NativeHost {
 
 	async directoryPicker() {
 		return new NativeHandle(this, await this.call("directory", {}));
+	}
+
+	async createTempDirectory() {
+		return new NativeHandle(this, await this.call("temp.directory", {}));
+	}
+
+	removeTempDirectory(dir) {
+		if (!dir) return Promise.resolve();
+		return this.call("temp.remove", { id: dir.nativeHandle || dir });
 	}
 
 	async fonts() {
@@ -856,10 +851,45 @@ class NativeHost {
 
 	async download(data, mime, name) {
 		const handle = await this.savePicker({suggestedName:name});
-		const writer = await handle.createWritable();
-		try { await writer.write(data); await writer.close(); }
-		catch (error) { await writer.abort().catch(() => {}); throw error; }
+		try {
+			const writer = await handle.createWritable();
+			try { await writer.write(data); await writer.close(); }
+			catch (error) { await writer.abort().catch(() => {}); throw error; }
+		} finally {
+			await this.release(handle);
+		}
 	}
 }
 
 export const nativeHost = globalThis.guigo ? new NativeHost(globalThis.guigo) : null;
+
+export function engineLimits() {
+	engineScheduler ||= new BrowserScheduler();
+	return {parallelism: engineScheduler.capacity, memoryBytes: engineScheduler.budget};
+}
+
+export function createEngineWorker(options = {}) {
+	if (nativeHost) return nativeHost.worker();
+	if (options.page || options.batch) return new BrowserWorker(options);
+	if (options.primary) return new BrowserSession(options);
+	return new BrowserEngine(options);
+}
+
+export async function documentBytes(file) {
+	if (file?.nativeFile) return file;
+	if (!nativeHost && file instanceof File) return file;
+	if (file instanceof Blob) return new Response(file.stream()).blob();
+	return new Uint8Array(await file.arrayBuffer());
+}
+
+export function saveFilePicker(options) {
+	return nativeHost ? nativeHost.savePicker(options) : window.showSaveFilePicker ? window.showSaveFilePicker(options) : null;
+}
+
+export function directoryPicker() {
+	return nativeHost ? nativeHost.directoryPicker() : window.showDirectoryPicker({mode:"readwrite"});
+}
+
+function requestKey(worker, data) {
+	return worker.shared ? JSON.stringify([data.engineID, data.id]) : data.id;
+}

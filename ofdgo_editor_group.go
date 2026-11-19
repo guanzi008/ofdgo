@@ -16,18 +16,17 @@ package ofdgo
 
 import (
 	"bytes"
-
 	"encoding/xml"
 	"fmt"
 	"maps"
 	"slices"
-	"strconv"
 )
 
 // GroupObjects 将同一容器内连续的对象组合，保留标识、绘制顺序及原始内容
 // 入参: page 页面索引, ids 至少两个对象标识
 // 返回: string 组合标识, error 错误信息
 func (e *Editor) GroupObjects(page int, ids []string) (id string, err error) {
+	defer e.bindPageIndex(page)()
 	_, indexes, err := e.selectedObjects(page, ids)
 	if err != nil {
 		return "", err
@@ -54,7 +53,12 @@ func (e *Editor) GroupObjects(page int, ids []string) (id string, err error) {
 		return "", err
 	}
 	defer reader.Close()
+	pageContent, err := reader.PageContentByIndex(page)
+	if err != nil {
+		return "", err
+	}
 	renderer := e.newRenderer(reader)
+	defer renderer.bindPageResources(pageContent)()
 	var extent Box
 	for _, index := range indexes {
 		object := layer.Objects[index.index]
@@ -93,11 +97,10 @@ func (e *Editor) GroupObjects(page int, ids []string) (id string, err error) {
 		state := object.state
 		if object.Type == "TextObject" && object.TextObject.layout != nil {
 			state.layout = object.TextObject.layout
-			state.origin[0], _, err = e.richPlainOffset(object.TextObject)
+			state.origin, err = e.textLayoutOrigin(object.TextObject)
 			if err != nil {
 				return "", err
 			}
-			state.origin[1], _ = strconv.ParseFloat(object.TextObject.TextCode[0].Y, 64)
 		}
 		states[editorObjectID(object)] = state
 	}
@@ -155,37 +158,73 @@ func (e *Editor) GroupObjects(page int, ids []string) (id string, err error) {
 // 入参: page 页面索引, id 组合标识
 // 返回: []string 展开后的对象标识, error 错误信息
 func (e *Editor) UngroupObject(page int, id string) ([]string, error) {
-	_, indexes, err := e.selectedObjects(page, []string{id})
-	if err != nil {
-		return nil, err
-	}
-	origin := e.objectOrigin(id)
-	if origin == nil || !editorContainerOrderable(origin.node.parent) {
-		return nil, fmt.Errorf("group container cannot be removed without losing attributes")
-	}
-	reader, renderer, root, _, err := e.compositeScope(page, ObjectPath{ID: id})
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
 	var result []string
-	err = e.ungroupCompositeNode(renderer, root, func(objects []GraphicObject, remaps []map[string]string) error {
-		origins := make(map[string]*editorObjectOrigin, len(objects))
-		for i := range objects {
-			object := &objects[i]
-			copy := *object.origin
-			copy.node.parent = origin.node.parent
-			object.origin = nil
-			id := editorObjectID(*object)
-			origins[id] = &copy
-			result = append(result, id)
+	err := e.Transaction(func(e *Editor) error {
+		defer e.bindPageIndex(page)()
+		_, indexes, err := e.selectedObjects(page, []string{id})
+		if err != nil {
+			return err
 		}
-		return e.remapStructureObjects(page, remaps, func() error {
-			e.replaceGroup(page, indexes, objects, origins)
-			return nil
+		origin := e.objectOrigin(id)
+		if origin == nil || !editorContainerOrderable(origin.node.parent) {
+			return fmt.Errorf("group container cannot be removed without losing attributes")
+		}
+		reader, renderer, root, _, err := e.compositeScope(page, ObjectPath{ID: id})
+		if err != nil {
+			return err
+		}
+		defer reader.Close()
+		return e.ungroupCompositeNode(renderer, root, func(objects []GraphicObject, remaps []map[string]string) error {
+			e.restoreUngroupedLayouts(e.pages[page].ID, objects, remaps)
+			origins := make(map[string]*editorObjectOrigin, len(objects))
+			for i := range objects {
+				object := &objects[i]
+				copy := *object.origin
+				copy.node.parent = origin.node.parent
+				copy.object.TextObject.layout = object.TextObject.layout
+				copy.object.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
+				object.origin = nil
+				objID := editorObjectID(*object)
+				origins[objID] = &copy
+				result = append(result, objID)
+			}
+			if err := e.cleanupRichTextMetadata(page, []string{id}); err != nil {
+				return err
+			}
+			return e.remapStructureObjects(page, remaps, func() error {
+				e.replaceGroup(page, indexes, objects, origins)
+				return nil
+			})
 		})
 	})
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// replaceGroup 原子替换同容器连续成员及原文来源，提交一次撤销记录
+// 入参: page 页面索引, indexes 原对象位置, objects 新成员, origins 新成员原文
+func (e *Editor) replaceGroup(page int, indexes []editorObjectPosition, objects []GraphicObject, origins map[string]*editorObjectOrigin) {
+	before := copyEditorPage(e.pages[page]).Content.Layer
+	after := copyEditorPage(e.pages[page]).Content.Layer
+	layer := &after[indexes[0].layer]
+	layer.Objects = slices.Replace(layer.Objects, indexes[0].index, indexes[len(indexes)-1].index+1, objects...)
+	previous := make(map[string]*editorObjectOrigin, len(origins))
+	for id := range origins {
+		previous[id] = e.objectOrigin(id)
+	}
+	apply := func(e *Editor, layers []Layer, origins map[string]*editorObjectOrigin) {
+		e.pages[page].Content.Layer = copyEditorPage(PageContent{Content: Content{Layer: layers}}).Content.Layer
+		for id, origin := range origins {
+			e.setObjectOrigin(id, origin)
+		}
+	}
+	apply(e, after, origins)
+	if change := e.recordChange(page); change != nil {
+		change.undo = func(e *Editor) { apply(e, before, previous) }
+		change.redo = func(e *Editor) { apply(e, after, origins) }
+	}
 }
 
 // editorUngroupable 判断移除容器是否会丢失对象行为或未知属性
@@ -195,7 +234,7 @@ func editorUngroupable(node *editorXML) bool {
 	if node.name.Local != "CompositeObject" && node.name.Local != "CompositeGraphicUnit" {
 		return false
 	}
-	if !editorXMLAttributes(node, "ID Boundary CTM DrawParam Alpha Visible ResourceID Width Height") {
+	if !editorXMLAttributes(node, "ID Name Boundary CTM DrawParam Alpha Visible ResourceID Width Height") {
 		return false
 	}
 	var contentSupported func(*editorXML) bool
@@ -236,28 +275,4 @@ func editorUngroupable(node *editorXML) bool {
 		}
 	}
 	return true
-}
-
-// replaceGroup 原子替换同容器连续成员及原文来源，提交一次撤销记录
-// 入参: page 页面索引, indexes 原对象位置, objects 新成员, origins 新成员原文
-func (e *Editor) replaceGroup(page int, indexes []editorObjectPosition, objects []GraphicObject, origins map[string]*editorObjectOrigin) {
-	before := copyEditorPage(e.pages[page]).Content.Layer
-	after := copyEditorPage(e.pages[page]).Content.Layer
-	layer := &after[indexes[0].layer]
-	layer.Objects = slices.Replace(layer.Objects, indexes[0].index, indexes[len(indexes)-1].index+1, objects...)
-	previous := make(map[string]*editorObjectOrigin, len(origins))
-	for id := range origins {
-		previous[id] = e.objectOrigin(id)
-	}
-	apply := func(e *Editor, layers []Layer, origins map[string]*editorObjectOrigin) {
-		e.pages[page].Content.Layer = copyEditorPage(PageContent{Content: Content{Layer: layers}}).Content.Layer
-		for id, origin := range origins {
-			e.setObjectOrigin(id, origin)
-		}
-	}
-	apply(e, after, origins)
-	if change := e.recordChange(page); change != nil {
-		change.undo = func(e *Editor) { apply(e, before, previous) }
-		change.redo = func(e *Editor) { apply(e, after, origins) }
-	}
 }

@@ -30,7 +30,6 @@ import (
 	"strings"
 
 	"github.com/tdewolff/canvas"
-	canvasimage "github.com/tdewolff/canvas/image"
 	"github.com/tdewolff/canvas/renderers/svg"
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	"github.com/xiaoqidun/pdfgo"
@@ -114,82 +113,6 @@ func (s *svgResourceRenderer) RenderPath(path *canvas.Path, style canvas.Style, 
 	s.pathData = output
 }
 
-// svgImageKey 按原图及输出精度复用图片编码，避免不同显示尺寸共用低清结果
-type svgImageKey struct {
-	image image.Image
-	size  image.Point
-}
-
-// svgResourceCacheKey 区分共享的图片编码缓存
-type svgResourceCacheKey struct{}
-
-// svgImageResourceKey 按像素、压缩策略及目标尺寸区分编码结果
-type svgImageResourceKey struct {
-	digest  [32]byte
-	options CompressionOptions
-	target  image.Point
-}
-
-// svgObjectGroup 记录编辑分组的稳定路径，不把底纹内部绘制当作成员
-type svgObjectGroup struct {
-	path      string
-	next      int
-	composite bool
-}
-
-// svgImageResources 获取派生渲染器共享的图片编码缓存
-// 返回: *renderCache 图片编码缓存
-func (r *Renderer) svgImageResources() *renderCache[svgImageResourceKey, SVGImage] {
-	key := svgResourceCacheKey{}
-	if state, ok := r.sharedBackendStates[key]; ok {
-		return state.(*renderCache[svgImageResourceKey, SVGImage])
-	}
-	cache := resourceCache[svgImageResourceKey, SVGImage](r.Reader.resources, 4<<20)
-	r.sharedBackendStates[key] = cache
-	return cache
-}
-
-// svgPixelDigest 对标准像素缓冲计算完整摘要，不展开延迟图像
-// 入参: ctx 取消上下文, img 原始图像, limit 可参与缓存的像素字节上限
-// 返回: [32]byte 像素摘要, bool 是否为支持的像素布局
-func svgPixelDigest(ctx context.Context, img image.Image, limit int) ([32]byte, bool) {
-	var pixels []byte
-	var stride, kind int
-	switch source := img.(type) {
-	case *image.NRGBA:
-		pixels, stride, kind = source.Pix, source.Stride, 1
-	case *image.NRGBA64:
-		pixels, stride, kind = source.Pix, source.Stride, 2
-	case *image.RGBA:
-		pixels, stride, kind = source.Pix, source.Stride, 3
-	case *image.RGBA64:
-		pixels, stride, kind = source.Pix, source.Stride, 4
-	default:
-		return [32]byte{}, false
-	}
-	if len(pixels) > limit {
-		return [32]byte{}, false
-	}
-	bounds := img.Bounds()
-	var header [48]byte
-	for i, value := range [...]int{kind, stride, bounds.Min.X, bounds.Min.Y, bounds.Max.X, bounds.Max.Y} {
-		binary.LittleEndian.PutUint64(header[i*8:], uint64(value))
-	}
-	hash := sha256.New()
-	hash.Write(header[:])
-	for len(pixels) > 0 {
-		if ctx.Err() != nil {
-			return [32]byte{}, false
-		}
-		count := min(len(pixels), 256<<10)
-		hash.Write(pixels[:count])
-		pixels = pixels[count:]
-	}
-	var digest [32]byte
-	hash.Sum(digest[:0])
-	return digest, true
-}
-
 // RenderImage 按输出策略编码图片，分离资源时保持尺寸和变换
 // 入参: img 图片对象, m 变换矩阵
 func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
@@ -257,6 +180,62 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 	}
 }
 
+// RenderText 绘制文字并记录实际使用的字体资源
+// 入参: text 文字对象, m 变换矩阵
+func (s *svgResourceRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
+	if s.embeddedFonts {
+		s.SVG.RenderText(text, m)
+		return
+	}
+	if text.Empty() {
+		return
+	}
+	font := text.MostCommonFontFace().Font
+	state := s.renderer.canvasState()
+	resource, ok := state.svgFontCache[font]
+	if !ok {
+		ctx := s.renderer.outputContext()
+		var prebuilt []byte
+		digest, hasDigest := state.fontDigests[font]
+		if !hasDigest {
+			prebuilt = basefont.SFNTData(font.Tables)
+			digest = sha256.Sum256(prebuilt)
+			state.fontDigests[font] = digest
+		}
+		cacheKey := svgFontResourceKey{digest: digest, style: font.Style()}
+		var err error
+		resource, err = s.renderer.svgFontResources().load(ctx, cacheKey, func() (SVGFont, int, error) {
+			data := prebuilt
+			if data == nil {
+				data = basefont.SFNTData(font.Tables)
+			}
+			built := SVGFont{
+				Name:   fmt.Sprintf("ofdgo-%x-%d", digest, font.Style()),
+				Weight: font.Style().CSS(),
+				Style:  "normal",
+				Data:   data,
+			}
+			if font.Style().Italic() {
+				built.Style = "italic"
+			}
+			return built, len(data) + 256, nil
+		})
+		if err != nil {
+			s.err = err
+			return
+		}
+		state.svgFontCache[font] = resource
+	}
+	if !s.seen[resource.Name] {
+		s.seen[resource.Name] = true
+		s.fonts = append(s.fonts, resource)
+		fmt.Fprintf(&s.styles, ".%s{font-family:%s!important}", resource.Name, resource.Name)
+	}
+	s.SetClass(resource.Name)
+	s.SVG.RenderText(text, m)
+	s.SetClass()
+}
+
 // imageResource 复用相同像素的编码结果，不持有源图像或改变输出策略
 // 入参: ctx 取消上下文, img 原图, target 压缩像素需求
 // 返回: SVGImage 图片资源, error 编码或取消错误
@@ -297,8 +276,8 @@ func (s *svgResourceRenderer) encodeImageResource(ctx context.Context, img image
 		options = s.renderer.Compression
 	}
 	resource := SVGImage{MIME: "image/png"}
-	if encoded, ok := img.(*canvasimage.Image); ok {
-		resource.MIME, resource.Data = encoded.Mimetype, encoded.Bytes
+	if encoded, ok := img.(*EncodedImage); ok {
+		resource.MIME, resource.Data = encoded.MIME(), encoded.Bytes()
 		if options.Mode != CompressionUnchanged {
 			data, err := pdfgo.OptimizeImageResource(ctx, resource.Data, options, target)
 			if ctx.Err() != nil {
@@ -344,39 +323,160 @@ func (s *svgResourceRenderer) encodeImageResource(ctx context.Context, img image
 	return resource, nil
 }
 
-// RenderText 绘制文字并记录实际使用的字体资源
-// 入参: text 文字对象, m 变换矩阵
-func (s *svgResourceRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
-	if s.embeddedFonts {
-		s.SVG.RenderText(text, m)
-		return
-	}
-	if text.Empty() {
-		return
-	}
-	font := text.MostCommonFontFace().Font
-	resource, ok := s.renderer.canvasState().svgFontCache[font]
-	if !ok {
-		data := basefont.SFNTData(font.Tables)
-		resource = SVGFont{
-			Name:   fmt.Sprintf("ofdgo-%x-%d", sha256.Sum256(data), font.Style()),
-			Weight: font.Style().CSS(),
-			Style:  "normal",
-			Data:   data,
+// beginObject 标记直接对象及复合或注解成员，模板图元不单独标记
+// 入参: object 图形对象
+// 返回: bool 是否写入分组
+func (s *svgResourceRenderer) beginObject(object *GraphicObject) bool {
+	id := s.objects[object]
+	attribute := "data-ofd-object"
+	if id == "" {
+		if len(s.objectStack) == 0 || !s.objectStack[len(s.objectStack)-1].composite {
+			return false
 		}
-		if font.Style().Italic() {
-			resource.Style = "italic"
+		parent := &s.objectStack[len(s.objectStack)-1]
+		id = fmt.Sprintf("%s/%d", parent.path, parent.next)
+		parent.next++
+		attribute = "data-ofd-child"
+	}
+	s.objectStack = append(s.objectStack, svgObjectGroup{path: id, composite: object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit"})
+	fmt.Fprintf(s.writer, `<g %s="%s">`, attribute, html.EscapeString(id))
+	return true
+}
+
+// endObject 结束对象分组
+func (s *svgResourceRenderer) endObject() {
+	s.objectStack = s.objectStack[:len(s.objectStack)-1]
+	fmt.Fprint(s.writer, `</g>`)
+}
+
+// beginAnnotation 标记完整注解外观，内部图元保持原有层级和绘制顺序
+// 入参: id 注解标识
+// 返回: bool 是否写入分组
+func (s *svgResourceRenderer) beginAnnotation(id string) bool {
+	if s.objects == nil {
+		return false
+	}
+	s.objectStack = append(s.objectStack, svgObjectGroup{path: "annotation:" + id, composite: true})
+	fmt.Fprintf(s.writer, `<g data-ofd-object="annotation:%s">`, html.EscapeString(id))
+	return true
+}
+
+// beginStamp 为完整签章外观建立编辑分组，不将嵌套OFD中的对象当作页面成员
+// 入参: stamp 签章外观
+// 返回: bool 是否写入分组
+func (s *svgResourceRenderer) beginStamp(stamp Stamp) bool {
+	if s.objects == nil || stamp.ID == "" || stamp.SignatureID == "" {
+		return false
+	}
+	id := stamp.ObjectID()
+	s.objectStack = append(s.objectStack, svgObjectGroup{path: id})
+	fmt.Fprintf(s.writer, `<g data-ofd-object="%s">`, html.EscapeString(id))
+	return true
+}
+
+// skipObjects 为不可见资源保留内部成员序号
+// 入参: count 直接成员数量
+func (s *svgResourceRenderer) skipObjects(count int) {
+	if len(s.objectStack) > 0 {
+		s.objectStack[len(s.objectStack)-1].next += count
+	}
+}
+
+// svgImageKey 按原图及输出精度复用图片编码，避免不同显示尺寸共用低清结果
+type svgImageKey struct {
+	image image.Image
+	size  image.Point
+}
+
+// svgResourceCacheKey 区分共享的图片编码缓存
+type svgResourceCacheKey struct{}
+
+// svgFontCacheKey 区分共享的SVG序列化字体缓存
+type svgFontCacheKey struct{}
+
+// svgFontResourceKey 按字体内容摘要与样式区分共享的SVG字体缓存
+type svgFontResourceKey struct {
+	digest [32]byte
+	style  canvas.FontStyle
+}
+
+// svgImageResourceKey 按像素、压缩策略及目标尺寸区分编码结果
+type svgImageResourceKey struct {
+	digest  [32]byte
+	options CompressionOptions
+	target  image.Point
+}
+
+// svgObjectGroup 记录编辑分组的稳定路径，不把底纹内部绘制当作成员
+type svgObjectGroup struct {
+	path      string
+	next      int
+	composite bool
+}
+
+// svgImageResources 获取派生渲染器共享的图片编码缓存
+// 返回: *renderCache 图片编码缓存
+func (r *Renderer) svgImageResources() *renderCache[svgImageResourceKey, SVGImage] {
+	key := svgResourceCacheKey{}
+	if state, ok := r.sharedBackendStates[key]; ok {
+		return state.(*renderCache[svgImageResourceKey, SVGImage])
+	}
+	cache := resourceCache[svgImageResourceKey, SVGImage](r.Reader.resources, 4<<20)
+	r.sharedBackendStates[key] = cache
+	return cache
+}
+
+// svgFontResources 获取派生渲染器共享的SVG字体数据缓存
+// 返回: *renderCache 字体数据缓存
+func (r *Renderer) svgFontResources() *renderCache[svgFontResourceKey, SVGFont] {
+	key := svgFontCacheKey{}
+	if state, ok := r.sharedBackendStates[key]; ok {
+		return state.(*renderCache[svgFontResourceKey, SVGFont])
+	}
+	cache := resourceCache[svgFontResourceKey, SVGFont](r.Reader.resources, 32<<20)
+	r.sharedBackendStates[key] = cache
+	return cache
+}
+
+// svgPixelDigest 对标准像素缓冲计算完整摘要，不展开延迟图像
+// 入参: ctx 取消上下文, img 原始图像, limit 可参与缓存的像素字节上限
+// 返回: [32]byte 像素摘要, bool 是否为支持的像素布局
+func svgPixelDigest(ctx context.Context, img image.Image, limit int) ([32]byte, bool) {
+	var pixels []byte
+	var stride, kind int
+	switch source := img.(type) {
+	case *image.NRGBA:
+		pixels, stride, kind = source.Pix, source.Stride, 1
+	case *image.NRGBA64:
+		pixels, stride, kind = source.Pix, source.Stride, 2
+	case *image.RGBA:
+		pixels, stride, kind = source.Pix, source.Stride, 3
+	case *image.RGBA64:
+		pixels, stride, kind = source.Pix, source.Stride, 4
+	default:
+		return [32]byte{}, false
+	}
+	if len(pixels) > limit {
+		return [32]byte{}, false
+	}
+	bounds := img.Bounds()
+	var header [48]byte
+	for i, value := range [...]int{kind, stride, bounds.Min.X, bounds.Min.Y, bounds.Max.X, bounds.Max.Y} {
+		binary.LittleEndian.PutUint64(header[i*8:], uint64(value))
+	}
+	hash := sha256.New()
+	hash.Write(header[:])
+	for len(pixels) > 0 {
+		if ctx.Err() != nil {
+			return [32]byte{}, false
 		}
-		s.renderer.canvasState().svgFontCache[font] = resource
+		count := min(len(pixels), 256<<10)
+		hash.Write(pixels[:count])
+		pixels = pixels[count:]
 	}
-	if !s.seen[resource.Name] {
-		s.seen[resource.Name] = true
-		s.fonts = append(s.fonts, resource)
-		fmt.Fprintf(&s.styles, ".%s{font-family:%s!important}", resource.Name, resource.Name)
-	}
-	s.SetClass(resource.Name)
-	s.SVG.RenderText(text, m)
-	s.SetClass()
+	var digest [32]byte
+	hash.Sum(digest[:0])
+	return digest, true
 }
 
 // renderSVGResources 渲染SVG并收集外部资源
@@ -428,50 +528,4 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 		return SVGResources{}, err
 	}
 	return SVGResources{Fonts: s.fonts, Images: s.images}, buffer.Flush()
-}
-
-// beginObject 标记直接对象及复合或注解成员，模板图元不单独标记
-// 入参: object 图形对象
-// 返回: bool 是否写入分组
-func (s *svgResourceRenderer) beginObject(object *GraphicObject) bool {
-	id := s.objects[object]
-	attribute := "data-ofd-object"
-	if id == "" {
-		if len(s.objectStack) == 0 || !s.objectStack[len(s.objectStack)-1].composite {
-			return false
-		}
-		parent := &s.objectStack[len(s.objectStack)-1]
-		id = fmt.Sprintf("%s/%d", parent.path, parent.next)
-		parent.next++
-		attribute = "data-ofd-child"
-	}
-	s.objectStack = append(s.objectStack, svgObjectGroup{path: id, composite: object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit"})
-	fmt.Fprintf(s.writer, `<g %s="%s">`, attribute, html.EscapeString(id))
-	return true
-}
-
-// endObject 结束对象分组
-func (s *svgResourceRenderer) endObject() {
-	s.objectStack = s.objectStack[:len(s.objectStack)-1]
-	fmt.Fprint(s.writer, `</g>`)
-}
-
-// beginAnnotation 标记完整注解外观，内部图元保持原有层级和绘制顺序
-// 入参: id 注解标识
-// 返回: bool 是否写入分组
-func (s *svgResourceRenderer) beginAnnotation(id string) bool {
-	if s.objects == nil {
-		return false
-	}
-	s.objectStack = append(s.objectStack, svgObjectGroup{path: "annotation:" + id, composite: true})
-	fmt.Fprintf(s.writer, `<g data-ofd-object="annotation:%s">`, html.EscapeString(id))
-	return true
-}
-
-// skipObjects 为不可见资源保留内部成员序号
-// 入参: count 直接成员数量
-func (s *svgResourceRenderer) skipObjects(count int) {
-	if len(s.objectStack) > 0 {
-		s.objectStack[len(s.objectStack)-1].next += count
-	}
 }

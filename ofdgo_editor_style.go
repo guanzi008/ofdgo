@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"slices"
 	"strings"
 )
 
@@ -100,13 +101,8 @@ func (e *Editor) DrawParam(id string, resolved bool) (*DrawParam, error) {
 		}
 		return cloneEditorData(draw), nil
 	}
-	for _, resource := range e.resources {
-		if resource.draw != nil && sameResourceID(resource.draw.ID, id) {
-			return cloneEditorData(resource.draw), nil
-		}
-	}
-	if e.source != nil {
-		if value, _ := resourceValue(e.source.reader.drawParamCache, id); value != nil {
+	for _, scope := range e.drawParamScopes() {
+		if value := e.lookupDrawParamInScope(scope, id); value != nil {
 			return cloneEditorData(value), nil
 		}
 	}
@@ -117,6 +113,7 @@ func (e *Editor) DrawParam(id string, resolved bool) (*DrawParam, error) {
 // 入参: page 页面索引, ids 对象标识, id 绘制参数标识
 // 返回: error 错误信息
 func (e *Editor) SetObjectDrawParam(page int, ids []string, id string) error {
+	defer e.bindPageIndex(page)()
 	if _, err := e.editorDrawParam(id, make(map[string]bool)); err != nil {
 		return err
 	}
@@ -126,7 +123,7 @@ func (e *Editor) SetObjectDrawParam(page int, ids []string, id string) error {
 	}
 	origins := make(map[string]*editorObjectOrigin)
 	for i, object := range objects {
-		if object.Type != "TextObject" && object.Type != "PathObject" && object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
+		if object.Type != "TextObject" && object.Type != "PathObject" && object.Type != "ImageObject" && object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
 			return fmt.Errorf("object %q does not support draw parameters", ids[i])
 		}
 		origin := e.objectOrigin(ids[i])
@@ -144,7 +141,7 @@ func (e *Editor) SetObjectDrawParam(page int, ids []string, id string) error {
 				return encodeErr
 			}
 			comparison := object
-			comparison.TextObject.DrawParam, comparison.PathObject.DrawParam = "", ""
+			comparison.TextObject.DrawParam, comparison.PathObject.DrawParam, comparison.ImageObject.DrawParam = "", "", ""
 			newXML, encodeErr := editorObjectXML(comparison)
 			if encodeErr != nil {
 				return encodeErr
@@ -186,6 +183,8 @@ func (e *Editor) SetObjectDrawParam(page int, ids []string, id string) error {
 			target = &next.TextObject
 		case "PathObject":
 			target = &next.PathObject
+		case "ImageObject":
+			target = &next.ImageObject
 		default:
 			target = &next.CompositeGraphicUnit
 		}
@@ -204,6 +203,8 @@ func (e *Editor) SetObjectDrawParam(page int, ids []string, id string) error {
 			next.TextObject.DrawParam = id
 		case "PathObject":
 			next.PathObject.DrawParam = id
+		case "ImageObject":
+			next.ImageObject.DrawParam = id
 		}
 		next.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
 		root, err = parseEditorXML(data)
@@ -234,47 +235,11 @@ func (e *Editor) AddDrawParam(draw DrawParam) (string, error) {
 	return e.addDrawParam(ctx, draw)
 }
 
-// addDrawParam 校验并注册绘制参数，资源操作可传递取消上下文
-// 入参: ctx 取消上下文, draw 绘制参数
-// 返回: string 资源标识, error 校验、编码或取消错误
-func (e *Editor) addDrawParam(ctx context.Context, draw DrawParam) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	if draw.ResourceID != "" || draw.BaseLoc != "" || draw.Link != "" {
-		return "", fmt.Errorf("external draw parameter references cannot be registered directly")
-	}
-	base, err := e.editorDrawParam(draw.Relative, make(map[string]bool))
-	if err != nil {
-		return "", err
-	}
-	effective := mergeDrawParam(*base, &draw)
-	if err := validateEditorStroke(PathObject{LineWidth: draw.LineWidth, Cap: draw.Cap, Join: draw.Join, MiterLimit: draw.MiterLimit, DashPattern: draw.DashPattern, DashOffset: draw.DashOffset}); err != nil {
-		return "", err
-	}
-	if !finite(draw.Size) || draw.Size < 0 || draw.Weight < 0 || draw.Weight > 900 || draw.Weight%100 != 0 {
-		return "", fmt.Errorf("invalid draw parameter font size or weight")
-	}
-	if effective.Font != "" {
-		if _, err := e.editorFont(effective.Font); err != nil {
-			return "", err
-		}
-	}
-	for _, paint := range []*FillColor{draw.FillColor, (*FillColor)(draw.StrokeColor)} {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		if err := e.editorColor(paint); err != nil {
-			return "", err
-		}
-	}
-	return e.addEditorDrawParamContext(ctx, cloneEditorData(draw))
-}
-
 // StyleObjects 原子更新对象透明度及文字、路径的填充和描边样式
 // 入参: page 页面索引, ids 对象标识, style 待修改属性
 // 返回: error 错误信息
 func (e *Editor) StyleObjects(page int, ids []string, style ObjectStyle) error {
+	defer e.bindPageIndex(page)()
 	objects, _, err := e.selectedObjects(page, ids)
 	if err != nil {
 		return err
@@ -303,6 +268,7 @@ func (e *Editor) StyleObjects(page int, ids []string, style ObjectStyle) error {
 // 入参: page 目标页面索引, ids 目标对象标识, source 样式来源快照
 // 返回: error 错误信息
 func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err error) {
+	defer e.bindPageIndex(page)()
 	if err := e.validateCopyStyle(source); err != nil {
 		return err
 	}
@@ -337,7 +303,10 @@ func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err er
 		}
 		for i := range objects {
 			text := objects[i].TextObject
-			style := copyEditorPathStyle(text.pathStyle(), source.TextObject.pathStyle(), editorStrokeScale(source.TextObject.CTM)/editorStrokeScale(text.CTM))
+			style, err := copyEditorPathStyle(text.pathStyle(), source.TextObject.pathStyle(), editorStrokeScale(source.TextObject.CTM)/editorStrokeScale(text.CTM))
+			if err != nil {
+				return err
+			}
 			objects[i].TextObject = text.withPathStyle(style)
 		}
 		return e.UpdateObjects(page, objects)
@@ -346,7 +315,10 @@ func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err er
 		object = cloneEditorData(object)
 		switch source.Type {
 		case "PathObject":
-			object.PathObject = copyEditorPathStyle(object.PathObject, source.PathObject, editorStrokeScale(source.PathObject.CTM)/editorStrokeScale(object.PathObject.CTM))
+			object.PathObject, err = copyEditorPathStyle(object.PathObject, source.PathObject, editorStrokeScale(source.PathObject.CTM)/editorStrokeScale(object.PathObject.CTM))
+			if err != nil {
+				return err
+			}
 		case "ImageObject":
 			object.ImageObject.Alpha = source.ImageObject.Alpha
 		}
@@ -355,48 +327,11 @@ func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err er
 	return e.updateObjects(page, objects, true)
 }
 
-// explicitDefaultPaint 将样式快照的缺省颜色写为显式颜色，避免继承目标容器颜色
-// 入参: object 已解析继承样式的文字或路径，其他类型保持不变
-// 返回: GraphicObject 颜色完整的样式快照, error 颜色资源错误
-func (e *Editor) explicitDefaultPaint(object GraphicObject) (GraphicObject, error) {
-	var fill **FillColor
-	var stroke **StrokeColor
-	text := object.Type == "TextObject"
-	if text {
-		fill, stroke = &object.TextObject.FillColor, &object.TextObject.StrokeColor
-	} else if object.Type == "PathObject" {
-		fill, stroke = &object.PathObject.FillColor, &object.PathObject.StrokeColor
-	} else {
-		return object, nil
-	}
-	if *fill != nil && *stroke != nil {
-		return object, nil
-	}
-	black, err := e.RGBColor(color.NRGBA{A: 255})
-	if err != nil {
-		return GraphicObject{}, err
-	}
-	transparent, zero := *black, 0
-	transparent.Alpha = &zero
-	if *fill == nil {
-		*fill = &transparent
-		if text {
-			*fill = black
-		}
-	}
-	if *stroke == nil {
-		*stroke = (*StrokeColor)(black)
-		if text {
-			*stroke = (*StrokeColor)(&transparent)
-		}
-	}
-	return object, nil
-}
-
 // StyleImageBorders 原子修改图片边框，保留未修改的颜色、线型及原文扩展
 // 入参: page 页面索引, ids 图片标识, style 边框增量
 // 返回: error 错误信息
 func (e *Editor) StyleImageBorders(page int, ids []string, style ImageBorderStyle) error {
+	defer e.bindPageIndex(page)()
 	for _, value := range []*float64{style.LineWidth, style.HorizontalRadius, style.VerticalRadius} {
 		if value != nil && (!finite(*value) || *value < 0) {
 			return fmt.Errorf("border dimensions must be finite and nonnegative")
@@ -447,6 +382,7 @@ func (e *Editor) StyleImageBorders(page int, ids []string, style ImageBorderStyl
 // 入参: page 页面索引, ids 图片标识, border 边框样式
 // 返回: error 错误信息
 func (e *Editor) SetImageBorders(page int, ids []string, border *ImageBorder) error {
+	defer e.bindPageIndex(page)()
 	if err := e.validateImageBorder(border); err != nil {
 		return err
 	}
@@ -463,31 +399,196 @@ func (e *Editor) SetImageBorders(page int, ids []string, border *ImageBorder) er
 	return e.updateObjects(page, objects, true)
 }
 
+// editorDrawParamScope 描述编辑器绘制参数继承解析的单个资源层级
+type editorDrawParamScope struct {
+	key    string
+	parsed *parsedRes
+}
+
+// addDrawParam 校验并注册绘制参数，资源操作可传递取消上下文
+// 入参: ctx 取消上下文, draw 绘制参数
+// 返回: string 资源标识, error 校验、编码或取消错误
+func (e *Editor) addDrawParam(ctx context.Context, draw DrawParam) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if draw.ResourceID != "" || draw.BaseLoc != "" || draw.Link != "" {
+		return "", fmt.Errorf("external draw parameter references cannot be registered directly")
+	}
+	base, err := e.editorDrawParam(draw.Relative, make(map[string]bool))
+	if err != nil {
+		return "", err
+	}
+	effective := mergeDrawParam(*base, &draw)
+	if err := validateEditorStroke(PathObject{LineWidth: draw.LineWidth, Cap: draw.Cap, Join: draw.Join, MiterLimit: draw.MiterLimit, DashPattern: draw.DashPattern, DashOffset: draw.DashOffset}); err != nil {
+		return "", err
+	}
+	if !finite(draw.Size) || draw.Size < 0 || draw.Weight < 0 || draw.Weight > 1000 || draw.Weight%100 != 0 {
+		return "", fmt.Errorf("invalid draw parameter font size or weight")
+	}
+	if effective.Font != "" {
+		if _, err := e.editorFont(effective.Font); err != nil {
+			return "", err
+		}
+	}
+	for _, paint := range []*FillColor{draw.FillColor, (*FillColor)(draw.StrokeColor)} {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if err := e.editorColor(paint); err != nil {
+			return "", err
+		}
+	}
+	return e.addEditorDrawParamContext(ctx, cloneEditorData(draw))
+}
+
+// explicitDefaultPaint 将样式快照的缺省颜色写为显式颜色，避免继承目标容器颜色
+// 入参: object 已解析继承样式的文字或路径，其他类型保持不变
+// 返回: GraphicObject 颜色完整的样式快照, error 颜色资源错误
+func (e *Editor) explicitDefaultPaint(object GraphicObject) (GraphicObject, error) {
+	var fill **FillColor
+	var stroke **StrokeColor
+	text := object.Type == "TextObject"
+	if text {
+		fill, stroke = &object.TextObject.FillColor, &object.TextObject.StrokeColor
+	} else if object.Type == "PathObject" {
+		fill, stroke = &object.PathObject.FillColor, &object.PathObject.StrokeColor
+	} else {
+		return object, nil
+	}
+	if *fill != nil && *stroke != nil {
+		return object, nil
+	}
+	black, err := e.RGBColor(color.NRGBA{A: 255})
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	transparent, zero := *black, 0
+	transparent.Alpha = &zero
+	if *fill == nil {
+		*fill = &transparent
+		if text {
+			*fill = black
+		}
+	}
+	if *stroke == nil {
+		*stroke = (*StrokeColor)(black)
+		if text {
+			*stroke = (*StrokeColor)(&transparent)
+		}
+	}
+	return object, nil
+}
+
+// drawParamScopes 按编辑器待注册资源、激活页面局部资源及文档级公共资源顺序生成查找链
+// 返回: []editorDrawParamScope 有序查找层级
+func (e *Editor) drawParamScopes() []editorDrawParamScope {
+	scopes := []editorDrawParamScope{{key: "@editor"}}
+	if e.source == nil {
+		return scopes
+	}
+	seen := make(map[string]bool)
+	for _, parsed := range slices.Backward(e.pageScope) {
+		if parsed.path != "" && !seen[parsed.path] {
+			seen[parsed.path] = true
+			scopes = append(scopes, editorDrawParamScope{key: parsed.path, parsed: parsed})
+		}
+	}
+	hasDocFile := false
+	for _, list := range [][]string{e.source.document.CommonData.DocumentRes, e.source.document.CommonData.PublicRes} {
+		for _, loc := range slices.Backward(list) {
+			resPath := cleanPackagePath(e.source.reader.ResPath(loc))
+			if resPath == "" || resPath == "." || seen[resPath] {
+				continue
+			}
+			seen[resPath] = true
+			if parsed, err := e.source.reader.parseResFileContext(context.Background(), resPath); err == nil && parsed != nil {
+				hasDocFile = true
+				scopes = append(scopes, editorDrawParamScope{key: resPath, parsed: parsed})
+			}
+		}
+	}
+	if !hasDocFile {
+		scopes = append(scopes, editorDrawParamScope{key: "@doc"})
+	}
+	if len(e.pageScope) == 0 {
+		for _, parsed := range e.ensureSourcePageResources() {
+			if parsed.path != "" && !seen[parsed.path] {
+				seen[parsed.path] = true
+				scopes = append(scopes, editorDrawParamScope{key: parsed.path, parsed: parsed})
+			}
+		}
+	}
+	return scopes
+}
+
+// lookupDrawParamInScope 在单个资源层级内匹配指定标识的绘制参数
+// 入参: scope 资源层级, id 绘制参数标识
+// 返回: *DrawParam 命中定义，未命中返回nil
+func (e *Editor) lookupDrawParamInScope(scope editorDrawParamScope, id string) *DrawParam {
+	switch scope.key {
+	case "@editor":
+		for _, resource := range e.resources {
+			if resource.draw != nil && sameResourceID(resource.draw.ID, id) {
+				return resource.draw
+			}
+		}
+	case "@doc":
+		if e.source != nil {
+			if dp, ok := e.source.reader.docDrawParams.get(id); ok {
+				return dp
+			}
+		}
+	default:
+		if dp, ok := scope.parsed.drawParams.get(id); ok {
+			return dp
+		}
+	}
+	return nil
+}
+
 // editorDrawParam 解析原文档的绘制参数继承链，缺失或循环引用不进入编辑快照
 // 入参: id 绘制参数标识, visited 已访问标识
 // 返回: *DrawParam 合并参数, error 错误信息
 func (e *Editor) editorDrawParam(id string, visited map[string]bool) (*DrawParam, error) {
+	return e.editorDrawParamAt(id, 0, e.drawParamScopes(), visited)
+}
+
+// editorDrawParamAt 从指定作用域层级起解析绘制参数，支持同名Relative向上级资源继承
+// 入参: id 绘制参数标识, startLevel 起始层级索引, scopes 作用域链, visited 已访问作用域标识对
+// 返回: *DrawParam 合并参数, error 错误信息
+func (e *Editor) editorDrawParamAt(id string, startLevel int, scopes []editorDrawParamScope, visited map[string]bool) (*DrawParam, error) {
 	if id == "" {
 		return &DrawParam{}, nil
 	}
 	var dp *DrawParam
-	for _, resource := range e.resources {
-		if resource.draw != nil && sameResourceID(resource.draw.ID, id) {
-			dp = resource.draw
+	foundLevel := -1
+	for i := startLevel; i < len(scopes); i++ {
+		if candidate := e.lookupDrawParamInScope(scopes[i], id); candidate != nil {
+			dp, foundLevel = candidate, i
 			break
 		}
 	}
-	if dp == nil && e.source != nil {
-		dp, _ = resourceValue(e.source.reader.drawParamCache, id)
+	key := id
+	if normalized := editorResourceID(id); normalized != "" {
+		key = normalized
 	}
-	if key := editorResourceID(id); key != "" {
-		id = key
+	if dp == nil {
+		return nil, &EditError{Code: EditUnsupportedStyle, Err: fmt.Errorf("invalid draw parameter reference %q", key)}
 	}
-	if dp == nil || visited[id] {
-		return nil, &EditError{Code: EditUnsupportedStyle, Err: fmt.Errorf("invalid draw parameter reference %q", id)}
+	visitKey := scopes[foundLevel].key + "\x00" + key
+	if visited[visitKey] {
+		return nil, &EditError{Code: EditUnsupportedStyle, Err: fmt.Errorf("invalid draw parameter reference %q", key)}
 	}
-	visited[id] = true
-	base, err := e.editorDrawParam(dp.Relative, visited)
+	visited[visitKey] = true
+	if dp.Relative == "" {
+		return mergeDrawParam(DrawParam{}, dp), nil
+	}
+	nextStart := foundLevel
+	if sameResourceID(dp.Relative, id) {
+		nextStart = foundLevel + 1
+	}
+	base, err := e.editorDrawParamAt(dp.Relative, nextStart, scopes, visited)
 	if err != nil {
 		return nil, err
 	}
@@ -504,6 +605,13 @@ func (e *Editor) resolveEditorStyle(object GraphicObject, layer string) (Graphic
 		id = object.TextObject.DrawParam
 	case "PathObject":
 		id = object.PathObject.DrawParam
+	case "ImageObject":
+		for _, id := range []string{layer, object.ImageObject.DrawParam} {
+			if _, err := e.editorDrawParam(id, make(map[string]bool)); err != nil {
+				return GraphicObject{}, err
+			}
+		}
+		return object, nil
 	case "CompositeObject", "CompositeGraphicUnit":
 		for _, id := range []string{layer, object.CompositeGraphicUnit.DrawParam} {
 			if _, err := e.editorDrawParam(id, make(map[string]bool)); err != nil {
@@ -715,8 +823,8 @@ func (e *Editor) validateCopyStyle(source GraphicObject) error {
 
 // copyEditorPathStyle 按页面描边倍率复制路径外观，保留目标几何和行为
 // 入参: to 目标路径, from 来源路径, scale 来源与目标的描边倍率比
-// 返回: PathObject 独立路径副本
-func copyEditorPathStyle(to, from PathObject, scale float64) PathObject {
+// 返回: PathObject 独立路径副本, error 缩放编码错误
+func copyEditorPathStyle(to, from PathObject, scale float64) (PathObject, error) {
 	from = cloneEditorData(from)
 	to.Fill, to.Stroke, to.Alpha = from.Fill, from.Stroke, from.Alpha
 	to.FillColor, to.StrokeColor = from.FillColor, from.StrokeColor
@@ -742,11 +850,15 @@ func copyEditorPathStyle(to, from PathObject, scale float64) PathObject {
 	}
 	if scale != 1 {
 		to.LineWidth *= scale
-		to.DashPattern = scaleTextNumbers(to.DashPattern, scale)
+		var err error
+		to.DashPattern, err = scaleTextNumbers(to.DashPattern, scale)
+		if err != nil {
+			return PathObject{}, err
+		}
 		value := *to.DashOffset * scale
 		to.DashOffset = &value
 	}
-	return to
+	return to, nil
 }
 
 // editorStrokeScale 获取路径在页面坐标中的描边倍率，与渲染器保持一致
