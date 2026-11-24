@@ -19,6 +19,9 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -32,9 +35,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"weak"
 
+	"github.com/emmansun/gmsm/sm4"
 	basefile "github.com/xiaoqidun/ofdgo/internal/base/file"
 )
 
@@ -43,6 +49,12 @@ const editorSnapshotArchiveLimit = 32 << 20
 
 // editorSnapshotChunkSize 指定快照压缩数据的分块大小
 const editorSnapshotChunkSize = 256 << 10
+
+// editorOwnedTemplatePrefix 标记新建文档中由内部托管的模板页资源前缀
+const editorOwnedTemplatePrefix = "TemplatePage|"
+
+// editorStreamPageBufferLimit 限制流式写出页面XML时复用的单页缓冲上限
+const editorStreamPageBufferLimit = 4 << 20
 
 // ErrSaveTarget 表示编辑器尚未绑定保存目标
 var ErrSaveTarget = errors.New("save target is not set")
@@ -70,6 +82,76 @@ type WriteTransaction interface {
 	Abort() error
 }
 
+// fileOutput 使用本地文件事务保存文档
+type fileOutput struct {
+	target *basefile.Target
+}
+
+// editorSnapshotArchive 复用独立压缩包，超预算时仅在已有快照存活期间共享
+type editorSnapshotArchive struct {
+	files    []*zip.File
+	archive  weak.Pointer[zip.Reader]
+	retained *renderCache[int, *zip.Reader]
+}
+
+// snapshotTempHandle 管理溢出快照临时文件的并发读取、可选一次性密流加解密与原子防双关清理
+type snapshotTempHandle struct {
+	closed atomic.Bool
+	mu     sync.RWMutex
+	file   *os.File
+	name   string
+	key    []byte
+	nonce  [8]byte
+	block  cipher.Block
+}
+
+// snapshotReaderAt 封装快照随机读取器作为ZIP条目共同持有的底层ReaderAt对象
+type snapshotReaderAt struct {
+	buf *editorSnapshotBuffer
+}
+
+// editorSnapshotBuffer 分块保存压缩数据，超预算时自动溢出至临时文件并支持并发随机读取
+type editorSnapshotBuffer struct {
+	chunks       [][]byte
+	size         int64
+	spillLimit   int64
+	encryptSpill bool
+	temp         *snapshotTempHandle
+	err          error
+}
+
+// editorProgress 编辑与保存阶段的进度回调，nil表示不回报进度
+type editorProgress func(stage string, completed, total int) error
+
+// ofdCountingWriter 记录实际输出字节数
+type ofdCountingWriter struct {
+	writer io.Writer
+	count  int64
+}
+
+// ofdXML 使用标准ofd命名空间写出XML
+type ofdXML struct {
+	encoder    *xml.Encoder
+	references *editorReferenceScan
+	ctx        context.Context
+	attrs      ofdAttrs
+	escaped    bytes.Buffer
+	spaces     bytes.Buffer
+	err        error
+}
+
+// ofdAttrs OFD节点属性
+type ofdAttrs []xml.Attr
+
+// editorResourceSelection 保存单次输出中同一编辑快照的资源筛选结果
+type editorResourceSelection struct {
+	owner         *Editor
+	fonts, images []editorResource
+	spaces        []ColorSpace
+	files         map[string]bool
+	extra         map[string][]byte
+}
+
 // NewFileOutput 创建本地保存目标并记录当前文件状态，不创建或修改文件
 // 同一目标应复用返回值，以便后续保存检测外部修改
 // 替换前比较文件标识、大小和修改时间，不提供跨进程排他锁
@@ -81,6 +163,113 @@ func NewFileOutput(name string) (Output, error) {
 		return nil, err
 	}
 	return &fileOutput{target: target}, nil
+}
+
+// newOFDXML 创建XML编码器
+// 入参: writer 输出流
+// 返回: *ofdXML 编码器
+func newOFDXML(writer io.Writer) *ofdXML {
+	_, err := io.WriteString(writer, xml.Header)
+	return &ofdXML{encoder: xml.NewEncoder(writer), err: err}
+}
+
+// parseOwnedTemplateResource 解析托管模板页资源元数据
+// 入参: resource 编辑器资源条目
+// 返回: TemplatePage 模板定义, bool 是否为托管模板页
+func parseOwnedTemplateResource(resource editorResource) (TemplatePage, bool) {
+	if resource.draw != nil || !strings.HasPrefix(resource.drawSource, editorOwnedTemplatePrefix) {
+		return TemplatePage{}, false
+	}
+	rest := strings.TrimPrefix(resource.drawSource, editorOwnedTemplatePrefix)
+	parts := strings.SplitN(rest, "|", 3)
+	if len(parts) != 3 || parts[0] == "" {
+		return TemplatePage{}, false
+	}
+	return TemplatePage{ID: parts[0], ZOrder: parts[1], Name: parts[2], BaseLoc: "/" + resource.name}, true
+}
+
+// newSnapshotZipReader 用快照缓冲构造ZIP阅读器并将临时文件清理绑定至所有条目共享的ReaderAt
+// 入参: data 快照缓冲
+// 返回: *zip.Reader ZIP阅读器, error 打开错误
+func newSnapshotZipReader(data *editorSnapshotBuffer) (*zip.Reader, error) {
+	if data == nil {
+		return nil, fmt.Errorf("snapshot buffer is nil")
+	}
+	ra := &snapshotReaderAt{buf: data}
+	reader, err := zip.NewReader(ra, data.size)
+	if err != nil {
+		return nil, err
+	}
+	if data.temp != nil {
+		runtime.AddCleanup(ra, cleanupSnapshotHandle, data.temp)
+	}
+	return reader, nil
+}
+
+// pruneReaderZip 按保留条件裁剪阅读器ZIP条目并同步刷新归档缓存标识与最大标识缓存
+// 入参: r 目标阅读器, keep 保留条目判定函数
+func pruneReaderZip(r *Reader, keep func(*zip.File) bool) {
+	if r == nil || r.zip == nil {
+		return
+	}
+	files := make([]*zip.File, 0, len(r.zip.File))
+	for _, file := range r.zip.File {
+		if keep(file) {
+			files = append(files, file)
+		}
+	}
+	r.zip = &zip.Reader{Comment: r.zip.Comment, File: files}
+	r.archiveID = nextReaderArchiveID.Add(1)
+	r.maxIDCache = &archiveMaxIDCache{}
+	r.fileIndex = nil
+	r.fileNames = nil
+	r.pageHeaderCache = nil
+	r.pageHeaders = nil
+}
+
+// cleanupSnapshotHandle 在最后一个持有共享ReaderAt的ZIP对象回收后原子关闭并删除临时文件
+// 入参: handle 待清理的临时文件句柄
+func cleanupSnapshotHandle(handle *snapshotTempHandle) {
+	if handle != nil {
+		_ = handle.Close()
+	}
+}
+
+// encodeOFDXML 编码文档节点，用于保存和独立副本
+// 入参: encode 节点写入方法
+// 返回: []byte XML数据, error 错误信息
+func encodeOFDXML(encode func(*ofdXML)) ([]byte, error) {
+	return encodeOFDXMLContext(nil, encode)
+}
+
+// encodeOFDXMLContext 编码文档节点，失败时不返回部分数据
+// 入参: ctx 取消上下文，可为nil, encode 节点写入方法
+// 返回: []byte XML数据, error 编码或取消错误
+func encodeOFDXMLContext(ctx context.Context, encode func(*ofdXML)) ([]byte, error) {
+	var data bytes.Buffer
+	x := newOFDXML(&data)
+	x.ctx = ctx
+	if !x.checkContext() {
+		return nil, x.err
+	}
+	encode(x)
+	if err := x.finish(); err != nil {
+		return nil, err
+	}
+	return data.Bytes(), nil
+}
+
+// shadingAttrs 编码轴向和径向渐变的共同属性
+// 入参: mapType 映射方式, mapUnit 映射周期, extend 延伸方式, start 渐变起点, end 渐变终点
+// 返回: ofdAttrs 属性集合
+func shadingAttrs(mapType string, mapUnit float64, extend, start, end string) ofdAttrs {
+	var attrs ofdAttrs
+	attrs.add("MapType", mapType)
+	attrs.number("MapUnit", mapUnit)
+	attrs.add("Extend", extend)
+	attrs.add("StartPoint", start)
+	attrs.add("EndPoint", end)
+	return attrs
 }
 
 // Snapshot 创建独立编辑快照，完成后可与原编辑器并行使用
@@ -96,12 +285,14 @@ func (e *Editor) Snapshot(ctx context.Context) (*Editor, error) {
 		return nil, err
 	}
 	defer reader.Close()
-	next := &Reader{files: make(map[string][]byte, len(reader.files)), encryption: reader.encryption, documentIndex: reader.documentIndex, selectedVersion: cloneEditorData(reader.selectedVersion), resources: e.runtimeResources, pdfDestinations: reader.pdfDestinations.clone()}
+	next := &Reader{files: make(map[string][]byte, len(reader.files)), documentIndex: reader.documentIndex, selectedVersion: cloneEditorData(reader.selectedVersion), resources: e.runtimeResources, pdfDestinations: reader.pdfDestinations.clone()}
 	if reader.encryption != nil {
-		next.encryption = &encryptionState{info: cloneEditorData(reader.encryption.info), options: cloneEncryptionOptions(reader.encryption.options)}
+		next.encryption = newEncryptionState(cloneEditorData(reader.encryption.info), cloneEncryptionOptions(reader.encryption.options), nil)
+		next.adoptEncryptionHold()
 	}
-	if reader.Zip != nil {
-		next.Zip, err = e.copySnapshotArchive(ctx, reader.Zip)
+	defer next.Close()
+	if reader.zip != nil {
+		next.zip, err = e.copySnapshotArchive(ctx, reader.zip)
 		if err != nil {
 			return nil, err
 		}
@@ -206,11 +397,6 @@ func (e *Editor) Reader(ctx context.Context) (*Reader, error) {
 	return e.readerContext(ctx, nil)
 }
 
-// fileOutput 使用本地文件事务保存文档
-type fileOutput struct {
-	target *basefile.Target
-}
-
 // Begin 创建本地文件写入事务
 // 入参: ctx 取消上下文
 // 返回: WriteTransaction 写入事务, error 文件状态错误
@@ -218,24 +404,112 @@ func (o *fileOutput) Begin(ctx context.Context) (WriteTransaction, error) {
 	return o.target.Begin(ctx)
 }
 
-// editorSnapshotArchive 复用独立压缩包，超预算时仅在已有快照存活期间共享
-type editorSnapshotArchive struct {
-	files    []*zip.File
-	archive  weak.Pointer[zip.Reader]
-	retained *renderCache[int, *zip.Reader]
+// xorSnapshotCTR 使用SM4-CTR一次性密流在任意字节偏移执行无状态并发安全异或加解密
+// 入参: block 分组密码, nonce 随机现时, offset 字节偏移, dst 输出缓冲, src 输入数据
+func xorSnapshotCTR(block cipher.Block, nonce [8]byte, offset int64, dst, src []byte) {
+	var counter [sm4.BlockSize]byte
+	copy(counter[:8], nonce[:])
+	blockIndex := uint64(offset / sm4.BlockSize)
+	blockOffset := int(offset % sm4.BlockSize)
+	var keystream [sm4.BlockSize]byte
+	pos := 0
+	for pos < len(src) {
+		binary.BigEndian.PutUint64(counter[8:], blockIndex)
+		block.Encrypt(keystream[:], counter[:])
+		take := min(len(src)-pos, sm4.BlockSize-blockOffset)
+		for j := range take {
+			dst[pos+j] = src[pos+j] ^ keystream[blockOffset+j]
+		}
+		pos += take
+		blockIndex++
+		blockOffset = 0
+	}
+	clear(keystream[:])
+	clear(counter[:])
 }
 
-// editorSnapshotBuffer 分块保存压缩数据，超预算时自动溢出至临时文件并支持并发随机读取
-type editorSnapshotBuffer struct {
-	chunks     [][]byte
-	size       int64
-	spillLimit int64
-	tempFile   *os.File
-	tempName   string
+// writeSnapshotFile 将切片直接或经SM4-CTR加密写入临时文件，不修改调用方输入缓冲
+// 入参: file 临时文件, block 分组密码, nonce 随机现时, offset 字节偏移, data 待写数据
+// 返回: int 写入字节数, error 写入错误
+func writeSnapshotFile(file *os.File, block cipher.Block, nonce [8]byte, offset int64, data []byte) (int, error) {
+	if block == nil {
+		return file.Write(data)
+	}
+	var buf [32 * 1024]byte
+	defer clear(buf[:])
+	written := 0
+	for written < len(data) {
+		chunk := min(len(buf), len(data)-written)
+		xorSnapshotCTR(block, nonce, offset+int64(written), buf[:chunk], data[written:written+chunk])
+		n, err := file.Write(buf[:chunk])
+		written += n
+		if err != nil {
+			return written, err
+		}
+		if n != chunk {
+			return written, io.ErrShortWrite
+		}
+	}
+	return written, nil
 }
 
-// Write 追加快照数据，超出内存阈值时自动迁移至临时文件
-// 入参: data 压缩数据
+// ReadAt 在读锁保护下从临时文件随机读取指定字节区间
+// 入参: data 目标缓冲, offset 数据偏移, limit 读取长度上限
+// 返回: int 读取字节数, error 读取或关闭错误
+func (h *snapshotTempHandle) ReadAt(data []byte, offset, limit int64) (int, error) {
+	if h == nil || h.closed.Load() {
+		return 0, os.ErrClosed
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.file == nil {
+		return 0, os.ErrClosed
+	}
+	n, err := h.file.ReadAt(data[:limit], offset)
+	if n > 0 && h.block != nil {
+		xorSnapshotCTR(h.block, h.nonce, offset, data[:n], data[:n])
+	}
+	if err == nil && n < len(data) {
+		err = io.EOF
+	}
+	return n, err
+}
+
+// Close 原子关闭并删除底层快照临时文件同时清零临时密钥，重复调用安全
+// 返回: error 关闭或删除错误
+func (h *snapshotTempHandle) Close() error {
+	if h == nil || !h.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	h.mu.Lock()
+	file, name := h.file, h.name
+	h.file, h.name = nil, ""
+	clear(h.key)
+	h.key = nil
+	clear(h.nonce[:])
+	h.block = nil
+	h.mu.Unlock()
+	if file == nil {
+		return nil
+	}
+	err := file.Close()
+	if name != "" {
+		if rmErr := os.Remove(name); err == nil && !errors.Is(rmErr, os.ErrNotExist) {
+			err = rmErr
+		}
+	}
+	return err
+}
+
+// ReadAt 从底层快照缓冲随机读取字节
+// 入参: data 目标缓冲, offset 数据偏移
+// 返回: int 读取字节数, error 偏移或结束错误
+func (r *snapshotReaderAt) ReadAt(data []byte, offset int64) (int, error) {
+	return r.buf.ReadAt(data, offset)
+}
+
+// Write 追加快照数据，超出内存阈值时自动迁移至临时文件并在敏感模式下以一次性密钥加密落盘
+// 入参: data 待写数据
 // 返回: int 写入字节数, error 写入错误
 func (b *editorSnapshotBuffer) Write(data []byte) (int, error) {
 	if len(data) == 0 {
@@ -245,36 +519,76 @@ func (b *editorSnapshotBuffer) Write(data []byte) (int, error) {
 	if limit <= 0 {
 		limit = editorSnapshotArchiveLimit
 	}
-	if b.tempFile == nil && b.size+int64(len(data)) > limit {
-		if temp, err := os.CreateTemp("", "ofdgo-snapshot-*.tmp"); err == nil {
-			written := int64(0)
-			spillErr := error(nil)
-			for i, chunk := range b.chunks {
-				valid := len(chunk)
-				if i == len(b.chunks)-1 {
-					if rem := int(b.size % editorSnapshotChunkSize); rem != 0 {
-						valid = rem
-					}
-				}
-				if _, wErr := temp.Write(chunk[:valid]); wErr != nil {
-					spillErr = wErr
-					break
-				}
-				written += int64(valid)
+	if b.temp == nil && b.err == nil && b.size+int64(len(data)) > limit {
+		var key []byte
+		var nonce [8]byte
+		var block cipher.Block
+		var initErr error
+		if b.encryptSpill {
+			key = make([]byte, sm4.BlockSize)
+			if _, err := rand.Read(key); err != nil {
+				initErr = err
+			} else if _, err := rand.Read(nonce[:]); err != nil {
+				initErr = err
+			} else if block, err = sm4.NewCipher(key); err != nil {
+				initErr = err
 			}
-			if spillErr == nil && written == b.size {
-				b.tempFile = temp
-				b.tempName = temp.Name()
-				b.chunks = nil
+		}
+		if initErr != nil {
+			clear(key)
+			clear(nonce[:])
+			b.err = initErr
+		} else {
+			temp, err := os.CreateTemp("", "ofdgo-snapshot-*.tmp")
+			if err != nil {
+				clear(key)
+				clear(nonce[:])
+				b.err = err
 			} else {
-				name := temp.Name()
-				_ = temp.Close()
-				_ = os.Remove(name)
+				written := int64(0)
+				var spillErr error
+				for i, chunk := range b.chunks {
+					valid := len(chunk)
+					if i == len(b.chunks)-1 {
+						if rem := int(b.size % editorSnapshotChunkSize); rem != 0 {
+							valid = rem
+						}
+					}
+					if _, wErr := writeSnapshotFile(temp, block, nonce, written, chunk[:valid]); wErr != nil {
+						spillErr = wErr
+						break
+					}
+					written += int64(valid)
+				}
+				if spillErr == nil && written == b.size {
+					for _, chunk := range b.chunks {
+						clear(chunk)
+					}
+					b.temp = &snapshotTempHandle{file: temp, name: temp.Name(), key: key, nonce: nonce, block: block}
+					b.chunks = nil
+				} else {
+					if spillErr == nil {
+						spillErr = io.ErrShortWrite
+					}
+					clear(key)
+					clear(nonce[:])
+					b.err = spillErr
+					name := temp.Name()
+					_ = temp.Close()
+					_ = os.Remove(name)
+				}
 			}
 		}
 	}
-	if b.tempFile != nil {
-		n, err := b.tempFile.Write(data)
+	if b.temp != nil {
+		b.temp.mu.RLock()
+		file, block, nonce := b.temp.file, b.temp.block, b.temp.nonce
+		if file == nil {
+			b.temp.mu.RUnlock()
+			return 0, os.ErrClosed
+		}
+		n, err := writeSnapshotFile(file, block, nonce, b.size, data)
+		b.temp.mu.RUnlock()
 		b.size += int64(n)
 		return n, err
 	}
@@ -298,16 +612,12 @@ func (b *editorSnapshotBuffer) ReadAt(data []byte, offset int64) (int, error) {
 	if offset < 0 {
 		return 0, fmt.Errorf("negative snapshot offset")
 	}
-	if b.tempFile != nil {
+	if b.temp != nil {
 		if offset >= b.size {
 			return 0, io.EOF
 		}
 		limit := min(int64(len(data)), b.size-offset)
-		n, err := b.tempFile.ReadAt(data[:limit], offset)
-		if err == nil && n < len(data) {
-			err = io.EOF
-		}
-		return n, err
+		return b.temp.ReadAt(data, offset, limit)
 	}
 	read := 0
 	for len(data) > 0 {
@@ -325,29 +635,18 @@ func (b *editorSnapshotBuffer) ReadAt(data []byte, offset int64) (int, error) {
 	return read, nil
 }
 
-// Close 释放内存分块并关闭删除溢出的临时文件
+// Close 释放内存分块并原子关闭删除溢出的临时文件
 // 返回: error 关闭或删除错误
 func (b *editorSnapshotBuffer) Close() error {
 	for _, chunk := range b.chunks {
 		clear(chunk)
 	}
 	b.chunks = nil
-	if b.tempFile == nil {
+	if b.temp == nil {
 		return nil
 	}
-	file, name := b.tempFile, b.tempName
-	b.tempFile, b.tempName = nil, ""
-	err := file.Close()
-	if name != "" {
-		if rmErr := os.Remove(name); err == nil && !errors.Is(rmErr, os.ErrNotExist) {
-			err = rmErr
-		}
-	}
-	return err
+	return b.temp.Close()
 }
-
-// editorProgress 编辑与保存阶段的进度回调，nil表示不回报进度
-type editorProgress func(stage string, completed, total int) error
 
 // report 回报进度并原样传递调用方停止原因
 // 入参: stage 阶段, completed 已处理项, total 总项数
@@ -374,12 +673,6 @@ func (progress editorProgress) withContext(ctx context.Context) editorProgress {
 	}
 }
 
-// ofdCountingWriter 记录实际输出字节数
-type ofdCountingWriter struct {
-	writer io.Writer
-	count  int64
-}
-
 // Write 写入并累计字节数
 // 入参: data 数据
 // 返回: int 字节数, error 错误信息
@@ -390,25 +683,6 @@ func (w *ofdCountingWriter) Write(data []byte) (int, error) {
 		err = io.ErrShortWrite
 	}
 	return n, err
-}
-
-// ofdXML 使用标准ofd命名空间写出XML
-type ofdXML struct {
-	encoder    *xml.Encoder
-	references *editorReferenceScan
-	ctx        context.Context
-	attrs      ofdAttrs
-	escaped    bytes.Buffer
-	spaces     bytes.Buffer
-	err        error
-}
-
-// newOFDXML 创建XML编码器
-// 入参: writer 输出流
-// 返回: *ofdXML 编码器
-func newOFDXML(writer io.Writer) *ofdXML {
-	_, err := io.WriteString(writer, xml.Header)
-	return &ofdXML{encoder: xml.NewEncoder(writer), err: err}
 }
 
 // page 按标准顺序写出页面定义、图层、对象及动作
@@ -460,21 +734,113 @@ func (x *ofdXML) pageArea(name string, area PageArea) {
 	x.end(name)
 }
 
-// layer 写出新建图层及其对象
-// 入参: layer 图层
+// layer 写出新建图层及其对象，恢复嵌套PageBlock结构与ID
+// 入参: layer 图层对象
 func (x *ofdXML) layer(layer Layer) {
 	var attrs ofdAttrs
 	attrs.add("ID", layer.ID)
 	attrs.add("Type", layer.Type)
 	attrs.add("DrawParam", layer.DrawParam)
 	x.start("Layer", attrs)
-	for _, object := range layer.Objects {
+	x.graphicObjects(layer.Objects, layer.PageBlock)
+	x.end("Layer")
+}
+
+// graphicObjects 按嵌套PageBlock路径栈写出图形对象序列并保留空页块
+// 入参: objects 图形对象序列, blocks 页块列表
+func (x *ofdXML) graphicObjects(objects []GraphicObject, blocks []PageBlock) {
+	if len(objects) == 0 {
+		for _, block := range blocks {
+			if x.err != nil {
+				return
+			}
+			x.pageBlock(block)
+		}
+		return
+	}
+	var open []string
+	emitted := make(map[string]bool)
+	for _, object := range objects {
 		if x.err != nil {
 			return
 		}
+		target := object.pageBlocks
+		common := 0
+		for common < len(open) && common < len(target) && open[common] == target[common] {
+			common++
+		}
+		for i := len(open) - 1; i >= common; i-- {
+			x.end("PageBlock")
+		}
+		for i := common; i < len(target); i++ {
+			var attrs ofdAttrs
+			attrs.add("ID", target[i])
+			x.start("PageBlock", attrs)
+			emitted[target[i]] = true
+		}
+		open = target
 		x.object(object, false)
 	}
-	x.end("Layer")
+	for range open {
+		x.end("PageBlock")
+	}
+	x.emitEmptyPageBlocks(blocks, emitted)
+}
+
+// pageBlock 递归写出结构化PageBlock节点及其内部对象
+// 入参: block 页块对象
+func (x *ofdXML) pageBlock(block PageBlock) {
+	var attrs ofdAttrs
+	attrs.add("ID", block.ID)
+	x.start("PageBlock", attrs)
+	if len(block.Objects) != 0 {
+		trimmed := make([]GraphicObject, len(block.Objects))
+		for i, object := range block.Objects {
+			if len(object.pageBlocks) > 0 && object.pageBlocks[0] == block.ID {
+				object.pageBlocks = object.pageBlocks[1:]
+			}
+			trimmed[i] = object
+		}
+		x.graphicObjects(trimmed, block.PageBlock)
+	} else {
+		for _, obj := range block.TextObject {
+			x.object(GraphicObject{Type: "TextObject", TextObject: obj}, false)
+		}
+		for _, obj := range block.PathObject {
+			x.object(GraphicObject{Type: "PathObject", PathObject: obj}, false)
+		}
+		for _, obj := range block.ImageObject {
+			x.object(GraphicObject{Type: "ImageObject", ImageObject: obj}, false)
+		}
+		for _, obj := range block.CompositeObject {
+			x.object(GraphicObject{Type: "CompositeObject", CompositeObject: obj}, false)
+		}
+		for _, child := range block.PageBlock {
+			x.pageBlock(child)
+		}
+	}
+	x.end("PageBlock")
+}
+
+// emitEmptyPageBlocks 补写未在扁平对象序列中出现的空PageBlock节点
+// 入参: blocks 页块列表, emitted 已输出页块集合
+func (x *ofdXML) emitEmptyPageBlocks(blocks []PageBlock, emitted map[string]bool) {
+	for _, block := range blocks {
+		if x.err != nil {
+			return
+		}
+		if len(block.Objects) == 0 && len(block.TextObject) == 0 && len(block.PathObject) == 0 && len(block.ImageObject) == 0 && len(block.CompositeObject) == 0 {
+			if !emitted[block.ID] {
+				var attrs ofdAttrs
+				attrs.add("ID", block.ID)
+				x.start("PageBlock", attrs)
+				x.emitEmptyPageBlocks(block.PageBlock, emitted)
+				x.end("PageBlock")
+			}
+			continue
+		}
+		x.emitEmptyPageBlocks(block.PageBlock, emitted)
+	}
 }
 
 // resources 写出文档资源索引
@@ -624,9 +990,6 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.add("xmlns:ofd", ofdNamespace2016)
 	}
 	tagName := object.Type
-	if tagName == "CompositeGraphicUnit" && !root {
-		tagName = "CompositeObject"
-	}
 	switch object.Type {
 	case "TextObject", "Text":
 		obj := object.TextObject
@@ -657,7 +1020,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		}
 		attrs.add("Join", obj.Join)
 		attrs.add("Cap", obj.Cap)
-		if obj.dashPatternSet {
+		if obj.DashPatternSet {
 			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: obj.DashPattern})
 		} else {
 			attrs.add("DashPattern", obj.DashPattern)
@@ -696,7 +1059,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.add("Join", obj.Join)
 		attrs.add("Cap", obj.Cap)
 		attrs.add("Rule", obj.Rule)
-		if obj.dashPatternSet {
+		if obj.DashPatternSet {
 			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: obj.DashPattern})
 		} else {
 			attrs.add("DashPattern", obj.DashPattern)
@@ -730,7 +1093,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		}
 		attrs.add("Join", obj.Join)
 		attrs.add("Cap", obj.Cap)
-		if obj.dashPatternSet {
+		if obj.DashPatternSet {
 			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: obj.DashPattern})
 		} else {
 			attrs.add("DashPattern", obj.DashPattern)
@@ -741,8 +1104,8 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.flag("Visible", obj.Visible)
 		attrs.alpha(obj.Alpha)
 		actions = obj.Actions
-	case "CompositeObject", "CompositeGraphicUnit":
-		obj := object.CompositeGraphicUnit
+	case "CompositeObject":
+		obj := object.CompositeObject
 		attrs.add("ID", obj.ID)
 		attrs.add("Name", obj.Name)
 		attrs.add("Boundary", obj.Boundary)
@@ -759,7 +1122,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		}
 		attrs.add("Join", obj.Join)
 		attrs.add("Cap", obj.Cap)
-		if obj.dashPatternSet {
+		if obj.DashPatternSet {
 			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: obj.DashPattern})
 		} else {
 			attrs.add("DashPattern", obj.DashPattern)
@@ -782,8 +1145,8 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		}
 		x.clips(object.ImageObject.Clips, ctm)
 		x.border(object.ImageObject.Border)
-	} else if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
-		x.clips(object.CompositeGraphicUnit.Clips, object.CompositeGraphicUnit.CTM)
+	} else if object.Type == "CompositeObject" {
+		x.clips(object.CompositeObject.Clips, object.CompositeObject.CTM)
 	} else if object.Type == "PathObject" || object.Type == "Path" {
 		if object.Type == "PathObject" {
 			x.clips(object.PathObject.Clips, object.PathObject.CTM)
@@ -813,21 +1176,43 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 				})
 			}
 		}
+		totalRunes := 0
+		for _, code := range object.TextObject.TextCode {
+			totalRunes += len(textCodeRunes(code.Value))
+		}
 		offset, index := 0, 0
 		for _, code := range object.TextObject.TextCode {
 			if x.err != nil {
 				return
 			}
 			end := offset + len(textCodeRunes(code.Value))
+			for index < len(transforms) && transforms[index].CodePosition < offset {
+				index++
+			}
 			for index < len(transforms) && transforms[index].CodePosition < end {
 				if x.err != nil {
 					return
 				}
 				transform := transforms[index]
+				codeCount := transform.CodeCount
+				if codeCount <= 0 {
+					codeCount = 1
+				}
+				if maxCount := totalRunes - transform.CodePosition; maxCount > 0 && codeCount > maxCount {
+					codeCount = maxCount
+				}
+				glyphCount := transform.GlyphCount
+				if glyphCount <= 0 {
+					if fields := len(strings.Fields(transform.Glyphs)); fields > 0 {
+						glyphCount = fields
+					} else {
+						glyphCount = 1
+					}
+				}
 				attrs := x.attrs[:0]
 				attrs.add("CodePosition", strconv.Itoa(transform.CodePosition-offset))
-				attrs.add("CodeCount", strconv.Itoa(transform.CodeCount))
-				attrs.add("GlyphCount", strconv.Itoa(transform.GlyphCount))
+				attrs.add("CodeCount", strconv.Itoa(codeCount))
+				attrs.add("GlyphCount", strconv.Itoa(glyphCount))
 				x.attrs = attrs
 				x.start("CGTransform", attrs)
 				x.text("Glyphs", transform.Glyphs)
@@ -853,7 +1238,7 @@ func (x *ofdXML) clips(clips *Clips, ctm string) {
 	if clips == nil || !x.checkContext() {
 		return
 	}
-	matrix := IdentityMatrix
+	matrix := IdentityMatrix()
 	if clips.usesObjectMatrix() {
 		matrix = NewMatrix(ctm)
 	}
@@ -1111,11 +1496,22 @@ func (x *ofdXML) pattern(pattern *Pattern) {
 	var content ofdAttrs
 	content.add("Thumbnail", pattern.CellContent.Thumbnail)
 	x.start("CellContent", content)
-	for object := range pattern.CellContent.objects() {
-		if x.err != nil {
-			return
+	if len(pattern.CellContent.Objects) != 0 {
+		x.graphicObjects(pattern.CellContent.Objects, pattern.CellContent.PageBlock)
+	} else {
+		for _, obj := range pattern.CellContent.TextObject {
+			x.object(GraphicObject{Type: "TextObject", TextObject: obj}, false)
 		}
-		x.object(object, false)
+		for _, obj := range pattern.CellContent.PathObject {
+			x.object(GraphicObject{Type: "PathObject", PathObject: obj}, false)
+		}
+		for _, obj := range pattern.CellContent.ImageObject {
+			x.object(GraphicObject{Type: "ImageObject", ImageObject: obj}, false)
+		}
+		for _, obj := range pattern.CellContent.CompositeObject {
+			x.object(GraphicObject{Type: "CompositeObject", CompositeObject: obj}, false)
+		}
+		x.graphicObjects(nil, pattern.CellContent.PageBlock)
 	}
 	x.end("CellContent")
 	x.end("Pattern")
@@ -1144,6 +1540,10 @@ func (x *ofdXML) actions(actions []Action) {
 				x.start("Area", ofdAttrs{{Name: xml.Name{Local: "Start"}, Value: area.Start}})
 				for _, command := range area.Command {
 					if x.err != nil {
+						return
+					}
+					if !validRegionCommandType(command.Type) {
+						x.err = fmt.Errorf("invalid region command type: %q", command.Type)
 						return
 					}
 					var attrs ofdAttrs
@@ -1187,9 +1587,6 @@ func (x *ofdXML) actions(actions []Action) {
 	x.end("Actions")
 }
 
-// ofdAttrs OFD节点属性
-type ofdAttrs []xml.Attr
-
 // add 添加非空属性
 // 入参: name 属性名, value 属性值
 func (a *ofdAttrs) add(name, value string) {
@@ -1222,15 +1619,6 @@ func (a *ofdAttrs) alpha(value *int) {
 	}
 }
 
-// editorResourceSelection 保存单次输出中同一编辑快照的资源筛选结果
-type editorResourceSelection struct {
-	owner         *Editor
-	fonts, images []editorResource
-	spaces        []ColorSpace
-	files         map[string]bool
-	extra         map[string][]byte
-}
-
 // copySnapshotArchive 复用条目未变的独立压缩包，取消或失败不发布缓存
 // 入参: ctx 取消上下文, source 原压缩包
 // 返回: *zip.Reader 独立压缩包, error 复制错误
@@ -1252,7 +1640,7 @@ func (e *Editor) copySnapshotArchive(ctx context.Context, source *zip.Reader) (*
 	if e.runtimeResources != nil {
 		limit = e.runtimeResources.options.SnapshotBytes
 	}
-	data := &editorSnapshotBuffer{spillLimit: limit}
+	data := &editorSnapshotBuffer{spillLimit: limit, encryptSpill: e.encryption != nil}
 	cleanupData := true
 	defer func() {
 		if cleanupData {
@@ -1272,7 +1660,7 @@ func (e *Editor) copySnapshotArchive(ctx context.Context, source *zip.Reader) (*
 	if err := archive.Close(); err != nil {
 		return nil, err
 	}
-	reader, err := zip.NewReader(data, data.size)
+	reader, err := newSnapshotZipReader(data)
 	if err != nil {
 		return nil, err
 	}
@@ -1280,11 +1668,8 @@ func (e *Editor) copySnapshotArchive(ctx context.Context, source *zip.Reader) (*
 		return nil, err
 	}
 	cleanupData = false
-	if data.tempFile != nil {
-		runtime.AddCleanup(reader, cleanupSnapshotBuffer, data)
-	}
 	cached := &editorSnapshotArchive{files: slices.Clone(source.File), archive: weak.Make(reader)}
-	if data.tempFile == nil && int64(len(data.chunks)) <= limit/editorSnapshotChunkSize {
+	if data.temp == nil && int64(len(data.chunks)) <= limit/editorSnapshotChunkSize {
 		cached.retained = resourceCache[int, *zip.Reader](e.runtimeResources, editorSnapshotArchiveLimit)
 		cached.retained.limit = int(min(limit, int64(int(^uint(0)>>1)-1)))
 		cached.retained.put(0, reader, len(data.chunks)*editorSnapshotChunkSize)
@@ -1375,6 +1760,8 @@ func (e *Editor) writePagesTo(writer io.Writer, indexes []int) (int64, error) {
 	selected.SetFontDirs(e.fontDirs...)
 	selected.SetFontFS(e.fontFS...)
 	selected.encryption = e.encryption
+	selected.syncEncryptionHold()
+	defer selected.Close()
 	selected.optimizedImages = maps.Clone(e.optimizedImages)
 	id := selected.Info.DocID
 	selected.Info = cloneEditorData(e.Info)
@@ -1413,7 +1800,7 @@ func (e *Editor) writePlaintext(writer io.Writer) (int64, error) {
 		return 0, err
 	}
 	progress := editorProgress(e.OnWriteProgress)
-	fonts, err := e.subsetFonts(progress)
+	fonts, err := e.subsetFontsWithTemplates(progress)
 	if err != nil {
 		return 0, err
 	}
@@ -1426,6 +1813,9 @@ func (e *Editor) writePlaintext(writer io.Writer) (int64, error) {
 	output := &ofdCountingWriter{writer: writer}
 	archive := zip.NewWriter(output)
 	if e.output != nil && e.output.options.Mode != CompressionUnchanged {
+		if len(e.removedPages) == 0 && len(e.origins) == 0 {
+			return e.writeStreamingCompressed(ctx, archive, output, fonts, progress)
+		}
 		parts := make(map[string][]byte)
 		err := e.writeParts(ctx, func(name string, data []byte, _ bool) error {
 			if subset, ok := fonts[name]; ok {
@@ -1501,6 +1891,7 @@ func (e *Editor) readerWithOptions(ctx context.Context, progress editorProgress,
 	defer func() {
 		if result != nil {
 			result.pdfDestinations = e.pdfDestinations.clone()
+			result.bindEncryptionHold()
 		}
 	}()
 	if err := ctx.Err(); err != nil {
@@ -1527,14 +1918,50 @@ func (e *Editor) readerWithOptions(ctx context.Context, progress editorProgress,
 	if err := r.initRootContext(ctx); err != nil {
 		return nil, nil, err
 	}
-	if _, err := r.DocContext(ctx); err != nil {
+	if _, err := r.docContext(ctx); err != nil {
 		return nil, nil, err
 	}
 	for i, page := range r.doc.Pages.Page {
-		r.pageHeaderCache[r.ResPath(page.BaseLoc)] = PageContent{Area: e.pages[i].Area, Template: slices.Clone(e.pages[i].Template), PageRes: slices.Clone(e.pages[i].PageRes)}
+		name := r.ResPath(page.BaseLoc)
+		r.pageHeaders.put(name, PageContent{Area: e.pages[i].Area, Template: slices.Clone(e.pages[i].Template), PageRes: slices.Clone(e.pages[i].PageRes)}, r.files[name])
 	}
 	e.previewPages = pages
 	return r, nil, nil
+}
+
+// skeletonReader 为渐进PDF导入创建不含未就绪页面XML的常驻骨架阅读器
+// 入参: ctx 取消上下文
+// 返回: *Reader 骨架阅读器, error 构建或取消错误
+func (e *Editor) skeletonReader(ctx context.Context) (*Reader, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := e.validate(); err != nil {
+		return nil, err
+	}
+	if e.source != nil || len(e.origins) != 0 {
+		return e.readerContext(ctx, nil)
+	}
+	r := &Reader{files: make(map[string][]byte), encryption: e.encryption, resources: e.runtimeResources}
+	if err := e.writePartsWithPages(ctx, func(name string, data []byte, _ bool) error {
+		r.files[name] = data
+		return nil
+	}, nil, false, nil); err != nil {
+		return nil, err
+	}
+	if err := r.initRootContext(ctx); err != nil {
+		return nil, err
+	}
+	if _, err := r.docStructureContext(ctx); err != nil {
+		return nil, err
+	}
+	r.pdfDestinations = e.pdfDestinations.clone()
+	for i, page := range r.doc.Pages.Page {
+		name := r.ResPath(page.BaseLoc)
+		r.pageHeaders.put(name, PageContent{Area: e.pages[i].Area, Template: slices.Clone(e.pages[i].Template), PageRes: slices.Clone(e.pages[i].PageRes)}, nil)
+	}
+	r.bindEncryptionHold()
+	return r, nil
 }
 
 // invalidatePreviewPages 失效受影响页面的预览编码，保留事务和历史快照的独立缓存
@@ -1573,7 +2000,7 @@ func (e *Editor) resourceReader(ctx context.Context) (*Reader, error) {
 	if err := r.initRootContext(ctx); err != nil {
 		return nil, err
 	}
-	if _, err := r.DocContext(ctx); err != nil {
+	if _, err := r.docContext(ctx); err != nil {
 		return nil, err
 	}
 	return r, nil
@@ -1617,6 +2044,13 @@ func (e *Editor) writeParts(ctx context.Context, write func(string, []byte, bool
 // 入参: ctx 取消上下文, write 条目写入方法, progress 保存进度回调, includePages 是否写出页面, previews 预览页面编码缓存
 // 返回: error 写入错误
 func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []byte, bool) error, progress editorProgress, includePages bool, previews map[string][]byte) error {
+	return e.writePartsWithOptions(ctx, write, progress, includePages, false, previews)
+}
+
+// writePartsWithOptions 统一生成包条目，支持跳过页面XML落地以便调用方按页流式写出ZIP
+// 入参: ctx 取消上下文, write 条目写入方法, progress 保存进度回调, includePages 是否包含页面语义, skipPageEntries 是否由调用方流式写出页面条目, previews 预览页面编码缓存
+// 返回: error 写入错误
+func (e *Editor) writePartsWithOptions(ctx context.Context, write func(string, []byte, bool) error, progress editorProgress, includePages, skipPageEntries bool, previews map[string][]byte) error {
 	progress = progress.withContext(ctx)
 	if len(e.removedPages) != 0 {
 		output := write
@@ -1643,6 +2077,7 @@ func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []b
 	if err != nil {
 		return err
 	}
+	templates, templateFiles := e.usedOwnedTemplates()
 	writeXML := func(name string, encode func(*ofdXML)) error {
 		data, err := encodeOFDXMLContext(ctx, encode)
 		if err != nil {
@@ -1710,6 +2145,13 @@ func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []b
 		for _, name := range slices.Sorted(maps.Keys(definitions)) {
 			x.text("DocumentRes", "/"+name)
 		}
+		for _, tpl := range templates {
+			attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: tpl.ID}, {Name: xml.Name{Local: "BaseLoc"}, Value: tpl.BaseLoc}}
+			attrs.add("Name", tpl.Name)
+			attrs.add("ZOrder", tpl.ZOrder)
+			x.start("TemplatePage", attrs)
+			x.end("TemplatePage")
+		}
 		x.end("CommonData")
 		x.start("Pages", nil)
 		for _, page := range e.pages {
@@ -1754,7 +2196,7 @@ func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []b
 			}
 		}
 	}
-	if includePages {
+	if includePages && !skipPageEntries {
 		for i, page := range e.pages {
 			if err := progress.report("pages", i, len(e.pages)); err != nil {
 				return err
@@ -1808,7 +2250,7 @@ func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []b
 		}
 	}
 	for _, resource := range e.resources {
-		if resource.definition() != "" && definitions[resource.name] || resource.colorProfileUsed(spaces) {
+		if resource.definition() != "" && definitions[resource.name] || resource.colorProfileUsed(spaces) || templateFiles[resource.name] {
 			if written[resource.name] {
 				continue
 			}
@@ -1857,31 +2299,25 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 		}
 		return id
 	}
-	editorPageRes := make(map[string][]*parsedRes, len(e.pages))
-	for _, p := range e.pages {
-		if len(p.pageResources) == 0 {
-			continue
-		}
-		key := normPageID(p.ID)
-		if _, exists := editorPageRes[key]; !exists {
-			editorPageRes[key] = p.pageResources
-		}
-	}
+	var editorPageRes map[string][]*parsedRes
 	var sourcePageRefs map[string]Page
-	if e.source != nil {
-		sourcePageRefs = make(map[string]Page, len(e.source.document.Pages.Page))
-		for _, p := range e.source.document.Pages.Page {
-			key := normPageID(p.ID)
-			if _, exists := sourcePageRefs[key]; !exists {
-				sourcePageRefs[key] = p
-			}
-		}
-	}
 	localResCache := make(map[string][]*parsedRes)
 	localResForPageID := func(pageID string) ([]*parsedRes, error) {
 		key := normPageID(pageID)
 		if cached, ok := localResCache[key]; ok {
 			return cached, nil
+		}
+		if editorPageRes == nil {
+			editorPageRes = make(map[string][]*parsedRes)
+			for _, p := range e.pages {
+				if len(p.pageResources) == 0 {
+					continue
+				}
+				pk := normPageID(p.ID)
+				if _, exists := editorPageRes[pk]; !exists {
+					editorPageRes[pk] = p.pageResources
+				}
+			}
 		}
 		if res, ok := editorPageRes[key]; ok {
 			localResCache[key] = res
@@ -1891,9 +2327,38 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 			localResCache[key] = nil
 			return nil, nil
 		}
-		if sp := e.source.pages[pageID]; sp != nil && sp.original != nil && len(sp.original.pageResources) > 0 {
-			localResCache[key] = sp.original.pageResources
-			return sp.original.pageResources, nil
+		if sp := e.source.pages[pageID]; sp != nil {
+			if sp.original != nil && len(sp.original.pageResources) > 0 {
+				localResCache[key] = sp.original.pageResources
+				return sp.original.pageResources, nil
+			}
+			hdr, hdrErr := e.source.reader.readPageHeaderContext(ctx, sp.ref)
+			if hdrErr != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				localResCache[key] = nil
+				return nil, nil
+			}
+			if len(hdr.PageRes) == 0 {
+				localResCache[key] = nil
+				return nil, nil
+			}
+			res, resErr := e.source.reader.collectPageResourcesContext(ctx, e.source.reader.ResPath(sp.ref.BaseLoc), &hdr)
+			if resErr != nil {
+				return nil, resErr
+			}
+			localResCache[key] = res
+			return res, nil
+		}
+		if sourcePageRefs == nil {
+			sourcePageRefs = make(map[string]Page, len(e.source.document.Pages.Page))
+			for _, p := range e.source.document.Pages.Page {
+				pk := normPageID(p.ID)
+				if _, exists := sourcePageRefs[pk]; !exists {
+					sourcePageRefs[pk] = p
+				}
+			}
 		}
 		if p, ok := sourcePageRefs[key]; ok {
 			hdr, hdrErr := e.source.reader.readPageHeaderContext(ctx, p)
@@ -1978,36 +2443,27 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 			maps.Copy(promoted, used)
 		}
 	}
-	for _, page := range e.pages {
-		if err := ctx.Err(); err != nil {
-			return nil, nil, nil, nil, nil, err
+	usedTemplates := make(map[string]bool)
+	for i, page := range e.pages {
+		if i&4095 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, nil, nil, nil, err
+			}
 		}
-		var localRes []*parsedRes
+		var srcPage *editorSourcePage
 		if e.source != nil {
-			localRes = page.pageResources
-			if len(localRes) == 0 {
-				var locErr error
-				localRes, locErr = localResForPageID(page.ID)
-				if locErr != nil {
-					return nil, nil, nil, nil, nil, locErr
-				}
+			srcPage = e.source.pages[page.ID]
+			if srcPage != nil && srcPage.original == nil {
+				continue
 			}
 		}
-		actionRefs := make(map[string]bool)
-		collectActionReferences(page.Actions, actionRefs)
-		maps.Copy(used, actionRefs)
-		if e.source != nil && len(actionRefs) > 0 {
-			srcPage := e.source.pages[page.ID]
-			if srcPage == nil || srcPage.original == nil || !reflect.DeepEqual(page.Actions, srcPage.original.Actions) {
-				normalizeResourceReferences(actionRefs)
-				for ref := range actionRefs {
-					if !slices.ContainsFunc(localRes, func(parsed *parsedRes) bool { return parsedHasResource(parsed, ref, "") }) {
-						promoted[ref] = true
-					}
-				}
+		for _, tpl := range page.Template {
+			if id := editorResourceID(tpl.TemplateID); id != "" {
+				usedTemplates[id] = true
 			}
 		}
-		if e.source != nil && sourcePageUntouched(page, e.source.pages[page.ID]) {
+		if e.source != nil && sourcePageUntouched(page, srcPage) {
+			collectActionReferences(page.Actions, used)
 			for _, layer := range page.Content.Layer {
 				if layer.DrawParam != "" {
 					used[layer.DrawParam] = true
@@ -2021,13 +2477,47 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 			}
 			continue
 		}
+		var localRes []*parsedRes
+		localResLoaded := false
+		getLocalRes := func() ([]*parsedRes, error) {
+			if !localResLoaded {
+				localResLoaded = true
+				if len(page.pageResources) > 0 {
+					localRes = page.pageResources
+				} else if e.source != nil {
+					var locErr error
+					localRes, locErr = localResForPageID(page.ID)
+					if locErr != nil {
+						return nil, locErr
+					}
+				}
+			}
+			return localRes, nil
+		}
+		actionRefs := make(map[string]bool)
+		collectActionReferences(page.Actions, actionRefs)
+		maps.Copy(used, actionRefs)
+		if e.source != nil && len(actionRefs) > 0 {
+			if srcPage == nil || srcPage.original == nil || !reflect.DeepEqual(page.Actions, srcPage.original.Actions) {
+				resList, locErr := getLocalRes()
+				if locErr != nil {
+					return nil, nil, nil, nil, nil, locErr
+				}
+				normalizeResourceReferences(actionRefs)
+				for ref := range actionRefs {
+					if !slices.ContainsFunc(resList, func(parsed *parsedRes) bool { return parsedHasResource(parsed, ref, "") }) {
+						promoted[ref] = true
+					}
+				}
+			}
+		}
 		var original map[string]GraphicObject
 		var originalLayers map[string]string
 		if e.source != nil {
 			original = make(map[string]GraphicObject)
 			originalLayers = make(map[string]string)
-			if source := e.source.pages[page.ID]; source != nil && source.original != nil {
-				for _, layer := range source.original.Content.Layer {
+			if srcPage != nil && srcPage.original != nil {
+				for _, layer := range srcPage.original.Content.Layer {
 					originalLayers[layer.ID] = layer.DrawParam
 					for _, object := range layer.Objects {
 						original[editorObjectID(object)] = object
@@ -2039,11 +2529,15 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 			if layer.DrawParam != "" {
 				used[layer.DrawParam] = true
 				if e.source != nil && originalLayers[layer.ID] != layer.DrawParam {
+					resList, locErr := getLocalRes()
+					if locErr != nil {
+						return nil, nil, nil, nil, nil, locErr
+					}
 					key := editorResourceID(layer.DrawParam)
 					if key == "" {
 						key = layer.DrawParam
 					}
-					if !slices.ContainsFunc(localRes, func(parsed *parsedRes) bool { return parsedHasResource(parsed, key, "") }) {
+					if !slices.ContainsFunc(resList, func(parsed *parsedRes) bool { return parsedHasResource(parsed, key, "") }) {
 						promoted[key] = true
 					}
 				}
@@ -2056,17 +2550,35 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 				collectObjectReferences(object, used)
 				origin := e.objectOrigin(editorObjectID(object))
 				if e.source != nil && (!exists || !reflect.DeepEqual(before, object)) {
+					resList, locErr := getLocalRes()
+					if locErr != nil {
+						return nil, nil, nil, nil, nil, locErr
+					}
 					refs := make(map[string]bool)
 					collectObjectReferences(object, refs)
 					normalizeResourceReferences(refs)
 					for ref := range refs {
-						if !slices.ContainsFunc(localRes, func(parsed *parsedRes) bool { return parsedHasResource(parsed, ref, "") }) {
+						if !slices.ContainsFunc(resList, func(parsed *parsedRes) bool { return parsedHasResource(parsed, ref, "") }) {
 							promoted[ref] = true
 							if origin != nil && origin.page != nil && origin.page.original != nil && len(origin.page.original.pageResources) > 0 {
 								pageOrigins[ref] = origin.page.original.pageResources
 							}
 						}
 					}
+				}
+			}
+		}
+	}
+	for _, resource := range e.resources {
+		tpl, ok := parseOwnedTemplateResource(resource)
+		if !ok {
+			continue
+		}
+		if retainAll || usedTemplates[editorResourceID(tpl.ID)] {
+			for _, reference := range resource.references {
+				used[reference] = true
+				if e.source != nil {
+					promoted[reference] = true
 				}
 			}
 		}
@@ -2363,47 +2875,295 @@ func (e *Editor) encodeXML(encode func(*ofdXML)) ([]byte, error) {
 	return encodeOFDXMLContext(ctx, encode)
 }
 
-// cleanupSnapshotBuffer 在最后一个持有快照归档的Reader回收后清理临时存储
-// 入参: buf 待清理的快照缓冲
-func cleanupSnapshotBuffer(buf *editorSnapshotBuffer) {
-	if buf != nil {
-		_ = buf.Close()
+// writeConvertedPDF 为PDF导入文档提供低内存流式写出，跳过重复全页快照扫描
+// 入参: ctx 取消上下文, writer 输出流, options 输出压缩配置
+// 返回: int64 已写入字节数, error 写出或取消错误
+func (e *Editor) writeConvertedPDF(ctx context.Context, writer io.Writer, options CompressionOptions) (int64, error) {
+	if err := sameOutputFile(e.sourceFile, writer); err != nil {
+		return 0, err
 	}
+	ctx = e.runtimeResources.context(ctx)
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := options.Validate(); err != nil {
+		return 0, err
+	}
+	snapshot := *e
+	snapshot.OnWriteProgress = editorProgress(e.OnWriteProgress).withContext(ctx)
+	snapshot.output = &outputOptimization{ctx: ctx, options: options}
+	defer snapshot.output.release()
+	if options.Mode != CompressionUnchanged {
+		if err := snapshot.compressPatternPaints(); err != nil {
+			return 0, err
+		}
+	}
+	var count int64
+	return snapshot.WriteTo(convertWriter{ctx: ctx, writer: writer, count: &count})
 }
 
-// encodeOFDXML 编码文档节点，用于保存和独立副本
-// 入参: encode 节点写入方法
-// 返回: []byte XML数据, error 错误信息
-func encodeOFDXML(encode func(*ofdXML)) ([]byte, error) {
-	return encodeOFDXMLContext(nil, encode)
+// writeStreamingCompressed 按页流式编码直写ZIP并仅对非页面资源执行压缩去重，避免万页XML驻留内存
+// 入参: ctx 取消上下文, archive 目标ZIP写出器, output 字节计数包装器, fonts 字体子集表, progress 进度回调
+// 返回: int64 已写入字节数, error 编码或写入错误
+func (e *Editor) writeStreamingCompressed(ctx context.Context, archive *zip.Writer, output *ofdCountingWriter, fonts map[string][]byte, progress editorProgress) (int64, error) {
+	parts := make(map[string][]byte)
+	err := e.writePartsWithOptions(ctx, func(name string, data []byte, _ bool) error {
+		if subset, ok := fonts[name]; ok {
+			data = subset
+		}
+		parts[name] = data
+		return nil
+	}, progress, true, true, nil)
+	if err != nil {
+		return 0, err
+	}
+	generated := make(map[string]editorGeneratedReferences, len(e.pages))
+	progressCtx := progress.withContext(ctx)
+	var pageBuf bytes.Buffer
+	for i, page := range e.pages {
+		if err := progressCtx.report("pages", i, len(e.pages)); err != nil {
+			return output.count, err
+		}
+		name := packagePagePath(e.packageDirectory(), page.ID)
+		if pageBuf.Cap() > editorStreamPageBufferLimit {
+			pageBuf = bytes.Buffer{}
+		} else {
+			pageBuf.Reset()
+		}
+		scan := &editorReferenceScan{refs: &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}, name: name, safe: true}
+		x := newOFDXML(&pageBuf)
+		x.ctx = ctx
+		x.references = scan
+		x.page(page)
+		if err := x.finish(); err != nil {
+			return output.count, err
+		}
+		data := pageBuf.Bytes()
+		if scan.safe && scan.seen && len(scan.stack) == 0 {
+			if err := e.writeOutputEntry(archive, zip.FileHeader{Name: name, Method: zip.Deflate}, data); err != nil {
+				return output.count, err
+			}
+			parts[name] = nil
+			generated[name] = editorGeneratedReferences{refs: scan.refs}
+		} else {
+			parts[name] = bytes.Clone(data)
+		}
+	}
+	if err := progressCtx.report("pages", len(e.pages), len(e.pages)); err != nil {
+		return output.count, err
+	}
+	removed := make(map[string]bool)
+	if e.output != nil && !e.output.protected {
+		unused, err := e.compactResourceReferences(parts, nil, editorProgress(e.OnWriteProgress), generated, nil)
+		if err != nil {
+			return output.count, err
+		}
+		maps.Copy(removed, unused)
+	}
+	if err := e.compressResourceReferences(parts, nil, removed, generated); err != nil {
+		return output.count, err
+	}
+	for _, name := range slices.Sorted(maps.Keys(parts)) {
+		if removed[cleanPackagePath(name)] || parts[name] == nil {
+			continue
+		}
+		if err := e.writeOutputEntry(archive, zip.FileHeader{Name: name, Method: zip.Deflate}, parts[name]); err != nil {
+			return output.count, err
+		}
+	}
+	err = archive.Close()
+	return output.count, err
 }
 
-// encodeOFDXMLContext 编码文档节点，失败时不返回部分数据
-// 入参: ctx 取消上下文，可为nil, encode 节点写入方法
-// 返回: []byte XML数据, error 编码或取消错误
-func encodeOFDXMLContext(ctx context.Context, encode func(*ofdXML)) ([]byte, error) {
-	var data bytes.Buffer
-	x := newOFDXML(&data)
-	x.ctx = ctx
-	if !x.checkContext() {
-		return nil, x.err
+// subsetFontsWithTemplates 在裁剪新增字体时纳入托管模板页用字，避免模板字符被裁除
+// 入参: progress 写出进度回调
+// 返回: map[string][]byte 字体子集表, error 扫描或裁剪错误
+func (e *Editor) subsetFontsWithTemplates(progress editorProgress) (map[string][]byte, error) {
+	_, templateFiles := e.usedOwnedTemplates()
+	if len(templateFiles) == 0 {
+		return e.subsetFonts(progress)
 	}
-	encode(x)
-	if err := x.finish(); err != nil {
-		return nil, err
+	subsetEditor := *e
+	subsetEditor.pages = slices.Clone(e.pages)
+	for _, resource := range e.resources {
+		if !templateFiles[resource.name] {
+			continue
+		}
+		var tplPage PageContent
+		if err := xml.Unmarshal(resource.data, &tplPage); err != nil {
+			return nil, err
+		}
+		subsetEditor.pages = append(subsetEditor.pages, tplPage)
 	}
-	return data.Bytes(), nil
+	return subsetEditor.subsetFonts(progress)
 }
 
-// shadingAttrs 编码轴向和径向渐变的共同属性
-// 入参: mapType 映射方式, mapUnit 映射周期, extend 延伸方式, start 渐变起点, end 渐变终点
-// 返回: ofdAttrs 属性集合
-func shadingAttrs(mapType string, mapUnit float64, extend, start, end string) ofdAttrs {
-	var attrs ofdAttrs
-	attrs.add("MapType", mapType)
-	attrs.number("MapUnit", mapUnit)
-	attrs.add("Extend", extend)
-	attrs.add("StartPoint", start)
-	attrs.add("EndPoint", end)
-	return attrs
+// addOwnedTemplatePage 将本库生成的对象注册为标准OFD模板页，同时兼容纯内存与源文档模式
+// 入参: ctx 取消上下文, area 模板页面区域, objects 模板图元对象, zOrder 模板层次, title 可选模板名称
+// 返回: string 模板标识, error 校验、编码或取消错误
+func (e *Editor) addOwnedTemplatePage(ctx context.Context, area PageArea, objects []GraphicObject, zOrder, title string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := e.prepareSourceIDsContext(ctx); err != nil {
+		return "", err
+	}
+	savedMaxID := e.maxID
+	committed := false
+	defer func() {
+		if !committed {
+			e.maxID = savedMaxID
+		}
+	}()
+	zOrder = editorTemplateOrder(zOrder)
+	validation := &editorValidation{Editor: e}
+	prepared := make([]GraphicObject, len(objects))
+	for i, object := range objects {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		objID, err := e.nextID()
+		if err != nil {
+			return "", err
+		}
+		item, err := validation.prepareObject(objID, object)
+		if err != nil {
+			return "", err
+		}
+		prepared[i] = item
+	}
+	tplID, err := e.nextID()
+	if err != nil {
+		return "", err
+	}
+	layerID, err := e.nextID()
+	if err != nil {
+		return "", err
+	}
+	tplPage := PageContent{
+		Area:    area,
+		Content: Content{Layer: []Layer{{ID: layerID, Type: "Body", Objects: prepared}}},
+	}
+	loc := e.packageName("Templates/Template_" + tplID + "/Content.xml")
+	scan := &editorReferenceScan{refs: &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}, objects: make(map[string]bool), name: loc, safe: true}
+	data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) {
+		x.references = scan
+		x.page(tplPage)
+	})
+	if err != nil {
+		return "", err
+	}
+	var refs []string
+	var usage *editorVectorUsage
+	if scan.safe && scan.seen && len(scan.stack) == 0 {
+		refs = slices.Sorted(maps.Keys(scan.objects))
+		usage = scan.vectorUsage(data)
+	} else {
+		refs, err = editorResourceReferences(data)
+		if err != nil {
+			return "", err
+		}
+	}
+	tag := editorOwnedTemplatePrefix + tplID + "|" + zOrder + "|" + title
+	resource := editorResource{
+		name:       loc,
+		data:       data,
+		drawSource: tag,
+		references: refs,
+		usage:      usage,
+	}
+	if e.source != nil {
+		baseSource := e.source
+		baseReader := baseSource.reader
+		docData, err := baseReader.readFileViewContext(ctx, baseReader.documentRoot)
+		if err != nil {
+			return "", err
+		}
+		root, err := parseEditorXMLContext(ctx, docData)
+		if err != nil {
+			return "", err
+		}
+		common := root.child("CommonData")
+		if common == nil {
+			return "", fmt.Errorf("document has no CommonData")
+		}
+		attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: tplID}, {Name: xml.Name{Local: "BaseLoc"}, Value: "/" + loc}, {Name: xml.Name{Local: "ZOrder"}, Value: zOrder}}
+		attrs.add("Name", title)
+		fragment, err := common.containerXML("TemplatePage", attrs, nil)
+		if err != nil {
+			return "", err
+		}
+		var patched []byte
+		if common.open == common.end {
+			patched = editorAppendStructure(docData, common, fragment)
+		} else {
+			at := common.close
+			if node := common.child("DefaultCS"); node != nil {
+				at = node.start
+			}
+			patched = editorPatchXML(docData, []editorXMLPatch{{at, at, fragment}})
+		}
+		docPath := cleanPackagePath(baseReader.documentRoot)
+		nextReader := *baseReader
+		nextReader.encHold = nil
+		nextReader.files = maps.Clone(baseReader.files)
+		if nextReader.files == nil {
+			nextReader.files = make(map[string][]byte, 2)
+		}
+		nextReader.fileNames = maps.Clone(baseReader.fileNames)
+		if nextReader.fileNames == nil {
+			nextReader.fileNames = make(map[string]bool, 2)
+		}
+		nextReader.files[loc] = data
+		nextReader.fileNames[loc] = true
+		nextReader.files[docPath] = patched
+		nextReader.fileNames[docPath] = true
+		nextDoc := *baseSource.document
+		nextDoc.CommonData.TemplatePage = append(slices.Clone(baseSource.document.CommonData.TemplatePage), TemplatePage{ID: tplID, Name: title, BaseLoc: "/" + loc, ZOrder: zOrder})
+		nextReader.doc = &nextDoc
+		nextSource := *baseSource
+		nextSource.reader = &nextReader
+		nextSource.document = &nextDoc
+		nextSource.appendOnlyFiles = maps.Clone(baseSource.appendOnlyFiles)
+		nextSource.recordAppendOnlyFiles(map[string][]byte{loc: data, docPath: patched})
+		e.resources = append(e.resources, resource)
+		e.source = &nextSource
+		if e.ownedReader == baseReader {
+			e.ownedReader = &nextReader
+			e.ownedOwner = e
+			e.ownedTx = e.transactionChanges
+		}
+		committed = true
+		return tplID, nil
+	}
+	e.resources = append(e.resources, resource)
+	committed = true
+	return tplID, nil
+}
+
+// usedOwnedTemplates 返回当前文档页面实际引用的托管模板页定义与文件路径集合
+// 返回: []TemplatePage 模板定义清单, map[string]bool 模板文件路径集合
+func (e *Editor) usedOwnedTemplates() ([]TemplatePage, map[string]bool) {
+	usedIDs := make(map[string]bool)
+	for _, page := range e.pages {
+		for _, tpl := range page.Template {
+			if id := editorResourceID(tpl.TemplateID); id != "" {
+				usedIDs[id] = true
+			}
+		}
+	}
+	if len(usedIDs) == 0 {
+		return nil, nil
+	}
+	var list []TemplatePage
+	files := make(map[string]bool)
+	for _, resource := range e.resources {
+		tpl, ok := parseOwnedTemplateResource(resource)
+		if !ok || !usedIDs[editorResourceID(tpl.ID)] {
+			continue
+		}
+		list = append(list, tpl)
+		files[resource.name] = true
+	}
+	return list, files
 }

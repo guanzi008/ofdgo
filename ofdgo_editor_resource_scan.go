@@ -44,52 +44,17 @@ type editorScanKey struct {
 	customTag       bool
 }
 
+// editorSourceScanKey 按不可变原包路径及标引摘要区分只读引用扫描结果
+type editorSourceScanKey struct {
+	name            string
+	customTagDigest [32]byte
+	customTag       bool
+}
+
 // editorScanValue 保存只读文件引用及资源索引标识
 type editorScanValue struct {
 	refs     *editorResourceRefs
 	resource bool
-}
-
-// memorySize 估算文件引用的键与字体用字集合，不保留XML原文
-// 返回: int 内存成本
-func (v editorScanValue) memorySize() int {
-	cost := 256
-	for _, values := range []map[string]bool{v.refs.ids, v.refs.files, v.refs.versions, v.refs.documents} {
-		for key := range values {
-			cost += 64 + len(key)
-		}
-	}
-	for key := range v.refs.roles {
-		cost += 64 + len(key)
-	}
-	for key, tags := range v.refs.customTagFiles {
-		cost += 64 + len(key) + 64*len(tags)
-	}
-	for key, font := range v.refs.fonts {
-		cost += 256 + len(key) + 32*(len(font.chars)+len(font.glyphs))
-	}
-	return cost
-}
-
-// scanOutputResources 在一次输出中复用未变化文件的引用，聚合与版本归属仍逐次计算
-// 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 扫描范围, progress 进度, collect 是否保留文件引用
-// 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可优化, error 读取或取消错误
-func (e *Editor) scanOutputResources(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names map[string]bool, progress editorProgress, collect bool) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
-	return e.scanOutputResourcesWithRetired(ctx, reader, parts, generated, names, nil, progress, collect)
-}
-
-// scanOutputResourcesWithRetired 扫描文件引用，对已标记淘汰且无人引用的孤立文件跳过解析
-// 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 扫描范围, retired 待淘汰路径, progress 进度, collect 是否保留文件引用
-// 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可优化, error 读取或取消错误
-func (e *Editor) scanOutputResourcesWithRetired(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names, retired map[string]bool, progress editorProgress, collect bool) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
-	var cache *renderCache[editorScanKey, editorScanValue]
-	if e.output != nil {
-		if e.output.references == nil {
-			e.output.references = resourceCache[editorScanKey, editorScanValue](nil, 8<<20)
-		}
-		cache = e.output.references
-	}
-	return scanEditorResourceFiles(ctx, reader, parts, generated, names, retired, progress, collect, cache)
 }
 
 // scanEditorResources 优先扫描结构依赖，原始数据不按XML解析，孤立文件仍保留引用检查
@@ -103,6 +68,13 @@ func scanEditorResources(ctx context.Context, reader *Reader, parts map[string][
 // 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 范围, retired 待淘汰路径, progress 进度, collect 是否保留文件引用, cache 本次扫描缓存
 // 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可优化, error 读取或取消错误
 func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names, retired map[string]bool, progress editorProgress, collect bool, cache *renderCache[editorScanKey, editorScanValue]) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
+	return scanEditorResourceFilesWithSource(ctx, reader, parts, generated, names, retired, progress, collect, cache, nil, nil)
+}
+
+// scanEditorResourceFilesWithSource 扫描文件依赖，优先复用不可变原包级只读缓存与同次输出缓存
+// 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 范围, retired 待淘汰路径, progress 进度, collect 是否保留文件引用, cache 本次扫描缓存, sourceReader 不可变原包阅读器, sourceCache 原包级只读扫描缓存
+// 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可优化, error 读取或取消错误
+func scanEditorResourceFilesWithSource(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names, retired map[string]bool, progress editorProgress, collect bool, cache *renderCache[editorScanKey, editorScanValue], sourceReader *Reader, sourceCache *renderCache[editorSourceScanKey, editorScanValue]) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
 	refs := &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage), roles: make(map[string]int), documents: make(map[string]bool), versions: make(map[string]bool)}
 	var resources []string
 	var references map[string]*editorResourceRefs
@@ -119,7 +91,7 @@ func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[stri
 		actual[key] = name
 	}
 	queue := []string{"OFD.xml"}
-	if reader != nil && reader.OFD.DocBody[reader.documentIndex].versioned {
+	if reader != nil && reader.ofd.DocBody[reader.documentIndex].versioned {
 		entry, err := reader.DocumentRootContext(ctx)
 		if err != nil {
 			return nil, nil, nil, false, err
@@ -182,13 +154,21 @@ func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[stri
 		}
 		resource, safe, shared := false, true, false
 		if isCustomTag || !replaced || local == nil || !known.matches(data) {
-			scanKey := editorScanKey{reader: reader, name: name, replaced: replaced, staged: known.staged, customTag: isCustomTag}
+			var customTagDigest [32]byte
 			if isCustomTag {
-				scanKey.customTagDigest = customTagsScanDigest(customTagMeta)
+				customTagDigest = customTagsScanDigest(customTagMeta)
 			}
+			isImmutable := sourceCache != nil && !replaced && reader != nil && sourceReader != nil && reader.files[key] == nil && reader.zip == sourceReader.zip && reader.encryptedSource() == sourceReader.encryptedSource()
+			var sourceKey editorSourceScanKey
+			var scanKey editorScanKey
 			var cached editorScanValue
 			var found bool
-			if cache != nil {
+			if isImmutable {
+				sourceKey = editorSourceScanKey{name: key, customTagDigest: customTagDigest, customTag: isCustomTag}
+				cached, found = sourceCache.get(sourceKey)
+			}
+			if !found && cache != nil {
+				scanKey = editorScanKey{reader: reader, name: name, replaced: replaced, staged: known.staged, customTag: isCustomTag, customTagDigest: customTagDigest}
 				if replaced {
 					scanKey.digest = sha256.Sum256(data)
 				}
@@ -197,7 +177,7 @@ func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[stri
 			if found {
 				local, resource = cached.refs, cached.resource
 			} else {
-				shared = cache == nil && included && !collect
+				shared = cache == nil && !isImmutable && included && !collect
 				if shared {
 					sharedRefs.roles = nil
 					sharedRefs.customTagFiles = nil
@@ -226,9 +206,13 @@ func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[stri
 					resource, safe = local.scanContext(ctx, input, name)
 				}
 				input.Close()
-				if cache != nil && safe && ctx.Err() == nil {
+				if safe && ctx.Err() == nil {
 					value := editorScanValue{refs: local, resource: resource}
-					cache.put(scanKey, value, value.memorySize()+len(name))
+					if isImmutable {
+						sourceCache.put(sourceKey, value, value.memorySize()+len(key))
+					} else if cache != nil {
+						cache.put(scanKey, value, value.memorySize()+len(name))
+					}
 				}
 			}
 		}
@@ -280,11 +264,20 @@ func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[stri
 		for _, usage := range refs.fonts {
 			usage.unsafe = true
 		}
-		for _, item := range references {
-			item.fontUnsafe = true
-			for _, usage := range item.fonts {
-				usage.unsafe = true
+		for name, item := range references {
+			cloned := *item
+			cloned.fontUnsafe = true
+			if len(item.fonts) != 0 {
+				cloned.fonts = make(map[string]*editorFontUsage, len(item.fonts))
+				for id, usage := range item.fonts {
+					if usage != nil {
+						copied := *usage
+						copied.unsafe = true
+						cloned.fonts[id] = &copied
+					}
+				}
 			}
+			references[name] = &cloned
 		}
 	}
 	if err := progress.report("references", len(ordered), len(ordered)); err != nil {
@@ -507,4 +500,55 @@ func customTagsScanDigest(tags []CustomTag) [32]byte {
 	var sum [32]byte
 	copy(sum[:], hash.Sum(nil))
 	return sum
+}
+
+// memorySize 估算文件引用的键与字体用字集合，不保留XML原文
+// 返回: int 内存成本
+func (v editorScanValue) memorySize() int {
+	cost := 256
+	for _, values := range []map[string]bool{v.refs.ids, v.refs.files, v.refs.versions, v.refs.documents} {
+		for key := range values {
+			cost += 64 + len(key)
+		}
+	}
+	for key := range v.refs.roles {
+		cost += 64 + len(key)
+	}
+	for key, tags := range v.refs.customTagFiles {
+		cost += 64 + len(key) + 64*len(tags)
+	}
+	for key, font := range v.refs.fonts {
+		cost += 256 + len(key) + 32*(len(font.chars)+len(font.glyphs))
+	}
+	return cost
+}
+
+// scanOutputResources 在一次输出中复用未变化文件的引用，聚合与版本归属仍逐次计算
+// 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 扫描范围, progress 进度, collect 是否保留文件引用
+// 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可优化, error 读取或取消错误
+func (e *Editor) scanOutputResources(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names map[string]bool, progress editorProgress, collect bool) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
+	return e.scanOutputResourcesWithRetired(ctx, reader, parts, generated, names, nil, progress, collect)
+}
+
+// scanOutputResourcesWithRetired 扫描文件引用，对已标记淘汰且无人引用的孤立文件跳过解析
+// 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 扫描范围, retired 待淘汰路径, progress 进度, collect 是否保留文件引用
+// 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可优化, error 读取或取消错误
+func (e *Editor) scanOutputResourcesWithRetired(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names, retired map[string]bool, progress editorProgress, collect bool) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
+	var cache *renderCache[editorScanKey, editorScanValue]
+	if e.output != nil {
+		if e.output.references == nil {
+			e.output.references = resourceCache[editorScanKey, editorScanValue](nil, 8<<20)
+		}
+		cache = e.output.references
+	}
+	var sourceReader *Reader
+	var sourceCache *renderCache[editorSourceScanKey, editorScanValue]
+	if e.source != nil && e.source.reader != nil && (e.source.reader.zip != nil || e.source.reader.encryptedSource() != nil) {
+		if e.source.scanCache == nil {
+			e.source.scanCache = resourceCache[editorSourceScanKey, editorScanValue](e.runtimeResources, 32<<20)
+		}
+		sourceReader = e.source.reader
+		sourceCache = e.source.scanCache
+	}
+	return scanEditorResourceFilesWithSource(ctx, reader, parts, generated, names, retired, progress, collect, cache, sourceReader, sourceCache)
 }

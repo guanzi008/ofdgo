@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"path"
@@ -27,6 +28,46 @@ type TemplateReference struct {
 	PageIndex int
 	PageID    string
 	Template
+}
+
+// editorTemplateOrder 将省略的模板默认层次规范化为Background
+// 入参: value 原始层次
+// 返回: string 有效默认层次
+func editorTemplateOrder(value string) string {
+	if value == "" {
+		return "Background"
+	}
+	return value
+}
+
+// validEditorTemplateOrder 校验模板前景背景枚举及未指定状态
+// 入参: value 层次值
+// 返回: bool 是否有效
+func validEditorTemplateOrder(value string) bool {
+	return value == "" || value == "Background" || value == "Foreground"
+}
+
+// editorTemplateDefinition 查找当前阅读器中的唯一模板定义，拒绝缺失及歧义标识
+// 入参: reader 当前阅读器, id 模板标识
+// 返回: TemplatePage 定义副本, error 文档或标识错误
+func editorTemplateDefinition(reader *Reader, id string) (TemplatePage, error) {
+	doc, err := reader.docInternal()
+	if err != nil {
+		return TemplatePage{}, err
+	}
+	var result TemplatePage
+	for _, item := range doc.CommonData.TemplatePage {
+		if sameResourceID(item.ID, id) {
+			if result.ID != "" {
+				return TemplatePage{}, fmt.Errorf("ambiguous template ID %q", id)
+			}
+			result = item
+		}
+	}
+	if result.ID == "" {
+		return result, fmt.Errorf("template %q not found", id)
+	}
+	return result, nil
 }
 
 // Templates 返回当前文档及所选版本的模板定义副本，省略的ZOrder返回Background
@@ -46,22 +87,54 @@ func (e *Editor) Templates() ([]TemplatePage, error) {
 // 入参: page 零基页面索引
 // 返回: []Template 独立引用清单, error 页面读取错误
 func (e *Editor) PageTemplates(page int) ([]Template, error) {
-	p, err := e.page(page)
-	if err != nil {
-		return nil, err
+	if page < 0 || page >= len(e.pages) {
+		return nil, fmt.Errorf("page index %d out of range", page)
 	}
-	return append([]Template{}, p.Template...), nil
+	if e.source != nil {
+		if src := e.source.pages[e.pages[page].ID]; src != nil && src.original == nil {
+			header, err := e.source.reader.readPageHeaderContext(context.Background(), src.ref)
+			if err != nil {
+				return nil, err
+			}
+			return append([]Template{}, header.Template...), nil
+		}
+	}
+	return append([]Template{}, e.pages[page].Template...), nil
 }
 
 // TemplateReferences 返回当前文档及所选版本全部普通页面的模板引用副本，不包含模板页自身引用
 // 清单按页面索引及页内引用文件顺序排列，无引用时返回空切片，读取失败时不返回部分结果
 // 返回: []TemplateReference 引用定位及绑定层次清单, error 页面读取错误
 func (e *Editor) TemplateReferences() ([]TemplateReference, error) {
+	ctx := context.Background()
+	if e.source != nil {
+		pending := make([]Page, 0)
+		for i := range e.pages {
+			if src := e.source.pages[e.pages[i].ID]; src != nil && src.original == nil {
+				pending = append(pending, src.ref)
+			}
+		}
+		if len(pending) != 0 {
+			if err := e.source.reader.preloadPageHeadersContext(ctx, pending); err != nil {
+				return nil, err
+			}
+		}
+	}
 	result := []TemplateReference{}
 	for i := range e.pages {
-		refs, err := e.PageTemplates(i)
-		if err != nil {
-			return nil, err
+		var refs []Template
+		if e.source != nil {
+			if src := e.source.pages[e.pages[i].ID]; src != nil && src.original == nil {
+				header, err := e.source.reader.readPageHeaderContext(ctx, src.ref)
+				if err != nil {
+					return nil, err
+				}
+				refs = header.Template
+			} else {
+				refs = e.pages[i].Template
+			}
+		} else {
+			refs = e.pages[i].Template
 		}
 		for _, ref := range refs {
 			result = append(result, TemplateReference{PageIndex: i, PageID: e.pages[i].ID, Template: ref})
@@ -171,7 +244,7 @@ func (e *Editor) CreateTemplateFromPage(page int, name, zOrder string) (string, 
 			return err
 		}
 		defer r.Close()
-		doc, err := r.Doc()
+		doc, err := r.docInternal()
 		if err != nil {
 			return err
 		}
@@ -232,7 +305,10 @@ func (e *Editor) CreateTemplateFromPage(page int, name, zOrder string) (string, 
 		if err != nil {
 			return err
 		}
-		id = e.nextID()
+		id, err = e.nextID()
+		if err != nil {
+			return err
+		}
 		location := packageAvailableName(r, nil, path.Join(path.Dir(source), "Template_"+id+".xml"))
 		document, err := r.readFile(r.documentRoot)
 		if err != nil {
@@ -352,12 +428,16 @@ func (e *Editor) ReplaceTemplateFromPage(id string, page int) error {
 // 返回: error 标识、被引用或结构错误
 func (e *Editor) DeleteTemplate(id string) error {
 	return e.editTemplateDefinition(id, func(r *Reader, data []byte, node *editorXML) ([]byte, error) {
-		doc, err := r.Doc()
+		ctx := context.Background()
+		doc, err := r.docInternal()
 		if err != nil {
 			return nil, err
 		}
-		for i := range doc.Pages.Page {
-			page, err := r.PageContentByIndex(i)
+		if err := r.preloadPageHeadersContext(ctx, doc.Pages.Page); err != nil {
+			return nil, err
+		}
+		for i, item := range doc.Pages.Page {
+			page, err := r.readPageHeaderContext(ctx, item)
 			if err != nil {
 				return nil, err
 			}
@@ -374,7 +454,7 @@ func (e *Editor) DeleteTemplate(id string) error {
 // Templates 直接返回当前文档及版本的模板清单，不创建编辑器，省略的ZOrder返回Background
 // 返回: []TemplatePage 独立模板定义副本, error 文档读取错误
 func (r *Reader) Templates() ([]TemplatePage, error) {
-	doc, err := r.Doc()
+	doc, err := r.docInternal()
 	if err != nil {
 		return nil, err
 	}
@@ -389,59 +469,23 @@ func (r *Reader) Templates() ([]TemplatePage, error) {
 // 返回独立副本，按页面索引及页内引用文件顺序排列；无引用时返回空切片，读取失败时不返回部分结果
 // 返回: []TemplateReference 引用定位及绑定层次清单, error 文档或页面读取错误
 func (r *Reader) TemplateReferences() ([]TemplateReference, error) {
-	doc, err := r.Doc()
+	ctx := context.Background()
+	doc, err := r.docInternal()
 	if err != nil {
+		return nil, err
+	}
+	if err := r.preloadPageHeadersContext(ctx, doc.Pages.Page); err != nil {
 		return nil, err
 	}
 	result := []TemplateReference{}
 	for i, item := range doc.Pages.Page {
-		page, err := r.PageContentByIndex(i)
+		page, err := r.readPageHeaderContext(ctx, item)
 		if err != nil {
 			return nil, err
 		}
 		for _, ref := range page.Template {
 			result = append(result, TemplateReference{PageIndex: i, PageID: item.ID, Template: ref})
 		}
-	}
-	return result, nil
-}
-
-// editorTemplateOrder 将省略的模板默认层次规范化为Background
-// 入参: value 原始层次
-// 返回: string 有效默认层次
-func editorTemplateOrder(value string) string {
-	if value == "" {
-		return "Background"
-	}
-	return value
-}
-
-// validEditorTemplateOrder 校验模板前景背景枚举及未指定状态
-// 入参: value 层次值
-// 返回: bool 是否有效
-func validEditorTemplateOrder(value string) bool {
-	return value == "" || value == "Background" || value == "Foreground"
-}
-
-// editorTemplateDefinition 查找当前阅读器中的唯一模板定义，拒绝缺失及歧义标识
-// 入参: reader 当前阅读器, id 模板标识
-// 返回: TemplatePage 定义副本, error 文档或标识错误
-func editorTemplateDefinition(reader *Reader, id string) (TemplatePage, error) {
-	doc, err := reader.Doc()
-	if err != nil {
-		return TemplatePage{}, err
-	}
-	var result TemplatePage
-	for _, item := range doc.CommonData.TemplatePage {
-		if sameResourceID(item.ID, id) {
-			if result.ID != "" {
-				return TemplatePage{}, fmt.Errorf("ambiguous template ID %q", id)
-			}
-			result = item
-		}
-	}
-	if result.ID == "" {
-		return result, fmt.Errorf("template %q not found", id)
 	}
 	return result, nil
 }

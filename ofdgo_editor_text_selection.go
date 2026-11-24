@@ -89,6 +89,58 @@ type TextSelectionPreview struct {
 	analysis  TextSelectionAnalysis
 }
 
+// selectionAfterTextEdit 计算删除及重排后的选中位置，不保留旧修订绑定
+// 入参: analysis 原选区, parts 更新项, reflow 是否合并为富文本
+// 返回: TextSelection 提交后可用于重新枚举的选择
+func selectionAfterTextEdit(analysis TextSelectionAnalysis, parts []TextSelectionPart, reflow bool) TextSelection {
+	result := TextSelection{Root: analysis.Selection.Root}
+	var deleted []int
+	if reflow {
+		for _, part := range analysis.Parts[1:] {
+			deleted = append(deleted, part.Index)
+		}
+		parts = analysis.Parts[:1]
+	} else {
+		for _, part := range parts {
+			if part.Deleted {
+				deleted = append(deleted, part.Index)
+			}
+		}
+	}
+	slices.Sort(deleted)
+	deleted = slices.Compact(deleted)
+	for _, part := range parts {
+		if part.Deleted {
+			continue
+		}
+		if result.Root == nil {
+			result.IDs = append(result.IDs, part.ID)
+			continue
+		}
+		removed, _ := slices.BinarySearch(deleted, part.Index)
+		result.Indexes = append(result.Indexes, part.Index-removed)
+	}
+	return result
+}
+
+// selectionUpdatedText 仅更新请求字段，保留源对象继承样式与排版状态
+// 入参: part 预览项, edit 编辑参数
+// 返回: TextObject 可提交的原始对象
+func selectionUpdatedText(part TextSelectionPart, edit TextSelectionEdit) TextObject {
+	next := cloneEditorData(part.raw)
+	next.TextCode, next.CGTransform, next.layout = part.TextObject.TextCode, part.TextObject.CGTransform, part.TextObject.layout
+	if edit.Font != "" {
+		next.Font = part.TextObject.Font
+	}
+	if edit.Size != 0 {
+		next.Size = part.TextObject.Size
+	}
+	if edit.Color != "" {
+		next.FillColor = part.TextObject.FillColor
+	}
+	return next
+}
+
 // AnalyzeTextSelection 分析同一容器内的横排文字，拒绝重叠及无法可靠映射的布局
 // 入参: page 页面索引, selection 文字选区
 // 返回: TextSelectionAnalysis 阅读顺序与能力, error 选择或布局错误
@@ -727,58 +779,6 @@ func (e *Editor) prepareTextSelectionEdit(edit *TextSelectionEdit) error {
 	return nil
 }
 
-// selectionAfterTextEdit 计算删除及重排后的选中位置，不保留旧修订绑定
-// 入参: analysis 原选区, parts 更新项, reflow 是否合并为富文本
-// 返回: TextSelection 提交后可用于重新枚举的选择
-func selectionAfterTextEdit(analysis TextSelectionAnalysis, parts []TextSelectionPart, reflow bool) TextSelection {
-	result := TextSelection{Root: analysis.Selection.Root}
-	var deleted []int
-	if reflow {
-		for _, part := range analysis.Parts[1:] {
-			deleted = append(deleted, part.Index)
-		}
-		parts = analysis.Parts[:1]
-	} else {
-		for _, part := range parts {
-			if part.Deleted {
-				deleted = append(deleted, part.Index)
-			}
-		}
-	}
-	slices.Sort(deleted)
-	deleted = slices.Compact(deleted)
-	for _, part := range parts {
-		if part.Deleted {
-			continue
-		}
-		if result.Root == nil {
-			result.IDs = append(result.IDs, part.ID)
-			continue
-		}
-		removed, _ := slices.BinarySearch(deleted, part.Index)
-		result.Indexes = append(result.Indexes, part.Index-removed)
-	}
-	return result
-}
-
-// selectionUpdatedText 仅更新请求字段，保留源对象继承样式与排版状态
-// 入参: part 预览项, edit 编辑参数
-// 返回: TextObject 可提交的原始对象
-func selectionUpdatedText(part TextSelectionPart, edit TextSelectionEdit) TextObject {
-	next := cloneEditorData(part.raw)
-	next.TextCode, next.CGTransform, next.layout = part.TextObject.TextCode, part.TextObject.CGTransform, part.TextObject.layout
-	if edit.Font != "" {
-		next.Font = part.TextObject.Font
-	}
-	if edit.Size != 0 {
-		next.Size = part.TextObject.Size
-	}
-	if edit.Color != "" {
-		next.FillColor = part.TextObject.FillColor
-	}
-	return next
-}
-
 // reflowTextSelection 将富文本排版结果替换至首个源位置，其他源成员一并删除
 // 入参: page 页面索引, selection 原选择, edit 编辑参数, preview 布局预览
 // 返回: error 排版或提交错误
@@ -805,7 +805,7 @@ func (e *Editor) reflowTextSelection(page int, selection TextSelection, edit Tex
 	}
 	first := preview.analysis.Parts[0]
 	if selection.Root == nil {
-		object.CompositeGraphicUnit.ID = first.ID
+		object.CompositeObject.ID = first.ID
 		if err := e.updateObjects(page, []GraphicObject{object}, true); err != nil {
 			return err
 		}
@@ -831,7 +831,7 @@ func (e *Editor) reflowTextSelection(page int, selection TextSelection, edit Tex
 				return fmt.Errorf("invalid composite parent transform")
 			}
 			local := transformEditorMatrix(object, inverse)
-			local.CompositeGraphicUnit.ID = node.object.TextObject.ID
+			local.CompositeObject.ID = node.object.TextObject.ID
 			if !node.boundaryInCTM {
 				local = compositeBoundary(local, node.parent, false)
 			}

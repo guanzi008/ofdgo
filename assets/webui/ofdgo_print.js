@@ -1,8 +1,11 @@
+const BROWSER_PRINT_DESTROYED_TIMEOUT_MS = 60000;
 let printQueue = Promise.resolve();
+let printInstanceSequence = 0;
 
 export class PrintDialog {
 	constructor(options) {
 		Object.assign(this, options);
+		this.instanceId = String(++printInstanceSequence);
 		const panel = this.panel || document.querySelector("#printPanel");
 		this.el = Object.fromEntries(["Panel", "Form", "Settings", "Printer", "Properties", "Copies", "Collation", "Duplex", "BackReverse", "BackRotate", "Contents", "Scope", "Range", "Parity", "Reverse", "Mode", "Paper", "Width", "Height", "Orientation", "Scaling", "Scale", "MarginTop", "MarginRight", "MarginBottom", "MarginLeft", "Grid", "PageOrder", "Gap", "Binding", "BookletSheets", "SheetFrom", "SheetTo", "Overlap", "Sides", "Rotate", "Grayscale", "Borders", "CropMarks", "Raster", "DPI", "DPIValue", "TileOnlyLarge", "Labels", "Preview", "Previous", "Next", "PreviewNumber", "PageControl", "PageCount", "Status", "Spinner", "ProgressTrack", "ProgressBar", "Cancel", "Submit"].map(name => [name, name === "Panel" ? panel : panel.querySelector(`#print${name}`)]));
 		this.printerOptions = this.el.Printer.innerHTML;
@@ -35,6 +38,7 @@ export class PrintDialog {
 		this.observer.observe(this.el.Preview);
 		this.printMedia = typeof window.matchMedia === "function" ? window.matchMedia("print") : null;
 		this.browserPrintTimer = 0;
+		this.destroyedPrintTimer = 0;
 		this.browserPrintFallback = () => {
 			if (this.waiting !== "browser") return;
 			clearTimeout(this.browserPrintTimer);
@@ -52,8 +56,13 @@ export class PrintDialog {
 		this.beforePrint = () => {
 			if (!this.context || !this.el.Panel.open) return;
 			const root = document.querySelector("#ofdgoPrintDocument");
-			if (!root?.children.length) {
+			const owned = Boolean(this.releasePrint && root?.dataset.printOwner === this.instanceId);
+			if (!owned || !root.children.length) {
 				this.root = root || this.createRoot();
+				if (this.root.dataset.printOwner && !owned) {
+					for (const img of this.root.querySelectorAll("img")) img.src = "";
+				}
+				delete this.root.dataset.printOwner;
 				this.root.textContent = "请先在OFDGo中打开打印预览，准备完整文档后打印。";
 			}
 		};
@@ -62,7 +71,7 @@ export class PrintDialog {
 	}
 
 	open(context) {
-		if (this.context) return;
+		if (this.context || this.waiting || this.destroyed) return;
 		const saved = this.settings.get(context.tab)?.get(context.document);
 		this.context = context;
 		this.restoring = true;
@@ -352,11 +361,17 @@ export class PrintDialog {
 			if (!this.current(sequence)) return;
 			this.prepared = true;
 			this.layout = layout;
-			if (this.isDevice()) this.el.Copies.max = Math.min(999, this.profile.maxCopies || 999, layout.copiesLimit > 0 ? layout.copiesLimit : 999);
+			if (this.isDevice()) this.el.Copies.max = Math.min(999, this.profile.maxCopies || 999);
 			await this.preview(Math.min(this.side, layout.sides.length - 1));
 			if (!this.current(sequence) || this.layout !== layout) return;
 			this.job = {deviceOptions, fingerprint:profile?.fingerprint, manual:this.manual(), sides:options.sides, backContent:layout.backContent};
-			this.status();
+			const permissions = context.permissions;
+			const permissionNotice = permissions?.declared && (!permissions.print || permissions.copies === 0)
+				? "文件声明禁止打印，仍可打印"
+				: permissions?.declared && permissions.copies > 0
+					? `文件声明限印 ${permissions.copies} 份，仍可自由设置`
+					: "";
+			this.status(permissionNotice);
 			if (layout.sides.some(side => side.placements.some(placement => placement.clipped))) this.status("内容超出可打印区域");
 			if (this.manual() && options.sides === "back" && !layout.backContent) this.status("背面为空白");
 		} catch (error) {
@@ -462,9 +477,19 @@ export class PrintDialog {
 	clearBrowserPrintWatch() {
 		clearTimeout(this.browserPrintTimer);
 		this.browserPrintTimer = 0;
+		clearTimeout(this.destroyedPrintTimer);
+		this.destroyedPrintTimer = 0;
 		window.removeEventListener("focus", this.browserPrintFallback);
 		document.removeEventListener("visibilitychange", this.browserPrintVisibility);
 		this.printMedia?.removeEventListener?.("change", this.browserPrintMediaChange);
+	}
+
+	armDestroyedPrintTimeout() {
+		clearTimeout(this.destroyedPrintTimer);
+		this.destroyedPrintTimer = setTimeout(() => {
+			this.destroyedPrintTimer = 0;
+			if (this.destroyed && (this.waiting === "browser" || this.waiting === "native")) this.finishPrint();
+		}, BROWSER_PRINT_DESTROYED_TIMEOUT_MS);
 	}
 
 	async print() {
@@ -486,6 +511,7 @@ export class PrintDialog {
 			this.root = document.querySelector("#ofdgoPrintDocument") || this.createRoot();
 			for (const img of this.root.querySelectorAll("img")) img.src = "";
 			this.root.replaceChildren();
+			this.root.dataset.printOwner = this.instanceId;
 			const style = document.createElement("style");
 			style.textContent = this.layout.sides.map((side, i) => `@page ofdgoPrint${i}{size:${side.width}mm ${side.height}mm;margin:0}`).join("");
 			this.root.append(style);
@@ -525,17 +551,18 @@ export class PrintDialog {
 				document.title = this.printTitle = context.name;
 			}
 			this.waiting = this.nativeHost ? "native" : "browser";
+			this.nativePrintController = this.nativeHost ? new AbortController() : null;
 			this.controls();
 			this.status(job.deviceOptions ? "正在提交打印" : "正在打开打印", true);
 			if (job.deviceOptions) {
-				const result = await this.nativeHost.call("print", {...job.deviceOptions, fingerprint:job.fingerprint});
-				this.finishPrint(result?.submitted ? "打印已提交" : "打印作业未被接受");
+				const result = await this.nativeHost.call("print", {...job.deviceOptions, fingerprint:job.fingerprint}, this.nativePrintController.signal);
+				if (this.releasePrint === release) this.finishPrint(result?.submitted ? "打印已提交" : "打印作业未被接受");
 				if (this.current(sequence) && result?.submitted && job.manual && job.sides === "front") {
 					if (job.backContent) { this.el.Sides.value = "back"; this.schedule(); }
 					else this.status("背面为空白");
 				}
 			} else if (this.nativeHost) {
-				const capabilities = await this.nativeHost.call("print.capabilities", {});
+				const capabilities = await this.nativeHost.call("print.capabilities", {}, this.nativePrintController.signal);
 				if (!this.current(sequence)) throw new DOMException("打印已取消", "AbortError");
 				if (!capabilities.systemDialog) throw new Error("当前运行时不支持系统打印");
 				if (!capabilities.dialogCompletion) {
@@ -543,8 +570,8 @@ export class PrintDialog {
 					this.controls();
 					this.watchBrowserPrint();
 				}
-				await this.nativeHost.call("print.dialog", {kind:"system"});
-				if (capabilities.dialogCompletion) this.finishPrint("打印窗口已关闭");
+				await this.nativeHost.call("print.dialog", {kind:"system"}, this.nativePrintController.signal);
+				if (capabilities.dialogCompletion && this.releasePrint === release) this.finishPrint("打印窗口已关闭");
 			} else if (typeof window.print === "function") {
 				this.watchBrowserPrint();
 				window.print();
@@ -572,22 +599,27 @@ export class PrintDialog {
 
 	finishPrint(message = "") {
 		this.clearBrowserPrintWatch();
+		this.nativePrintController = null;
 		if (this.previousTitle !== undefined) {
 			if (document.title === this.printTitle) document.title = this.previousTitle;
 			delete this.previousTitle;
 		}
-		if (this.releasePrint && this.root) {
+		if (this.releasePrint && this.root && this.root.dataset.printOwner === this.instanceId) {
 			for (const img of this.root.querySelectorAll("img")) img.src = "";
 			this.root.replaceChildren();
+			delete this.root.dataset.printOwner;
 		}
 		for (const url of this.urls) URL.revokeObjectURL(url);
 		this.urls = [];
 		this.releasePrint?.();
 		this.releasePrint = null;
-		this.status(message);
 		this.waiting = this.running = false;
+		if (this.destroyed) {
+			window.removeEventListener("afterprint", this.afterPrint);
+			return;
+		}
+		this.status(message);
 		this.controls();
-		if (this.destroyed) window.removeEventListener("afterprint", this.afterPrint);
 	}
 
 	async pdf() {
@@ -630,10 +662,18 @@ export class PrintDialog {
 
 	destroy() {
 		this.destroyed = true;
-		this.clearBrowserPrintWatch();
+		if (this.waiting !== "browser") this.clearBrowserPrintWatch();
 		this.close();
 		this.observer.disconnect();
 		window.removeEventListener("beforeprint", this.beforePrint);
-		if (!this.waiting) window.removeEventListener("afterprint", this.afterPrint);
+		if (this.waiting === "native") {
+			this.nativePrintController?.abort();
+			this.armDestroyedPrintTimeout();
+			window.removeEventListener("afterprint", this.afterPrint);
+		} else if (this.waiting === "browser") {
+			this.armDestroyedPrintTimeout();
+		} else {
+			window.removeEventListener("afterprint", this.afterPrint);
+		}
 	}
 }

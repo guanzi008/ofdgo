@@ -30,6 +30,71 @@ type pdfCompositePattern struct {
 	box             Box
 	transferChecked bool
 	transferOpaque  bool
+	denseFold       *pdfDensePatternFold
+}
+
+// pdfDensePatternFold 缓存高密度平铺图案的单周期折叠像素
+type pdfDensePatternFold struct {
+	space    *pdfgo.ColorSpace
+	softMask bool
+	hasChan  bool
+	dpi      float64
+	scaleX   float64
+	scaleY   float64
+	width    int
+	height   int
+	pixels   []pdfCompositePixel
+	channels []uint8
+}
+
+// pdfCompositeOverPixel 对两个透明底合成像素执行标准源覆盖混合
+// 入参: dst 目标像素, src 源像素, components 颜色分量数
+func pdfCompositeOverPixel(dst *pdfCompositePixel, src pdfCompositePixel, components int) {
+	if src.Shape == 0 && src.Alpha == 0 {
+		return
+	}
+	if src.Alpha >= 1 {
+		dst.Values, dst.Alpha = src.Values, 1
+	} else if src.Alpha > 0 {
+		alpha := src.Alpha + dst.Alpha*(1-src.Alpha)
+		if alpha > 0 {
+			for i := 0; i < components; i++ {
+				dst.Values[i] = math.Max(0, math.Min(1, (src.Values[i]*src.Alpha+dst.Values[i]*dst.Alpha*(1-src.Alpha))/alpha))
+			}
+		}
+		dst.Alpha = alpha
+	}
+	dst.Effect += src.Effect * (1 - dst.Effect)
+	dst.Shape += src.Shape * (1 - dst.Shape)
+}
+
+// pdfShadingSourceKey 区分图案的使用几何及填充或描边
+type pdfShadingSourceKey struct {
+	pattern  *pdfgo.ShadingPattern
+	geometry pdfCompositeKey
+}
+
+// pdfCompositePatternCell 合并互不重叠单元的覆盖贡献，避免相邻抗锯齿边缘重复混合
+// 入参: target 图案累计结果, initial 原始背景, source 单元结果, disjoint 单元边界是否互不重叠
+func pdfCompositePatternCell(target *pdfCompositePixel, initial, source pdfCompositePixel, disjoint bool) {
+	if source.Shape == 0 {
+		return
+	}
+	if disjoint {
+		alpha := math.Max(0, math.Min(1, target.Alpha+source.Alpha-initial.Alpha))
+		if alpha != 0 {
+			for i := range target.Values {
+				target.Values[i] = (target.Values[i]*target.Alpha + source.Values[i]*source.Alpha - initial.Values[i]*initial.Alpha) / alpha
+			}
+		}
+		target.Alpha = alpha
+		target.Effect = math.Min(1, target.Effect+source.Effect)
+		target.Shape = math.Min(1, target.Shape+source.Shape)
+	} else {
+		target.Values, target.Alpha = source.Values, source.Alpha
+		target.Effect += source.Effect * (1 - target.Effect)
+		target.Shape += source.Shape * (1 - target.Shape)
+	}
 }
 
 // opaqueTransfer 复用图案不透明性检查，图案内部函数不提前作用于源颜色
@@ -49,12 +114,6 @@ func (p *pdfCompositePattern) opaqueTransfer() (bool, error) {
 		p.transferChecked, p.transferOpaque = true, true
 	}
 	return p.transferOpaque, nil
-}
-
-// pdfShadingSourceKey 区分图案的使用几何及填充或描边
-type pdfShadingSourceKey struct {
-	pattern  *pdfgo.ShadingPattern
-	geometry pdfCompositeKey
 }
 
 // tiling 将图案作为非隔离组绘制，保留背景贡献及单元间隙
@@ -78,11 +137,22 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 	})
 	left, right := math.Ceil((area.X-source.BBox.XMax)/xstep), math.Floor((area.X+area.W-source.BBox.XMin)/xstep)
 	top, bottom := math.Ceil((area.Y-source.BBox.YMax)/ystep), math.Floor((area.Y+area.H-source.BBox.YMin)/ystep)
+	countX, countY := right-left+1, bottom-top+1
+	if finite(countX) && finite(countY) && (countX <= 0 || countY <= 0) {
+		result := c.acquirePixels(len(backdrop))
+		clear(result)
+		return result, nil
+	}
 	limit := float64(int(^uint(0) >> 1))
+	dense := !finite(countX) || !finite(countY) || countX*countY > pdfPatternDenseFoldLimit
 	for _, value := range []float64{left, right, top, bottom} {
 		if !finite(value) || value <= -limit || value >= limit {
-			return nil, fmt.Errorf("PDF tiling pattern instance range overflow")
+			dense = true
+			break
 		}
+	}
+	if dense {
+		return c.tilingDense(source, pattern, matrix, inverse, backdrop, space, channels)
 	}
 	result := c.acquirePixels(len(backdrop))
 	complete := false
@@ -109,8 +179,16 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 	disjoint := source.BBox.XMax-source.BBox.XMin <= xstep && source.BBox.YMax-source.BBox.YMin <= ystep
 	pixelStep := 25.4 / c.importer.rasterDPI
 	localInverse, _ := pattern.local.matrix.Inverse()
-	for row := int(top); row <= int(bottom); row++ {
-		for column := int(left); column <= int(right); column++ {
+	rowStart, rowEnd, rowStep := int(top), int(bottom), 1
+	if source.YStep < 0 {
+		rowStart, rowEnd, rowStep = int(bottom), int(top), -1
+	}
+	colStart, colEnd, colStep := int(left), int(right), 1
+	if source.XStep < 0 {
+		colStart, colEnd, colStep = int(right), int(left), -1
+	}
+	for row := rowStart; row != rowEnd+rowStep; row += rowStep {
+		for column := colStart; column != colEnd+colStep; column += colStep {
 			if err := c.importer.ctx.Err(); err != nil {
 				return nil, err
 			}
@@ -191,27 +269,308 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 	return result, nil
 }
 
-// pdfCompositePatternCell 合并互不重叠单元的覆盖贡献，避免相邻抗锯齿边缘重复混合
-// 入参: target 图案累计结果, initial 原始背景, source 单元结果, disjoint 单元边界是否互不重叠
-func pdfCompositePatternCell(target *pdfCompositePixel, initial, source pdfCompositePixel, disjoint bool) {
-	if source.Shape == 0 {
-		return
+// tilingNodesNeedBackdrop 检查高密度平铺单元内是否存在依赖外部背景的非Normal混合
+// 入参: nodes 平铺合成节点列表
+// 返回: bool 是否依赖外部背景
+func tilingNodesNeedBackdrop(nodes []pdfCompositeNode) bool {
+	for _, node := range nodes {
+		if g := node.group; g != nil {
+			if !codecpdf.NormalBlend(g.BlendMode) {
+				return true
+			}
+			if !g.Isolated && tilingNodesNeedBackdrop(node.children) {
+				return true
+			}
+			continue
+		}
+		style, _, _ := node.style()
+		if !codecpdf.NormalBlend(style.BlendMode) {
+			return true
+		}
 	}
-	if disjoint {
-		alpha := math.Max(0, math.Min(1, target.Alpha+source.Alpha-initial.Alpha))
-		if alpha != 0 {
-			for i := range target.Values {
-				target.Values[i] = (target.Values[i]*target.Alpha + source.Values[i]*source.Alpha - initial.Values[i]*initial.Alpha) / alpha
+	return false
+}
+
+// tilingDense 对超密集或亚像素步距平铺图案执行单周期折叠并在当前块查表填充
+// 入参: source 原图案, pattern 预解析单元, matrix 图案到页面矩阵, inverse 页面到图案逆矩阵, backdrop 外部背景像素, space 混合空间, channels 可选源通道输出
+// 返回: []pdfCompositePixel 源颜色及覆盖, error 绘制或取消错误
+func (c *pdfCompositor) tilingDense(source *pdfgo.TilingPattern, pattern *pdfCompositePattern, matrix, inverse pdfgo.Matrix, backdrop []pdfCompositePixel, space *pdfgo.ColorSpace, channels []uint8) ([]pdfCompositePixel, error) {
+	count := len(backdrop)
+	b := source.BBox
+	bw, bh := b.XMax-b.XMin, b.YMax-b.YMin
+	xstep, ystep := math.Abs(source.XStep), math.Abs(source.YStep)
+	if bw <= 0 || bh <= 0 || xstep <= 0 || ystep <= 0 {
+		result := c.acquirePixels(count)
+		clear(result)
+		return result, nil
+	}
+	pixelStep := 25.4 / c.importer.rasterDPI
+	const maxDim = 512.0
+	spanW, spanH := math.Max(bw, xstep), math.Max(bh, ystep)
+	sx := math.Hypot(matrix[0], matrix[1]) / pixelStep
+	sy := math.Hypot(matrix[2], matrix[3]) / pixelStep
+	if !finite(sx) || sx <= 0 {
+		sx = 1
+	}
+	if !finite(sy) || sy <= 0 {
+		sy = 1
+	}
+	if spanW*sx > maxDim {
+		sx = maxDim / spanW
+	}
+	if spanH*sy > maxDim {
+		sy = maxDim / spanH
+	}
+	components := space.Components()
+	buildFold := func(initBg *pdfCompositePixel) (*pdfDensePatternFold, error) {
+		srcW := max(1, int(math.Ceil(spanW*sx)))
+		srcH := max(1, int(math.Ceil(spanH*sy)))
+		cellW, cellH := float64(srcW)*pixelStep, float64(srcH)*pixelStep
+		local := pattern.local
+		local.matrix = pdfgo.Matrix{cellW / spanW, 0, 0, -cellH / spanH, -b.XMin * cellW / spanW, b.YMax * cellH / spanH}
+		local.pageWidth, local.pageHeight = cellW, cellH
+		local.compositeCache = nil
+		localInverse, ok := local.matrix.Inverse()
+		if !ok {
+			return nil, fmt.Errorf("invalid PDF dense pattern matrix")
+		}
+		srcPixels := make([]pdfCompositePixel, srcW*srcH)
+		if initBg != nil {
+			bg := pdfCompositePixel{Values: initBg.Values, Alpha: initBg.Alpha}
+			for i := range srcPixels {
+				srcPixels[i] = bg
 			}
 		}
-		target.Alpha = alpha
-		target.Effect = math.Min(1, target.Effect+source.Effect)
-		target.Shape = math.Min(1, target.Shape+source.Shape)
-	} else {
-		target.Values, target.Alpha = source.Values, source.Alpha
-		target.Effect += source.Effect * (1 - target.Effect)
-		target.Shape += source.Shape * (1 - target.Shape)
+		var srcChannels []uint8
+		if channels != nil {
+			srcChannels = make([]uint8, srcW*srcH)
+		}
+		cell := pdfCompositor{importer: &local, box: Box{W: cellW, H: cellH}, width: srcW, height: srcH, inverse: localInverse, cache: local.compositingCache(), scratch: &pdfCompositeScratch{}, origins: c.origins, masks: map[*pdfgo.SoftMask][]float64{}, softMask: c.softMask, channels: srcChannels}
+		err := cell.draw(pattern.nodes, srcPixels, space)
+		cell.releaseMasks()
+		if err != nil {
+			return nil, err
+		}
+		if initBg != nil {
+			for i := range srcPixels {
+				pixel := &srcPixels[i]
+				if pixel.Effect != 0 {
+					for j := range components {
+						pixel.Values[j] = math.Max(0, math.Min(1, (pixel.Values[j]*pixel.Alpha-initBg.Values[j]*initBg.Alpha*(1-pixel.Effect))/pixel.Effect))
+					}
+				}
+				pixel.Alpha = pixel.Effect
+			}
+		} else {
+			for i := range srcPixels {
+				srcPixels[i].Alpha = srcPixels[i].Effect
+			}
+		}
+		dx := max(1, min(srcW, int(math.Round(xstep*float64(srcW)/spanW))))
+		dy := max(1, min(srcH, int(math.Round(ystep*float64(srcH)/spanH))))
+		band := srcPixels
+		bandChannels := srcChannels
+		if bh > ystep && dy < srcH {
+			band = make([]pdfCompositePixel, srcW*dy)
+			if srcChannels != nil {
+				bandChannels = make([]uint8, srcW*dy)
+			}
+			rowCount := (srcH + dy - 1) / dy
+			start, end, step := 0, rowCount-1, 1
+			if source.YStep < 0 {
+				start, end, step = rowCount-1, 0, -1
+			}
+			for k := start; k != end+step; k += step {
+				if err := c.importer.ctx.Err(); err != nil {
+					return nil, err
+				}
+				y0 := k * dy
+				for y := 0; y < dy && y0+y < srcH; y++ {
+					for x := range srcW {
+						si, di := (y0+y)*srcW+x, y*srcW+x
+						pdfCompositeOverPixel(&band[di], srcPixels[si], components)
+						if bandChannels != nil && srcPixels[si].Shape != 0 {
+							bandChannels[di] = srcChannels[si]
+						}
+					}
+				}
+			}
+		}
+		folded := band
+		foldedChannels := bandChannels
+		if bw > xstep && dx < srcW {
+			folded = make([]pdfCompositePixel, dx*dy)
+			if bandChannels != nil {
+				foldedChannels = make([]uint8, dx*dy)
+			}
+			colCount := (srcW + dx - 1) / dx
+			start, end, step := colCount-1, 0, -1
+			if source.XStep < 0 {
+				start, end, step = 0, colCount-1, 1
+			}
+			for k := start; k != end+step; k += step {
+				if err := c.importer.ctx.Err(); err != nil {
+					return nil, err
+				}
+				x0 := k * dx
+				for y := range dy {
+					for x := 0; x < dx && x0+x < srcW; x++ {
+						si, di := y*srcW+x0+x, y*dx+x
+						pdfCompositeOverPixel(&folded[di], band[si], components)
+						if foldedChannels != nil && band[si].Shape != 0 {
+							foldedChannels[di] = bandChannels[si]
+						}
+					}
+				}
+			}
+		} else if srcW != dx || len(folded) != dx*dy {
+			cropped := make([]pdfCompositePixel, dx*dy)
+			var croppedChannels []uint8
+			if foldedChannels != nil {
+				croppedChannels = make([]uint8, dx*dy)
+			}
+			for y := range dy {
+				for x := range dx {
+					cropped[y*dx+x] = folded[y*srcW+x]
+					if croppedChannels != nil {
+						croppedChannels[y*dx+x] = foldedChannels[y*srcW+x]
+					}
+				}
+			}
+			folded, foldedChannels = cropped, croppedChannels
+		}
+		return &pdfDensePatternFold{space: space, softMask: c.softMask, hasChan: channels != nil, dpi: c.importer.rasterDPI, scaleX: sx, scaleY: sy, width: dx, height: dy, pixels: folded, channels: foldedChannels}, nil
 	}
+	if tilingNodesNeedBackdrop(pattern.nodes) {
+		type bgExactKey struct {
+			values [4]float64
+			alpha  float64
+		}
+		exactFolds := make(map[bgExactKey]*pdfDensePatternFold)
+		quantized := false
+		for i := range count {
+			p := backdrop[i]
+			k := bgExactKey{values: p.Values, alpha: p.Alpha}
+			if _, ok := exactFolds[k]; !ok {
+				if len(exactFolds) >= 32 {
+					quantized = true
+					break
+				}
+				exactFolds[k] = nil
+			}
+		}
+		type bgQuantKey struct {
+			c [5]uint8
+		}
+		quantKey := func(p pdfCompositePixel) (bgQuantKey, pdfCompositePixel) {
+			var k bgQuantKey
+			var rep pdfCompositePixel
+			for j := range components {
+				q := uint8(math.Round(math.Max(0, math.Min(1, p.Values[j])) * 31))
+				k.c[j] = q
+				rep.Values[j] = float64(q) / 31
+			}
+			qa := uint8(math.Round(math.Max(0, math.Min(1, p.Alpha)) * 31))
+			k.c[4] = qa
+			rep.Alpha = float64(qa) / 31
+			return k, rep
+		}
+		var quantFolds map[bgQuantKey]*pdfDensePatternFold
+		if quantized {
+			quantFolds = make(map[bgQuantKey]*pdfDensePatternFold)
+		}
+		result := c.acquirePixels(count)
+		for y := range c.height {
+			if err := c.importer.ctx.Err(); err != nil {
+				c.releasePixels(result)
+				return nil, err
+			}
+			py := c.box.Y + (float64(y)+.5)*pixelStep
+			for x := range c.width {
+				index := y*c.width + x
+				bg := backdrop[index]
+				var fold *pdfDensePatternFold
+				var err error
+				if !quantized {
+					k := bgExactKey{values: bg.Values, alpha: bg.Alpha}
+					fold = exactFolds[k]
+					if fold == nil {
+						fold, err = buildFold(&bg)
+						if err != nil {
+							c.releasePixels(result)
+							return nil, err
+						}
+						exactFolds[k] = fold
+					}
+				} else {
+					qk, rep := quantKey(bg)
+					fold = quantFolds[qk]
+					if fold == nil {
+						fold, err = buildFold(&rep)
+						if err != nil {
+							c.releasePixels(result)
+							return nil, err
+						}
+						quantFolds[qk] = fold
+					}
+				}
+				pt := inverse.Apply(pdfgo.Point{X: c.box.X + (float64(x)+.5)*pixelStep, Y: py})
+				fx := math.Mod(pt.X-b.XMin, xstep)
+				if fx < 0 {
+					fx += xstep
+				}
+				fy := math.Mod(b.YMax-pt.Y, ystep)
+				if fy < 0 {
+					fy += ystep
+				}
+				tx := max(0, min(fold.width-1, int(fx/xstep*float64(fold.width))))
+				ty := max(0, min(fold.height-1, int(fy/ystep*float64(fold.height))))
+				fi := ty*fold.width + tx
+				result[index] = fold.pixels[fi]
+				if channels != nil && fold.pixels[fi].Shape != 0 {
+					channels[index] = fold.channels[fi]
+				}
+			}
+		}
+		return result, nil
+	}
+	fold := pattern.denseFold
+	if fold == nil || !fold.space.Equal(space) || fold.softMask != c.softMask || fold.dpi != c.importer.rasterDPI || fold.scaleX != sx || fold.scaleY != sy || channels != nil && !fold.hasChan {
+		var err error
+		fold, err = buildFold(nil)
+		if err != nil {
+			return nil, err
+		}
+		pattern.denseFold = fold
+	}
+	result := c.acquirePixels(count)
+	for y := range c.height {
+		if err := c.importer.ctx.Err(); err != nil {
+			c.releasePixels(result)
+			return nil, err
+		}
+		py := c.box.Y + (float64(y)+.5)*pixelStep
+		for x := range c.width {
+			pt := inverse.Apply(pdfgo.Point{X: c.box.X + (float64(x)+.5)*pixelStep, Y: py})
+			fx := math.Mod(pt.X-b.XMin, xstep)
+			if fx < 0 {
+				fx += xstep
+			}
+			fy := math.Mod(b.YMax-pt.Y, ystep)
+			if fy < 0 {
+				fy += ystep
+			}
+			tx := max(0, min(fold.width-1, int(fx/xstep*float64(fold.width))))
+			ty := max(0, min(fold.height-1, int(fy/ystep*float64(fold.height))))
+			index := y*c.width + x
+			fi := ty*fold.width + tx
+			result[index] = fold.pixels[fi]
+			if channels != nil && fold.pixels[fi].Shape != 0 {
+				channels[index] = fold.channels[fi]
+			}
+		}
+	}
+	return result, nil
 }
 
 // compositePattern 复用图案单元解析及几何上下文，供检查和局部合成共同使用
@@ -583,6 +942,10 @@ func (p *pdfImporter) halftone(style pdfgo.Style) error {
 	}
 	if !p.halftoneWarnings[h] {
 		p.halftoneWarnings[h] = true
+		if p.halftoneWarningMessages == nil {
+			p.halftoneWarningMessages = make(map[string]bool)
+		}
+		p.halftoneWarningMessages[message] = true
 		p.warning(pdfgo.Diagnostic{Message: message})
 	}
 	return nil
@@ -624,6 +987,11 @@ func (c *pdfCompositor) shadingPattern(pattern *pdfgo.ShadingPattern, node pdfCo
 	nodes, err := c.importer.shadingSources(pattern, node, outline)
 	if err != nil {
 		return nil, err
+	}
+	if len(nodes) == 0 {
+		result := c.acquirePixels(len(backdrop))
+		clear(result)
+		return result, nil
 	}
 	local := *c
 	local.transfers, local.shadingSource = nil, true
@@ -705,9 +1073,15 @@ func (p *pdfImporter) shadingSources(pattern *pdfgo.ShadingPattern, node pdfComp
 	if err != nil {
 		return nil, err
 	}
+	if len(nodes) == 0 {
+		return nil, nil
+	}
 	outer, _, _ := node.style()
 	sources := make([]pdfCompositeNode, 0, len(nodes[0].children))
 	for _, child := range nodes[0].children {
+		if child.path == nil {
+			continue
+		}
 		style := child.path.Style
 		style.LineWidth, style.Cap, style.Join, style.MiterLimit = outer.LineWidth, outer.Cap, outer.Join, outer.MiterLimit
 		style.Dash, style.DashPhase, style.StrokeAdjust = outer.Dash, outer.DashPhase, outer.StrokeAdjust

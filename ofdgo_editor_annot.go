@@ -16,9 +16,11 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"maps"
+	"math"
 	"path"
 	"strings"
 	"time"
@@ -35,6 +37,144 @@ type AnnotationSelection struct {
 	richText  map[int]*richTextSnapshot
 }
 
+// ImageStampOptions 描述标准图片图章注解的构造参数
+// Box为页面毫米区域，Angle为顺时针旋转角度，Alpha为nil时使用不透明默认值
+type ImageStampOptions struct {
+	ResourceID string
+	Box        Box
+	Angle      float64
+	Alpha      *int
+	Creator    string
+	Remark     string
+}
+
+// NewImageStampAnnotation 构造标准图片图章注解，统一计算外观Boundary、居中旋转CTM及透明度
+// 入参: options 图片图章参数
+// 返回: Annotation 可直接提交的图章注解, error 参数校验错误
+func NewImageStampAnnotation(options ImageStampOptions) (Annotation, error) {
+	if strings.TrimSpace(options.ResourceID) == "" {
+		return Annotation{}, fmt.Errorf("stamp requires an image resource ID")
+	}
+	if err := validateCreationBox(options.Box); err != nil {
+		return Annotation{}, err
+	}
+	if !finite(options.Angle) {
+		return Annotation{}, fmt.Errorf("stamp angle must be finite")
+	}
+	var alpha *int
+	if options.Alpha != nil {
+		if *options.Alpha < 0 || *options.Alpha > 255 {
+			return Annotation{}, fmt.Errorf("alpha must be between 0 and 255")
+		}
+		value := *options.Alpha
+		alpha = &value
+	}
+	ctm := Matrix{a: options.Box.W, d: options.Box.H}
+	if options.Angle != 0 {
+		rad := options.Angle * math.Pi / 180
+		cos, sin := math.Cos(rad), math.Sin(rad)
+		rot := Matrix{a: cos, b: sin, c: -sin, d: cos}
+		ctm = TranslationMatrix(options.Box.W/2, options.Box.H/2).Multiply(rot).Multiply(TranslationMatrix(-options.Box.W/2, -options.Box.H/2)).Multiply(ctm)
+	}
+	object := GraphicObject{
+		Type: "ImageObject",
+		ImageObject: ImageObject{
+			ResourceID: options.ResourceID,
+			Boundary:   editorBoxString(Box{W: options.Box.W, H: options.Box.H}),
+			CTM:        ctm.String(),
+			Alpha:      alpha,
+		},
+	}
+	return Annotation{
+		Type:    "Stamp",
+		Creator: options.Creator,
+		Remark:  options.Remark,
+		Appearance: &Appearance{
+			Boundary: editorBoxString(options.Box),
+			Objects:  []GraphicObject{object},
+		},
+	}, nil
+}
+
+// editorAnnotationDate 更新注解修改日期，采用标准xs:date格式
+// 入参: data 注解XML片段
+// 返回: []byte 新片段, error 错误信息
+func editorAnnotationDate(data []byte) ([]byte, error) {
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return nil, err
+	}
+	return editorXMLAttribute(data, root, "LastModDate", time.Now().Format("2006-01-02"))
+}
+
+// AddAnnotations 批量向指定页面新增标准注解并单次提交，支持多页共用单个注解或按页一一对应
+// 同一页面可重复出现，返回的新注解标识与pages一一对应，一次批量操作计入一条撤销记录
+// 入参: pages 目标页面索引列表, annotations 单个或与页码等长的注解列表
+// 返回: []string 新注解标识列表, error 错误信息
+func (e *Editor) AddAnnotations(pages []int, annotations []Annotation) ([]string, error) {
+	return e.AddAnnotationsContext(context.Background(), pages, annotations)
+}
+
+// AddAnnotationsContext 批量向指定页面新增标准注解并单次提交，准备和提交阶段响应取消
+// 入参: ctx 取消上下文, pages 目标页面索引列表, annotations 单个或与页码等长的注解列表
+// 返回: []string 新注解标识列表, error 参数、校验或取消错误
+func (e *Editor) AddAnnotationsContext(ctx context.Context, pages []int, annotations []Annotation) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(pages) == 0 {
+		if len(annotations) <= 1 {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("annotation count %d does not match page count %d", len(annotations), len(pages))
+	}
+	if len(annotations) != 1 && len(annotations) != len(pages) {
+		return nil, fmt.Errorf("annotation count %d does not match page count %d", len(annotations), len(pages))
+	}
+	for _, page := range pages {
+		if page < 0 || page >= len(e.pages) {
+			return nil, fmt.Errorf("page index %d out of range", page)
+		}
+	}
+	var ids []string
+	err := e.Transaction(func(edit *Editor) error {
+		if err := edit.prepareSourceIDsContext(ctx); err != nil {
+			return err
+		}
+		ids = make([]string, len(pages))
+		uniquePages := make([]int, 0, len(pages))
+		grouped := make([][]byte, 0, len(pages))
+		positions := make(map[int]int, len(pages))
+		for i, page := range pages {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			annotation := annotations[0]
+			if len(annotations) > 1 {
+				annotation = annotations[i]
+			}
+			id, data, err := edit.prepareAnnotation(page, annotation)
+			if err != nil {
+				return err
+			}
+			ids[i] = id
+			fragment := bytes.TrimPrefix(data, []byte(xml.Header))
+			if pos, ok := positions[page]; ok {
+				grouped[pos] = append(grouped[pos], fragment...)
+			} else {
+				positions[page] = len(uniquePages)
+				uniquePages = append(uniquePages, page)
+				grouped = append(grouped, bytes.Clone(fragment))
+			}
+		}
+		return edit.appendPageAnnotations(ctx, uniquePages, grouped, true)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 // Annotations 获取指定页面的注解信息，包含不可见注解，返回值与编辑器相互独立
 // 入参: index 页面索引
 // 返回: []AnnotationInfo 注解信息, error 错误信息
@@ -45,7 +185,7 @@ func (e *Editor) Annotations(index int) ([]AnnotationInfo, error) {
 	if e.source == nil {
 		return nil, nil
 	}
-	if _, err := e.source.reader.Doc(); err != nil {
+	if _, err := e.source.reader.docInternal(); err != nil {
 		return nil, err
 	}
 	return e.source.reader.annotationInfos(index, e.pages[index].ID), nil
@@ -174,12 +314,14 @@ func (e *Editor) CaptureAnnotations(page int, ids []string) (*AnnotationSelectio
 		if err != nil {
 			return nil, err
 		}
-		snapshot, err := e.captureRichTextSnapshot(page, GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: CompositeGraphicUnit{Objects: annotation.Appearance.Objects}})
-		if err != nil {
-			return nil, err
-		}
-		if snapshot != nil {
-			selection.richText[len(selection.data)] = snapshot
+		if annotation.Appearance != nil {
+			snapshot, err := e.captureRichTextSnapshotObjects(page, annotation.Appearance.Objects)
+			if err != nil {
+				return nil, err
+			}
+			if snapshot != nil {
+				selection.richText[len(selection.data)] = snapshot
+			}
 		}
 		selection.data = append(selection.data, data)
 		selection.states[key] = maps.Clone(e.source.annotationStates[e.pages[page].ID+"/"+key])
@@ -274,8 +416,10 @@ func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, 
 				if err != nil {
 					return err
 				}
-				if err := edit.putRichTextSnapshot(page, GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: CompositeGraphicUnit{Objects: annotation.Appearance.Objects}}, snapshot); err != nil {
-					return err
+				if annotation.Appearance != nil {
+					if err := edit.putRichTextSnapshotObjects(page, annotation.Appearance.Objects, snapshot); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -305,8 +449,11 @@ func (e *Editor) TransformAnnotations(page int, ids []string, matrix Matrix) err
 			if err != nil {
 				return err
 			}
-			if matrix == IdentityMatrix {
+			if matrix == IdentityMatrix() {
 				continue
+			}
+			if annotation.Appearance == nil {
+				return fmt.Errorf("annotation has no appearance")
 			}
 			box, err := ParseBox(annotation.Appearance.Boundary)
 			if err != nil {
@@ -373,15 +520,15 @@ func (e *Editor) ReplaceAnnotationText(page int, id, old, value string, style Te
 							return err
 						}
 						count++
-					} else if member.Object.Type == "CompositeObject" || member.Object.Type == "CompositeGraphicUnit" {
-						resource := member.Object.CompositeGraphicUnit.ResourceID
+					} else if member.Object.Type == "CompositeObject" {
+						resource := member.Object.CompositeObject.ResourceID
 						if id := editorResourceID(resource); id != "" {
 							resource = id
 						}
 						if resource != "" && visiting[resource] {
 							return fmt.Errorf("cyclic composite resource %q", resource)
 						}
-						children, err := edit.compositeMembers(nodes[i], renderer.Reader, renderer, visiting)
+						children, err := edit.compositeMembers(nodes[i], renderer.reader, renderer, visiting)
 						if err != nil {
 							return err
 						}
@@ -401,17 +548,6 @@ func (e *Editor) ReplaceAnnotationText(page int, id, old, value string, style Te
 		return 0, err
 	}
 	return count, nil
-}
-
-// editorAnnotationDate 更新注解修改日期，采用标准xs:date格式
-// 入参: data 注解XML片段
-// 返回: []byte 新片段, error 错误信息
-func editorAnnotationDate(data []byte) ([]byte, error) {
-	root, err := parseEditorXML(data)
-	if err != nil {
-		return nil, err
-	}
-	return editorXMLAttribute(data, root, "LastModDate", time.Now().Format("2006-01-02"))
 }
 
 // editAnnotations 原子修改页面注解原文，按需分离共用文件并保留输入包与历史快照

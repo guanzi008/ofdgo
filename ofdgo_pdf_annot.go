@@ -28,6 +28,45 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// pdfAnnotationType 将具有静态外观的PDF注解类别对应到OFD注解类别
+// 入参: subtype PDF注解类别
+// 返回: string OFD注解类别，空字符串表示需单独处理
+func pdfAnnotationType(subtype pdfgo.Name) string {
+	switch subtype {
+	case "Stamp":
+		return "Stamp"
+	case "Watermark":
+		return "Watermark"
+	case "Highlight", "Underline", "Squiggly", "StrikeOut":
+		return "Highlight"
+	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link", "Popup", "Widget", "PrinterMark", "TrapNet", "3D", "RichMedia", "Redact", "Projection":
+		return "Path"
+	}
+	if !(pdfgo.Annotation{Subtype: subtype}).IsStandard() {
+		return "Path"
+	}
+	return ""
+}
+
+// recoverAnnotationObject 在非严格模式下保留或告警跳过故障注解，不吞掉取消与底层读取错误
+// 入参: ctx 取消上下文, name 来源字段, object 原始对象, cause 故障原因
+// 返回: error 严格模式、取消或不可恢复错误
+func (p *pdfImporter) recoverAnnotationObject(ctx context.Context, name string, object pdfgo.Object, cause error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.warning == nil || !pdfAuxiliaryError(cause) {
+		return cause
+	}
+	if err := p.recoverPDFObject(ctx, name, object, cause); err != nil {
+		if ctx.Err() != nil || !pdfAuxiliaryError(err) {
+			return err
+		}
+		p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF " + name + " skipped: " + cause.Error()})
+	}
+	return nil
+}
+
 // recoverAnnotationAuxiliary 仅在存在有效正常外观时保留辅助错误，外观仍由调用方实际绘制
 // 入参: ctx 取消上下文, annotation 原始注解, name 辅助字段名, object 原始对象, cause 辅助错误
 // 返回: error 严格模式、缺少有效外观或不可恢复错误
@@ -170,6 +209,126 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 	return p.paintedAnnotation(ctx, page, annotation, nil, actions...)
 }
 
+// pdfResolveNumber 解析PDF整数或实数为有限浮点数
+// 入参: reader PDF阅读器, object PDF对象
+// 返回: float64 数值, bool 是否为有效有限数值
+func pdfResolveNumber(reader *pdfgo.Reader, object pdfgo.Object) (float64, bool) {
+	resolved, err := reader.Resolve(object)
+	if err != nil || resolved == nil {
+		return 0, false
+	}
+	switch v := resolved.(type) {
+	case pdfgo.Integer:
+		return float64(v), true
+	case pdfgo.Real:
+		n := float64(v)
+		return n, finite(n)
+	}
+	return 0, false
+}
+
+// linkAppearanceEmpty 判断无AP的Link注解是否因边框宽为零或颜色为空而必然产出空外观
+// 入参: annotation PDF注解
+// 返回: bool 是否可安全跳过外观遍历与合成
+func (p *pdfImporter) linkAppearanceEmpty(annotation pdfgo.Annotation) bool {
+	if p.warning == nil || annotation.Subtype != "Link" || annotation.Dictionary["OC"] != nil || annotation.Rect.XMin >= annotation.Rect.XMax || annotation.Rect.YMin >= annotation.Rect.YMax {
+		return false
+	}
+	if annotation.Dictionary["AP"] != nil {
+		ap, err := p.reader.Resolve(annotation.Dictionary["AP"])
+		if err != nil || ap != nil {
+			return false
+		}
+	}
+	width := 1.0
+	if bsObj := annotation.Dictionary["BS"]; bsObj != nil {
+		resolved, err := p.reader.Resolve(bsObj)
+		if err != nil {
+			return false
+		}
+		if resolved != nil {
+			bs, ok := resolved.(pdfgo.Dictionary)
+			if !ok {
+				return false
+			}
+			if bs["W"] != nil {
+				w, ok := pdfResolveNumber(p.reader, bs["W"])
+				if !ok || w < 0 {
+					return false
+				}
+				width = w
+			}
+			style := pdfgo.Name("S")
+			if bs["S"] != nil {
+				sv, err := p.reader.Resolve(bs["S"])
+				if err != nil {
+					return false
+				}
+				if sv != nil {
+					name, ok := sv.(pdfgo.Name)
+					if !ok {
+						return false
+					}
+					style = name
+				}
+			}
+			if style == "D" && bs["D"] != nil {
+				dv, err := p.reader.Resolve(bs["D"])
+				if err != nil {
+					return false
+				}
+				if dv != nil {
+					if _, ok := dv.(pdfgo.Array); !ok {
+						return false
+					}
+				}
+			}
+		}
+	} else if borderObj := annotation.Dictionary["Border"]; borderObj != nil {
+		resolved, err := p.reader.Resolve(borderObj)
+		if err != nil {
+			return false
+		}
+		if resolved != nil {
+			border, ok := resolved.(pdfgo.Array)
+			if !ok || len(border) < 3 || len(border) > 4 {
+				return false
+			}
+			rx, ok0 := pdfResolveNumber(p.reader, border[0])
+			ry, ok1 := pdfResolveNumber(p.reader, border[1])
+			w, ok2 := pdfResolveNumber(p.reader, border[2])
+			if !ok0 || !ok1 || !ok2 || rx < 0 || ry < 0 || w < 0 {
+				return false
+			}
+			if len(border) == 4 {
+				dv, err := p.reader.Resolve(border[3])
+				if err != nil {
+					return false
+				}
+				if _, ok := dv.(pdfgo.Array); !ok {
+					return false
+				}
+			}
+			width = w
+		}
+	}
+	hasColor := true
+	if cObj := annotation.Dictionary["C"]; cObj != nil {
+		resolved, err := p.reader.Resolve(cObj)
+		if err != nil {
+			return false
+		}
+		if resolved != nil {
+			arr, ok := resolved.(pdfgo.Array)
+			if !ok {
+				return false
+			}
+			hasColor = len(arr) != 0
+		}
+	}
+	return width == 0 || !hasColor
+}
+
 // paintedAnnotation 复用注解坐标、标志与元数据处理，允许替换静态绘制内容
 // 入参: ctx 取消上下文, page PDF页面, annotation PDF注解, paint 绘制回调，空值使用原外观, actions 外观区域的动作
 // 返回: error 外观或转换错误
@@ -258,38 +417,64 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 		x, y := math.Min(source.X, playback.X), math.Min(source.Y, playback.Y)
 		box = Box{X: x, Y: y, W: math.Max(source.X+source.W, playback.X+playback.W) - x, H: math.Max(source.Y+source.H, playback.Y+playback.H) - y}
 	}
+	skipAppearance := paint == nil && p.linkAppearanceEmpty(annotation)
 	stamp := *p
 	stamp.matrix = (pdfgo.Matrix{1, 0, 0, 1, -box.X, -box.Y}).Mul(p.matrix)
 	stamp.objects = nil
 	stamp.report = PDFImportReport{}
+	stamp.resetWarnings()
 	stamp.compositeCache = nil
-	stamp.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
+	stamp.compositeNodes = p.compositeNodes[:len(p.compositeNodes):len(p.compositeNodes)]
+	if !skipAppearance {
+		stamp.clipTexts = make(map[*pdfgo.TextClip]pdfClipTextEntry)
+	}
 	stamp.pageWidth, stamp.pageHeight = box.W, box.H
+	defer func() {
+		if stamp.references != nil && stamp.references != p.references {
+			if p.references == nil {
+				p.references = stamp.references
+			} else {
+				stamp.references.Close()
+			}
+		}
+		p.usedReferences = p.usedReferences || stamp.usedReferences
+	}()
+	paintFailed := false
 	if paint != nil {
 		if err := paint(&stamp); err != nil {
-			return err
+			if err := p.recoverAnnotationObject(ctx, "Annotation.Appearance", annotation.Dictionary, err); err != nil {
+				return err
+			}
+			paintFailed = true
 		}
-	} else {
+	} else if !skipAppearance {
 		nodes, err := p.collectCompositeNodes(func(visitor pdfgo.Visitor) error {
 			return p.reader.WalkAnnotationAppearance(ctx, page, annotation, visitor)
 		}, annotation.Subtype == "Widget")
-		if err != nil {
-			return err
+		stamp.references = p.references
+		stamp.halftoneWarnings = p.halftoneWarnings
+		stamp.usedReferences = p.usedReferences
+		if err == nil {
+			err = stamp.compositeObjects(nodes)
 		}
-		if err := stamp.compositeObjects(nodes); err != nil {
-			return err
+		if err != nil {
+			if err := p.recoverAnnotationObject(ctx, "Annotation.Appearance", annotation.Dictionary, err); err != nil {
+				return err
+			}
+			paintFailed = true
 		}
 	}
-	p.mergeAnnotationStamp(&stamp)
-	if flags&(2|32) == 0 && !invisible {
-		p.compositeNodes = stamp.compositeNodes
-		p.transferBackdrop = stamp.transferBackdrop
+	if paintFailed {
+		if len(actions) == 0 {
+			return nil
+		}
+		stamp.objects = nil
 	}
 	objects, err := stamp.objects.data(ctx)
 	if err != nil {
 		return err
 	}
-	converted := Annotation{Type: pdfAnnotationType(annotation.Subtype), Subtype: string(annotation.Subtype), Remark: remark, Appearance: Appearance{Boundary: pdfBoundary(box), Objects: objects}}
+	converted := Annotation{Type: pdfAnnotationType(annotation.Subtype), Subtype: string(annotation.Subtype), Remark: remark, Appearance: &Appearance{Boundary: pdfBoundary(box), Objects: objects}}
 	if annotation.Subtype == "Projection" {
 		projection, err := p.reader.ReadProjectionAnnotation(annotation)
 		if err != nil {
@@ -382,7 +567,7 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 		}
 		converted.Parameters.Parameter = append(converted.Parameters.Parameter, AnnotationParameter{Name: "PDF.M", Value: modified})
 	}
-	_, data, err := p.editor.prepareAnnotation(p.page, converted)
+	_, objectIDs, data, err := p.editor.prepareAnnotationWithIDs(p.page, converted)
 	if err != nil {
 		return fmt.Errorf("PDF annotation: %w", err)
 	}
@@ -397,30 +582,31 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 		}
 	}
 	if binding.source.object != (pdfgo.Reference{}) || len(binding.content) != 0 {
-		root, err := parseEditorXMLContext(ctx, data)
-		if err != nil {
-			return err
-		}
-		if appearance := root.child("Appearance"); appearance != nil {
-			for _, object := range appearance.children {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				if id := object.attr("ID"); id != "" {
-					binding.ids = append(binding.ids, id)
-				}
-			}
-		}
+		binding.ids = objectIDs
 		p.annotationBindings = append(p.annotationBindings, binding)
 	}
 	p.annotationData = append(p.annotationData, bytes.TrimPrefix(data, []byte(xml.Header))...)
+	if !paintFailed {
+		p.mergeAnnotationStamp(&stamp)
+		if flags&(2|32) == 0 && !invisible {
+			p.compositeNodes = stamp.compositeNodes
+			p.transferBackdrop = stamp.transferBackdrop
+			p.compositeBackdropLoaded = stamp.compositeBackdropLoaded
+			p.compositeBackdropNodes = stamp.compositeBackdropNodes
+		} else if !p.compositeBackdropLoaded && stamp.compositeBackdropLoaded {
+			p.compositeBackdropLoaded = true
+			p.compositeBackdropNodes = stamp.compositeBackdropNodes
+			if len(stamp.compositeBackdropNodes) != 0 {
+				combined := make([]pdfCompositeNode, 0, len(stamp.compositeBackdropNodes)+len(p.compositeNodes))
+				combined = append(combined, stamp.compositeBackdropNodes...)
+				combined = append(combined, p.compositeNodes...)
+				p.compositeNodes = combined
+			}
+		}
+	}
 	if len(actions) != 0 && annotation.Subtype == "Link" || len(clicks) != 0 {
 		p.report.Links++
 	}
-	p.report.TextObjects += stamp.report.TextObjects
-	p.report.PathObjects += stamp.report.PathObjects
-	p.report.ImageObjects += stamp.report.ImageObjects
-	p.report.Warnings = append(p.report.Warnings, stamp.report.Warnings...)
 	return nil
 }
 
@@ -453,26 +639,6 @@ func (p *pdfImporter) commitAnnotations() error {
 	return nil
 }
 
-// pdfAnnotationType 将具有静态外观的PDF注解类别对应到OFD注解类别
-// 入参: subtype PDF注解类别
-// 返回: string OFD注解类别，空字符串表示需单独处理
-func pdfAnnotationType(subtype pdfgo.Name) string {
-	switch subtype {
-	case "Stamp":
-		return "Stamp"
-	case "Watermark":
-		return "Watermark"
-	case "Highlight", "Underline", "Squiggly", "StrikeOut":
-		return "Highlight"
-	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link", "Popup", "Widget", "PrinterMark", "TrapNet", "3D", "RichMedia", "Redact", "Projection":
-		return "Path"
-	}
-	if !(pdfgo.Annotation{Subtype: subtype}).IsStandard() {
-		return "Path"
-	}
-	return ""
-}
-
 // formWidget 将表单当前外观转换为注解并报告交互语义差异
 // 入参: ctx 取消上下文, page PDF页面, annotation 表单控件, strict 严格检查开关
 // 返回: error 外观或转换错误
@@ -485,16 +651,25 @@ func (p *pdfImporter) formWidget(ctx context.Context, page *pdfgo.Page, annotati
 		return err
 	}
 	if flags&(2|32) != 0 {
-		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "hidden PDF form field not transferred"})
+		p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: "hidden PDF form field not transferred"})
 		return nil
 	}
-	if annotation.Dictionary["OC"] != nil {
-		return &pdfgo.UnsupportedError{Feature: "widget viewing behavior"}
+	if oc := annotation.Dictionary["OC"]; oc != nil {
+		optional, err := p.reader.Resolve(oc)
+		if err != nil {
+			if err := p.recoverPDFObject(ctx, "Annotation.OC", oc, err); err != nil {
+				return err
+			}
+			annotation.Dictionary = maps.Clone(annotation.Dictionary)
+			delete(annotation.Dictionary, "OC")
+		} else if optional != nil {
+			return &pdfgo.UnsupportedError{Feature: "widget viewing behavior"}
+		}
 	}
 	if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
 		return err
 	}
-	p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF form field appearance imported; interactive behavior not transferred"})
+	p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF form field appearance imported; interactive behavior not transferred"})
 	return nil
 }
 
@@ -510,13 +685,13 @@ func (p *pdfImporter) signatureWidget(ctx context.Context, page *pdfgo.Page, ann
 		return err
 	}
 	if flags&(2|32) != 0 {
-		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "hidden PDF signature not transferred"})
+		p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: "hidden PDF signature not transferred"})
 		return nil
 	}
 	if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
 		return err
 	}
-	p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF signature appearance imported; digital signature not transferred"})
+	p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF signature appearance imported; digital signature not transferred"})
 	return nil
 }
 
@@ -528,7 +703,9 @@ func (p *pdfImporter) mergeAnnotationStamp(stamp *pdfImporter) {
 	p.report.PathObjects += stamp.report.PathObjects
 	p.report.ImageObjects += stamp.report.ImageObjects
 	p.report.Links += stamp.report.Links
-	p.report.Warnings = append(p.report.Warnings, stamp.report.Warnings...)
+	for _, entry := range stamp.warningEntries() {
+		p.addWarningCount(entry.diagnostic, entry.count)
+	}
 	p.rasterWarned = p.rasterWarned || stamp.rasterWarned
 	if p.cmykSpace == "" {
 		p.cmykSpace = stamp.cmykSpace
@@ -596,7 +773,11 @@ func (p *pdfImporter) mergeAnnotationStamp(stamp *pdfImporter) {
 	if p.references == nil {
 		p.references = stamp.references
 	}
+	p.usedReferences = p.usedReferences || stamp.usedReferences
 	if p.halftoneWarnings == nil {
 		p.halftoneWarnings = stamp.halftoneWarnings
+	}
+	if p.isolatedGroupImages == nil {
+		p.isolatedGroupImages = stamp.isolatedGroupImages
 	}
 }

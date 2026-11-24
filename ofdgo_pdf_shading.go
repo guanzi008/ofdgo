@@ -19,8 +19,8 @@ import (
 	"image"
 	"math"
 	"strconv"
+	"sync"
 
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
@@ -76,6 +76,169 @@ func pdfICCTransfer(space *pdfgo.ColorSpace) bool {
 	return true
 }
 
+// pdfICCValues 将单位源分量量化到OFD16位颜色，不提前转换为显示RGB
+// 入参: values 单位分量, count 分量数
+// 返回: string OFD颜色分量, error 非有限或范围错误
+func pdfICCValues(values []float64, count int) (string, error) {
+	if count < 1 || count > 4 || len(values) < count {
+		return "", fmt.Errorf("invalid ICC shading component count")
+	}
+	var encoded [4]float64
+	for i := range count {
+		if !finite(values[i]) || values[i] < 0 || values[i] > 1 {
+			return "", fmt.Errorf("invalid ICC shading component")
+		}
+		encoded[i] = math.Round(values[i] * 65535)
+	}
+	return pdfNumbers(encoded[:count]...), nil
+}
+
+// pdfGradientStopsError 检查源颜色分段是否可由OFD基本颜色表达
+// 入参: stops 源颜色分段, space 源颜色空间
+// 返回: error 不可线性表达的变换
+func pdfGradientStopsError(stops []pdfgo.GradientStop, space *pdfgo.ColorSpace) error {
+	if len(stops) == 0 {
+		return &pdfgo.UnsupportedError{Feature: "nonlinear gradient conversion"}
+	}
+	calibrated := space != nil && space.Calibrated() && !pdfICCTransfer(space) && !space.SRGBEquivalent()
+	if calibrated {
+		for i := 1; i < len(stops); i++ {
+			a, b := stops[i-1], stops[i]
+			if a.Position != b.Position && a.Values != b.Values {
+				return &pdfgo.UnsupportedError{Feature: "nonlinear calibrated gradient conversion"}
+			}
+		}
+	}
+	return nil
+}
+
+// pdfGradientPattern 判断渐变是否需要底纹保留边界或背景
+// 入参: paint PDF画刷
+// 返回: bool 是否需要底纹单元
+func pdfGradientPattern(paint pdfgo.Paint) bool {
+	return paint.Axial != nil && (paint.Axial.Bounds != nil || paint.Axial.Background != nil && paint.Axial.Extend != [2]bool{true, true}) || paint.Radial != nil && (paint.Radial.Bounds != nil || paint.Radial.Background != nil && paint.Radial.Extend != [2]bool{true, true}) || paint.Mesh != nil && paint.Mesh.Bounds != nil
+}
+
+// pdfRadialNested 判断起止圆是否严格内含，确保绘制区由内外圆边界唯一限定
+// 入参: gradient 径向渐变
+// 返回: bool 是否严格内含
+func pdfRadialNested(gradient *pdfgo.RadialGradient) bool {
+	return math.Hypot(gradient.End.X-gradient.Start.X, gradient.End.Y-gradient.Start.Y) < math.Abs(gradient.EndRadius-gradient.StartRadius)
+}
+
+// pdfRadialBackground 用圆弧保留内含双圆的背景区域，不离散化渐变边界
+// 入参: gradient 源渐变, matrix 渐变到页面的矩阵, box 对象边界
+// 返回: string 奇偶填充背景路径, error 几何转换错误
+func pdfRadialBackground(gradient *pdfgo.RadialGradient, matrix pdfgo.Matrix, box Box) (string, error) {
+	inner, outer := gradient.Start, gradient.End
+	r0, r1, extend := gradient.StartRadius, gradient.EndRadius, gradient.Extend
+	if r1 < r0 {
+		inner, outer, r0, r1 = outer, inner, r1, r0
+		extend = [2]bool{extend[1], extend[0]}
+	}
+	var circles, path GeometryPath
+	if !extend[1] {
+		path = geometryRectangle(Box{W: box.W, H: box.H})
+		circles = geometryCircle(RasterPoint{X: outer.X, Y: outer.Y}, r1)
+	}
+	if !extend[0] && r0 > 0 {
+		circles = append(circles, geometryCircle(RasterPoint{X: inner.X, Y: inner.Y}, r0)...)
+	}
+	local := Matrix{a: matrix[0], b: matrix[1], c: matrix[2], d: matrix[3], e: matrix[4] - box.X, f: matrix[5] - box.Y}
+	circles, err := circles.Transform(local)
+	if err != nil {
+		return "", err
+	}
+	return append(path, circles...).OFD()
+}
+
+// pdfAxialBackground 裁出轴向渐变未延伸的两侧区域，与渐变绘制区互不重叠
+// 入参: shading 对象局部渐变, box 对象边界
+// 返回: string 背景路径, error 非有限坐标
+func pdfAxialBackground(shading *AxialShd, box Box) (string, error) {
+	start, end := parseFloats(shading.StartPoint), parseFloats(shading.EndPoint)
+	dx, dy := end[0]-start[0], end[1]-start[1]
+	scale := math.Max(math.Abs(dx), math.Abs(dy))
+	if !finite(scale) || scale == 0 {
+		return "", fmt.Errorf("invalid PDF gradient background axis")
+	}
+	dx, dy = dx/scale, dy/scale
+	corners := [4]pdfgo.Point{{}, {X: box.W}, {X: box.W, Y: box.H}, {Y: box.H}}
+	data := ""
+	for side, origin := range [][]float64{start, end} {
+		if side == 0 && (shading.Extend == "1" || shading.Extend == "3") || side == 1 && (shading.Extend == "2" || shading.Extend == "3") {
+			continue
+		}
+		distances := [4]float64{}
+		for i, point := range corners {
+			distances[i] = (point.X-origin[0])*dx + (point.Y-origin[1])*dy
+			if side == 1 {
+				distances[i] = -distances[i]
+			}
+			if !finite(distances[i]) {
+				return "", fmt.Errorf("invalid PDF gradient background extent")
+			}
+		}
+		points := make([]pdfgo.Point, 0, 5)
+		previous := 3
+		for i, point := range corners {
+			a, b := distances[previous], distances[i]
+			if (a <= 0) != (b <= 0) {
+				scale := math.Max(math.Abs(a), math.Abs(b))
+				ratio := (a / scale) / (a/scale - b/scale)
+				from := corners[previous]
+				points = append(points, pdfgo.Point{X: from.X + (point.X-from.X)*ratio, Y: from.Y + (point.Y-from.Y)*ratio})
+			}
+			if b <= 0 {
+				points = append(points, point)
+			}
+			previous = i
+		}
+		if len(points) < 3 {
+			continue
+		}
+		for i, point := range points {
+			if i == 0 {
+				data += " M "
+			} else {
+				data += " L "
+			}
+			data += pdfNumbers(point.X, point.Y)
+		}
+		data += " C"
+	}
+	return data, nil
+}
+
+// pdfShadingClippedNode 将函数定义域作为几何裁剪，避免重合边界的覆盖率重复相乘
+// 入参: node 原图元, box 定义域矩形, matrix 定义域到页面的变换
+// 返回: pdfCompositeNode 带独立裁剪的图元
+func pdfShadingClippedNode(node pdfCompositeNode, box pdfgo.Rectangle, matrix pdfgo.Matrix) pdfCompositeNode {
+	clip := pdfgo.Path{Segments: []pdfgo.Segment{
+		{Operator: "M", Points: []pdfgo.Point{matrix.Apply(pdfgo.Point{X: box.XMin, Y: box.YMin})}},
+		{Operator: "L", Points: []pdfgo.Point{matrix.Apply(pdfgo.Point{X: box.XMax, Y: box.YMin})}},
+		{Operator: "L", Points: []pdfgo.Point{matrix.Apply(pdfgo.Point{X: box.XMax, Y: box.YMax})}},
+		{Operator: "L", Points: []pdfgo.Point{matrix.Apply(pdfgo.Point{X: box.XMin, Y: box.YMax})}},
+		{Operator: "C"},
+	}}
+	var style *pdfgo.Style
+	if node.path != nil {
+		mark := *node.path
+		node.path = &mark
+		style = &mark.Style
+	} else if node.text != nil {
+		mark := *node.text
+		node.text = &mark
+		style = &mark.Style
+	} else {
+		mark := *node.image
+		node.image = &mark
+		style = &mark.Style
+	}
+	style.Clips = append(append([]pdfgo.Path(nil), style.Clips...), clip)
+	return node
+}
+
 // iccColorSpace 注册16位ICC空间，复用同一源空间与意图的资源
 // 入参: space 源颜色空间, intent 输出渲染意图
 // 返回: string OFD资源标识, error 配置或注册错误
@@ -108,23 +271,6 @@ func (p *pdfImporter) iccColorSpace(space *pdfgo.ColorSpace, intent pdfgo.Name) 
 	}
 	p.iccSpaces[key] = id
 	return id, nil
-}
-
-// pdfICCValues 将单位源分量量化到OFD16位颜色，不提前转换为显示RGB
-// 入参: values 单位分量, count 分量数
-// 返回: string OFD颜色分量, error 非有限或范围错误
-func pdfICCValues(values []float64, count int) (string, error) {
-	if count < 1 || count > 4 || len(values) < count {
-		return "", fmt.Errorf("invalid ICC shading component count")
-	}
-	var encoded [4]float64
-	for i := range count {
-		if !finite(values[i]) || values[i] < 0 || values[i] > 1 {
-			return "", fmt.Errorf("invalid ICC shading component")
-		}
-		encoded[i] = math.Round(values[i] * 65535)
-	}
-	return pdfNumbers(encoded[:count]...), nil
 }
 
 // gradientSegments 保留设备及ICC源分量，其他校准颜色经源空间转换
@@ -179,25 +325,6 @@ func (p *pdfImporter) gradientSegments(stops []pdfgo.GradientStop, space *pdfgo.
 	return segments, nil
 }
 
-// pdfGradientStopsError 检查源颜色分段是否可由OFD基本颜色表达
-// 入参: stops 源颜色分段, space 源颜色空间
-// 返回: error 不可线性表达的变换
-func pdfGradientStopsError(stops []pdfgo.GradientStop, space *pdfgo.ColorSpace) error {
-	if len(stops) == 0 {
-		return &pdfgo.UnsupportedError{Feature: "nonlinear gradient conversion"}
-	}
-	calibrated := space != nil && space.Calibrated() && !pdfICCTransfer(space) && !space.SRGBEquivalent()
-	if calibrated {
-		for i := 1; i < len(stops); i++ {
-			a, b := stops[i-1], stops[i]
-			if a.Position != b.Position && a.Values != b.Values {
-				return &pdfgo.UnsupportedError{Feature: "nonlinear calibrated gradient conversion"}
-			}
-		}
-	}
-	return nil
-}
-
 // gradientError 检查渐变函数与源空间能否原生映射为OFD分段
 // 入参: paint 画刷
 // 返回: error 不可等价表达的渐变或取消错误
@@ -240,20 +367,6 @@ func (p *pdfImporter) gradientError(paint pdfgo.Paint) error {
 		return pdfGradientStopsError(paint.Radial.Stops, paint.Radial.Space)
 	}
 	return p.ctx.Err()
-}
-
-// pdfGradientPattern 判断渐变是否需要底纹保留边界或背景
-// 入参: paint PDF画刷
-// 返回: bool 是否需要底纹单元
-func pdfGradientPattern(paint pdfgo.Paint) bool {
-	return paint.Axial != nil && (paint.Axial.Bounds != nil || paint.Axial.Background != nil && paint.Axial.Extend != [2]bool{true, true}) || paint.Radial != nil && (paint.Radial.Bounds != nil || paint.Radial.Background != nil && paint.Radial.Extend != [2]bool{true, true}) || paint.Mesh != nil && paint.Mesh.Bounds != nil
-}
-
-// pdfRadialNested 判断起止圆是否严格内含，确保绘制区由内外圆边界唯一限定
-// 入参: gradient 径向渐变
-// 返回: bool 是否严格内含
-func pdfRadialNested(gradient *pdfgo.RadialGradient) bool {
-	return math.Hypot(gradient.End.X-gradient.Start.X, gradient.End.Y-gradient.Start.Y) < math.Abs(gradient.EndRadius-gradient.StartRadius)
 }
 
 // gradientPattern 用底纹单元保留渐变边界及背景，单元覆盖整个对象以避免重复绘制
@@ -380,90 +493,6 @@ func (p *pdfImporter) gradientBackgroundColor(values [4]float64, space *pdfgo.Co
 	return segments[0].Color, nil
 }
 
-// pdfRadialBackground 用圆弧保留内含双圆的背景区域，不离散化渐变边界
-// 入参: gradient 源渐变, matrix 渐变到页面的矩阵, box 对象边界
-// 返回: string 奇偶填充背景路径, error 几何转换错误
-func pdfRadialBackground(gradient *pdfgo.RadialGradient, matrix pdfgo.Matrix, box Box) (string, error) {
-	inner, outer := gradient.Start, gradient.End
-	r0, r1, extend := gradient.StartRadius, gradient.EndRadius, gradient.Extend
-	if r1 < r0 {
-		inner, outer, r0, r1 = outer, inner, r1, r0
-		extend = [2]bool{extend[1], extend[0]}
-	}
-	var circles, path GeometryPath
-	if !extend[1] {
-		path = GeometryPath(basegeom.Rectangle(Box{W: box.W, H: box.H}))
-		circles = geometryCircle(RasterPoint{X: outer.X, Y: outer.Y}, r1)
-	}
-	if !extend[0] && r0 > 0 {
-		circles = append(circles, geometryCircle(RasterPoint{X: inner.X, Y: inner.Y}, r0)...)
-	}
-	local := Matrix{a: matrix[0], b: matrix[1], c: matrix[2], d: matrix[3], e: matrix[4] - box.X, f: matrix[5] - box.Y}
-	circles, err := circles.Transform(local)
-	if err != nil {
-		return "", err
-	}
-	return append(path, circles...).OFD()
-}
-
-// pdfAxialBackground 裁出轴向渐变未延伸的两侧区域，与渐变绘制区互不重叠
-// 入参: shading 对象局部渐变, box 对象边界
-// 返回: string 背景路径, error 非有限坐标
-func pdfAxialBackground(shading *AxialShd, box Box) (string, error) {
-	start, end := parseFloats(shading.StartPoint), parseFloats(shading.EndPoint)
-	dx, dy := end[0]-start[0], end[1]-start[1]
-	scale := math.Max(math.Abs(dx), math.Abs(dy))
-	if !finite(scale) || scale == 0 {
-		return "", fmt.Errorf("invalid PDF gradient background axis")
-	}
-	dx, dy = dx/scale, dy/scale
-	corners := [4]pdfgo.Point{{}, {X: box.W}, {X: box.W, Y: box.H}, {Y: box.H}}
-	data := ""
-	for side, origin := range [][]float64{start, end} {
-		if side == 0 && (shading.Extend == "1" || shading.Extend == "3") || side == 1 && (shading.Extend == "2" || shading.Extend == "3") {
-			continue
-		}
-		distances := [4]float64{}
-		for i, point := range corners {
-			distances[i] = (point.X-origin[0])*dx + (point.Y-origin[1])*dy
-			if side == 1 {
-				distances[i] = -distances[i]
-			}
-			if !finite(distances[i]) {
-				return "", fmt.Errorf("invalid PDF gradient background extent")
-			}
-		}
-		points := make([]pdfgo.Point, 0, 5)
-		previous := 3
-		for i, point := range corners {
-			a, b := distances[previous], distances[i]
-			if (a <= 0) != (b <= 0) {
-				scale := math.Max(math.Abs(a), math.Abs(b))
-				ratio := (a / scale) / (a/scale - b/scale)
-				from := corners[previous]
-				points = append(points, pdfgo.Point{X: from.X + (point.X-from.X)*ratio, Y: from.Y + (point.Y-from.Y)*ratio})
-			}
-			if b <= 0 {
-				points = append(points, point)
-			}
-			previous = i
-		}
-		if len(points) < 3 {
-			continue
-		}
-		for i, point := range points {
-			if i == 0 {
-				data += " M "
-			} else {
-				data += " L "
-			}
-			data += pdfNumbers(point.X, point.Y)
-		}
-		data += " C"
-	}
-	return data, nil
-}
-
 // gradientPath 按原始函数合成渐变路径，保留填充描边的单一对象语义
 // 入参: mark 路径绘制信息
 // 返回: error 几何或着色错误
@@ -561,39 +590,68 @@ func (c *pdfCompositor) gradient(paint pdfgo.Paint, space *pdfgo.ColorSpace, nod
 		}
 	}
 	const samples = 4
-	var coverage image.Image
+	var baseCoverage image.Image
+	var hiCoverage image.Image
+	var domainGeometry pdfCompositeGeometry
 	domainClipped := node != nil && paint.Function != nil && background == nil
 	if node != nil {
-		local, importer := *c, *c.importer
-		importer.rasterDPI *= samples
-		local.importer = &importer
 		var err error
 		if domainClipped {
-			geometry, ok := c.cache.shadings[key]
+			var ok bool
+			domainGeometry, ok = c.cache.shadings[key]
 			if !ok {
 				g := paint.Function
 				n := pdfShadingClippedNode(*node, g.Domain, g.Matrix)
-				geometry.scene, geometry.box, err = c.importer.compileGroup(func(p *pdfImporter) error { return n.coverage(p, outline) })
+				domainGeometry.scene, domainGeometry.box, err = c.importer.compileGroup(func(p *pdfImporter) error { return n.coverage(p, outline) })
 				if err != nil {
 					return nil, err
 				}
 				if c.cache.shadings == nil {
 					c.cache.shadings = map[pdfGradientKey]pdfCompositeGeometry{}
 				}
-				c.cache.shadings[key] = geometry
+				c.cache.shadings[key] = domainGeometry
 			}
-			if geometry.scene != nil {
-				coverage, err = importer.renderGroupScene(geometry.scene, c.box)
+			b := domainGeometry.box
+			if domainGeometry.scene != nil && !(b.X >= c.box.X+c.box.W || b.Y >= c.box.Y+c.box.H || b.X+b.W <= c.box.X || b.Y+b.H <= c.box.Y) {
+				target, targetErr := c.acquireCoverage()
+				if targetErr != nil {
+					return nil, targetErr
+				}
+				baseCoverage, err = c.importer.renderGroupSceneInto(domainGeometry.scene, c.box, target)
+				if err != nil {
+					c.releaseCoverage(target)
+				}
 			}
 		} else {
-			coverage, err = local.coverage(*node, outline)
+			baseCoverage, err = c.coverage(*node, outline)
 		}
 		if err != nil {
 			return nil, err
 		}
-		if coverage == nil {
+		if baseCoverage == nil {
 			return make([]pdfShadingPixel, c.width*c.height), nil
 		}
+		defer c.releaseCoverage(baseCoverage)
+	}
+	ensureHiCoverage := func() (image.Image, error) {
+		if node == nil || hiCoverage != nil {
+			return hiCoverage, nil
+		}
+		local, importer := *c, *c.importer
+		importer.rasterDPI *= samples
+		local.importer = &importer
+		local.masks = nil
+		local.clipMasks = nil
+		var err error
+		if domainClipped {
+			if domainGeometry.scene != nil {
+				hiCoverage, err = importer.renderGroupScene(domainGeometry.scene, c.box)
+			}
+		} else {
+			hiCoverage, err = local.coverage(*node, outline)
+			local.releaseMasks()
+		}
+		return hiCoverage, err
 	}
 	var position pdfgo.GradientPosition
 	if paint.Axial != nil || paint.Radial != nil {
@@ -607,103 +665,263 @@ func (c *pdfCompositor) gradient(paint pdfgo.Paint, space *pdfgo.ColorSpace, nod
 			return nil, err
 		}
 	}
-	converter, err := space.PrepareConversion(source, intent, conversion)
-	if err != nil {
-		return nil, err
-	}
 	colorants := codecpdf.PrepareShadingColorants(paint, space, c.softMask)
-	step := 25.4 / c.importer.rasterDPI
-	pixels := make([]pdfShadingPixel, c.width*c.height)
-	for y := range c.height {
-		if err := c.importer.ctx.Err(); err != nil {
+	sameSpace := colorants == nil && source.Equal(space)
+	var converter pdfgo.ColorConverter
+	if !sameSpace && colorants == nil {
+		var err error
+		converter, err = space.PrepareConversion(source, intent, conversion)
+		if err != nil {
 			return nil, err
 		}
-		for x := range c.width {
-			pixel := &pixels[y*c.width+x]
-			for sy := range samples {
-				for sx := range samples {
-					weight := 1.0
-					if coverage != nil {
-						a := baseimage.AlphaAt(coverage, x*samples+sx, y*samples+sy)
-						weight = float64(a) / 65535
-						if weight == 0 {
-							continue
-						}
+	}
+	components := source.Components()
+	step := 25.4 / c.importer.rasterDPI
+	var boundsMat, domainMat pdfgo.Matrix
+	var boundsMarginX, boundsMarginY, domainMarginX, domainMarginY float64
+	if bounds != nil {
+		boundsMat = inverse.Mul(c.inverse)
+		boundsMarginX = (math.Abs(boundsMat[0]) + math.Abs(boundsMat[2])) * step * 0.55
+		boundsMarginY = (math.Abs(boundsMat[1]) + math.Abs(boundsMat[3])) * step * 0.55
+	}
+	if paint.Function != nil && !domainClipped {
+		domainMat = functionInverse.Mul(c.inverse)
+		domainMarginX = (math.Abs(domainMat[0]) + math.Abs(domainMat[2])) * step * 0.55
+		domainMarginY = (math.Abs(domainMat[1]) + math.Abs(domainMat[3])) * step * 0.55
+	}
+	evalSample := func(pagePoint pdfgo.Point) ([4]float64, bool, bool, error) {
+		point := pagePoint
+		local := point
+		if bounds != nil || paint.Radial != nil {
+			local = inverse.Apply(point)
+		}
+		if bounds != nil {
+			if local.X < bounds.XMin || local.X > bounds.XMax || local.Y < bounds.YMin || local.Y > bounds.YMax {
+				return [4]float64{}, false, true, nil
+			}
+		}
+		if paint.Radial != nil {
+			point = local
+		}
+		var values [4]float64
+		var visible bool
+		var err error
+		if g := paint.Function; g != nil {
+			local = functionInverse.Apply(point)
+			visible = domainClipped || local.X >= g.Domain.XMin && local.X <= g.Domain.XMax && local.Y >= g.Domain.YMin && local.Y <= g.Domain.YMax
+			if visible {
+				if colorants != nil {
+					values, err = colorants.PointAt(local)
+				} else {
+					values, err = g.ValuesAt(local)
+					if err == nil && !sameSpace {
+						values, err = converter.Convert(values[:components])
 					}
-					pagePoint := c.inverse.Apply(pdfgo.Point{X: c.box.X + (float64(x)+(float64(sx)+.5)/samples)*step, Y: c.box.Y + (float64(y)+(float64(sy)+.5)/samples)*step})
-					point := pagePoint
-					local := point
-					if bounds != nil || paint.Radial != nil {
-						local = inverse.Apply(point)
+				}
+			}
+		} else {
+			var parameter float64
+			parameter, visible = position.PositionAt(point)
+			if visible {
+				if colorants != nil {
+					values, err = colorants.At(parameter)
+				} else if paint.Axial != nil {
+					values, err = paint.Axial.ValuesAt(parameter)
+				} else {
+					values, err = paint.Radial.ValuesAt(parameter)
+				}
+				if err == nil && colorants == nil && !sameSpace {
+					values, err = converter.Convert(values[:components])
+				}
+			}
+		}
+		if err != nil {
+			return [4]float64{}, false, false, err
+		}
+		if !visible {
+			if background == nil {
+				return [4]float64{}, false, false, nil
+			}
+			return backgroundValues, true, false, nil
+		}
+		return values, true, false, nil
+	}
+	isImageNode := node != nil && node.image != nil
+	extendBoth := paint.Axial != nil && paint.Axial.Extend == [2]bool{true, true}
+	pixels := make([]pdfShadingPixel, c.width*c.height)
+	evalSupersample := func(x, y int, pixel *pdfShadingPixel) error {
+		hi, err := ensureHiCoverage()
+		if err != nil {
+			return err
+		}
+		for sy := range samples {
+			for sx := range samples {
+				weight := 1.0
+				if hi != nil {
+					a := baseimage.AlphaAt(hi, x*samples+sx, y*samples+sy)
+					weight = float64(a) / 65535
+					if weight == 0 {
+						continue
 					}
-					if bounds != nil {
-						if local.X < bounds.XMin || local.X > bounds.XMax || local.Y < bounds.YMin || local.Y > bounds.YMax {
-							continue
-						}
-					}
-					if paint.Radial != nil {
-						point = local
-					}
-					var values [4]float64
-					var visible bool
-					var err error
-					if g := paint.Function; g != nil {
-						local = functionInverse.Apply(point)
-						visible = domainClipped || local.X >= g.Domain.XMin && local.X <= g.Domain.XMax && local.Y >= g.Domain.YMin && local.Y <= g.Domain.YMax
-						if visible {
-							if colorants != nil {
-								values, err = colorants.PointAt(local)
-							} else {
-								values, err = g.ValuesAt(local)
-								if err == nil {
-									values, err = converter.Convert(values[:source.Components()])
-								}
-							}
-						}
-					} else {
-						var parameter float64
-						parameter, visible = position.PositionAt(point)
-						if visible {
-							if colorants != nil {
-								values, err = colorants.At(parameter)
-							} else if paint.Axial != nil {
-								values, err = paint.Axial.ValuesAt(parameter)
-							} else {
-								values, err = paint.Radial.ValuesAt(parameter)
-							}
-							if err == nil && colorants == nil {
-								values, err = converter.Convert(values[:source.Components()])
-							}
-						}
-					}
+				}
+				pagePoint := c.inverse.Apply(pdfgo.Point{X: c.box.X + (float64(x)+(float64(sx)+.5)/samples)*step, Y: c.box.Y + (float64(y)+(float64(sy)+.5)/samples)*step})
+				values, ok, outBounds, err := evalSample(pagePoint)
+				if err != nil {
+					return err
+				}
+				if outBounds || !ok {
+					continue
+				}
+				if isImageNode {
+					_, alpha, err := c.imageColor(node.image, pagePoint, space)
 					if err != nil {
-						return nil, err
+						return err
 					}
-					if !visible {
+					weight *= alpha
+				}
+				for i, value := range values {
+					pixel.Values[i] += value * weight
+				}
+				pixel.Shape += weight
+			}
+		}
+		if pixel.Shape != 0 {
+			for i := range pixel.Values {
+				pixel.Values[i] /= pixel.Shape
+			}
+			pixel.Shape /= samples * samples
+		}
+		return nil
+	}
+	evalRowRange := func(y0, y1 int, deferSupersample bool) error {
+		for y := y0; y < y1; y++ {
+			if err := c.importer.ctx.Err(); err != nil {
+				return err
+			}
+			var covRow []byte
+			if baseCoverage != nil {
+				covRow = codecpdf.CoverageRow(baseCoverage, y, 0, c.width)
+			}
+			centerOFDY := c.box.Y + (float64(y)+.5)*step
+			for x := range c.width {
+				baseA := uint32(65535)
+				if baseCoverage != nil {
+					if covRow != nil {
+						baseA = uint32(covRow[4*x+3]) * 257
+					} else {
+						baseA = baseimage.AlphaAt(baseCoverage, x, y)
+					}
+					if baseA == 0 {
+						continue
+					}
+				}
+				pixel := &pixels[y*c.width+x]
+				centerOFD := pdfgo.Point{X: c.box.X + (float64(x)+.5)*step, Y: centerOFDY}
+				supersample := isImageNode || baseA < 65535
+				if !supersample && bounds != nil {
+					bp := boundsMat.Apply(centerOFD)
+					if bp.X+boundsMarginX < bounds.XMin || bp.X-boundsMarginX > bounds.XMax || bp.Y+boundsMarginY < bounds.YMin || bp.Y-boundsMarginY > bounds.YMax {
+						continue
+					}
+					if bp.X-boundsMarginX < bounds.XMin || bp.X+boundsMarginX > bounds.XMax || bp.Y-boundsMarginY < bounds.YMin || bp.Y+boundsMarginY > bounds.YMax {
+						supersample = true
+					}
+				}
+				if !supersample && paint.Function != nil && !domainClipped {
+					g := paint.Function
+					dp := domainMat.Apply(centerOFD)
+					if dp.X+domainMarginX < g.Domain.XMin || dp.X-domainMarginX > g.Domain.XMax || dp.Y+domainMarginY < g.Domain.YMin || dp.Y-domainMarginY > g.Domain.YMax {
 						if background == nil {
 							continue
 						}
-						values = backgroundValues
+						pixel.Values, pixel.Shape = backgroundValues, 1
+						continue
 					}
-					if node != nil && node.image != nil {
-						_, alpha, err := c.imageColor(node.image, pagePoint, space)
-						if err != nil {
-							return nil, err
+					if dp.X-domainMarginX < g.Domain.XMin || dp.X+domainMarginX > g.Domain.XMax || dp.Y-domainMarginY < g.Domain.YMin || dp.Y+domainMarginY > g.Domain.YMax {
+						supersample = true
+					}
+				}
+				if !supersample && (paint.Axial != nil && !extendBoth || paint.Radial != nil) {
+					half := 0.5 * step
+					visCount := 0
+					for _, delta := range [4]pdfgo.Point{{X: -half, Y: -half}, {X: half, Y: -half}, {X: half, Y: half}, {X: -half, Y: half}} {
+						pt := c.inverse.Apply(pdfgo.Point{X: centerOFD.X + delta.X, Y: centerOFD.Y + delta.Y})
+						if paint.Radial != nil {
+							pt = inverse.Apply(pt)
 						}
-						weight *= alpha
+						if _, vis := position.PositionAt(pt); vis {
+							visCount++
+						}
 					}
-					for i, value := range values {
-						pixel.Values[i] += value * weight
+					if visCount != 0 && visCount != 4 {
+						supersample = true
+					} else if visCount == 0 {
+						if background == nil {
+							continue
+						}
+						pixel.Values, pixel.Shape = backgroundValues, 1
+						continue
 					}
-					pixel.Shape += weight
+				}
+				if !supersample {
+					values, ok, _, err := evalSample(c.inverse.Apply(centerOFD))
+					if err != nil {
+						return err
+					}
+					if ok {
+						pixel.Values, pixel.Shape = values, 1
+					}
+					continue
+				}
+				if deferSupersample {
+					pixel.Shape = -1
+					continue
+				}
+				if err := evalSupersample(x, y, pixel); err != nil {
+					return err
 				}
 			}
-			if pixel.Shape != 0 {
-				for i := range pixel.Values {
-					pixel.Values[i] /= pixel.Shape
-				}
-				pixel.Shape /= samples * samples
+		}
+		return nil
+	}
+	workers := conversionWorkers(c.importer.ctx)
+	if workers > 1 && colorants == nil && !isImageNode && c.height >= 32 && c.width*c.height >= 4096 {
+		if workers > c.height/8 {
+			workers = max(1, c.height/8)
+		}
+		errs := make([]error, workers)
+		var wg sync.WaitGroup
+		for w := range workers {
+			y0 := w * c.height / workers
+			y1 := (w + 1) * c.height / workers
+			wg.Add(1)
+			go func(idx, startY, endY int) {
+				defer wg.Done()
+				errs[idx] = evalRowRange(startY, endY, true)
+			}(w, y0, y1)
+		}
+		wg.Wait()
+		for _, err := range errs {
+			if err != nil {
+				return nil, err
 			}
+		}
+		for y := range c.height {
+			rowOff := y * c.width
+			for x := range c.width {
+				pixel := &pixels[rowOff+x]
+				if pixel.Shape >= 0 {
+					continue
+				}
+				pixel.Shape = 0
+				if err := evalSupersample(x, y, pixel); err != nil {
+					return nil, err
+				}
+			}
+		}
+	} else {
+		if err := evalRowRange(0, c.height, false); err != nil {
+			return nil, err
 		}
 	}
 	if c.gradients == nil {
@@ -711,35 +929,6 @@ func (c *pdfCompositor) gradient(paint pdfgo.Paint, space *pdfgo.ColorSpace, nod
 	}
 	c.gradients[key] = pixels
 	return pixels, nil
-}
-
-// pdfShadingClippedNode 将函数定义域作为几何裁剪，避免重合边界的覆盖率重复相乘
-// 入参: node 原图元, box 定义域矩形, matrix 定义域到页面的变换
-// 返回: pdfCompositeNode 带独立裁剪的图元
-func pdfShadingClippedNode(node pdfCompositeNode, box pdfgo.Rectangle, matrix pdfgo.Matrix) pdfCompositeNode {
-	clip := pdfgo.Path{Segments: []pdfgo.Segment{
-		{Operator: "M", Points: []pdfgo.Point{matrix.Apply(pdfgo.Point{X: box.XMin, Y: box.YMin})}},
-		{Operator: "L", Points: []pdfgo.Point{matrix.Apply(pdfgo.Point{X: box.XMax, Y: box.YMin})}},
-		{Operator: "L", Points: []pdfgo.Point{matrix.Apply(pdfgo.Point{X: box.XMax, Y: box.YMax})}},
-		{Operator: "L", Points: []pdfgo.Point{matrix.Apply(pdfgo.Point{X: box.XMin, Y: box.YMax})}},
-		{Operator: "C"},
-	}}
-	var style *pdfgo.Style
-	if node.path != nil {
-		mark := *node.path
-		node.path = &mark
-		style = &mark.Style
-	} else if node.text != nil {
-		mark := *node.text
-		node.text = &mark
-		style = &mark.Style
-	} else {
-		mark := *node.image
-		node.image = &mark
-		style = &mark.Style
-	}
-	style.Clips = append(append([]pdfgo.Path(nil), style.Clips...), clip)
-	return node
 }
 
 // color 保留设备及ICC源分量，其他校准色以16位显示颜色输出
@@ -764,7 +953,11 @@ func (p *pdfImporter) color(paint pdfgo.Paint, intent pdfgo.Name) (*FillColor, e
 	}
 	if cmyk != nil && (paint.Space == nil || !paint.Space.Calibrated()) {
 		if p.cmykSpace == "" {
-			p.cmykSpace = p.editor.nextID()
+			cmykID, err := p.editor.nextID()
+			if err != nil {
+				return nil, err
+			}
+			p.cmykSpace = cmykID
 			p.editor.resources = append(p.editor.resources, editorResource{space: &ColorSpace{ID: p.cmykSpace, Type: "CMYK", BitsPerComponent: 16}})
 		}
 		v := cmyk
@@ -1035,20 +1228,20 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, 
 	if err != nil {
 		return nil, err
 	}
-	triangles, ok := c.cache.meshes[mesh]
+	prepared, ok := c.cache.meshes[mesh]
 	if !ok {
 		var err error
-		triangles, err = codecpdf.MeshTriangles(c.importer.ctx, mesh, c.importer.matrix, c.importer.rasterDPI)
+		prepared, err = codecpdf.PrepareMesh(c.importer.ctx, mesh, c.importer.matrix)
 		if err != nil {
 			return nil, err
 		}
 		if c.cache.meshes == nil {
-			c.cache.meshes = map[*pdfgo.MeshGradient][]codecpdf.MeshTriangle{}
+			c.cache.meshes = map[*pdfgo.MeshGradient]*codecpdf.MeshPrepared{}
 		}
-		c.cache.meshes[mesh] = triangles
+		c.cache.meshes[mesh] = prepared
 	}
 	options := codecpdf.MeshRasterOptions{Matrix: c.importer.matrix, Origin: pdfgo.Point{X: c.box.X, Y: c.box.Y}, DPI: c.importer.rasterDPI, Width: c.width, Height: c.height, Workers: conversionWorkers(c.importer.ctx), SoftMask: c.softMask}
-	pixels, err := codecpdf.MeshPixels(c.importer.ctx, mesh, triangles, space, converter, options)
+	pixels, err := codecpdf.MeshRasterPrepared(c.importer.ctx, mesh, prepared, space, converter, options)
 	if err != nil {
 		return nil, err
 	}

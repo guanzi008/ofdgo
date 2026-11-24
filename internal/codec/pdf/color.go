@@ -39,30 +39,11 @@ type TransferCache struct {
 	functions map[transferKey]*pdfgo.TransferFunction
 }
 
-// Resolve 在页面内复用输出设备的有效函数，不修改原始图形状态
-// 入参: reader 原始阅读器, style 原始图形状态, model 原生设备颜色空间
-// 返回: *pdfgo.TransferFunction 有效函数, error 网屏传递函数错误
-func (c *TransferCache) Resolve(reader *pdfgo.Reader, style pdfgo.Style, model pdfgo.Name) (*pdfgo.TransferFunction, error) {
-	if style.Halftone == nil && style.Transfer == nil {
-		return nil, nil
-	}
-	if model == "" {
-		model = "DeviceRGB"
-	}
-	if c.functions == nil {
-		c.functions = make(map[transferKey]*pdfgo.TransferFunction)
-	}
-	key := transferKey{style.Transfer, style.Halftone, model}
-	transfer, found := c.functions[key]
-	if !found {
-		var err error
-		transfer, err = reader.DeviceTransfer(style.Transfer, style.Halftone, model)
-		if err != nil {
-			return nil, err
-		}
-		c.functions[key] = transfer
-	}
-	return transfer, nil
+// transferKey 区分图形状态、网屏覆盖函数及输出设备
+type transferKey struct {
+	transfer *pdfgo.TransferFunction
+	halftone *pdfgo.Halftone
+	model    pdfgo.Name
 }
 
 // OutputColor 将合成结果映射到OFD输出，与保留的设备四色对象使用相同显示换算
@@ -160,7 +141,7 @@ func CompositeColor(paint pdfgo.Paint, point pdfgo.Point, space *pdfgo.ColorSpac
 				return values, false, nil
 			}
 		}
-		t, visible := ShadingPosition(paint, point)
+		t, visible := shadingPosition(paint, point)
 		var err error
 		if !visible {
 			if background == nil {
@@ -193,6 +174,37 @@ func CompositeColor(paint pdfgo.Paint, point pdfgo.Point, space *pdfgo.ColorSpac
 // 入参: target 原像素与输出, source 替换像素, shape 覆盖率
 // 返回: error 像素或覆盖率错误
 func CompositeInterpolate(target *CompositePixel, source CompositePixel, shape float64) error {
+	if shape >= 0 && shape <= 1 && target.Alpha >= 0 && target.Alpha <= 1 && target.Shape >= 0 && target.Shape <= 1 && target.Effect >= 0 && target.Effect <= 1 && source.Alpha >= 0 && source.Alpha <= 1 && source.Shape >= 0 && source.Shape <= 1 && source.Effect >= 0 && source.Effect <= 1 {
+		invShape := 1 - shape
+		tAlpha, sAlpha := target.Alpha, source.Alpha
+		alpha := tAlpha*invShape + sAlpha*shape
+		if alpha != 0 {
+			var values [4]float64
+			for c := range 4 {
+				var tp, sp float64
+				if tAlpha != 0 {
+					v := target.Values[c]
+					if !(v >= 0 && v <= 1) {
+						goto slow
+					}
+					tp = v * tAlpha
+				}
+				if sAlpha != 0 {
+					v := source.Values[c]
+					if !(v >= 0 && v <= 1) {
+						goto slow
+					}
+					sp = v * sAlpha
+				}
+				values[c] = (tp*invShape + sp*shape) / alpha
+			}
+			target.Values = values
+		}
+		target.Alpha = alpha
+		target.Effect = target.Effect*invShape + source.Effect*shape
+		return nil
+	}
+slow:
 	pixel := pdfgo.ColorantPixel{Values: target.Values[:], Alpha: target.Alpha, Shape: target.Shape, Effect: target.Effect}
 	if err := pixel.Interpolate(pdfgo.ColorantPixel{Values: source.Values[:], Alpha: source.Alpha, Shape: source.Shape, Effect: source.Effect}, shape); err != nil {
 		return err
@@ -213,6 +225,66 @@ func CompositeKnockout(target *CompositePixel, initial, source CompositePixel) e
 		return err
 	}
 	target.Alpha, target.Effect, target.Shape = pixel.Alpha, pixel.Effect, pixel.Shape
+	return nil
+}
+
+// CompositeKnockoutFast 按ISO 32000-1挖空公式合并单像素，仅对非法数值回退完整校验
+// 入参: target 累计组结果, initial 初始背景, source 单个对象合成结果
+// 返回: error 像素错误
+func CompositeKnockoutFast(target *CompositePixel, initial, source CompositePixel) error {
+	f := source.Shape
+	if f == 0 {
+		return nil
+	}
+	if !(f >= 0 && f <= 1 && target.Alpha >= 0 && target.Alpha <= 1 && target.Shape >= 0 && target.Shape <= 1 && target.Effect >= 0 && target.Effect <= 1 && initial.Alpha >= 0 && initial.Alpha <= 1 && initial.Shape >= 0 && initial.Shape <= 1 && initial.Effect >= 0 && initial.Effect <= 1 && source.Alpha >= 0 && source.Alpha <= 1 && source.Effect >= 0 && source.Effect <= 1) {
+		return CompositeKnockout(target, initial, source)
+	}
+	invF := 1 - f
+	tAlpha, iAlpha, sAlpha := target.Alpha, initial.Alpha, source.Alpha
+	alpha := tAlpha*invF + sAlpha - iAlpha*invF
+	if alpha > 0 {
+		var values [4]float64
+		for c := range 4 {
+			var tp, ip, sp float64
+			if tAlpha != 0 {
+				v := target.Values[c]
+				if !(v >= 0 && v <= 1) {
+					return CompositeKnockout(target, initial, source)
+				}
+				tp = v * tAlpha
+			}
+			if iAlpha != 0 {
+				v := initial.Values[c]
+				if !(v >= 0 && v <= 1) {
+					return CompositeKnockout(target, initial, source)
+				}
+				ip = v * iAlpha
+			}
+			if sAlpha != 0 {
+				v := source.Values[c]
+				if !(v >= 0 && v <= 1) {
+					return CompositeKnockout(target, initial, source)
+				}
+				sp = v * sAlpha
+			}
+			out := (tp*invF + sp - ip*invF) / alpha
+			if out < 0 {
+				out = 0
+			} else if out > 1 {
+				out = 1
+			}
+			values[c] = out
+		}
+		target.Values = values
+	}
+	if alpha < 0 {
+		alpha = 0
+	} else if alpha > 1 {
+		alpha = 1
+	}
+	target.Alpha = alpha
+	target.Effect = target.Effect*invF + source.Effect
+	target.Shape += f * (1 - target.Shape)
 	return nil
 }
 
@@ -285,7 +357,7 @@ func CompositeGroupRegion(ctx context.Context, pixels, initial, result []Composi
 // 返回: error 未支持的混合模式
 func CompositePaintOver(backdrop *CompositePixel, source [4]float64, alpha float64, space *pdfgo.ColorSpace, mode pdfgo.Name, compatible bool, marked *[4]bool) error {
 	if !compatible && marked == nil {
-		return CompositeOver(backdrop, source, alpha, space, mode)
+		return compositeOver(backdrop, source, alpha, space, mode)
 	}
 	if alpha == 0 {
 		return nil
@@ -301,13 +373,50 @@ func CompositePaintOver(backdrop *CompositePixel, source [4]float64, alpha float
 	return nil
 }
 
-// CompositeOver 按PDF透明模型合成源颜色，四色混合使用分量补色
+// compositeOver 按PDF透明模型合成源颜色，四色混合使用分量补色
 // 入参: backdrop 背景及输出, source 源分量, alpha 源透明度, space 混合空间, mode 混合模式
 // 返回: error 未支持的混合模式
-func CompositeOver(backdrop *CompositePixel, source [4]float64, alpha float64, space *pdfgo.ColorSpace, mode pdfgo.Name) error {
+func compositeOver(backdrop *CompositePixel, source [4]float64, alpha float64, space *pdfgo.ColorSpace, mode pdfgo.Name) error {
 	if alpha == 0 {
 		return nil
 	}
+	if NormalBlend(mode) && alpha > 0 && alpha <= 1 && backdrop.Alpha >= 0 && backdrop.Alpha <= 1 {
+		components := space.Components()
+		if components > 0 && components <= 4 {
+			ba := backdrop.Alpha
+			if ba == 0 || alpha == 1 {
+				for i := range components {
+					v := source[i]
+					if !(v >= 0 && v <= 1) {
+						goto slow
+					}
+				}
+				for i := range components {
+					backdrop.Values[i] = source[i]
+				}
+				backdrop.Alpha = alpha
+				backdrop.Effect = alpha + backdrop.Effect*(1-alpha)
+				return nil
+			}
+			invA := 1 - alpha
+			combined := alpha + ba*invA
+			wB := ba * invA / combined
+			wS := alpha / combined
+			for i := range components {
+				bv, sv := backdrop.Values[i], source[i]
+				if !(bv >= 0 && bv <= 1 && sv >= 0 && sv <= 1) {
+					goto slow
+				}
+			}
+			for i := range components {
+				backdrop.Values[i] = backdrop.Values[i]*wB + source[i]*wS
+			}
+			backdrop.Alpha = combined
+			backdrop.Effect = alpha + backdrop.Effect*invA
+			return nil
+		}
+	}
+slow:
 	values, combined, err := space.Composite(backdrop.Values[:space.Components()], source[:space.Components()], backdrop.Alpha, alpha, mode)
 	if err != nil {
 		return err
@@ -349,9 +458,28 @@ func OverprintNeedsSeparation(paint pdfgo.Paint) bool {
 	return (paint.CMYK != nil || process) && !OpaqueBlack(paint)
 }
 
-// transferKey 区分图形状态、网屏覆盖函数及输出设备
-type transferKey struct {
-	transfer *pdfgo.TransferFunction
-	halftone *pdfgo.Halftone
-	model    pdfgo.Name
+// Resolve 在页面内复用输出设备的有效函数，不修改原始图形状态
+// 入参: reader 原始阅读器, style 原始图形状态, model 原生设备颜色空间
+// 返回: *pdfgo.TransferFunction 有效函数, error 网屏传递函数错误
+func (c *TransferCache) Resolve(reader *pdfgo.Reader, style pdfgo.Style, model pdfgo.Name) (*pdfgo.TransferFunction, error) {
+	if style.Halftone == nil && style.Transfer == nil {
+		return nil, nil
+	}
+	if model == "" {
+		model = "DeviceRGB"
+	}
+	if c.functions == nil {
+		c.functions = make(map[transferKey]*pdfgo.TransferFunction)
+	}
+	key := transferKey{style.Transfer, style.Halftone, model}
+	transfer, found := c.functions[key]
+	if !found {
+		var err error
+		transfer, err = reader.DeviceTransfer(style.Transfer, style.Halftone, model)
+		if err != nil {
+			return nil, err
+		}
+		c.functions[key] = transfer
+	}
+	return transfer, nil
 }

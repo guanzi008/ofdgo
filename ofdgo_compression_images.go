@@ -23,6 +23,7 @@ import (
 	"image"
 	"image/gif"
 	"io"
+	"maps"
 	"math"
 
 	"github.com/xiaoqidun/j2kgo"
@@ -33,6 +34,9 @@ import (
 // compressionPatternImageLimit 限制底纹尺寸分析的变换组合数，超限时保留原图尺寸
 const compressionPatternImageLimit = 65536
 
+// outputImageNestedKey 标记当前图像优化处于外层并行池中，避免解码器嵌套并发
+type outputImageNestedKey struct{}
+
 // compressionImages 记录图片各处使用的最大像素需求
 type compressionImages struct {
 	ctx           context.Context
@@ -42,6 +46,259 @@ type compressionImages struct {
 	patternPage   *Matrix
 	patterns      map[*Pattern]bool
 	patternVisits map[compressionPatternKey]bool
+}
+
+// compressionPatternKey 复用相同底纹的尺寸分析，平移不影响像素需求
+type compressionPatternKey struct {
+	pattern *Pattern
+	linear  [4]float64
+}
+
+// compressionImageSize 将毫米显示尺寸换算为像素，非法尺寸不降采样
+// 整像素边界消除单位换算产生的单ULP上溢，不降低实际像素需求
+// 入参: width 显示宽度, height 显示高度, dpi 分辨率上限
+// 返回: image.Point 像素需求
+func compressionImageSize(width, height float64, dpi int) image.Point {
+	w := math.Ceil(math.Nextafter(width*float64(dpi)/25.4, math.Inf(-1)))
+	h := math.Ceil(math.Nextafter(height*float64(dpi)/25.4, math.Inf(-1)))
+	if w <= 0 || h <= 0 || math.IsNaN(w) || math.IsNaN(h) || math.IsInf(w, 0) || math.IsInf(h, 0) || w > 1<<30 || h > 1<<30 {
+		return image.Point{}
+	}
+	return image.Pt(int(w), int(h))
+}
+
+// outputImageFormat 识别可由资源压缩生成的图片格式
+// 入参: data 图片编码
+// 返回: string 标准资源格式，未识别时为空
+func outputImageFormat(data []byte) string {
+	if baseimage.IsJPEG(data) {
+		return "JPEG"
+	}
+	if baseimage.IsPNG(data) {
+		return "PNG"
+	}
+	return ""
+}
+
+// optimizeImageResource 优化可完整保留的BMP、TIFF、静态GIF及有损JP2，复用图像压缩和降采样策略
+// 原始模式及无法保留的色彩配置不转换，仅采用小于原始编码的结果
+// 入参: ctx 取消上下文, data 图片编码, options 压缩选项, size 像素需求
+// 返回: []byte 图片编码，可能引用输入, error 解码、编码或取消错误
+func optimizeImageResource(ctx context.Context, data []byte, options CompressionOptions, size image.Point) ([]byte, error) {
+	if err := options.Validate(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if options.Mode != CompressionUnchanged {
+		if baseimage.IsTIFF(data) {
+			return optimizeTIFFResource(ctx, data, options, size)
+		}
+		if bytes.HasPrefix(data, []byte("BM")) {
+			return optimizeBMPResource(ctx, data, options, size)
+		}
+		if bytes.HasPrefix(data, []byte("GIF87a")) || bytes.HasPrefix(data, []byte("GIF89a")) {
+			return optimizeGIFResource(ctx, data, options, size)
+		}
+		if options.Mode == CompressionLossy && (isJP2Container(data) || isJ2KCodestream(data)) {
+			return optimizeJP2Resource(ctx, data, options, size)
+		}
+	}
+	return pdfgo.OptimizeImageResource(ctx, data, options.pdfOptions(), size)
+}
+
+// optimizeBMPResource 压缩可保留色彩与密度的位图，未知元数据及高精度位域保持原样
+// 入参: ctx 取消上下文, data BMP编码, options 压缩选项, size 像素需求
+// 返回: []byte 图片编码, error 解码、编码或取消错误
+func optimizeBMPResource(ctx context.Context, data []byte, options CompressionOptions, size image.Point) ([]byte, error) {
+	offset, width, height, depth, compression, err := baseimage.ParseBMPHeader(data)
+	if err != nil {
+		return data, nil
+	}
+	if height < 0 {
+		height = -height
+	}
+	if int64(width)*int64(height) > outputOptimizationBufferLimit/4 || compression != 0 && compression != 3 {
+		return data, nil
+	}
+	header := binary.LittleEndian.Uint32(data[14:18])
+	if header != 40 && header != 108 && header != 124 {
+		return data, nil
+	}
+	if header >= 108 && binary.LittleEndian.Uint32(data[70:74]) != 0x73524742 {
+		return data, nil
+	}
+	if header == 124 && (binary.LittleEndian.Uint32(data[122:126]) != 0 || binary.LittleEndian.Uint32(data[126:130]) != 0 || binary.LittleEndian.Uint32(data[130:134]) != 0) {
+		return data, nil
+	}
+	stride := (int64(width)*int64(depth) + 31) / 32 * 4
+	if int64(offset)+stride*int64(height) > int64(len(data)) {
+		return data, nil
+	}
+	density, ok := baseimage.BMPDensity(data)
+	if !ok {
+		return data, nil
+	}
+	if depth == 16 || depth == 32 {
+		masks, err := baseimage.BMPColorMasks(data, offset, depth, compression)
+		if err != nil {
+			return data, nil
+		}
+		if options.Mode == CompressionLossless {
+			for _, mask := range masks {
+				if mask.Max > 255 {
+					return data, nil
+				}
+			}
+		}
+	}
+	var pixels image.Image
+	if depth == 16 || compression == 3 {
+		pixels, err = baseimage.DecodeBMPContext(ctx, data)
+	} else {
+		pixels, _, err = image.Decode(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
+	}
+	if err != nil {
+		return nil, err
+	}
+	return optimizeRasterResource(ctx, data, pixels, options, size, density)
+}
+
+// optimizeRasterResource 编码已解码的资源图片，同步降采样后的像素密度，仅采用更小结果
+// 先降采样再编码，绝对密度按最终尺寸量化，相对密度保留精确比例
+// 无损有密度时保留PNG，有损模式允许不透明照片转JPEG并同步JFIF密度
+// 入参: ctx 取消上下文, data 原编码, pixels 像素, options 压缩选项, size 像素需求, density 像素密度
+// 返回: []byte 图片编码, error 编码或取消错误
+func optimizeRasterResource(ctx context.Context, data []byte, pixels image.Image, options CompressionOptions, size image.Point, density baseimage.Density) ([]byte, error) {
+	hasDensity := density.X != 0 || density.Y != 0
+	before := pixels.Bounds().Size()
+	if options.Mode == CompressionLossy {
+		var err error
+		pixels, err = pdfgo.ResizeImage(ctx, pixels, size)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var ok bool
+	density, ok = density.Scale(before, pixels.Bounds().Size())
+	if !ok {
+		return data, ctx.Err()
+	}
+	var candidate []byte
+	var err error
+	if hasDensity && options.Mode != CompressionLossy {
+		var encoded bytes.Buffer
+		err = pdfgo.EncodePNGWithOptions(ctx, &encoded, pixels, options.pdfOptions())
+		candidate = encoded.Bytes()
+	} else {
+		candidate, err = pdfgo.EncodeImageResource(ctx, pixels, options.pdfOptions())
+	}
+	if err != nil {
+		if errors.Is(err, io.ErrShortBuffer) {
+			return data, ctx.Err()
+		}
+		return nil, err
+	}
+	if hasDensity {
+		densityWritten := false
+		if baseimage.IsJPEG(candidate) {
+			if withDensity, denseOK := baseimage.WithJPEGDensity(candidate, density); denseOK && len(withDensity) <= outputOptimizationBufferLimit {
+				candidate = withDensity
+				densityWritten = true
+			} else {
+				var encoded bytes.Buffer
+				if pngErr := pdfgo.EncodePNGWithOptions(ctx, &encoded, pixels, options.pdfOptions()); pngErr != nil {
+					if errors.Is(pngErr, io.ErrShortBuffer) {
+						return data, ctx.Err()
+					}
+					return nil, pngErr
+				}
+				candidate = encoded.Bytes()
+			}
+		}
+		if !densityWritten {
+			if len(candidate) > outputOptimizationBufferLimit-baseimage.PNGDensityChunkSize {
+				return data, ctx.Err()
+			}
+			candidate, ok = baseimage.WithPNGDensity(candidate, density)
+			if !ok {
+				return data, ctx.Err()
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(candidate) < len(data) {
+		return candidate, nil
+	}
+	return data, nil
+}
+
+// optimizeGIFResource 压缩静态单帧GIF为更小的PNG或JPEG，多帧动画保持原样
+// 入参: ctx 取消上下文, data GIF编码, options 压缩选项, size 显示像素需求
+// 返回: []byte 图片编码，不可转换时保留原文, error 编码或取消错误
+func optimizeGIFResource(ctx context.Context, data []byte, options CompressionOptions, size image.Point) ([]byte, error) {
+	cfg, err := gif.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width) > outputOptimizationBufferLimit/4/int64(cfg.Height) {
+		return data, ctx.Err()
+	}
+	anim, err := gif.DecodeAll(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
+	if err != nil || len(anim.Image) != 1 {
+		return data, ctx.Err()
+	}
+	frame := anim.Image[0]
+	if frame.Bounds() != image.Rect(0, 0, anim.Config.Width, anim.Config.Height) {
+		return data, ctx.Err()
+	}
+	return optimizeRasterResource(ctx, data, frame, options, size, baseimage.Density{})
+}
+
+// optimizeJP2Resource 在有损模式下解码JP2或J2K码流并降采样重编为更小的JPEG或PNG
+// 入参: ctx 取消上下文, data JP2或J2K编码, options 压缩选项, size 显示像素需求
+// 返回: []byte 图片编码，超限或失败时保留原文, error 编码或取消错误
+func optimizeJP2Resource(ctx context.Context, data []byte, options CompressionOptions, size image.Point) ([]byte, error) {
+	cfg, err := j2kgo.DecodeConfigContext(ctx, bytes.NewReader(data), nil)
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width) > outputOptimizationBufferLimit/8/int64(cfg.Height) {
+		return data, ctx.Err()
+	}
+	workers := conversionWorkers(ctx)
+	if nested, _ := ctx.Value(outputImageNestedKey{}).(bool); nested {
+		workers = 1
+	}
+	pixels, err := j2kgo.DecodeContext(ctx, bytes.NewReader(data), &j2kgo.DecodeOptions{Workers: max(1, workers)})
+	if err != nil || pixels == nil {
+		return data, ctx.Err()
+	}
+	return optimizeRasterResource(ctx, data, pixels, options, size, baseimage.Density{})
+}
+
+// optimizeTIFFResource 压缩单目录TIFF，保留方向、透明度、采样精度及像素密度
+// 主图或单个瓦片的预计缓冲超限时保留原编码
+// 入参: ctx 取消上下文, data TIFF编码, options 压缩选项, size 显示像素需求
+// 返回: []byte 图片编码，不可完整转换时保留原文, error 编码或取消错误
+func optimizeTIFFResource(ctx context.Context, data []byte, options CompressionOptions, size image.Point) ([]byte, error) {
+	layout, err := baseimage.ReadTIFFLayoutContext(ctx, bytes.NewReader(data))
+	if err != nil {
+		return data, ctx.Err()
+	}
+	pixelSize := int64(layout.DecodedPixelBytes())
+	if int64(layout.Width) > outputOptimizationBufferLimit/pixelSize/int64(layout.Height) {
+		return data, ctx.Err()
+	}
+	if layout.TileWidth != 0 && int64(layout.TileWidth) > outputOptimizationBufferLimit/pixelSize/int64(layout.TileHeight) {
+		return data, ctx.Err()
+	}
+	density, ok := baseimage.TIFFConversionDensity(data, layout, options.Mode == CompressionLossy)
+	if !ok {
+		return data, ctx.Err()
+	}
+	pixels, err := baseimage.DecodeTIFF(ctx, data, layout)
+	if err != nil {
+		return data, ctx.Err()
+	}
+	return optimizeRasterResource(ctx, data, pixels, options, size, density)
 }
 
 // DrawObject 汇总图片、替换图及文字、路径和图像边框底纹的尺寸，不使用裁剪后的局部面积
@@ -71,7 +328,7 @@ func (v *compressionImages) DrawObject(object *GraphicObject, state RenderState)
 		return err
 	}
 	if border := img.Border; border != nil && border.BorderColor != nil && border.BorderColor.Pattern != nil {
-		matrix, _ := renderObjectMatrix(img.Boundary, IdentityMatrix, state)
+		matrix, _ := renderObjectMatrix(img.Boundary, IdentityMatrix(), state)
 		if err := v.patternImages((*FillColor)(border.BorderColor), matrix); err != nil {
 			return err
 		}
@@ -86,24 +343,28 @@ func (v *compressionImages) DrawObject(object *GraphicObject, state RenderState)
 }
 
 // VisitComposite 按矢量资源的完整变换统计缩略图和替换图，不以裁剪区域缩减尺寸
-// 入参: object 矢量资源或复合图元, state 已包含当前图元变换的状态
+// 入参: object 复合图元对象, state 已包含当前图元变换的状态
 // 返回: error 取消、资源标识或几何错误
-func (v *compressionImages) VisitComposite(object *CompositeGraphicUnit, state RenderState) error {
+func (v *compressionImages) VisitComposite(object *CompositeObject, state RenderState) error {
 	if err := v.ctx.Err(); err != nil {
 		return err
 	}
-	if object.Thumbnail == "" && object.Substitution == "" {
+	if object == nil || object.ResourceID == "" {
 		return nil
 	}
-	ids := [2]string{editorResourceID(object.Thumbnail), editorResourceID(object.Substitution)}
-	if object.Thumbnail != "" && ids[0] == "" || object.Substitution != "" && ids[1] == "" {
+	unit := v.renderer.compositeDefinition(object.ResourceID)
+	if unit == nil || unit.Thumbnail == "" && unit.Substitution == "" {
+		return nil
+	}
+	ids := [2]string{editorResourceID(unit.Thumbnail), editorResourceID(unit.Substitution)}
+	if unit.Thumbnail != "" && ids[0] == "" || unit.Substitution != "" && ids[1] == "" {
 		return fmt.Errorf("invalid composite image resource")
 	}
-	matrix := IdentityMatrix
+	matrix := IdentityMatrix()
 	if state.Parent != nil {
 		matrix = *state.Parent
 	}
-	size := compressionImageSize(object.Width*math.Hypot(matrix.a, matrix.b), object.Height*math.Hypot(matrix.c, matrix.d), v.dpi)
+	size := compressionImageSize(unit.Width*math.Hypot(matrix.a, matrix.b), unit.Height*math.Hypot(matrix.c, matrix.d), v.dpi)
 	return v.recordSize(ids, size)
 }
 
@@ -127,7 +388,7 @@ func (v *compressionImages) recordSize(ids [2]string, size image.Point) error {
 	if size.X == 0 || size.Y == 0 {
 		return fmt.Errorf("invalid image placement")
 	}
-	r := v.renderer.Reader
+	r := v.renderer.reader
 	for _, id := range ids {
 		if id == "" {
 			continue
@@ -162,7 +423,7 @@ func (v *compressionImages) objectPatterns(object PathObject, state RenderState)
 	if (fill == nil || fill.Pattern == nil) && (stroke == nil || stroke.Pattern == nil) {
 		return nil
 	}
-	matrix, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
+	matrix, _ := renderObjectMatrix(object.Boundary, IdentityMatrix(), state)
 	for _, color := range [2]*FillColor{fill, stroke} {
 		if color != nil && color.Pattern != nil {
 			if err := v.patternImages(color, matrix); err != nil {
@@ -259,20 +520,7 @@ func (v *compressionImages) patternImages(color *FillColor, object Matrix) error
 	return nil
 }
 
-// compressionPatternKey 复用相同底纹的尺寸分析，平移不影响像素需求
-type compressionPatternKey struct {
-	pattern *Pattern
-	linear  [4]float64
-}
-
-// compressionImagePlan 分文档合并图片需求，版本文件的当前入口独立于其他文档处理
-// 入参: ctx 取消上下文, options 压缩配置
-// 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
-func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOptions) (map[string]bool, map[string]image.Point, error) {
-	return r.compressionImagePlanProtected(ctx, options, nil, nil)
-}
-
-// compressionImagePlanProtected 按签名保护边界分文档合并图片需求，受保护文档和文件不参与有损降采样
+// compressionImagePlanProtected 按签名与全包历史版本保护边界分文档合并图片需求，受保护文档和文件不参与有损降采样
 // 入参: ctx 取消上下文, options 压缩配置, protectedDocs 受签名保护的文档索引, protectedFiles 受签名保护的文件路径
 // 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
 func (r *Reader) compressionImagePlanProtected(ctx context.Context, options CompressionOptions, protectedDocs map[int]bool, protectedFiles map[string]bool) (map[string]bool, map[string]image.Point, error) {
@@ -282,14 +530,31 @@ func (r *Reader) compressionImagePlanProtected(ctx context.Context, options Comp
 	images := make(map[string]bool)
 	sizes := make(map[string]image.Point)
 	blocked := make(map[string]bool)
-	isolated := r.OFD.DocBody[r.documentIndex].versioned
+	currentVersioned := r.currentVersioned()
+	var versionBlocked map[string]bool
+	if r.packageVersioned() {
+		versionBlocked = make(map[string]bool)
+		for index := range r.DocumentCount() {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
+			if !r.ofd.DocBody[index].versioned {
+				continue
+			}
+			files, err := r.documentNonCurrentVersionFiles(ctx, index)
+			if err != nil {
+				return nil, nil, err
+			}
+			maps.Copy(versionBlocked, files)
+		}
+	}
 	current := make(map[string]bool)
 	for offset := 0; offset < r.DocumentCount(); offset++ {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
 		index := offset
-		if isolated {
+		if currentVersioned {
 			index = (r.documentIndex + offset) % r.DocumentCount()
 		}
 		if protectedDocs[index] {
@@ -329,13 +594,13 @@ func (r *Reader) compressionImagePlanProtected(ctx context.Context, options Comp
 		}
 		for _, img := range catalog {
 			name := cleanPackagePath(img.Location)
-			if protectedFiles[name] {
+			if protectedFiles[name] || versionBlocked[name] && (!currentVersioned || index != r.documentIndex) {
 				images[name] = false
 				blocked[name] = true
 				delete(sizes, name)
 				continue
 			}
-			if isolated {
+			if currentVersioned {
 				if index == r.documentIndex {
 					current[name] = true
 				} else if current[name] {
@@ -368,7 +633,7 @@ func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, 
 	if dpi == 0 {
 		return nil, nil
 	}
-	doc, err := r.DocContext(ctx)
+	doc, err := r.docContext(ctx)
 	if err != nil {
 		return nil, ctx.Err()
 	}
@@ -418,247 +683,4 @@ func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, 
 		result[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
 	}
 	return result, ctx.Err()
-}
-
-// compressionImageSize 将毫米显示尺寸换算为像素，非法尺寸不降采样
-// 整像素边界消除单位换算产生的单ULP上溢，不降低实际像素需求
-// 入参: width 显示宽度, height 显示高度, dpi 分辨率上限
-// 返回: image.Point 像素需求
-func compressionImageSize(width, height float64, dpi int) image.Point {
-	w := math.Ceil(math.Nextafter(width*float64(dpi)/25.4, math.Inf(-1)))
-	h := math.Ceil(math.Nextafter(height*float64(dpi)/25.4, math.Inf(-1)))
-	if w <= 0 || h <= 0 || math.IsNaN(w) || math.IsNaN(h) || math.IsInf(w, 0) || math.IsInf(h, 0) || w > 1<<30 || h > 1<<30 {
-		return image.Point{}
-	}
-	return image.Pt(int(w), int(h))
-}
-
-// outputImageFormat 识别可由资源压缩生成的图片格式
-// 入参: data 图片编码
-// 返回: string 标准资源格式，未识别时为空
-func outputImageFormat(data []byte) string {
-	if baseimage.IsJPEG(data) {
-		return "JPEG"
-	}
-	if baseimage.IsPNG(data) {
-		return "PNG"
-	}
-	return ""
-}
-
-// optimizeImageResource 优化可完整保留的BMP、TIFF、静态GIF及有损JP2，复用图像压缩和降采样策略
-// 原始模式及无法保留的色彩配置不转换，仅采用小于原始编码的结果
-// 入参: ctx 取消上下文, data 图片编码, options 压缩选项, size 像素需求
-// 返回: []byte 图片编码，可能引用输入, error 解码、编码或取消错误
-func optimizeImageResource(ctx context.Context, data []byte, options CompressionOptions, size image.Point) ([]byte, error) {
-	if err := options.Validate(); err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if options.Mode != CompressionUnchanged {
-		if baseimage.IsTIFF(data) {
-			return optimizeTIFFResource(ctx, data, options, size)
-		}
-		if bytes.HasPrefix(data, []byte("BM")) {
-			return optimizeBMPResource(ctx, data, options, size)
-		}
-		if bytes.HasPrefix(data, []byte("GIF87a")) || bytes.HasPrefix(data, []byte("GIF89a")) {
-			return optimizeGIFResource(ctx, data, options, size)
-		}
-		if options.Mode == CompressionLossy && (isJP2Container(data) || isJ2KCodestream(data)) {
-			return optimizeJP2Resource(ctx, data, options, size)
-		}
-	}
-	return pdfgo.OptimizeImageResource(ctx, data, options, size)
-}
-
-// optimizeBMPResource 压缩可保留色彩与密度的位图，未知元数据及高精度位域保持原样
-// 入参: ctx 取消上下文, data BMP编码, options 压缩选项, size 像素需求
-// 返回: []byte 图片编码, error 解码、编码或取消错误
-func optimizeBMPResource(ctx context.Context, data []byte, options CompressionOptions, size image.Point) ([]byte, error) {
-	offset, width, height, depth, compression, err := baseimage.ParseBMPHeader(data)
-	if err != nil {
-		return data, nil
-	}
-	if height < 0 {
-		height = -height
-	}
-	if int64(width)*int64(height) > outputOptimizationBufferLimit/4 || compression != 0 && compression != 3 {
-		return data, nil
-	}
-	header := binary.LittleEndian.Uint32(data[14:18])
-	if header != 40 && header != 108 && header != 124 {
-		return data, nil
-	}
-	if header >= 108 && binary.LittleEndian.Uint32(data[70:74]) != 0x73524742 {
-		return data, nil
-	}
-	if header == 124 && (binary.LittleEndian.Uint32(data[122:126]) != 0 || binary.LittleEndian.Uint32(data[126:130]) != 0 || binary.LittleEndian.Uint32(data[130:134]) != 0) {
-		return data, nil
-	}
-	stride := (int64(width)*int64(depth) + 31) / 32 * 4
-	if int64(offset)+stride*int64(height) > int64(len(data)) {
-		return data, nil
-	}
-	density, ok := baseimage.BMPDensity(data)
-	if !ok {
-		return data, nil
-	}
-	if depth == 16 || depth == 32 {
-		masks, err := baseimage.BMPColorMasks(data, offset, depth, compression)
-		if err != nil {
-			return data, nil
-		}
-		if options.Mode == CompressionLossless {
-			for _, mask := range masks {
-				if mask.Max > 255 {
-					return data, nil
-				}
-			}
-		}
-	}
-	var pixels image.Image
-	if depth == 16 || compression == 3 {
-		pixels, err = baseimage.DecodeBMPContext(ctx, data)
-	} else {
-		pixels, _, err = image.Decode(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
-	}
-	if err != nil {
-		return nil, err
-	}
-	return optimizeRasterResource(ctx, data, pixels, options, size, density)
-}
-
-// optimizeRasterResource 编码已解码的资源图片，同步降采样后的像素密度，仅采用更小结果
-// 先降采样再编码，绝对密度按最终尺寸量化，相对密度保留精确比例
-// 无损有密度时保留PNG，有损模式允许不透明照片转JPEG并同步JFIF密度
-// 入参: ctx 取消上下文, data 原编码, pixels 像素, options 压缩选项, size 像素需求, density 像素密度
-// 返回: []byte 图片编码, error 编码或取消错误
-func optimizeRasterResource(ctx context.Context, data []byte, pixels image.Image, options CompressionOptions, size image.Point, density baseimage.Density) ([]byte, error) {
-	hasDensity := density.X != 0 || density.Y != 0
-	before := pixels.Bounds().Size()
-	if options.Mode == CompressionLossy {
-		var err error
-		pixels, err = pdfgo.ResizeImage(ctx, pixels, size)
-		if err != nil {
-			return nil, err
-		}
-	}
-	var ok bool
-	density, ok = density.Scale(before, pixels.Bounds().Size())
-	if !ok {
-		return data, ctx.Err()
-	}
-	var candidate []byte
-	var err error
-	if hasDensity && options.Mode != CompressionLossy {
-		var encoded bytes.Buffer
-		err = pdfgo.EncodePNGWithOptions(ctx, &encoded, pixels, options)
-		candidate = encoded.Bytes()
-	} else {
-		candidate, err = pdfgo.EncodeImageResource(ctx, pixels, options)
-	}
-	if err != nil {
-		if errors.Is(err, io.ErrShortBuffer) {
-			return data, ctx.Err()
-		}
-		return nil, err
-	}
-	if hasDensity {
-		densityWritten := false
-		if baseimage.IsJPEG(candidate) {
-			if withDensity, denseOK := baseimage.WithJPEGDensity(candidate, density); denseOK && len(withDensity) <= outputOptimizationBufferLimit {
-				candidate = withDensity
-				densityWritten = true
-			} else {
-				var encoded bytes.Buffer
-				if pngErr := pdfgo.EncodePNGWithOptions(ctx, &encoded, pixels, options); pngErr != nil {
-					if errors.Is(pngErr, io.ErrShortBuffer) {
-						return data, ctx.Err()
-					}
-					return nil, pngErr
-				}
-				candidate = encoded.Bytes()
-			}
-		}
-		if !densityWritten {
-			if len(candidate) > outputOptimizationBufferLimit-baseimage.PNGDensityChunkSize {
-				return data, ctx.Err()
-			}
-			candidate, ok = baseimage.WithPNGDensity(candidate, density)
-			if !ok {
-				return data, ctx.Err()
-			}
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if len(candidate) < len(data) {
-		return candidate, nil
-	}
-	return data, nil
-}
-
-// optimizeGIFResource 压缩静态单帧GIF为更小的PNG或JPEG，多帧动画保持原样
-// 入参: ctx 取消上下文, data GIF编码, options 压缩选项, size 显示像素需求
-// 返回: []byte 图片编码，不可转换时保留原文, error 编码或取消错误
-func optimizeGIFResource(ctx context.Context, data []byte, options CompressionOptions, size image.Point) ([]byte, error) {
-	cfg, err := gif.DecodeConfig(bytes.NewReader(data))
-	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width) > outputOptimizationBufferLimit/4/int64(cfg.Height) {
-		return data, ctx.Err()
-	}
-	anim, err := gif.DecodeAll(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
-	if err != nil || len(anim.Image) != 1 {
-		return data, ctx.Err()
-	}
-	frame := anim.Image[0]
-	if frame.Bounds() != image.Rect(0, 0, anim.Config.Width, anim.Config.Height) {
-		return data, ctx.Err()
-	}
-	return optimizeRasterResource(ctx, data, frame, options, size, baseimage.Density{})
-}
-
-// optimizeJP2Resource 在有损模式下解码JP2或J2K码流并降采样重编为更小的JPEG或PNG
-// 入参: ctx 取消上下文, data JP2或J2K编码, options 压缩选项, size 显示像素需求
-// 返回: []byte 图片编码，超限或失败时保留原文, error 编码或取消错误
-func optimizeJP2Resource(ctx context.Context, data []byte, options CompressionOptions, size image.Point) ([]byte, error) {
-	cfg, err := j2kgo.DecodeConfigContext(ctx, bytes.NewReader(data), nil)
-	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width) > outputOptimizationBufferLimit/8/int64(cfg.Height) {
-		return data, ctx.Err()
-	}
-	pixels, err := j2kgo.DecodeContext(ctx, bytes.NewReader(data), nil)
-	if err != nil || pixels == nil {
-		return data, ctx.Err()
-	}
-	return optimizeRasterResource(ctx, data, pixels, options, size, baseimage.Density{})
-}
-
-// optimizeTIFFResource 压缩单目录TIFF，保留方向、透明度、采样精度及像素密度
-// 主图或单个瓦片的预计缓冲超限时保留原编码
-// 入参: ctx 取消上下文, data TIFF编码, options 压缩选项, size 显示像素需求
-// 返回: []byte 图片编码，不可完整转换时保留原文, error 编码或取消错误
-func optimizeTIFFResource(ctx context.Context, data []byte, options CompressionOptions, size image.Point) ([]byte, error) {
-	layout, err := baseimage.ReadTIFFLayoutContext(ctx, bytes.NewReader(data))
-	if err != nil {
-		return data, ctx.Err()
-	}
-	pixelSize := int64(layout.DecodedPixelBytes())
-	if int64(layout.Width) > outputOptimizationBufferLimit/pixelSize/int64(layout.Height) {
-		return data, ctx.Err()
-	}
-	if layout.TileWidth != 0 && int64(layout.TileWidth) > outputOptimizationBufferLimit/pixelSize/int64(layout.TileHeight) {
-		return data, ctx.Err()
-	}
-	density, ok := baseimage.TIFFConversionDensity(data, layout, options.Mode == CompressionLossy)
-	if !ok {
-		return data, ctx.Err()
-	}
-	pixels, err := baseimage.DecodeTIFF(ctx, data, layout)
-	if err != nil {
-		return data, ctx.Err()
-	}
-	return optimizeRasterResource(ctx, data, pixels, options, size, density)
 }

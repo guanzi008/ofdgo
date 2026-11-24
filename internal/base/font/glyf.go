@@ -38,115 +38,16 @@ type Outliner struct {
 	warnings map[uint16]error
 }
 
-// Path 按字体设计坐标提取闭合轮廓，TrueType保留字形指令处理
-// 入参: path 路径接收器, glyph 字形编号, scale 字体单位缩放
-// 返回: error 字形解析错误
-func (f *Outliner) Path(path glyphPather, glyph uint16, scale float64) error {
-	type point struct{ X, Y float64 }
-	if !f.Font.IsTrueType {
-		f.cffOnce.Do(func() {
-			data, err := SanitizeCFF(f.Font.Tables["CFF "])
-			if err == nil {
-				data, err = NormalizeCFFCharstringsAt(data, f.Font.UnitsPerEm())
-			}
-			if err != nil {
-				f.cffErr = err
-				return
-			}
-			f.cff, f.cffErr = cff.Parse(data)
-		})
-		if f.cffErr != nil {
-			return f.cffErr
-		}
-		segments, _, err := f.cff.LoadGlyph(glyph)
-		if err != nil {
-			return err
-		}
-		open := false
-		for _, segment := range segments {
-			p := segment.Args
-			switch segment.Op {
-			case opentype.SegmentOpMoveTo:
-				if open {
-					path.Close()
-				}
-				path.MoveTo(float64(p[0].X)*scale, float64(p[0].Y)*scale)
-				open = true
-			case opentype.SegmentOpLineTo:
-				path.LineTo(float64(p[0].X)*scale, float64(p[0].Y)*scale)
-			case opentype.SegmentOpCubeTo:
-				path.CubeTo(float64(p[0].X)*scale, float64(p[0].Y)*scale, float64(p[1].X)*scale, float64(p[1].Y)*scale, float64(p[2].X)*scale, float64(p[2].Y)*scale)
-			default:
-				return fmt.Errorf("invalid CFF curve")
-			}
-		}
-		if open {
-			path.Close()
-		}
-		return nil
-	}
-	contour, err := f.glyph(glyph, make(map[uint16]bool))
-	if err != nil {
-		return err
-	}
-	points := contour.points
-	first := 0
-	for _, endpoint := range contour.ends {
-		last := int(endpoint)
-		if last < first || last >= len(points)-4 {
-			return fmt.Errorf("invalid TrueType contour endpoints")
-		}
-		if last == first {
-			first = last + 1
-			continue
-		}
-		coordinate := func(i int) point {
-			return point{X: float64(points[i].x) * scale / 64, Y: float64(points[i].y) * scale / 64}
-		}
-		start, end := coordinate(first), coordinate(last)
-		begin, stop := first, last
-		if points[first].on {
-			begin++
-		} else if points[last].on {
-			start, stop = end, last-1
-		} else {
-			start = point{X: (start.X + end.X) / 2, Y: (start.Y + end.Y) / 2}
-		}
-		path.MoveTo(start.X, start.Y)
-		var control point
-		pending := false
-		for i := begin; i <= stop; i++ {
-			p := coordinate(i)
-			if points[i].on {
-				if pending {
-					path.QuadTo(control.X, control.Y, p.X, p.Y)
-				} else {
-					path.LineTo(p.X, p.Y)
-				}
-				pending = false
-			} else {
-				if pending {
-					path.QuadTo(control.X, control.Y, (control.X+p.X)/2, (control.Y+p.Y)/2)
-				}
-				control, pending = p, true
-			}
-		}
-		if pending {
-			path.QuadTo(control.X, control.Y, start.X, start.Y)
-		}
-		path.Close()
-		first = last + 1
-	}
-	return nil
-}
+// TrueType复合字形展开的最大嵌套深度和分量访问次数
+const (
+	maxTTCompositeDepth = 32
+	maxTTCompositeSteps = 4096
+)
 
-// GlyphWarning 返回字形恢复为执行前轮廓的原因
-// 入参: id 字形编号
-// 返回: error 恢复原因，无恢复时为空
-func (f *Outliner) GlyphWarning(id uint16) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.warnings[id]
+// ttCompositeWalk 记录TrueType复合字形递归展开时的环检测与预算状态
+type ttCompositeWalk struct {
+	active map[uint16]bool
+	steps  int
 }
 
 // ttGlyph 保存字形轮廓及四个度量虚拟点
@@ -155,93 +56,6 @@ type ttGlyph struct {
 	ends    []uint16
 	metrics *[4]ttPoint
 	warning error
-}
-
-// glyph 解码简单或复合字形并执行对应字节码，不改写字体资源
-// 入参: id 字形编号, active 递归访问集合
-// 返回: ttGlyph 字形轮廓, error 字形错误
-func (f *Outliner) glyph(id uint16, active map[uint16]bool) (ttGlyph, error) {
-	var result ttGlyph
-	if id >= f.Font.NumGlyphs() || active[id] {
-		return result, fmt.Errorf("invalid TrueType component reference %d", id)
-	}
-	active[id] = true
-	defer delete(active, id)
-	data, err := trueTypeGlyphData(f.Font.Tables, id)
-	if err != nil {
-		return result, err
-	}
-	if len(data) == 0 {
-		data = make([]byte, 12)
-	}
-	if len(data) < 10 {
-		return result, fmt.Errorf("truncated TrueType glyph %d", id)
-	}
-	n := int(int16(binary.BigEndian.Uint16(data)))
-	phantoms := f.phantomPoints(id, data)
-	var program []byte
-	if n >= 0 {
-		result, program, err = readTTSimple(data, n)
-	} else {
-		result, program, err = f.composite(id, data, phantoms, active)
-	}
-	if err != nil {
-		return result, err
-	}
-	if result.warning != nil {
-		f.recordGlyphWarning(id, result.warning)
-	}
-	if result.metrics != nil {
-		result.points = append(result.points, result.metrics[:]...)
-	} else {
-		result.points = append(result.points, phantoms[:]...)
-	}
-	if len(program) == 0 {
-		return result, nil
-	}
-	outlineOnly, err := ttOutlineOnly(f.Font.Tables, program)
-	if err != nil {
-		return result, err
-	}
-	if outlineOnly {
-		return result, nil
-	}
-	f.once.Do(func() { f.program, f.err = newTTInterpreter(f.Font.Tables, f.Font.UnitsPerEm()) })
-	if f.err != nil {
-		if ttRecoverableHint(f.err) {
-			result.warning = f.err
-			f.recordGlyphWarning(id, f.err)
-			return result, nil
-		}
-		return result, f.err
-	}
-	if f.program.graphics.inhibit {
-		return result, nil
-	}
-	vm := f.program.clone()
-	vm.zones[1], vm.ends = append([]ttPoint(nil), result.points...), result.ends
-	if err := vm.run(program); err != nil {
-		if ttRecoverableHint(err) {
-			result.warning = err
-			f.recordGlyphWarning(id, err)
-			return result, nil
-		}
-		return result, fmt.Errorf("TrueType glyph %d: %w", id, err)
-	}
-	result.points = vm.zones[1]
-	return result, nil
-}
-
-// phantomPoints 按水平和垂直度量生成字形末尾的四个虚拟点
-// 入参: id 字形编号, data 完整字形头
-// 返回: [4]ttPoint 左右边距与上下原点
-func (f *Outliner) phantomPoints(id uint16, data []byte) [4]ttPoint {
-	left := int32(int16(binary.BigEndian.Uint16(data[2:]))) - int32(f.Font.sideBearing(id, false))
-	top := int32(int16(binary.BigEndian.Uint16(data[8:])))
-	if f.Font.vertical != 0 {
-		top += int32(f.Font.sideBearing(id, true))
-	}
-	return [4]ttPoint{{x: left * 64, ox: left * 64}, {x: (left + int32(f.Font.GlyphAdvance(id))) * 64, ox: (left + int32(f.Font.GlyphAdvance(id))) * 64}, {y: top * 64, oy: top * 64}, {y: (top - int32(f.Font.GlyphVerticalAdvance(id))) * 64, oy: (top - int32(f.Font.GlyphVerticalAdvance(id))) * 64}}
 }
 
 // ttRecoverableHint 判断栈参数、区点轮廓及函数引用或控制流错误是否允许保留执行前轮廓
@@ -280,17 +94,6 @@ func trueTypeGlyphData(tables map[string][]byte, id uint16) ([]byte, error) {
 		return nil, fmt.Errorf("invalid TrueType glyph %d range", id)
 	}
 	return glyf[start:end], nil
-}
-
-// recordGlyphWarning 记录字形恢复提示，允许并发提取轮廓
-// 入参: id 字形编号, warning 恢复原因
-func (f *Outliner) recordGlyphWarning(id uint16, warning error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.warnings == nil {
-		f.warnings = make(map[uint16]error)
-	}
-	f.warnings[id] = warning
 }
 
 // readTTSimple 读取简单字形的重复标志、差分坐标和字节码
@@ -380,10 +183,247 @@ func readTTSimple(data []byte, count int) (ttGlyph, []byte, error) {
 	return result, program, nil
 }
 
+// ttOutlineOnly 识别已剥离提示表但仍引用字体函数或控制值的子集字形，使用设计轮廓
+// 入参: tables 字体表, code 字形程序
+// 返回: bool 是否只提取轮廓, error 字节码错误
+func ttOutlineOnly(tables map[string][]byte, code []byte) (bool, error) {
+	if len(tables["fpgm"])+len(tables["prep"])+len(tables["cvt "]) != 0 {
+		return false, nil
+	}
+	for pc := 0; pc < len(code); {
+		op := code[pc]
+		if op == 0x2a || op == 0x2b || op == 0x3e || op == 0x3f || op == 0x44 || op == 0x45 || op == 0x70 || op >= 0x73 && op <= 0x75 || op >= 0xe0 {
+			return true, nil
+		}
+		var err error
+		pc, err = ttInstructionEnd(code, pc)
+		if err != nil {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+// Path 按字体设计坐标提取闭合轮廓，TrueType保留字形指令处理
+// 入参: path 路径接收器, glyph 字形编号, scale 字体单位缩放
+// 返回: error 字形解析错误
+func (f *Outliner) Path(path glyphPather, glyph uint16, scale float64) error {
+	type point struct{ X, Y float64 }
+	if !f.Font.IsTrueType {
+		f.cffOnce.Do(func() {
+			data, err := SanitizeCFF(f.Font.Tables["CFF "])
+			if err == nil {
+				data, err = NormalizeCFFCharstringsAt(data, f.Font.UnitsPerEm())
+			}
+			if err != nil {
+				f.cffErr = err
+				return
+			}
+			f.cff, f.cffErr = cff.Parse(data)
+		})
+		if f.cffErr != nil {
+			return f.cffErr
+		}
+		segments, _, err := f.cff.LoadGlyph(glyph)
+		if err != nil {
+			return err
+		}
+		open := false
+		for _, segment := range segments {
+			p := segment.Args
+			switch segment.Op {
+			case opentype.SegmentOpMoveTo:
+				if open {
+					path.Close()
+				}
+				path.MoveTo(float64(p[0].X)*scale, float64(p[0].Y)*scale)
+				open = true
+			case opentype.SegmentOpLineTo:
+				path.LineTo(float64(p[0].X)*scale, float64(p[0].Y)*scale)
+			case opentype.SegmentOpCubeTo:
+				path.CubeTo(float64(p[0].X)*scale, float64(p[0].Y)*scale, float64(p[1].X)*scale, float64(p[1].Y)*scale, float64(p[2].X)*scale, float64(p[2].Y)*scale)
+			default:
+				return fmt.Errorf("invalid CFF curve")
+			}
+		}
+		if open {
+			path.Close()
+		}
+		return nil
+	}
+	contour, err := f.glyph(glyph, &ttCompositeWalk{active: make(map[uint16]bool)}, 0)
+	if err != nil {
+		return err
+	}
+	points := contour.points
+	first := 0
+	for _, endpoint := range contour.ends {
+		last := int(endpoint)
+		if last < first || last >= len(points)-4 {
+			return fmt.Errorf("invalid TrueType contour endpoints")
+		}
+		if last == first {
+			first = last + 1
+			continue
+		}
+		coordinate := func(i int) point {
+			return point{X: float64(points[i].x) * scale / 64, Y: float64(points[i].y) * scale / 64}
+		}
+		start, end := coordinate(first), coordinate(last)
+		begin, stop := first, last
+		if points[first].on {
+			begin++
+		} else if points[last].on {
+			start, stop = end, last-1
+		} else {
+			start = point{X: (start.X + end.X) / 2, Y: (start.Y + end.Y) / 2}
+		}
+		path.MoveTo(start.X, start.Y)
+		var control point
+		pending := false
+		for i := begin; i <= stop; i++ {
+			p := coordinate(i)
+			if points[i].on {
+				if pending {
+					path.QuadTo(control.X, control.Y, p.X, p.Y)
+				} else {
+					path.LineTo(p.X, p.Y)
+				}
+				pending = false
+			} else {
+				if pending {
+					path.QuadTo(control.X, control.Y, (control.X+p.X)/2, (control.Y+p.Y)/2)
+				}
+				control, pending = p, true
+			}
+		}
+		if pending {
+			path.QuadTo(control.X, control.Y, start.X, start.Y)
+		}
+		path.Close()
+		first = last + 1
+	}
+	return nil
+}
+
+// GlyphWarning 返回字形恢复为执行前轮廓的原因
+// 入参: id 字形编号
+// 返回: error 恢复原因，无恢复时为空
+func (f *Outliner) GlyphWarning(id uint16) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.warnings[id]
+}
+
+// glyph 解码简单或复合字形并执行对应字节码，不改写字体资源
+// 入参: id 字形编号, walk 复合字形展开状态, depth 当前嵌套深度
+// 返回: ttGlyph 字形轮廓, error 字形错误
+func (f *Outliner) glyph(id uint16, walk *ttCompositeWalk, depth int) (ttGlyph, error) {
+	var result ttGlyph
+	if depth > maxTTCompositeDepth {
+		return result, fmt.Errorf("TrueType composite depth limit exceeded")
+	}
+	walk.steps++
+	if walk.steps > maxTTCompositeSteps {
+		return result, fmt.Errorf("TrueType composite expansion limit exceeded")
+	}
+	if id >= f.Font.NumGlyphs() || walk.active[id] {
+		return result, fmt.Errorf("invalid TrueType component reference %d", id)
+	}
+	walk.active[id] = true
+	defer delete(walk.active, id)
+	data, err := trueTypeGlyphData(f.Font.Tables, id)
+	if err != nil {
+		return result, err
+	}
+	if len(data) == 0 {
+		data = make([]byte, 12)
+	}
+	if len(data) < 10 {
+		return result, fmt.Errorf("truncated TrueType glyph %d", id)
+	}
+	n := int(int16(binary.BigEndian.Uint16(data)))
+	phantoms := f.phantomPoints(id, data)
+	var program []byte
+	if n >= 0 {
+		result, program, err = readTTSimple(data, n)
+	} else {
+		result, program, err = f.composite(id, data, phantoms, walk, depth)
+	}
+	if err != nil {
+		return result, err
+	}
+	if result.warning != nil {
+		f.recordGlyphWarning(id, result.warning)
+	}
+	if result.metrics != nil {
+		result.points = append(result.points, result.metrics[:]...)
+	} else {
+		result.points = append(result.points, phantoms[:]...)
+	}
+	if len(program) == 0 {
+		return result, nil
+	}
+	outlineOnly, err := ttOutlineOnly(f.Font.Tables, program)
+	if err != nil {
+		return result, err
+	}
+	if outlineOnly {
+		return result, nil
+	}
+	f.once.Do(func() { f.program, f.err = newTTInterpreter(f.Font.Tables, f.Font.UnitsPerEm()) })
+	if f.err != nil {
+		if ttRecoverableHint(f.err) {
+			result.warning = f.err
+			f.recordGlyphWarning(id, f.err)
+			return result, nil
+		}
+		return result, f.err
+	}
+	if f.program.graphics.inhibit {
+		return result, nil
+	}
+	vm := f.program.clone()
+	vm.zones[1], vm.ends = append([]ttPoint(nil), result.points...), result.ends
+	if err := vm.run(program); err != nil {
+		if ttRecoverableHint(err) {
+			result.warning = err
+			f.recordGlyphWarning(id, err)
+			return result, nil
+		}
+		return result, fmt.Errorf("TrueType glyph %d: %w", id, err)
+	}
+	result.points = vm.zones[1]
+	return result, nil
+}
+
+// phantomPoints 按水平和垂直度量生成字形末尾的四个虚拟点
+// 入参: id 字形编号, data 完整字形头
+// 返回: [4]ttPoint 左右边距与上下原点
+func (f *Outliner) phantomPoints(id uint16, data []byte) [4]ttPoint {
+	left := int32(int16(binary.BigEndian.Uint16(data[2:]))) - int32(f.Font.sideBearing(id, false))
+	top := int32(int16(binary.BigEndian.Uint16(data[8:])))
+	if f.Font.vertical != 0 {
+		top += int32(f.Font.sideBearing(id, true))
+	}
+	return [4]ttPoint{{x: left * 64, ox: left * 64}, {x: (left + int32(f.Font.GlyphAdvance(id))) * 64, ox: (left + int32(f.Font.GlyphAdvance(id))) * 64}, {y: top * 64, oy: top * 64}, {y: (top - int32(f.Font.GlyphVerticalAdvance(id))) * 64, oy: (top - int32(f.Font.GlyphVerticalAdvance(id))) * 64}}
+}
+
+// recordGlyphWarning 记录字形恢复提示，允许并发提取轮廓
+// 入参: id 字形编号, warning 恢复原因
+func (f *Outliner) recordGlyphWarning(id uint16, warning error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.warnings == nil {
+		f.warnings = make(map[uint16]error)
+	}
+	f.warnings[id] = warning
+}
+
 // composite 合成分量变换和点匹配，保留分量顺序及父级字节码
-// 入参: glyph 父字形编号, data 复合字形数据, phantoms 父字形虚拟点, active 递归访问集合
+// 入参: glyph 父字形编号, data 复合字形数据, phantoms 父字形虚拟点, walk 复合字形展开状态, depth 当前嵌套深度
 // 返回: ttGlyph 字形轮廓, []byte 字节码, error 数据错误
-func (f *Outliner) composite(glyph uint16, data []byte, phantoms [4]ttPoint, active map[uint16]bool) (ttGlyph, []byte, error) {
+func (f *Outliner) composite(glyph uint16, data []byte, phantoms [4]ttPoint, walk *ttCompositeWalk, depth int) (ttGlyph, []byte, error) {
 	var result ttGlyph
 	pos := 10
 	total := -1
@@ -439,7 +479,7 @@ func (f *Outliner) composite(glyph uint16, data []byte, phantoms [4]ttPoint, act
 		if flags&8 != 0 {
 			matrix[3] = matrix[0]
 		}
-		part, err := f.glyph(id, active)
+		part, err := f.glyph(id, walk, depth+1)
 		if err != nil {
 			return result, nil, err
 		}
@@ -476,7 +516,7 @@ func (f *Outliner) composite(glyph uint16, data []byte, phantoms [4]ttPoint, act
 			} else {
 				if total < 0 {
 					var err error
-					total, err = trueTypePointCount(f.Font.Tables, glyph, map[uint16]int{}, map[uint16]bool{})
+					total, err = trueTypePointCount(f.Font.Tables, glyph, map[uint16]int{}, map[uint16]bool{}, 0)
 					if err != nil {
 						return result, nil, err
 					}
@@ -531,25 +571,4 @@ func (f *Outliner) composite(glyph uint16, data []byte, phantoms [4]ttPoint, act
 		program = data[pos : pos+n]
 	}
 	return result, program, nil
-}
-
-// ttOutlineOnly 识别已剥离提示表但仍引用字体函数或控制值的子集字形，使用设计轮廓
-// 入参: tables 字体表, code 字形程序
-// 返回: bool 是否只提取轮廓, error 字节码错误
-func ttOutlineOnly(tables map[string][]byte, code []byte) (bool, error) {
-	if len(tables["fpgm"])+len(tables["prep"])+len(tables["cvt "]) != 0 {
-		return false, nil
-	}
-	for pc := 0; pc < len(code); {
-		op := code[pc]
-		if op == 0x2a || op == 0x2b || op == 0x3e || op == 0x3f || op == 0x44 || op == 0x45 || op == 0x70 || op >= 0x73 && op <= 0x75 || op >= 0xe0 {
-			return true, nil
-		}
-		var err error
-		pc, err = ttInstructionEnd(code, pc)
-		if err != nil {
-			return false, err
-		}
-	}
-	return false, nil
 }

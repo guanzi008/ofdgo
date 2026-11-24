@@ -34,10 +34,44 @@ func mergeGraphicObjectAlpha(obj GraphicObject, alpha *int) GraphicObject {
 		obj.PathObject.Alpha = mergeAlpha(obj.PathObject.Alpha, alpha)
 	case "ImageObject":
 		obj.ImageObject.Alpha = mergeAlpha(obj.ImageObject.Alpha, alpha)
-	case "CompositeGraphicUnit", "CompositeObject":
-		obj.CompositeGraphicUnit.Alpha = mergeAlpha(obj.CompositeGraphicUnit.Alpha, alpha)
+	case "CompositeObject":
+		obj.CompositeObject.Alpha = mergeAlpha(obj.CompositeObject.Alpha, alpha)
 	}
 	return obj
+}
+
+// mergeDrawParam 合并绘制参数属性
+// 入参: base 基础绘制参数, dp 覆盖绘制参数
+// 返回: *DrawParam 合并后的绘制参数
+func mergeDrawParam(base DrawParam, dp *DrawParam) *DrawParam {
+	if dp.LineWidth > 0 || dp.LineWidthSet {
+		base.LineWidth = dp.LineWidth
+		base.LineWidthSet = dp.LineWidthSet
+	}
+	if dp.Join != "" {
+		base.Join = dp.Join
+	}
+	if dp.Cap != "" {
+		base.Cap = dp.Cap
+	}
+	if dp.DashPattern != "" || dp.DashPatternSet {
+		base.DashPattern = dp.DashPattern
+		base.DashPatternSet = dp.DashPatternSet
+	}
+	if dp.DashOffset != nil {
+		base.DashOffset = dp.DashOffset
+	}
+	if dp.MiterLimit > 0 || dp.MiterLimitSet {
+		base.MiterLimit = dp.MiterLimit
+		base.MiterLimitSet = dp.MiterLimitSet
+	}
+	if dp.FillColor != nil {
+		base.FillColor = dp.FillColor
+	}
+	if dp.StrokeColor != nil {
+		base.StrokeColor = dp.StrokeColor
+	}
+	return &base
 }
 
 // drawParamDefaults 合并绘制参数默认样式
@@ -57,61 +91,13 @@ func (r *Renderer) drawParamDefaults(id string, defaults *DrawParam) *DrawParam 
 	return mergeDrawParam(*defaults, dp)
 }
 
-// mergeDrawParam 合并绘制参数属性
-// 入参: base 基础绘制参数, dp 覆盖绘制参数
+// compositeObjectDefaults 合并复合图元直接声明的描边属性与继承样式
+// 入参: object 复合图元对象, defaults 父级默认绘制参数
 // 返回: *DrawParam 合并后的绘制参数
-func mergeDrawParam(base DrawParam, dp *DrawParam) *DrawParam {
-	if dp.LineWidth > 0 || dp.LineWidthSet {
-		base.LineWidth = dp.LineWidth
-		base.LineWidthSet = dp.LineWidthSet
-	}
-	if dp.Join != "" {
-		base.Join = dp.Join
-	}
-	if dp.Cap != "" {
-		base.Cap = dp.Cap
-	}
-	if dp.DashPattern != "" || dp.dashPatternSet {
-		base.DashPattern = dp.DashPattern
-		base.dashPatternSet = dp.dashPatternSet
-	}
-	if dp.DashOffset != nil {
-		base.DashOffset = dp.DashOffset
-	}
-	if dp.MiterLimit > 0 || dp.MiterLimitSet {
-		base.MiterLimit = dp.MiterLimit
-		base.MiterLimitSet = dp.MiterLimitSet
-	}
-	if dp.FillColor != nil {
-		base.FillColor = dp.FillColor
-	}
-	if dp.StrokeColor != nil {
-		base.StrokeColor = dp.StrokeColor
-	}
-	if dp.Font != "" {
-		base.Font = dp.Font
-	}
-	if dp.Size > 0 {
-		base.Size = dp.Size
-	}
-	if dp.Weight > 0 || dp.WeightSet {
-		base.Weight = dp.Weight
-		base.WeightSet = dp.WeightSet
-	}
-	if dp.Italic || dp.ItalicSet {
-		base.Italic = dp.Italic
-		base.ItalicSet = dp.ItalicSet
-	}
-	return &base
-}
-
-// compositeGraphicUnitDefaults 合并复合图元直接声明的描边属性与继承样式
-// 入参: unit 复合图元, defaults 父级默认绘制参数
-// 返回: *DrawParam 合并后的绘制参数
-func (r *Renderer) compositeGraphicUnitDefaults(unit CompositeGraphicUnit, defaults *DrawParam) *DrawParam {
-	merged := r.drawParamDefaults(unit.DrawParam, defaults)
-	hasDirect := unit.LineWidth > 0 || unit.LineWidthSet || unit.Join != "" || unit.Cap != "" ||
-		unit.DashPattern != "" || unit.dashPatternSet || unit.DashOffset != nil || unit.MiterLimit > 0 || unit.MiterLimitSet
+func (r *Renderer) compositeObjectDefaults(object CompositeObject, defaults *DrawParam) *DrawParam {
+	merged := r.drawParamDefaults(object.DrawParam, defaults)
+	hasDirect := object.LineWidth > 0 || object.LineWidthSet || object.Join != "" || object.Cap != "" ||
+		object.DashPattern != "" || object.DashPatternSet || object.DashOffset != nil || object.MiterLimit > 0 || object.MiterLimitSet
 	if !hasDirect {
 		return merged
 	}
@@ -120,10 +106,10 @@ func (r *Renderer) compositeGraphicUnitDefaults(unit CompositeGraphicUnit, defau
 		base = *merged
 	}
 	override := &DrawParam{
-		LineWidth: unit.LineWidth, LineWidthSet: unit.LineWidthSet,
-		Join: unit.Join, Cap: unit.Cap,
-		DashPattern: unit.DashPattern, dashPatternSet: unit.dashPatternSet, DashOffset: unit.DashOffset,
-		MiterLimit: unit.MiterLimit, MiterLimitSet: unit.MiterLimitSet,
+		LineWidth: object.LineWidth, LineWidthSet: object.LineWidthSet,
+		Join: object.Join, Cap: object.Cap,
+		DashPattern: object.DashPattern, DashPatternSet: object.DashPatternSet, DashOffset: object.DashOffset,
+		MiterLimit: object.MiterLimit, MiterLimitSet: object.MiterLimitSet,
 	}
 	return mergeDrawParam(base, override)
 }
@@ -132,7 +118,7 @@ func (r *Renderer) compositeGraphicUnitDefaults(unit CompositeGraphicUnit, defau
 // 入参: id 参数标识, visited 已访问资源
 // 返回: *DrawParam 绘制参数
 func (r *Renderer) getDrawParam(id string, visited map[*DrawParam]bool) *DrawParam {
-	dp, _ := resourceValue(r.DrawParams, id)
+	dp, _ := resourceValue(r.drawParams, id)
 	if dp == nil || visited[dp] {
 		return nil
 	}

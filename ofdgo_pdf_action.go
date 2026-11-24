@@ -163,14 +163,14 @@ func (p *pdfImporter) eventActions(ctx context.Context, object pdfgo.Object, eve
 		annotation := source
 		annotation.Dictionary = pdfgo.Dictionary{"A": info.Dictionary}
 		warned = false
-		warnings := len(p.report.Warnings)
+		warnings := p.warningTotal
 		converted, err := p.convertLinkActions(annotation, p.warning == nil, currentPage)
 		if err != nil {
 			conversionErr = retain(err)
 			*currentPage = -1
 			return conversionErr
 		}
-		if p.warning != nil && (converted == nil || warned || len(p.report.Warnings) != warnings) {
+		if p.warning != nil && (converted == nil || warned || p.warningTotal != warnings) {
 			if err := retain(nil); err != nil {
 				conversionErr = err
 				return err
@@ -287,6 +287,7 @@ func (p *pdfImporter) destinationBounds(page *pdfgo.Page) (Box, error) {
 	}
 	matrix, width, height := codecpdf.PageMatrix(page)
 	editor := NewEditor()
+	defer editor.Close()
 	editor.SetResources(p.resources)
 	editor.SetRenderBackends(p.editor.Backends())
 	editor.SetFontDirs(p.editor.fontDirs...)
@@ -303,8 +304,8 @@ func (p *pdfImporter) destinationBounds(page *pdfgo.Page) (Box, error) {
 		matrix:  matrix, pageBox: page.CropBox, pageWidth: width, pageHeight: height,
 		rasterDPI: p.rasterDPI, fontIDs: make(map[*pdfgo.Font]string),
 		resolveFile: p.resolveFile, resolveReference: p.resolveReference,
-		references: &codecpdf.ReferenceCache{},
-		halftones:  p.halftones, halftoneWarnings: make(map[*pdfgo.Halftone]bool),
+		references:       &codecpdf.ReferenceCache{},
+		halftoneWarnings: make(map[*pdfgo.Halftone]bool),
 	}
 	defer local.references.Close()
 	if err := local.compositePage(nil, func(visitor pdfgo.Visitor) error {
@@ -320,9 +321,9 @@ func (p *pdfImporter) destinationBounds(page *pdfgo.Page) (Box, error) {
 		return Box{}, err
 	}
 	defer reader.Close()
-	renderer := p.renderer.childRenderer(reader)
-	renderer.TransparentBackground = true
-	renderer.RenderAnnotations = false
+	renderer := p.renderer.syncChildRenderer(reader)
+	renderer.transparentBackground = true
+	renderer.renderAnnotations = false
 	if renderer.backends.Fonts != nil {
 		renderer.backends.Fonts = pdfDestinationFontBackend{renderer.backends.Fonts}
 	}

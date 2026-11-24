@@ -26,280 +26,6 @@ import (
 	"strings"
 )
 
-// ColorSpace 获取当前文档及版本的颜色空间定义，不读取或解析ICC文件
-// 入参: ctx 取消上下文, id 资源标识
-// 返回: *ColorSpace 独立副本，Profile为包内绝对引用, error 查询或解析错误
-func (r *Reader) ColorSpace(ctx context.Context, id string) (*ColorSpace, error) {
-	catalog, err := r.resourceCatalog(ctx)
-	if err != nil {
-		return nil, err
-	}
-	item, _, resFile, _, err := findUniqueCatalogResource(catalog, "ColorSpace", id)
-	if err != nil {
-		return nil, err
-	}
-	var space ColorSpace
-	if err := catalog.styleDefinitionAt(ctx, resFile, item, &space); err != nil {
-		return nil, err
-	}
-	space.ID, space.Profile = item.ID, ""
-	if item.File != "" {
-		space.Profile = "/" + item.File
-	}
-	return &space, ctx.Err()
-}
-
-// DrawParam 获取当前文档的绘制参数，解析继承时拒绝缺失、类型错误及循环引用
-// 入参: ctx 取消上下文, id 资源标识, resolved 是否合并基础绘制参数
-// 返回: *DrawParam 独立副本，未解析时保留Relative, error 查询或继承错误
-func (r *Reader) DrawParam(ctx context.Context, id string, resolved bool) (*DrawParam, error) {
-	catalog, err := r.resourceCatalog(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var matches []int
-	for i, item := range catalog.items {
-		if resourceMatches(item, "DrawParam", id) {
-			matches = append(matches, i)
-		}
-	}
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("resource not found: DrawParam/%s", id)
-	}
-	curIdx := matches[0]
-	if len(matches) > 1 {
-		if !resolved {
-			return nil, fmt.Errorf("ambiguous resource DrawParam/%s defined in multiple resource files", id)
-		}
-		bestIdx := -1
-		for _, candidate := range matches {
-			scope := catalog.scopeForFile(catalog.itemFiles[candidate])
-			coversAll := true
-			for _, other := range matches {
-				if !slices.Contains(scope, catalog.itemFiles[other]) {
-					coversAll = false
-					break
-				}
-			}
-			if coversAll {
-				if bestIdx != -1 {
-					return nil, fmt.Errorf("ambiguous resource DrawParam/%s defined in multiple resource files", id)
-				}
-				bestIdx = candidate
-			}
-		}
-		if bestIdx == -1 {
-			return nil, fmt.Errorf("ambiguous resource DrawParam/%s defined in multiple resource files", id)
-		}
-		curIdx = bestIdx
-	}
-	var chain []DrawParam
-	seen := make(map[string]bool)
-	for {
-		item := catalog.items[curIdx]
-		curFile := catalog.itemFiles[curIdx]
-		visitKey := curFile + "\x00" + item.ID
-		if seen[visitKey] {
-			return nil, fmt.Errorf("cyclic draw parameter %s", item.ID)
-		}
-		seen[visitKey] = true
-		var draw DrawParam
-		if err := catalog.styleDefinitionAt(ctx, curFile, item, &draw); err != nil {
-			return nil, err
-		}
-		draw.ID = item.ID
-		if !resolved {
-			return &draw, nil
-		}
-		if draw.ResourceID != "" || draw.Link != "" || draw.BaseLoc != "" {
-			return nil, fmt.Errorf("external draw parameter cannot be resolved")
-		}
-		chain = append(chain, draw)
-		if draw.Relative == "" {
-			break
-		}
-		relID := editorResourceID(draw.Relative)
-		scope := catalog.scopeForFile(curFile)
-		if pos := slices.Index(scope, curFile); pos >= 0 {
-			if relID == item.ID {
-				scope = scope[pos+1:]
-			} else {
-				scope = scope[pos:]
-			}
-		}
-		nextIdx := -1
-		for _, resFile := range scope {
-			if idx, ok := catalog.itemIndex[resFile+"\x00DrawParam\x00"+relID]; ok {
-				nextIdx = idx
-				break
-			}
-		}
-		if nextIdx < 0 {
-			if relID == item.ID {
-				return nil, fmt.Errorf("cyclic draw parameter %s", item.ID)
-			}
-			return nil, fmt.Errorf("resource not found: DrawParam/%s", draw.Relative)
-		}
-		curIdx = nextIdx
-	}
-	result := &DrawParam{}
-	for i := len(chain) - 1; i >= 0; i-- {
-		result = mergeDrawParam(*result, &chain[i])
-	}
-	return result, ctx.Err()
-}
-
-// ColorSpace 读取编辑器中的颜色空间，包括尚未绑定图元的新注册定义
-// 入参: id 颜色空间标识
-// 返回: *ColorSpace 独立副本，Profile由库管理, error 资源不存在
-func (e *Editor) ColorSpace(id string) (*ColorSpace, error) {
-	for _, resource := range e.resources {
-		if resource.space != nil && sameResourceID(resource.space.ID, id) {
-			space := *resource.space
-			space.Palette, space.profile = slices.Clone(space.Palette), nil
-			return &space, nil
-		}
-	}
-	if e.source != nil {
-		if found, ok := e.sourceColorSpace(id); ok && found != nil {
-			space := *found
-			space.Palette, space.profile = slices.Clone(space.Palette), nil
-			if space.Profile != "" {
-				space.Profile = "/" + cleanPackagePath(e.source.reader.ResPath(space.Profile))
-			}
-			return &space, nil
-		}
-		return e.source.reader.ColorSpace(context.Background(), id)
-	}
-	return nil, fmt.Errorf("color space %q not found", id)
-}
-
-// ImportColorSpace 持久注册颜色空间及可选ICC，未绑定图元时仍保留声明并支持撤销
-// 入参: ctx 取消上下文, space 类型、位深及调色板，ID和Profile由库生成, profile 完整ICC或nil
-// 返回: string 新资源标识, error 定义校验或隔离提交错误
-func (e *Editor) ImportColorSpace(ctx context.Context, space ColorSpace, profile []byte) (string, error) {
-	return e.importResourceStyle(ctx, func(working *Editor) (string, []byte, map[string][]byte, error) {
-		id, err := working.AddColorSpace(space, profile)
-		if err != nil {
-			return "", nil, nil, err
-		}
-		resource := working.resources[len(working.resources)-1]
-		data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) { x.resources(nil, nil, []ColorSpace{*resource.space}) })
-		parts := make(map[string][]byte)
-		if resource.name != "" {
-			parts[resource.name] = bytes.Clone(resource.data)
-		}
-		return id, data, parts, err
-	})
-}
-
-// ImportDrawParam 持久注册共享绘制参数，未绑定图元时仍保留声明并支持撤销
-// 入参: ctx 取消上下文, draw 参数定义，ID由库生成，引用可来自当前文档或编辑器的待注册资源
-// 返回: string 新资源标识, error 定义校验或隔离提交错误
-func (e *Editor) ImportDrawParam(ctx context.Context, draw DrawParam) (string, error) {
-	return e.importResourceStyle(ctx, func(working *Editor) (string, []byte, map[string][]byte, error) {
-		id, err := working.addDrawParam(ctx, draw)
-		if err != nil {
-			return "", nil, nil, err
-		}
-		resource := working.resources[len(working.resources)-1]
-		return id, resource.data, make(map[string][]byte), nil
-	})
-}
-
-// ReplaceColorSpace 原子替换颜色空间，保留当前文档内的资源标识并隔离其他文档及历史版本
-// 入参: ctx 取消上下文, id 既有标识, space 新定义，ID和Profile由库管理, profile 完整ICC，nil移除配置
-// 返回: error 位深、调色板、ICC或既有颜色不兼容错误，失败不改变文档，成功支持撤销
-func (e *Editor) ReplaceColorSpace(ctx context.Context, id string, space ColorSpace, profile []byte) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	working := NewEditor()
-	if _, err := working.AddColorSpace(space, profile); err != nil {
-		return err
-	}
-	space = *working.resources[0].space
-	return e.changeResourceStyle(ctx, "ColorSpace", id, func(catalog *resourceCatalog, item ResourceInfo, targetFile string, target editorFontText, changes map[string][]byte) error {
-		space.ID = item.ID
-		if err := validateResourceColors(ctx, catalog, targetFile, space); err != nil {
-			return err
-		}
-		space.Profile = ""
-		if len(profile) != 0 {
-			name := packageAvailableName(catalog.scan.reader, changes, path.Join(e.packageDirectory(), "Res", "ColorSpaces", "ColorSpace_"+item.ID+".icc"))
-			space.Profile = "/" + name
-			changes[name] = bytes.Clone(profile)
-		}
-		data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) { x.resources(nil, nil, []ColorSpace{space}) })
-		if err != nil {
-			return err
-		}
-		root, err := parseEditorXMLContext(ctx, data)
-		if err != nil {
-			return err
-		}
-		node := root.child("ColorSpaces").child("ColorSpace")
-		fragment, err := editorXMLStandaloneContext(ctx, data[node.start:node.end], node)
-		if err != nil {
-			return err
-		}
-		return replaceResourceStyle(ctx, catalog, item, targetFile, target, fragment, changes)
-	})
-}
-
-// ReplaceDrawParam 原子替换共享绘制参数，保留全部既有绑定及图元的局部覆盖
-// 入参: ctx 取消上下文, id 既有标识, draw 新定义，ID由库管理，不接受外部定义引用
-// 返回: error 参数、依赖或循环错误，失败不改变文档，成功隔离其他文档及历史版本并支持撤销
-func (e *Editor) ReplaceDrawParam(ctx context.Context, id string, draw DrawParam) error {
-	return e.changeResourceStyle(ctx, "DrawParam", id, func(catalog *resourceCatalog, item ResourceInfo, targetFile string, target editorFontText, changes map[string][]byte) error {
-		working, err := catalog.scan.reader.EditorContext(ctx)
-		if err != nil {
-			return err
-		}
-		if err := working.prepareSourceIDsContext(ctx); err != nil {
-			return err
-		}
-		restoreScope := func() {}
-		if targetFile != "" && !catalog.docRes[targetFile] {
-			var localParsed []*parsedRes
-			scope := catalog.scopeForFile(targetFile)
-			for i := len(scope) - 1; i >= 0; i-- {
-				if catalog.docRes[scope[i]] {
-					continue
-				}
-				parsed, parseErr := working.source.reader.parseResFileContext(ctx, scope[i])
-				if parseErr != nil {
-					return parseErr
-				}
-				if parsed != nil {
-					localParsed = append(localParsed, parsed)
-				}
-			}
-			if len(localParsed) > 0 {
-				restoreScope = working.bindParsedScope(localParsed)
-			}
-		}
-		defer restoreScope()
-		added, err := working.addDrawParam(ctx, draw)
-		if err != nil {
-			return err
-		}
-		fragment, err := working.drawParamXMLContext(ctx, added)
-		if err != nil {
-			return err
-		}
-		root, err := parseEditorXMLContext(ctx, fragment)
-		if err != nil {
-			return err
-		}
-		fragment, err = editorXMLAttribute(fragment, root, "ID", item.ID)
-		if err != nil {
-			return err
-		}
-		return replaceResourceStyle(ctx, catalog, item, targetFile, target, fragment, changes)
-	})
-}
-
 // resourceStyleReference 保存资源依赖及可选的类型要求，不持有XML节点
 type resourceStyleReference struct {
 	scope   string
@@ -309,141 +35,6 @@ type resourceStyleReference struct {
 	exact   bool
 }
 
-// styleDefinitionAt 从指定资源文件的声明原文解码样式定义，补齐继承的XML命名空间
-// 入参: ctx 取消上下文, resFile 声明所在资源文件, item 目录条目, target 解码目标
-// 返回: error 取消或XML解析错误
-func (c *resourceCatalog) styleDefinitionAt(ctx context.Context, resFile string, item ResourceInfo, target any) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	entry := c.nodes[item.Kind+"/"+item.ID]
-	if resFile != "" {
-		if scoped, ok := c.nodes[resFile+":"+item.Kind+"/"+item.ID]; ok {
-			entry = scoped
-		}
-	}
-	data, err := editorXMLStandaloneContext(ctx, entry.file.data[entry.node.start:entry.node.end], entry.node)
-	if err != nil {
-		return err
-	}
-	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	return ctx.Err()
-}
-
-// importResourceStyle 在独立快照中生成并合并样式声明，更新最大标识并隔离共享资源文件
-// 入参: ctx 取消上下文, create 已校验定义及附属文件的生成操作
-// 返回: string 持久资源标识, error 生成、引用或提交错误
-func (e *Editor) importResourceStyle(ctx context.Context, create func(*Editor) (string, []byte, map[string][]byte, error)) (string, error) {
-	reader, err := e.resourceStyleReader(ctx)
-	if err != nil {
-		return "", err
-	}
-	working, err := reader.EditorContext(ctx)
-	if err != nil {
-		return "", err
-	}
-	if err := working.prepareSourceIDsContext(ctx); err != nil {
-		return "", err
-	}
-	id, data, parts, err := create(working)
-	if err != nil {
-		return "", err
-	}
-	if err := applyResourceStyleParts(ctx, reader, working.maxID, data, parts, nil); err != nil {
-		return "", err
-	}
-	catalog, err := reader.resourceCatalog(ctx)
-	if err != nil {
-		return "", err
-	}
-	if err := validateResourceStyleGraph(ctx, catalog, "", id, nil); err != nil {
-		return "", err
-	}
-	return id, e.commitResourceSnapshot(ctx, reader)
-}
-
-// resourceStyleReader 为样式资源操作补齐待注册声明及附属文件，不改变公开快照的按引用导出语义
-// 复用内容扫描收集已有标识，不重复解析结构文件或构建未使用的资源目录
-// 入参: ctx 取消上下文
-// 返回: *Reader 包含待注册字体、颜色空间及参数依赖的独立快照, error 读取或隔离错误
-func (e *Editor) resourceStyleReader(ctx context.Context) (*Reader, error) {
-	reader, err := e.Reader(ctx)
-	if err != nil || len(e.resources) == 0 {
-		return reader, err
-	}
-	known := make(map[string]bool)
-	_, err = scanEditorFontFiles(ctx, reader, reader.DocumentIndex(), func(_ *editorFontXML, root *editorXML) error {
-		if !root.matchesOFD("Res") {
-			return nil
-		}
-		for _, group := range root.children {
-			for _, node := range group.children {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				if node.matchesOFD(editorResourceElement(group.name.Local)) {
-					known[editorResourceID(node.attr("ID"))] = true
-				}
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	var fonts, images []editorResource
-	var spaces []ColorSpace
-	var indexes []string
-	parts := make(map[string][]byte)
-	for _, resource := range e.resources {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		id := resource.definition()
-		switch {
-		case resource.font != nil:
-			id = resource.font.ID
-		case resource.image != nil:
-			id = resource.image.ID
-		case resource.space != nil:
-			id = resource.space.ID
-		}
-		if id == "" || known[editorResourceID(id)] {
-			continue
-		}
-		switch {
-		case resource.font != nil:
-			fonts = append(fonts, resource)
-		case resource.image != nil:
-			images = append(images, resource)
-		case resource.space != nil:
-			spaces = append(spaces, *resource.space)
-		default:
-			indexes = append(indexes, resource.name)
-		}
-		if resource.name != "" {
-			parts[resource.name] = bytes.Clone(resource.data)
-		}
-	}
-	if len(fonts)+len(images)+len(spaces)+len(indexes) == 0 {
-		return reader, ctx.Err()
-	}
-	var data []byte
-	if len(fonts)+len(images)+len(spaces) != 0 {
-		data, err = encodeOFDXMLContext(ctx, func(x *ofdXML) { x.resources(fonts, images, spaces) })
-		if err != nil {
-			return nil, err
-		}
-	}
-	if err := applyResourceStyleParts(ctx, reader, e.maxID, data, parts, indexes); err != nil {
-		return nil, err
-	}
-	return reader, ctx.Err()
-}
-
 // applyResourceStyleParts 合并资源声明及独立索引，统一更新最大标识并隔离其他文档和历史版本
 // 入参: ctx 取消上下文, reader 独立快照, maximumID 最大注册标识, data 合并声明, parts 附属文件, indexes 独立索引路径
 // 返回: error 结构、读取或隔离错误
@@ -451,7 +42,7 @@ func applyResourceStyleParts(ctx context.Context, reader *Reader, maximumID uint
 	if maximumID > maxUnitID {
 		return fmt.Errorf("MaxUnitID %d exceeds uint32 range", maximumID)
 	}
-	doc, err := reader.DocContext(ctx)
+	doc, err := reader.docContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -505,38 +96,6 @@ func applyResourceStyleParts(ctx context.Context, reader *Reader, maximumID uint
 	return scan.apply(ctx, parts)
 }
 
-// changeResourceStyle 在补齐待注册资源的快照中替换定义，依赖与目标仅在全部校验通过后一次提交
-// 入参: ctx 取消上下文, kind 资源类型, id 目标标识, replace 定义替换操作
-// 返回: error 引用、校验或提交错误，失败不改变注册资源和撤销状态
-func (e *Editor) changeResourceStyle(ctx context.Context, kind, id string, replace func(*resourceCatalog, ResourceInfo, string, editorFontText, map[string][]byte) error) error {
-	reader, err := e.resourceStyleReader(ctx)
-	if err != nil {
-		return err
-	}
-	catalog, err := reader.resourceCatalog(ctx)
-	if err != nil {
-		return err
-	}
-	item, _, targetFile, target, err := findUniqueCatalogResource(catalog, kind, id)
-	if err != nil {
-		return err
-	}
-	if !item.Complete {
-		return fmt.Errorf("resource references contain unsupported content")
-	}
-	changes := make(map[string][]byte)
-	if err := replace(catalog, item, targetFile, target, changes); err != nil {
-		return err
-	}
-	if err := catalog.scan.apply(ctx, changes); err != nil {
-		return err
-	}
-	if err := pruneUnreferencedFiles(ctx, reader, item.File); err != nil {
-		return err
-	}
-	return e.commitResourceSnapshot(ctx, reader)
-}
-
 // replaceResourceStyle 更新声明原文并验证资源依赖，清除受影响的复合及底纹预览
 // 入参: ctx 取消上下文, catalog 当前目录, item 目标条目, targetFile 目标所在资源文件, target 目标节点, fragment 新声明, changes 待提交修改
 // 返回: error 不支持的定义、引用或预览处理错误
@@ -562,13 +121,13 @@ func resourceColorNode(node *editorXML) bool {
 // 入参: ctx 取消上下文, catalog 当前资源目录, targetFile 目标颜色空间所在文件, space 替换后的颜色空间
 // 返回: error 不兼容的色值或调色板索引
 func validateResourceColors(ctx context.Context, catalog *resourceCatalog, targetFile string, space ColorSpace) error {
-	doc, err := catalog.scan.reader.DocContext(ctx)
+	doc, err := catalog.scan.reader.docContext(ctx)
 	if err != nil {
 		return err
 	}
 	defaultCS := ""
 	if doc.CommonData.DefaultCS != 0 {
-		defaultCS = formatUnitID(uint64(doc.CommonData.DefaultCS))
+		defaultCS = formatUnitID(doc.CommonData.DefaultCS)
 	}
 	expectedKey := ""
 	if targetFile != "" {
@@ -766,6 +325,459 @@ func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, t
 		start = resourceStyleReference{key: cleanPackagePath(targetFile) + "\x00" + editorResourceID(id), exact: true}
 	}
 	return visit(start)
+}
+
+// ColorSpace 获取当前文档及版本的颜色空间定义，不读取或解析ICC文件
+// 入参: ctx 取消上下文, id 资源标识
+// 返回: *ColorSpace 独立副本，Profile为包内绝对引用, error 查询或解析错误
+func (r *Reader) ColorSpace(ctx context.Context, id string) (*ColorSpace, error) {
+	catalog, err := r.resourceCatalog(ctx)
+	if err != nil {
+		return nil, err
+	}
+	item, _, resFile, _, err := findUniqueCatalogResource(catalog, "ColorSpace", id)
+	if err != nil {
+		return nil, err
+	}
+	var space ColorSpace
+	if err := catalog.styleDefinitionAt(ctx, resFile, item, &space); err != nil {
+		return nil, err
+	}
+	space.ID, space.Profile = item.ID, ""
+	if item.File != "" {
+		space.Profile = "/" + item.File
+	}
+	return &space, ctx.Err()
+}
+
+// DrawParam 获取当前文档的绘制参数，解析继承时拒绝缺失、类型错误及循环引用
+// 入参: ctx 取消上下文, id 资源标识, resolved 是否合并基础绘制参数
+// 返回: *DrawParam 独立副本，未解析时保留Relative, error 查询或继承错误
+func (r *Reader) DrawParam(ctx context.Context, id string, resolved bool) (*DrawParam, error) {
+	catalog, err := r.resourceCatalog(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var matches []int
+	for i, item := range catalog.items {
+		if resourceMatches(item, "DrawParam", id) {
+			matches = append(matches, i)
+		}
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("resource not found: DrawParam/%s", id)
+	}
+	curIdx := matches[0]
+	if len(matches) > 1 {
+		if !resolved {
+			return nil, fmt.Errorf("ambiguous resource DrawParam/%s defined in multiple resource files", id)
+		}
+		bestIdx := -1
+		for _, candidate := range matches {
+			scope := catalog.scopeForFile(catalog.itemFiles[candidate])
+			coversAll := true
+			for _, other := range matches {
+				if !slices.Contains(scope, catalog.itemFiles[other]) {
+					coversAll = false
+					break
+				}
+			}
+			if coversAll {
+				if bestIdx != -1 {
+					return nil, fmt.Errorf("ambiguous resource DrawParam/%s defined in multiple resource files", id)
+				}
+				bestIdx = candidate
+			}
+		}
+		if bestIdx == -1 {
+			return nil, fmt.Errorf("ambiguous resource DrawParam/%s defined in multiple resource files", id)
+		}
+		curIdx = bestIdx
+	}
+	var chain []DrawParam
+	seen := make(map[string]bool)
+	for {
+		item := catalog.items[curIdx]
+		curFile := catalog.itemFiles[curIdx]
+		visitKey := curFile + "\x00" + item.ID
+		if seen[visitKey] {
+			return nil, fmt.Errorf("cyclic draw parameter %s", item.ID)
+		}
+		seen[visitKey] = true
+		var draw DrawParam
+		if err := catalog.styleDefinitionAt(ctx, curFile, item, &draw); err != nil {
+			return nil, err
+		}
+		draw.ID = item.ID
+		if !resolved {
+			return &draw, nil
+		}
+		chain = append(chain, draw)
+		if draw.Relative == "" {
+			break
+		}
+		relID := editorResourceID(draw.Relative)
+		scope := catalog.scopeForFile(curFile)
+		if pos := slices.Index(scope, curFile); pos >= 0 {
+			if relID == item.ID {
+				scope = scope[pos+1:]
+			} else {
+				scope = scope[pos:]
+			}
+		}
+		nextIdx := -1
+		for _, resFile := range scope {
+			if idx, ok := catalog.itemIndex[resFile+"\x00DrawParam\x00"+relID]; ok {
+				nextIdx = idx
+				break
+			}
+		}
+		if nextIdx < 0 {
+			if relID == item.ID {
+				return nil, fmt.Errorf("cyclic draw parameter %s", item.ID)
+			}
+			return nil, fmt.Errorf("resource not found: DrawParam/%s", draw.Relative)
+		}
+		curIdx = nextIdx
+	}
+	result := &DrawParam{}
+	for i := len(chain) - 1; i >= 0; i-- {
+		result = mergeDrawParam(*result, &chain[i])
+	}
+	return result, ctx.Err()
+}
+
+// ColorSpace 读取编辑器中的颜色空间，包括尚未绑定图元的新注册定义
+// 入参: id 颜色空间标识
+// 返回: *ColorSpace 独立副本，Profile由库管理, error 资源不存在
+func (e *Editor) ColorSpace(id string) (*ColorSpace, error) {
+	for _, resource := range e.resources {
+		if resource.space != nil && sameResourceID(resource.space.ID, id) {
+			space := *resource.space
+			space.Palette, space.profile = slices.Clone(space.Palette), nil
+			return &space, nil
+		}
+	}
+	if e.source != nil {
+		if found, ok := e.sourceColorSpace(id); ok && found != nil {
+			space := *found
+			space.Palette, space.profile = slices.Clone(space.Palette), nil
+			if space.Profile != "" {
+				space.Profile = "/" + cleanPackagePath(e.source.reader.ResPath(space.Profile))
+			}
+			return &space, nil
+		}
+		return e.source.reader.ColorSpace(context.Background(), id)
+	}
+	return nil, fmt.Errorf("color space %q not found", id)
+}
+
+// ImportColorSpace 持久注册颜色空间及可选ICC，未绑定图元时仍保留声明并支持撤销
+// 入参: ctx 取消上下文, space 类型、位深及调色板，ID和Profile由库生成, profile 完整ICC或nil
+// 返回: string 新资源标识, error 定义校验或隔离提交错误
+func (e *Editor) ImportColorSpace(ctx context.Context, space ColorSpace, profile []byte) (string, error) {
+	return e.importResourceStyle(ctx, func(working *Editor) (string, []byte, map[string][]byte, error) {
+		id, err := working.AddColorSpace(space, profile)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		resource := working.resources[len(working.resources)-1]
+		data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) { x.resources(nil, nil, []ColorSpace{*resource.space}) })
+		parts := make(map[string][]byte)
+		if resource.name != "" {
+			parts[resource.name] = bytes.Clone(resource.data)
+		}
+		return id, data, parts, err
+	})
+}
+
+// ImportDrawParam 持久注册共享绘制参数，未绑定图元时仍保留声明并支持撤销
+// 入参: ctx 取消上下文, draw 参数定义，ID由库生成，引用可来自当前文档或编辑器的待注册资源
+// 返回: string 新资源标识, error 定义校验或隔离提交错误
+func (e *Editor) ImportDrawParam(ctx context.Context, draw DrawParam) (string, error) {
+	return e.importResourceStyle(ctx, func(working *Editor) (string, []byte, map[string][]byte, error) {
+		id, err := working.addDrawParam(ctx, draw)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		resource := working.resources[len(working.resources)-1]
+		return id, resource.data, make(map[string][]byte), nil
+	})
+}
+
+// ReplaceColorSpace 原子替换颜色空间，保留当前文档内的资源标识并隔离其他文档及历史版本
+// 入参: ctx 取消上下文, id 既有标识, space 新定义，ID和Profile由库管理, profile 完整ICC，nil移除配置
+// 返回: error 位深、调色板、ICC或既有颜色不兼容错误，失败不改变文档，成功支持撤销
+func (e *Editor) ReplaceColorSpace(ctx context.Context, id string, space ColorSpace, profile []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	working := NewEditor()
+	if _, err := working.AddColorSpace(space, profile); err != nil {
+		return err
+	}
+	space = *working.resources[0].space
+	return e.changeResourceStyle(ctx, "ColorSpace", id, func(catalog *resourceCatalog, item ResourceInfo, targetFile string, target editorFontText, changes map[string][]byte) error {
+		space.ID = item.ID
+		if err := validateResourceColors(ctx, catalog, targetFile, space); err != nil {
+			return err
+		}
+		space.Profile = ""
+		if len(profile) != 0 {
+			name := packageAvailableName(catalog.scan.reader, changes, path.Join(e.packageDirectory(), "Res", "ColorSpaces", "ColorSpace_"+item.ID+".icc"))
+			space.Profile = "/" + name
+			changes[name] = bytes.Clone(profile)
+		}
+		data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) { x.resources(nil, nil, []ColorSpace{space}) })
+		if err != nil {
+			return err
+		}
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			return err
+		}
+		node := root.child("ColorSpaces").child("ColorSpace")
+		fragment, err := editorXMLStandaloneContext(ctx, data[node.start:node.end], node)
+		if err != nil {
+			return err
+		}
+		return replaceResourceStyle(ctx, catalog, item, targetFile, target, fragment, changes)
+	})
+}
+
+// ReplaceDrawParam 原子替换共享绘制参数，保留全部既有绑定及图元的局部覆盖
+// 入参: ctx 取消上下文, id 既有标识, draw 新定义，ID由库管理，不接受外部定义引用
+// 返回: error 参数、依赖或循环错误，失败不改变文档，成功隔离其他文档及历史版本并支持撤销
+func (e *Editor) ReplaceDrawParam(ctx context.Context, id string, draw DrawParam) error {
+	return e.changeResourceStyle(ctx, "DrawParam", id, func(catalog *resourceCatalog, item ResourceInfo, targetFile string, target editorFontText, changes map[string][]byte) error {
+		working, err := catalog.scan.reader.EditorContext(ctx)
+		if err != nil {
+			return err
+		}
+		defer working.Close()
+		if err := working.prepareSourceIDsContext(ctx); err != nil {
+			return err
+		}
+		restoreScope := func() {}
+		if targetFile != "" && !catalog.docRes[targetFile] {
+			var localParsed []*parsedRes
+			scope := catalog.scopeForFile(targetFile)
+			for i := len(scope) - 1; i >= 0; i-- {
+				if catalog.docRes[scope[i]] {
+					continue
+				}
+				parsed, parseErr := working.source.reader.parseResFileContext(ctx, scope[i])
+				if parseErr != nil {
+					return parseErr
+				}
+				if parsed != nil {
+					localParsed = append(localParsed, parsed)
+				}
+			}
+			if len(localParsed) > 0 {
+				restoreScope = working.bindParsedScope(localParsed)
+			}
+		}
+		defer restoreScope()
+		added, err := working.addDrawParam(ctx, draw)
+		if err != nil {
+			return err
+		}
+		fragment, err := working.drawParamXMLContext(ctx, added)
+		if err != nil {
+			return err
+		}
+		root, err := parseEditorXMLContext(ctx, fragment)
+		if err != nil {
+			return err
+		}
+		fragment, err = editorXMLAttribute(fragment, root, "ID", item.ID)
+		if err != nil {
+			return err
+		}
+		return replaceResourceStyle(ctx, catalog, item, targetFile, target, fragment, changes)
+	})
+}
+
+// styleDefinitionAt 从指定资源文件的声明原文解码样式定义，补齐继承的XML命名空间
+// 入参: ctx 取消上下文, resFile 声明所在资源文件, item 目录条目, target 解码目标
+// 返回: error 取消或XML解析错误
+func (c *resourceCatalog) styleDefinitionAt(ctx context.Context, resFile string, item ResourceInfo, target any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	entry := c.nodes[item.Kind+"/"+item.ID]
+	if resFile != "" {
+		if scoped, ok := c.nodes[resFile+":"+item.Kind+"/"+item.ID]; ok {
+			entry = scoped
+		}
+	}
+	data, err := editorXMLStandaloneContext(ctx, entry.file.data[entry.node.start:entry.node.end], entry.node)
+	if err != nil {
+		return err
+	}
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+// importResourceStyle 在独立快照中生成并合并样式声明，更新最大标识并隔离共享资源文件
+// 入参: ctx 取消上下文, create 已校验定义及附属文件的生成操作
+// 返回: string 持久资源标识, error 生成、引用或提交错误
+func (e *Editor) importResourceStyle(ctx context.Context, create func(*Editor) (string, []byte, map[string][]byte, error)) (string, error) {
+	reader, err := e.resourceStyleReader(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer reader.Close()
+	working, err := reader.EditorContext(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer working.Close()
+	if err := working.prepareSourceIDsContext(ctx); err != nil {
+		return "", err
+	}
+	id, data, parts, err := create(working)
+	if err != nil {
+		return "", err
+	}
+	if err := applyResourceStyleParts(ctx, reader, working.maxID, data, parts, nil); err != nil {
+		return "", err
+	}
+	catalog, err := reader.resourceCatalog(ctx)
+	if err != nil {
+		return "", err
+	}
+	if err := validateResourceStyleGraph(ctx, catalog, "", id, nil); err != nil {
+		return "", err
+	}
+	return id, e.commitResourceSnapshot(ctx, reader)
+}
+
+// resourceStyleReader 为样式资源操作补齐待注册声明及附属文件，不改变公开快照的按引用导出语义
+// 复用内容扫描收集已有标识，不重复解析结构文件或构建未使用的资源目录
+// 入参: ctx 取消上下文
+// 返回: *Reader 包含待注册字体、颜色空间及参数依赖的独立快照, error 读取或隔离错误
+func (e *Editor) resourceStyleReader(ctx context.Context) (result *Reader, err error) {
+	reader, err := e.Reader(ctx)
+	if err != nil || len(e.resources) == 0 {
+		return reader, err
+	}
+	defer func() {
+		if result == nil {
+			_ = reader.Close()
+		}
+	}()
+	known := make(map[string]bool)
+	_, err = scanEditorFontFiles(ctx, reader, reader.DocumentIndex(), func(_ *editorFontXML, root *editorXML) error {
+		if !root.matchesOFD("Res") {
+			return nil
+		}
+		for _, group := range root.children {
+			for _, node := range group.children {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if node.matchesOFD(editorResourceElement(group.name.Local)) {
+					known[editorResourceID(node.attr("ID"))] = true
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	var fonts, images []editorResource
+	var spaces []ColorSpace
+	var indexes []string
+	parts := make(map[string][]byte)
+	for _, resource := range e.resources {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		id := resource.definition()
+		switch {
+		case resource.font != nil:
+			id = resource.font.ID
+		case resource.image != nil:
+			id = resource.image.ID
+		case resource.space != nil:
+			id = resource.space.ID
+		}
+		if id == "" || known[editorResourceID(id)] {
+			continue
+		}
+		switch {
+		case resource.font != nil:
+			fonts = append(fonts, resource)
+		case resource.image != nil:
+			images = append(images, resource)
+		case resource.space != nil:
+			spaces = append(spaces, *resource.space)
+		default:
+			indexes = append(indexes, resource.name)
+		}
+		if resource.name != "" {
+			parts[resource.name] = bytes.Clone(resource.data)
+		}
+	}
+	if len(fonts)+len(images)+len(spaces)+len(indexes) == 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return reader, nil
+	}
+	var data []byte
+	if len(fonts)+len(images)+len(spaces) != 0 {
+		data, err = encodeOFDXMLContext(ctx, func(x *ofdXML) { x.resources(fonts, images, spaces) })
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := applyResourceStyleParts(ctx, reader, e.maxID, data, parts, indexes); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return reader, nil
+}
+
+// changeResourceStyle 在补齐待注册资源的快照中替换定义，依赖与目标仅在全部校验通过后一次提交
+// 入参: ctx 取消上下文, kind 资源类型, id 目标标识, replace 定义替换操作
+// 返回: error 引用、校验或提交错误，失败不改变注册资源和撤销状态
+func (e *Editor) changeResourceStyle(ctx context.Context, kind, id string, replace func(*resourceCatalog, ResourceInfo, string, editorFontText, map[string][]byte) error) error {
+	reader, err := e.resourceStyleReader(ctx)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	catalog, err := reader.resourceCatalog(ctx)
+	if err != nil {
+		return err
+	}
+	item, _, targetFile, target, err := findUniqueCatalogResource(catalog, kind, id)
+	if err != nil {
+		return err
+	}
+	if !item.Complete {
+		return fmt.Errorf("resource references contain unsupported content")
+	}
+	changes := make(map[string][]byte)
+	if err := replace(catalog, item, targetFile, target, changes); err != nil {
+		return err
+	}
+	if err := catalog.scan.apply(ctx, changes); err != nil {
+		return err
+	}
+	if err := pruneUnreferencedFiles(ctx, reader, item.File); err != nil {
+		return err
+	}
+	return e.commitResourceSnapshot(ctx, reader)
 }
 
 // drawParamXMLContext 读取并提取绘制参数原文，保留扩展信息并响应取消

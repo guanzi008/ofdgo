@@ -17,10 +17,14 @@ package webui
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"image/color"
@@ -37,8 +41,7 @@ import (
 	"time"
 
 	"github.com/xiaoqidun/ofdgo"
-	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
-	"github.com/xiaoqidun/pdfgo"
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
 // sessionTextCacheBytes 限制会话文字索引的内存预算
@@ -47,56 +50,81 @@ const sessionTextCacheBytes = 32 << 20
 // sessionSVGFontCacheBytes 限制已渲染页面字体的保留预算
 const sessionSVGFontCacheBytes = 32 << 20
 
-// sessionPageCacheLimit 限制会话已解析页面缓存窗口的页数上限
-const sessionPageCacheLimit = 8
+// sessionPageCacheBytes 限制跨工作会话共享页面内容LRU缓存的内存预算
+const sessionPageCacheBytes = 64 << 20
 
-// sessionPageCacheObjectLimit 限制可放入长驻页面缓存的单页图元数量上限
-const sessionPageCacheObjectLimit = 4096
+// batchFontCacheLimit 限制跨会话共享只读批量字体文件系统的缓存上限
+const batchFontCacheLimit = 4
 
-// OpenOptions 打开OFD文档选项
-type OpenOptions struct {
-	Fonts             []FontFile
+// 编辑器内部排版标引标识，用于区分文档外部自定义标引
+const (
+	webuiRichTextTagType   = "OFDGo.RichText"
+	webuiRichTextNamespace = "https://ofdgo.aite.me/ns/rich-text/1"
+	webuiTextTagType       = "OFDGo.Text"
+	webuiTextNamespace     = "https://ofdgo.aite.me/ns/text/1"
+)
+
+// emptyBatchFontFS 表示无自定义字体时复用的空只读字体文件系统
+var emptyBatchFontFS = ofdgo.NewFontFS(nil)
+
+// sharedBatchFonts 跨会话共享只读批量字体文件系统，按内容摘要和批次键索引
+var sharedBatchFonts = &batchFontCache{
+	byHash: make(map[[32]byte]*ofdgo.FontFS),
+	byKey:  make(map[string]*ofdgo.FontFS),
+	keys:   make(map[string][32]byte),
+	refs:   make(map[[32]byte]int),
+	owners: make(map[string]map[*businessEngine]struct{}),
+}
+
+// openOptions 打开OFD文档选项
+type openOptions struct {
+	Fonts             []ofdgo.FontFile
 	RenderAnnotations bool
 	ReaderOptions     []ofdgo.ReaderOption
 	RendererOptions   []ofdgo.RendererOption
 }
 
-// FontFile 字体文件
-type FontFile = ofdgo.FontFile
-
-// FontInfo 文档字体信息
-type FontInfo = ofdgo.FontInfo
-
-// Session WebUI文档会话
-type Session struct {
-	Reader           *ofdgo.Reader
-	Renderer         *ofdgo.Renderer
-	input            *ofdgo.Input
-	pdfSource        *ofdgo.Input
-	pdfFontNames     []string
-	fontFS           *ofdgo.FontFS
-	doc              *ofdgo.Document
-	pageCache        map[int]*ofdgo.PageContent
-	boxCache         []pageBoxInfo
-	textCache        *ofdgo.PageTextCache
-	svgFonts         map[string][]byte
-	fontScan         *ofdgo.FontInfoScanner
-	fontInfos        []FontInfo
-	fontsRead        bool
-	fontAnnotations  bool
-	signatures       []SignatureInfo
-	signatureError   error
-	signaturesRead   bool
-	editing          bool
-	editor           *ofdgo.Editor
-	summaryChanges   *ofdgo.EditorChanges
-	detailsUnchanged bool
-	revision         uint64
-	baseRevision     uint64
+// session WebUI文档会话
+type session struct {
+	Reader              *ofdgo.Reader
+	Renderer            *ofdgo.Renderer
+	ctx                 context.Context
+	source              *session
+	input               *ofdgo.Input
+	pdfSource           *ofdgo.Input
+	pdfFontNames        []string
+	fontFS              *ofdgo.FontFS
+	doc                 *ofdgo.Document
+	pageCache           *sharedPageCache
+	boxCache            []pageBoxInfo
+	openActionCache     []int8
+	openTemplatesLoaded bool
+	openTemplates       map[string]bool
+	textCache           *ofdgo.PageTextCache
+	svgFonts            map[string][]byte
+	fontScan            *ofdgo.FontInfoScanner
+	fontScanMu          *sync.Mutex
+	fontScanWorker      *session
+	fontInfos           []ofdgo.FontInfo
+	fontsRead           bool
+	fontAnnotations     bool
+	signatures          []signatureInfo
+	signatureError      error
+	signaturesRead      bool
+	ofdProtected        bool
+	ofdProtectedRead    bool
+	editing             bool
+	editor              *ofdgo.Editor
+	ownedEditor         *ofdgo.Editor
+	summaryChanges      *ofdgo.EditorChanges
+	detailsUnchanged    bool
+	revision            uint64
+	baseRevision        uint64
+	pdfSyncGen          uint64
 }
 
-// DocumentMetadata 文档描述，供信息展示与包内文档管理共用
-type DocumentMetadata struct {
+// documentMeta 文档描述，供信息展示与包内文档管理共用
+type documentMeta struct {
 	DocID          string             `json:"docId"`
 	Title          string             `json:"title"`
 	Author         string             `json:"author"`
@@ -112,66 +140,87 @@ type DocumentMetadata struct {
 	CustomData     []ofdgo.CustomData `json:"customData,omitempty"`
 }
 
-// DocumentInfo 文档信息
-type DocumentInfo struct {
-	DocumentMetadata
-	DocumentIndex   int               `json:"documentIndex"`
-	DocumentVersion string            `json:"documentVersion"`
-	VersionCount    int               `json:"versionCount"`
-	Documents       []DocumentEntry   `json:"documents,omitempty"`
-	Encryption      EncryptionInfo    `json:"encryption"`
-	Version         string            `json:"version"`
-	DocType         string            `json:"docType"`
-	PageCount       int               `json:"pageCount"`
-	FontCount       int               `json:"fontCount"`
-	SignatureCount  int               `json:"signatureCount"`
-	SignatureError  string            `json:"signatureError,omitempty"`
-	AttachmentError string            `json:"attachmentError,omitempty"`
-	Attachments     []AttachmentInfo  `json:"attachments,omitempty"`
-	Fonts           []FontInfo        `json:"fonts"`
-	Signatures      []SignatureInfo   `json:"signatures"`
-	Pages           []PageInfo        `json:"pages"`
-	Outlines        []OutlineInfo     `json:"outlines,omitempty"`
-	Structures      []ofdgo.Structure `json:"structures,omitempty"`
-	StructureError  string            `json:"structureError,omitempty"`
-	DetailsPending  bool              `json:"detailsPending,omitempty"`
+// documentInfo 文档信息
+type documentInfo struct {
+	documentMeta
+	DocumentIndex         int                 `json:"documentIndex"`
+	DocumentVersion       string              `json:"documentVersion"`
+	VersionCount          int                 `json:"versionCount"`
+	Documents             []documentEntry     `json:"documents,omitempty"`
+	Encryption            encryptionInfo      `json:"encryption"`
+	Version               string              `json:"version"`
+	DocType               string              `json:"docType"`
+	PageCount             int                 `json:"pageCount"`
+	FontCount             int                 `json:"fontCount"`
+	SignatureCount        int                 `json:"signatureCount"`
+	OFDSignatureProtected bool                `json:"ofdSignatureProtected"`
+	SignatureError        string              `json:"signatureError,omitempty"`
+	AttachmentError       string              `json:"attachmentError,omitempty"`
+	Attachments           []attachmentInfo    `json:"attachments,omitempty"`
+	Fonts                 []ofdgo.FontInfo    `json:"fonts"`
+	Signatures            []signatureInfo     `json:"signatures"`
+	Pages                 []pageInfo          `json:"pages"`
+	PageIDs               []string            `json:"pageIds,omitempty"`
+	HasOpenAction         bool                `json:"hasOpenAction"`
+	DefaultPageSize       *pageSize           `json:"defaultPageSize,omitempty"`
+	PageOverrides         []pageInfo          `json:"pageOverrides,omitempty"`
+	Outlines              []ofdgo.OutlineInfo `json:"outlines,omitempty"`
+	Structures            []ofdgo.Structure   `json:"structures,omitempty"`
+	StructureError        string              `json:"structureError,omitempty"`
+	Permissions           permissionsInfo     `json:"permissions"`
+	VPreferences          *ofdgo.VPreferences `json:"vPreferences,omitempty"`
+	DetailsPending        bool                `json:"detailsPending,omitempty"`
 }
 
-// VersionEntry 版本管理列表中的入口，空ID表示主文档
-type VersionEntry struct {
+// permissionsInfo 文档权限声明及是否显式存在Permissions节点
+type permissionsInfo struct {
+	Declared    bool               `json:"declared"`
+	Edit        bool               `json:"edit"`
+	Annot       bool               `json:"annot"`
+	Export      bool               `json:"export"`
+	Signature   bool               `json:"signature"`
+	Watermark   bool               `json:"watermark"`
+	PrintScreen bool               `json:"printScreen"`
+	Print       bool               `json:"print"`
+	Copies      int                `json:"copies"`
+	ValidPeriod *ofdgo.ValidPeriod `json:"validPeriod,omitempty"`
+}
+
+// versionEntry 版本管理列表中的入口，空ID表示主文档
+type versionEntry struct {
 	ID      string `json:"id"`
 	Index   int32  `json:"index"`
 	Name    string `json:"name"`
 	Default bool   `json:"default"`
 }
 
-// DocumentEntry 包内文档入口，管理列表按需补充元数据和页数
-type DocumentEntry struct {
-	DocumentMetadata
+// documentEntry 包内文档入口，管理列表按需补充元数据和页数
+type documentEntry struct {
+	documentMeta
 	Index     int    `json:"index"`
 	Root      string `json:"root"`
 	ID        string `json:"id"`
 	PageCount *int   `json:"pageCount,omitempty"`
 }
 
-// DocumentDetails 不含页面数组的文档补充信息
-type DocumentDetails struct {
-	Structures      []ofdgo.Structure `json:"structures,omitempty"`
-	StructureError  string            `json:"structureError,omitempty"`
-	FontCount       int               `json:"fontCount"`
-	SignatureCount  int               `json:"signatureCount"`
-	SignatureError  string            `json:"signatureError,omitempty"`
-	AttachmentError string            `json:"attachmentError,omitempty"`
-	Attachments     []AttachmentInfo  `json:"attachments,omitempty"`
-	Fonts           []FontInfo        `json:"fonts"`
-	Signatures      []SignatureInfo   `json:"signatures"`
+// documentDetails 不含页面数组的文档补充信息
+type documentDetails struct {
+	Structures            []ofdgo.Structure   `json:"structures,omitempty"`
+	StructureError        string              `json:"structureError,omitempty"`
+	Permissions           permissionsInfo     `json:"permissions"`
+	VPreferences          *ofdgo.VPreferences `json:"vPreferences,omitempty"`
+	FontCount             int                 `json:"fontCount"`
+	SignatureCount        int                 `json:"signatureCount"`
+	OFDSignatureProtected bool                `json:"ofdSignatureProtected"`
+	SignatureError        string              `json:"signatureError,omitempty"`
+	AttachmentError       string              `json:"attachmentError,omitempty"`
+	Attachments           []attachmentInfo    `json:"attachments,omitempty"`
+	Fonts                 []ofdgo.FontInfo    `json:"fonts"`
+	Signatures            []signatureInfo     `json:"signatures"`
 }
 
-// OutlineInfo 目录节点信息
-type OutlineInfo = ofdgo.OutlineInfo
-
-// AttachmentInfo 附件信息，Size单位为KB
-type AttachmentInfo struct {
+// attachmentInfo 附件信息，Size单位为KB
+type attachmentInfo struct {
 	ID       string   `json:"id"`
 	Name     string   `json:"name"`
 	Format   string   `json:"format,omitempty"`
@@ -180,106 +229,131 @@ type AttachmentInfo struct {
 	Visible  bool     `json:"visible"`
 }
 
-// PageInfo 页面信息
-type PageInfo struct {
-	Index  int     `json:"index"`
-	ID     string  `json:"id"`
+// pageSize 页面默认尺寸
+type pageSize struct {
 	Width  float64 `json:"width"`
 	Height float64 `json:"height"`
 }
 
-// PageSVG 页面SVG结果
-type PageSVG struct {
-	Index       int                 `json:"index"`
-	Number      int                 `json:"number"`
-	ID          string              `json:"id"`
-	Width       float64             `json:"width"`
-	Height      float64             `json:"height"`
-	SVG         string              `json:"svg"`
-	Links       []ofdgo.PageLink    `json:"-"`
-	Fonts       []ofdgo.SVGFont     `json:"-"`
-	Images      []ofdgo.SVGImage    `json:"-"`
-	Annotations []AnnotationPreview `json:"annotations,omitempty"`
+// pageInfo 页面信息
+type pageInfo struct {
+	Index         int     `json:"index"`
+	ID            string  `json:"id"`
+	Width         float64 `json:"width"`
+	Height        float64 `json:"height"`
+	HasOpenAction bool    `json:"hasOpenAction,omitempty"`
 }
 
-// AnnotationPreview 注解预览信息及页面坐标中的交互范围
-type AnnotationPreview struct {
+// pageSVG 页面SVG结果
+type pageSVG struct {
+	Index         int                 `json:"index"`
+	Number        int                 `json:"number"`
+	ID            string              `json:"id"`
+	Width         float64             `json:"width"`
+	Height        float64             `json:"height"`
+	SVG           string              `json:"svg"`
+	HasOpenAction *bool               `json:"hasOpenAction,omitempty"`
+	Links         []ofdgo.PageLink    `json:"-"`
+	Fonts         []ofdgo.SVGFont     `json:"-"`
+	Images        []ofdgo.SVGImage    `json:"-"`
+	Annotations   []annotationPreview `json:"annotations,omitempty"`
+}
+
+// annotationPreview 注解预览信息及页面坐标中的交互范围
+type annotationPreview struct {
 	ofdgo.AnnotationInfo
 	Bounds   ofdgo.Box             `json:"bounds"`
 	Contours []ofdgo.ObjectContour `json:"contours,omitempty"`
 }
 
-// ExportFormat 导出格式
-type ExportFormat = ofdgo.OutputFormat
-
-// SignatureInfo 签名验证信息
-type SignatureInfo struct {
-	DocIndex             int                  `json:"docIndex"`
-	DocRoot              string               `json:"docRoot,omitempty"`
-	ID                   string               `json:"id"`
-	Type                 string               `json:"type"`
-	Status               string               `json:"status"`
-	IntegrityValid       bool                 `json:"integrityValid"`
-	TrustedValid         bool                 `json:"trustedValid"`
-	Error                string               `json:"error,omitempty"`
-	Signer               string               `json:"signer,omitempty"`
-	SignatureDateTime    string               `json:"signatureDateTime,omitempty"`
-	SealName             string               `json:"sealName,omitempty"`
-	Provider             string               `json:"provider,omitempty"`
-	Company              string               `json:"company,omitempty"`
-	SealType             string               `json:"sealType,omitempty"`
-	SealID               string               `json:"sealId,omitempty"`
-	SealVendor           string               `json:"sealVendor,omitempty"`
-	Version              string               `json:"version,omitempty"`
-	SignSubject          string               `json:"signSubject,omitempty"`
-	SignIssuer           string               `json:"signIssuer,omitempty"`
-	SignSerial           string               `json:"signSerial,omitempty"`
-	SealSubject          string               `json:"sealSubject,omitempty"`
-	SignatureMethod      string               `json:"signatureMethod,omitempty"`
-	DigestMethod         string               `json:"digestMethod,omitempty"`
-	ReferenceCount       int                  `json:"referenceCount"`
-	ReferenceChecked     int                  `json:"referenceChecked"`
-	ReferencePassed      int                  `json:"referencePassed"`
-	Stamps               []SignatureStampInfo `json:"stamps,omitempty"`
-	DataHashChecked      bool                 `json:"dataHashChecked"`
-	DataHashOK           bool                 `json:"dataHashOK"`
-	SignedValueChecked   bool                 `json:"signedValueChecked"`
-	SignedValueOK        bool                 `json:"signedValueOK"`
-	CertChecked          bool                 `json:"certChecked"`
-	CertOK               bool                 `json:"certOK"`
-	CertTimeChecked      bool                 `json:"certTimeChecked,omitempty"`
-	CertTimeOK           bool                 `json:"certTimeOK,omitempty"`
-	CertTrustChecked     bool                 `json:"certTrustChecked,omitempty"`
-	CertTrustOK          bool                 `json:"certTrustOK,omitempty"`
-	CertTrustError       string               `json:"certTrustError,omitempty"`
-	SignatureTimeChecked bool                 `json:"signatureTimeChecked,omitempty"`
-	SignatureTimeOK      bool                 `json:"signatureTimeOK,omitempty"`
-	SealChecked          bool                 `json:"sealChecked"`
-	SealOK               bool                 `json:"sealOK"`
-	SealMatchChecked     bool                 `json:"sealMatchChecked"`
-	SealMatchOK          bool                 `json:"sealMatchOK"`
-	SealTimeChecked      bool                 `json:"sealTimeChecked,omitempty"`
-	SealTimeOK           bool                 `json:"sealTimeOK,omitempty"`
-	SealCertTimeChecked  bool                 `json:"sealCertTimeChecked,omitempty"`
-	SealCertTimeOK       bool                 `json:"sealCertTimeOK,omitempty"`
-	CoverageChecked      bool                 `json:"coverageChecked"`
-	CoverageOK           bool                 `json:"coverageOK"`
-	CoverageError        string               `json:"coverageError,omitempty"`
-	UncoveredFiles       []string             `json:"uncoveredFiles,omitempty"`
-	PolicyChecked        bool                 `json:"policyChecked"`
-	PolicyOK             bool                 `json:"policyOK"`
-	PolicyError          string               `json:"policyError,omitempty"`
-	TimestampChecked     bool                 `json:"timestampChecked"`
-	TimestampOK          bool                 `json:"timestampOK"`
-	Timestamps           []TimestampInfo      `json:"timestamps,omitempty"`
-	RevocationChecked    bool                 `json:"revocationChecked"`
-	RevocationOK         bool                 `json:"revocationOK"`
-	Revocations          []RevocationInfo     `json:"revocations,omitempty"`
+// signatureInfo 签名验证信息
+type signatureInfo struct {
+	DocIndex             int                         `json:"docIndex"`
+	VersionID            string                      `json:"versionId,omitempty"`
+	DocRoot              string                      `json:"docRoot,omitempty"`
+	ID                   string                      `json:"id"`
+	Type                 string                      `json:"type"`
+	Status               string                      `json:"status"`
+	IntegrityValid       bool                        `json:"integrityValid"`
+	TrustedValid         bool                        `json:"trustedValid"`
+	Error                string                      `json:"error,omitempty"`
+	Signer               string                      `json:"signer,omitempty"`
+	SignatureDateTime    string                      `json:"signatureDateTime,omitempty"`
+	SealName             string                      `json:"sealName,omitempty"`
+	Provider             string                      `json:"provider,omitempty"`
+	Company              string                      `json:"company,omitempty"`
+	SealType             string                      `json:"sealType,omitempty"`
+	SealID               string                      `json:"sealId,omitempty"`
+	SealVendor           string                      `json:"sealVendor,omitempty"`
+	SealVersion          int                         `json:"sealVersion,omitempty"`
+	SealCreateTime       string                      `json:"sealCreateTime,omitempty"`
+	SealValidStart       string                      `json:"sealValidStart,omitempty"`
+	SealValidEnd         string                      `json:"sealValidEnd,omitempty"`
+	Version              string                      `json:"version,omitempty"`
+	SignSubject          string                      `json:"signSubject,omitempty"`
+	SignIssuer           string                      `json:"signIssuer,omitempty"`
+	SignSerial           string                      `json:"signSerial,omitempty"`
+	SignNotBefore        string                      `json:"signNotBefore,omitempty"`
+	SignNotAfter         string                      `json:"signNotAfter,omitempty"`
+	SealSubject          string                      `json:"sealSubject,omitempty"`
+	SealNotBefore        string                      `json:"sealNotBefore,omitempty"`
+	SealNotAfter         string                      `json:"sealNotAfter,omitempty"`
+	SignatureMethod      string                      `json:"signatureMethod,omitempty"`
+	DigestMethod         string                      `json:"digestMethod,omitempty"`
+	DigestOK             bool                        `json:"digestOK"`
+	ReferenceCount       int                         `json:"referenceCount"`
+	ReferenceChecked     int                         `json:"referenceChecked"`
+	ReferencePassed      int                         `json:"referencePassed"`
+	FailedReferences     []signatureReferenceFailure `json:"failedReferences,omitempty"`
+	Stamps               []signatureStampInfo        `json:"stamps,omitempty"`
+	DataHashChecked      bool                        `json:"dataHashChecked"`
+	DataHashOK           bool                        `json:"dataHashOK"`
+	SignedValueChecked   bool                        `json:"signedValueChecked"`
+	SignedValueOK        bool                        `json:"signedValueOK"`
+	CertChecked          bool                        `json:"certChecked"`
+	CertOK               bool                        `json:"certOK"`
+	CertTimeChecked      bool                        `json:"certTimeChecked,omitempty"`
+	CertTimeOK           bool                        `json:"certTimeOK,omitempty"`
+	CertTrustChecked     bool                        `json:"certTrustChecked,omitempty"`
+	CertTrustOK          bool                        `json:"certTrustOK,omitempty"`
+	CertTrustError       string                      `json:"certTrustError,omitempty"`
+	SignatureTimeChecked bool                        `json:"signatureTimeChecked,omitempty"`
+	SignatureTimeOK      bool                        `json:"signatureTimeOK,omitempty"`
+	SealChecked          bool                        `json:"sealChecked"`
+	SealOK               bool                        `json:"sealOK"`
+	SealMatchChecked     bool                        `json:"sealMatchChecked"`
+	SealMatchOK          bool                        `json:"sealMatchOK"`
+	SealTimeChecked      bool                        `json:"sealTimeChecked,omitempty"`
+	SealTimeOK           bool                        `json:"sealTimeOK,omitempty"`
+	SealCertTimeChecked  bool                        `json:"sealCertTimeChecked,omitempty"`
+	SealCertTimeOK       bool                        `json:"sealCertTimeOK,omitempty"`
+	CoverageChecked      bool                        `json:"coverageChecked"`
+	CoverageOK           bool                        `json:"coverageOK"`
+	CoverageError        string                      `json:"coverageError,omitempty"`
+	UncoveredFiles       []string                    `json:"uncoveredFiles,omitempty"`
+	PolicyChecked        bool                        `json:"policyChecked"`
+	PolicyOK             bool                        `json:"policyOK"`
+	PolicyError          string                      `json:"policyError,omitempty"`
+	TimestampChecked     bool                        `json:"timestampChecked"`
+	TimestampOK          bool                        `json:"timestampOK"`
+	Timestamps           []timestampInfo             `json:"timestamps,omitempty"`
+	RevocationChecked    bool                        `json:"revocationChecked"`
+	RevocationOK         bool                        `json:"revocationOK"`
+	Revocations          []revocationInfo            `json:"revocations,omitempty"`
 }
 
-// TimestampInfo 独立展示时间戳绑定、签名、信任和证书时效
-type TimestampInfo struct {
+// signatureReferenceFailure 签名保护文件异常明细
+type signatureReferenceFailure struct {
+	Path  string `json:"path"`
+	Error string `json:"error,omitempty"`
+}
+
+// timestampInfo 独立展示时间戳绑定、签名、信任和证书时效
+type timestampInfo struct {
 	Time               string `json:"time,omitempty"`
+	Signer             string `json:"signer,omitempty"`
+	PolicyOID          string `json:"policyOID,omitempty"`
+	SerialNumber       string `json:"serialNumber,omitempty"`
 	Valid              bool   `json:"valid"`
 	BindingChecked     bool   `json:"bindingChecked"`
 	BindingOK          bool   `json:"bindingOK"`
@@ -292,8 +366,8 @@ type TimestampInfo struct {
 	Error              string `json:"error,omitempty"`
 }
 
-// RevocationInfo 仅表示签者或制章证书的离线撤销状态
-type RevocationInfo struct {
+// revocationInfo 仅表示签者或制章证书的离线撤销状态
+type revocationInfo struct {
 	Subject    string `json:"subject,omitempty"`
 	Source     string `json:"source,omitempty"`
 	Status     string `json:"status"`
@@ -305,8 +379,8 @@ type RevocationInfo struct {
 	Error      string `json:"error,omitempty"`
 }
 
-// SignatureStampInfo 签名外观信息
-type SignatureStampInfo struct {
+// signatureStampInfo 签名外观信息
+type signatureStampInfo struct {
 	ID       string  `json:"id,omitempty"`
 	Page     int     `json:"page,omitempty"`
 	PageID   string  `json:"pageId,omitempty"`
@@ -317,431 +391,13 @@ type SignatureStampInfo struct {
 	Height   float64 `json:"height,omitempty"`
 }
 
-// EncryptionInfo 仅向界面传递非敏感加密状态
-type EncryptionInfo struct {
+// encryptionInfo 仅向界面传递非敏感加密状态
+type encryptionInfo struct {
 	Encrypted      bool     `json:"encrypted"`
 	Method         string   `json:"method,omitempty"`
 	Users          []string `json:"users,omitempty"`
 	Layers         int      `json:"layers,omitempty"`
 	PolicyRequired bool     `json:"policyRequired,omitempty"`
-}
-
-// Open 打开浏览器内存中的OFD文档
-// 入参: data OFD文件数据, opts 打开选项
-// 返回: *Session 文档会话, error 错误信息
-func Open(data []byte, opts OpenOptions) (*Session, error) {
-	if len(data) == 0 {
-		return nil, fmt.Errorf("empty ofd data")
-	}
-	input, err := ofdgo.NewInput(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return nil, err
-	}
-	reader, err := ofdgo.NewReader(input, opts.ReaderOptions...)
-	if err != nil {
-		input.Close()
-		return nil, err
-	}
-	session, err := newSession(reader, opts)
-	if err != nil {
-		input.Close()
-		return nil, err
-	}
-	session.input = input
-	return session, nil
-}
-
-// Close 关闭文档会话
-// 返回: error 错误信息
-func (s *Session) Close() error {
-	if s == nil {
-		return nil
-	}
-	reader := s.Reader
-	input := s.input
-	*s = Session{}
-	var err error
-	if reader != nil {
-		err = reader.Close()
-	}
-	if input != nil {
-		err = errors.Join(err, input.Close())
-	}
-	return err
-}
-
-// Document 创建指定文档的会话，保留编辑内容和字体配置，不复用页面缓存
-// 不关闭原会话，输入文件的生命周期由原会话管理
-// 入参: index 文档索引，从0开始
-// 返回: *Session 文档会话, error 错误信息
-func (s *Session) Document(index int) (*Session, error) {
-	var reader *ofdgo.Reader
-	var err error
-	if s.editor != nil && s.editing {
-		if err = s.editor.SelectDocument(index); err != nil {
-			return nil, err
-		}
-		reader, err = s.editor.Reader(context.Background())
-	} else {
-		base := s.Reader
-		if s.editor != nil {
-			base, err = s.editor.Reader(context.Background())
-			if err != nil {
-				return nil, err
-			}
-		}
-		reader, err = base.Document(index)
-	}
-	if err != nil {
-		return nil, err
-	}
-	next, err := newSession(reader, OpenOptions{RenderAnnotations: s.Renderer.RenderAnnotations})
-	if err != nil {
-		return nil, err
-	}
-	ofdgo.WithRenderBackends(s.Renderer.Backends())(next.Renderer)
-	next.fontFS = s.fontFS
-	if next.fontFS != nil {
-		next.Renderer.SetFontFS(next.fontFS)
-		if s.editor != nil && s.editing {
-			s.editor.SetFontFS(next.fontFS)
-		}
-	}
-	if s.editor != nil && s.editing {
-		s.editor.SetRenderBackends(next.Renderer.Backends())
-		next.editing = true
-	}
-	next.editor = s.editor
-	return next, nil
-}
-
-// DocumentVersion 创建版本阅读会话，保留未保存内容和字体配置，不修改默认版本
-// 入参: id 版本标识，空字符串选择主入口
-// 返回: *Session 阅读会话, error 版本读取错误
-func (s *Session) DocumentVersion(id string) (*Session, error) {
-	reader := s.Reader
-	if s.editor != nil {
-		var err error
-		reader, err = s.editor.Reader(context.Background())
-		if err != nil {
-			return nil, err
-		}
-	}
-	reader, err := reader.DocumentVersion(id)
-	if err != nil {
-		return nil, err
-	}
-	next, err := newSession(reader, OpenOptions{RenderAnnotations: s.Renderer.RenderAnnotations})
-	if err != nil {
-		return nil, err
-	}
-	ofdgo.WithRenderBackends(s.Renderer.Backends())(next.Renderer)
-	next.fontFS = s.fontFS
-	if next.fontFS != nil {
-		next.Renderer.SetFontFS(next.fontFS)
-	}
-	return next, nil
-}
-
-// SetFonts 更新字体配置并保留文档、页面和验签结果
-// 入参: fonts 字体文件列表
-// 返回: error 错误信息
-func (s *Session) SetFonts(fonts []FontFile) error {
-	if len(fonts) > 0 {
-		fontFS := ofdgo.NewFontFS(fonts)
-		if fontFS.Len() == 0 {
-			return fmt.Errorf("invalid font file")
-		}
-		s.Renderer.SetFontFS(fontFS)
-		s.fontFS = fontFS
-	} else {
-		s.Renderer.SetFontFS()
-		s.fontFS = nil
-	}
-	s.textCache.Clear()
-	clear(s.svgFonts)
-	s.resetFontInfo()
-	return nil
-}
-
-// PageText 获取指定页面文字，复用当前会话的文字索引
-// 入参: index 页面索引
-// 返回: *ofdgo.PageText 页面文字, error 错误信息
-func (s *Session) PageText(index int) (*ofdgo.PageText, error) {
-	text := s.cachedPageText(index)
-	if text == nil {
-		var err error
-		text, err = s.readPageText(context.Background(), index)
-		if err != nil {
-			return nil, err
-		}
-		s.cachePageText(index, text)
-	}
-	return text, nil
-}
-
-// PageTextString 获取页面原文，不为全文复制保留额外的页面和文字索引
-// 入参: index 页面索引
-// 返回: string 页面原文, error 错误信息
-func (s *Session) PageTextString(index int) (string, error) {
-	return s.PageTextStringContext(context.Background(), index)
-}
-
-// PageTextStringContext 在指定上下文中获取页面原文
-// 入参: ctx 取消上下文, index 页面索引
-// 返回: string 页面原文, error 错误信息
-func (s *Session) PageTextStringContext(ctx context.Context, index int) (string, error) {
-	text := s.cachedPageText(index)
-	if text == nil {
-		var err error
-		text, err = s.readPageText(ctx, index)
-		if err != nil {
-			return "", err
-		}
-	}
-	return text.String(), nil
-}
-
-// SearchPage 搜索指定页面，复用当前会话的文字索引
-// 入参: index 页面索引, query 搜索文字
-// 返回: []ofdgo.TextMatch 匹配结果, error 错误信息
-func (s *Session) SearchPage(index int, query string) ([]ofdgo.TextMatch, error) {
-	return s.SearchPageContext(context.Background(), index, query, 0)
-}
-
-// SearchPageContext 搜索页面文字并限制累计结果，零上限返回全部，取消时不返回部分结果
-// 入参: ctx 取消上下文, index 页面索引, query 文字, limit 结果上限
-// 返回: []ofdgo.TextMatch 匹配结果, error 取消或读取错误
-func (s *Session) SearchPageContext(ctx context.Context, index int, query string, limit int) ([]ofdgo.TextMatch, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if query == "" {
-		return nil, nil
-	}
-	var matches []ofdgo.TextMatch
-	visit := func(match ofdgo.TextMatch) error {
-		matches = append(matches, match)
-		if limit > 0 && len(matches) >= limit {
-			return io.EOF
-		}
-		return nil
-	}
-	text := s.cachedPageText(index)
-	if text == nil && s.pageCache[index] == nil {
-		err := s.Renderer.SearchText(ctx, query, func(_ int, match ofdgo.TextMatch) error { return visit(match) }, index)
-		if err != nil && err != io.EOF {
-			return nil, err
-		}
-		return matches, nil
-	}
-	if text == nil {
-		var err error
-		text, err = s.readPageText(ctx, index)
-		if err != nil {
-			return nil, err
-		}
-		s.cachePageText(index, text)
-	}
-	cached, err := s.textCache.SearchEach(ctx, index, query, visit)
-	if !cached && err == nil {
-		err = text.SearchEach(ctx, query, visit)
-	}
-	if err != nil && err != io.EOF {
-		return nil, err
-	}
-	return matches, nil
-}
-
-// Summary 获取首屏所需信息，不解析页面图元或执行验签
-// 返回: DocumentInfo 文档信息
-func (s *Session) Summary() DocumentInfo {
-	return s.summary(nil)
-}
-
-// Details 获取无需逐页扫描的标引、附件、签名及字体匹配结果
-// 返回: DocumentDetails 文档补充信息
-func (s *Session) Details() DocumentDetails {
-	info := DocumentDetails{}
-	if structures, err := s.Reader.Structure(); err == nil {
-		info.Structures = structures
-	} else {
-		info.StructureError = err.Error()
-	}
-	if attachments, err := s.Reader.Attachments(); err == nil {
-		for _, attachment := range attachments {
-			if attachment.Visible || s.editing {
-				info.Attachments = append(info.Attachments, AttachmentInfo{
-					ID:       attachment.ID,
-					Name:     attachment.Name,
-					Format:   attachment.Format,
-					Size:     attachment.Size,
-					FileName: attachment.FileName(),
-					Visible:  attachment.Visible,
-				})
-			}
-		}
-	} else {
-		info.AttachmentError = err.Error()
-	}
-	if signatures, err := s.signatureInfos(); err == nil {
-		info.Signatures = signatures
-	} else {
-		info.SignatureError = err.Error()
-	}
-	info.SignatureCount = len(info.Signatures)
-	if fonts, err := s.Renderer.DeclaredFontInfos(); err == nil {
-		s.localizeFontInfos(fonts)
-		info.Fonts = fonts
-		info.FontCount = len(fonts)
-	}
-	return info
-}
-
-// Info 获取完整文档信息及逐页字体用量
-// 返回: DocumentInfo 文档信息
-func (s *Session) Info() DocumentInfo {
-	info := s.Summary()
-	details := s.Details()
-	info.Structures = details.Structures
-	info.StructureError = details.StructureError
-	info.Attachments = details.Attachments
-	info.AttachmentError = details.AttachmentError
-	info.Signatures = details.Signatures
-	info.SignatureCount = details.SignatureCount
-	info.SignatureError = details.SignatureError
-	for !s.scanFontInfo() {
-	}
-	info.Fonts = s.fontInfos
-	info.FontCount = len(info.Fonts)
-	info.DetailsPending = false
-	return info
-}
-
-// RenderPageSVG 渲染页面为SVG
-// 入参: index 页面索引
-// 返回: PageSVG 页面SVG结果, error 错误信息
-func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
-	return s.RenderPage(index, "", 0, false)
-}
-
-// RenderPage 按显示后端生成页面，光栅结果复用SVG容器和独立交互信息
-// 入参: index 页面索引, backend 后端组合，空值沿用会话配置, dpi 光栅分辨率, raster 是否光栅显示
-// 返回: PageSVG 页面结果, error 错误信息
-func (s *Session) RenderPage(index int, backend string, dpi float64, raster bool) (PageSVG, error) {
-	return s.renderPage(index, backend, dpi, raster, false, nil)
-}
-
-// SetRenderBackend 设置库提供的后端组合，不改变文档数据
-// 入参: name 后端名称
-// 返回: error 错误信息
-func (s *Session) SetRenderBackend(name string) error {
-	backends, err := ofdgo.NewRenderBackends(name)
-	if err != nil {
-		return err
-	}
-	if reflect.DeepEqual(s.Renderer.Backends(), backends) {
-		return nil
-	}
-	previous, next := s.Renderer.Backends().Info(), backends.Info()
-	if previous.Compiler != next.Compiler || previous.Fonts != next.Fonts || previous.Geometry != next.Geometry {
-		s.textCache.Clear()
-	}
-	ofdgo.WithRenderBackends(backends)(s.Renderer)
-	return nil
-}
-
-// SVGFontData 获取缓存页面引用的字体数据
-// 入参: name 字体资源标识
-// 返回: []byte 字体数据, error 错误信息
-func (s *Session) SVGFontData(name string) ([]byte, error) {
-	data, ok := s.svgFonts[name]
-	if !ok {
-		return nil, fmt.Errorf("svg font not found: %s", name)
-	}
-	return data, nil
-}
-
-// ExportPage 导出单页
-// 入参: index 页面索引, value 导出格式, dpi 图片DPI, writer 输出流
-// 返回: ExportFormat 导出格式, error 错误信息
-func (s *Session) ExportPage(index int, value string, dpi float64, writer io.Writer) (ExportFormat, error) {
-	format, ok := exportFormat(value)
-	if !ok {
-		return ExportFormat{}, fmt.Errorf("unsupported export format %s", value)
-	}
-	page, err := s.pageContent(index)
-	if err != nil {
-		return ExportFormat{}, err
-	}
-	renderer := *s.Renderer
-	if dpi > 0 && (format.Value == "png" || format.Value == "jpg") {
-		renderer.DPI = dpi
-	}
-	return format, renderer.RenderTo(page, writer, format.Value)
-}
-
-// ExportDocument 导出文档为PDF、TXT或逐页打包ZIP
-// 入参: value 导出格式, dpi 图片DPI, writer 输出流, indices 零基页面索引，省略则全部
-// 返回: ExportFormat 导出格式, error 错误信息
-func (s *Session) ExportDocument(value string, dpi float64, writer io.Writer, indices ...int) (ExportFormat, error) {
-	format, ok := exportFormat(value)
-	if !ok {
-		return ExportFormat{}, fmt.Errorf("unsupported export format %s", value)
-	}
-	if format.Value == "pdf" {
-		return format, s.ExportPDF(writer, indices...)
-	}
-	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
-		return ExportFormat{}, fmt.Errorf("ofd document is not opened")
-	}
-	if format.Value == "txt" {
-		return format, s.Renderer.RenderToMultiPageText(writer, indices...)
-	}
-	renderer := *s.Renderer
-	if dpi > 0 && (format.Value == "png" || format.Value == "jpg") {
-		renderer.DPI = dpi
-	}
-	err := renderer.RenderToZIP(writer, format.Value, indices...)
-	return ExportFormat{Value: "zip", Label: "ZIP", Extension: "zip", MIME: "application/zip"}, err
-}
-
-// ExportPDF 导出文档为PDF
-// 入参: writer 输出流, indices 零基页面索引，省略则全部
-// 返回: error 错误信息
-func (s *Session) ExportPDF(writer io.Writer, indices ...int) error {
-	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
-		return fmt.Errorf("ofd document is not opened")
-	}
-	if s.pdfSource != nil && s.editor == nil && len(indices) == 0 && s.Renderer.RenderAnnotations {
-		ctx := s.Renderer.OutputContext
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if s.Renderer.OnExportProgress != nil {
-			if err := s.Renderer.OnExportProgress(0, len(s.doc.Pages.Page)); err != nil {
-				return err
-			}
-		}
-		_, err := ofdgo.Convert(ctx, s.pdfSource, writer, ofdgo.ConvertOptions{Input: "pdf", Format: "pdf", Compression: s.Renderer.Compression})
-		if err == nil && s.Renderer.OnExportProgress != nil {
-			err = s.Renderer.OnExportProgress(len(s.doc.Pages.Page), len(s.doc.Pages.Page))
-		}
-		if err == nil {
-			err = ctx.Err()
-		}
-		return err
-	}
-	return s.Renderer.RenderToMultiPagePDF(writer, indices...)
-}
-
-// ExportFormats 获取导出格式
-// 返回: []ExportFormat 导出格式列表
-func ExportFormats() []ExportFormat {
-	return ofdgo.OutputFormats()[1:]
 }
 
 // pageBoxInfo 按页索引缓存真实区域，valid区分未读取与零值区域
@@ -750,24 +406,25 @@ type pageBoxInfo struct {
 	valid bool
 }
 
+// pageCacheEntry 保存共享页面缓存中的单个页面节点及估算字节
+type pageCacheEntry struct {
+	index int
+	page  *ofdgo.PageContent
+	bytes int64
+}
+
+// sharedPageCache 跨工作会话共享的并发安全有界页面内容LRU缓存
+type sharedPageCache struct {
+	mu      sync.Mutex
+	budget  int64
+	bytes   int64
+	entries map[int]*pageCacheEntry
+	order   []*pageCacheEntry
+}
+
 // exportWriter 分块传递导出数据
 type exportWriter struct {
 	write platformValue
-}
-
-// Write 将数据块交给浏览器保存
-// 入参: data 导出数据
-// 返回: int 写入长度, error 错误信息
-func (w exportWriter) Write(data []byte) (int, error) {
-	size := len(data)
-	for len(data) > 0 {
-		n := min(len(data), 1<<20)
-		if err := awaitExport(w.write, bytesToJS(data[:n])); err != nil {
-			return size - len(data), err
-		}
-		data = data[n:]
-	}
-	return size, nil
 }
 
 // browserReaderAt 分块读取浏览器文件，只缓存最近的一个数据块
@@ -779,65 +436,6 @@ type browserReaderAt struct {
 	offset     int64
 	data       []byte
 	checked    time.Time
-}
-
-// ReadAt 按需读取文件片段并定期交付取消检查点
-// 入参: data 目标缓冲, offset 文件偏移
-// 返回: int 读取字节数, error 读取错误
-func (r *browserReaderAt) ReadAt(data []byte, offset int64) (int, error) {
-	if offset < 0 {
-		return 0, fmt.Errorf("negative file offset")
-	}
-	n := 0
-	for len(data) > 0 {
-		if offset >= r.size {
-			return n, io.EOF
-		}
-		r.mu.Lock()
-		check := r.checkpoint.Type() == platformTypeFunction && time.Since(r.checked) >= 50*time.Millisecond
-		if check {
-			r.checked = time.Now()
-		}
-		r.mu.Unlock()
-		if check {
-			if err := awaitExport(r.checkpoint); err != nil {
-				return n, err
-			}
-		}
-		copied, err := r.readChunk(data, offset)
-		if err != nil {
-			return n, err
-		}
-		n += copied
-		offset += int64(copied)
-		data = data[copied:]
-	}
-	return n, nil
-}
-
-// readChunk 串行读取和复用缓存块，仅保留完整读取的内容
-// 入参: data 目标缓冲, offset 文件内偏移
-// 返回: int 复制字节数, error 读取错误
-func (r *browserReaderAt) readChunk(data []byte, offset int64) (int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.data) == 0 || offset < r.offset || offset-r.offset >= int64(len(r.data)) {
-		start := offset / (256 << 10) * (256 << 10)
-		size := int(min(int64(256<<10), r.size-start))
-		buffer := r.data
-		r.data = nil
-		if cap(buffer) < size {
-			buffer = make([]byte, size)
-		} else {
-			buffer = buffer[:size]
-		}
-		value := r.read.Invoke(float64(start), size)
-		if platformCopyBytes(buffer, value) != size {
-			return 0, io.ErrUnexpectedEOF
-		}
-		r.offset, r.data = start, buffer
-	}
-	return copy(data, r.data[offset-r.offset:]), nil
 }
 
 // apiResult 浏览器接口返回结果
@@ -861,7 +459,7 @@ type editorClipboard struct {
 
 // editorInfo 编辑文档信息与操作状态
 type editorInfo struct {
-	DocumentInfo
+	documentInfo
 	Revision         uint64              `json:"revision"`
 	CanUndo          bool                `json:"canUndo"`
 	CanRedo          bool                `json:"canRedo"`
@@ -947,6 +545,1235 @@ type outputContext struct {
 	interval   uint8
 }
 
+// pendingPDF 保存当前标签的增量转换、输入及操作回调
+type pendingPDF struct {
+	mu                sync.Mutex
+	closed            atomic.Bool
+	finished          atomic.Bool
+	foregroundWaiters atomic.Int32
+	fgMu              sync.Mutex
+	fgDone            chan struct{}
+	closedCh          chan struct{}
+	syncGen           uint64
+	importer          *ofdgo.PDFImport
+	retry             atomic.Bool
+	input             *ofdgo.Input
+	fontNames         []string
+	lazyFontFS        *ofdgo.FontFS
+	page              int
+	next              int
+	progress          platformValue
+	font              platformValue
+	operation         *outputContext
+	report            func(string, int, int) error
+	stage             string
+	completed         int
+	total             int
+}
+
+// batchFontCache 缓存只读字体文件系统，避免批量转换跨引擎重复拷贝和解析字体
+type batchFontCache struct {
+	mu     sync.Mutex
+	order  [][32]byte
+	byHash map[[32]byte]*ofdgo.FontFS
+	byKey  map[string]*ofdgo.FontFS
+	keys   map[string][32]byte
+	refs   map[[32]byte]int
+	owners map[string]map[*businessEngine]struct{}
+}
+
+// businessEngine 独立文档、编辑、剪贴板及操作上下文
+type businessEngine struct {
+	resources        *ofdgo.Resources
+	currentSession   *session
+	currentEditor    *ofdgo.Editor
+	pdf              *pendingPDF
+	pdfFont          platformValue
+	pdfWarnings      []byte
+	saveMu           sync.Mutex
+	saveSnapshot     *ofdgo.Editor
+	printDocument    *ofdgo.PrintDocument
+	pendingImport    *ofdgo.Reader
+	copiedObjects    *editorClipboard
+	portableObjects  *editorClipboard
+	copiedStyle      *ofdgo.GraphicObject
+	ctx              context.Context
+	resolveInput     func(context.Context, any) (io.ReaderAt, int64, error)
+	loadFont         func(string) ([]byte, error)
+	conversionPool   *ofdgo.ConversionPool
+	batchFontKey     string
+	batchFontFS      *ofdgo.FontFS
+	editorFontOwner  *ofdgo.Editor
+	editorFontFS     *ofdgo.FontFS
+	editorFontSynced bool
+}
+
+// pageSearchMatch 保存批量搜索匹配及其零基页面索引
+type pageSearchMatch struct {
+	ofdgo.TextMatch
+	Page int `json:"page"`
+}
+
+// availableExportFormats 获取导出格式
+// 返回: []ofdgo.OutputFormat 导出格式列表
+func availableExportFormats() []ofdgo.OutputFormat {
+	return ofdgo.OutputFormats()[1:]
+}
+
+// newSharedPageCache 创建指定内存预算的共享页面内容LRU缓存
+// 入参: budget 内存预算字节数
+// 返回: *sharedPageCache 共享页面缓存实例
+func newSharedPageCache(budget int64) *sharedPageCache {
+	return &sharedPageCache{budget: budget, entries: make(map[int]*pageCacheEntry)}
+}
+
+// documentMetadata 复制文档描述，集合字段与读取器及编辑器互不影响
+// 入参: info 文档描述
+// 返回: documentMeta 界面元数据
+func documentMetadata(info ofdgo.DocInfo) documentMeta {
+	metadata := documentMeta{
+		DocID: info.DocID, Title: info.Title, Author: info.Author, Subject: info.Subject, Abstract: info.Abstract,
+		CreationDate: info.CreationDate, ModDate: info.ModDate, DocUsage: info.DocUsage, Cover: info.Cover,
+		Keywords: slices.Clone(info.Keywords), Creator: info.Creator, CreatorVersion: info.CreatorVersion,
+	}
+	if info.CustomDatas != nil {
+		metadata.CustomData = slices.Clone(info.CustomDatas.CustomData)
+	}
+	return metadata
+}
+
+// newSession 从文档快照创建阅读会话，批注与印章按需惰性加载
+// 入参: reader 文档读取器, opts 打开选项
+// 返回: *session 文档会话, error 错误信息
+func newSession(reader *ofdgo.Reader, opts openOptions) (*session, error) {
+	doc, err := reader.DocStructure()
+	if err != nil {
+		reader.Close()
+		return nil, err
+	}
+	var rendererOptions []ofdgo.RendererOption
+	var fontFS *ofdgo.FontFS
+	if len(opts.Fonts) > 0 {
+		fontFS = ofdgo.NewFontFS(opts.Fonts)
+		if fontFS.Len() == 0 {
+			reader.Close()
+			return nil, fmt.Errorf("invalid font file")
+		}
+		rendererOptions = append(rendererOptions, ofdgo.WithFontFS(fontFS))
+	}
+	rendererOptions = append(rendererOptions, ofdgo.WithAnnotations(opts.RenderAnnotations))
+	rendererOptions = append(rendererOptions, opts.RendererOptions...)
+	renderer := ofdgo.NewRenderer(reader, rendererOptions...)
+	return &session{
+		Reader:          reader,
+		Renderer:        renderer,
+		fontFS:          fontFS,
+		doc:             doc,
+		pageCache:       newSharedPageCache(sessionPageCacheBytes),
+		boxCache:        make([]pageBoxInfo, len(doc.Pages.Page)),
+		openActionCache: make([]int8, len(doc.Pages.Page)),
+		textCache:       ofdgo.NewPageTextCache(sessionTextCacheBytes),
+		svgFonts:        make(map[string][]byte),
+		fontScanMu:      &sync.Mutex{},
+		fontAnnotations: renderer.RenderAnnotations(),
+	}, nil
+}
+
+// exportFormat 获取导出格式
+// 入参: value 格式值
+// 返回: ofdgo.OutputFormat 导出格式, bool 是否支持
+func exportFormat(value string) (ofdgo.OutputFormat, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "jpeg" {
+		value = "jpg"
+	}
+	for _, format := range availableExportFormats() {
+		if format.Value == value {
+			return format, true
+		}
+	}
+	return ofdgo.OutputFormat{}, false
+}
+
+// securityTime 格式化已提供的安全证据时间，零值不展示
+// 入参: value 时间
+// 返回: string 标准时间文本
+func securityTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.Format(time.RFC3339Nano)
+}
+
+// signatureSigner 获取签名人名称
+// 入参: report 签名验证报告
+// 返回: string 签名人名称
+func signatureSigner(report ofdgo.SignatureVerifyReport) string {
+	if report.Signer != "" {
+		return report.Signer
+	}
+	if report.SignCert.CommonName != "" {
+		return report.SignCert.CommonName
+	}
+	if report.SignCert.Organization != "" {
+		return report.SignCert.Organization
+	}
+	return report.SignCert.Subject
+}
+
+// signatureReferenceCounts 获取保护文件检查数量
+// 入参: refs 保护文件验证结果
+// 返回: int 已检查数量, int 已通过数量
+func signatureReferenceCounts(refs []ofdgo.SignatureReferenceVerify) (int, int) {
+	checked, passed := 0, 0
+	for _, ref := range refs {
+		if ref.Checked {
+			checked++
+		}
+		if ref.OK {
+			passed++
+		}
+	}
+	return checked, passed
+}
+
+// signatureReportError 获取签名错误信息
+// 入参: report 签名验证报告
+// 返回: string 错误信息
+func signatureReportError(report ofdgo.SignatureVerifyReport) string {
+	if report.Error != "" && report.StampPositionError != "" {
+		return report.Error + "; " + report.StampPositionError
+	}
+	if report.Error != "" {
+		return report.Error
+	}
+	return report.StampPositionError
+}
+
+// signatureFailedReferences 收集未通过、未检完或出错的保护文件明细
+// 入参: refs 保护文件验证结果
+// 返回: []signatureReferenceFailure 异常明细列表
+func signatureFailedReferences(refs []ofdgo.SignatureReferenceVerify) []signatureReferenceFailure {
+	const limit = 50
+	var failed []signatureReferenceFailure
+	for _, ref := range refs {
+		if ref.OK && ref.Checked && ref.Error == "" {
+			continue
+		}
+		failed = append(failed, signatureReferenceFailure{
+			Path:  cmp.Or(ref.Path, ref.FileRef),
+			Error: ref.Error,
+		})
+		if len(failed) >= limit {
+			break
+		}
+	}
+	return failed
+}
+
+// signatureReportNonCertFailure 判断除缺少裸签名外部证书外的实质性验证失败
+// 入参: report 签名验证报告
+// 返回: bool 是否存在实质性失败
+func signatureReportNonCertFailure(report ofdgo.SignatureVerifyReport) bool {
+	if report.StampPositionError != "" || !report.DigestOK || len(report.References) == 0 {
+		return true
+	}
+	for _, ref := range report.References {
+		if !ref.OK || !ref.Checked || ref.Error != "" {
+			return true
+		}
+	}
+	return report.DataHashChecked && !report.DataHashOK ||
+		report.SignedValueChecked && !report.SignedValueOK ||
+		report.SealChecked && !report.SealOK ||
+		report.SealMatchChecked && !report.SealMatchOK ||
+		report.CertChecked && !report.CertOK ||
+		report.CertTimeChecked && !report.CertTimeOK ||
+		report.CertTrustChecked && !report.CertTrustOK ||
+		report.SignatureTimeChecked && !report.SignatureTimeOK ||
+		report.SealTimeChecked && !report.SealTimeOK ||
+		report.SealCertTimeChecked && !report.SealCertTimeOK ||
+		report.CoverageChecked && !report.CoverageOK ||
+		report.PolicyChecked && !report.PolicyOK ||
+		report.TimestampChecked && !report.TimestampOK ||
+		report.RevocationChecked && !report.RevocationOK
+}
+
+// signatureReportStatus 判定界面展示的签名状态
+// 入参: report 签名验证报告
+// 返回: string 签名状态（valid、invalid、unchecked）
+func signatureReportStatus(report ofdgo.SignatureVerifyReport) string {
+	if report.Valid {
+		return "valid"
+	}
+	if report.Error == "signature certificate not found" && !signatureReportNonCertFailure(report) {
+		return "unchecked"
+	}
+	if report.HasFailure() || !report.DigestOK {
+		return "invalid"
+	}
+	return "unchecked"
+}
+
+// signatureIdentityError 将签署身份解析错误转换为清晰提示，未知错误保留原始信息
+// 入参: err 原始解析错误
+// 返回: error 面向界面的错误
+func signatureIdentityError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "do not match"):
+		return fmt.Errorf("证书与私钥不匹配")
+	case strings.Contains(msg, "at least 2048 bits"):
+		return fmt.Errorf("RSA私钥长度不足2048位或公钥指数无效")
+	case strings.Contains(msg, "unsupported ECDSA signature curve"):
+		return fmt.Errorf("不支持的椭圆曲线，仅支持SM2或P-256/P-384/P-521")
+	case strings.Contains(msg, "private key password required"):
+		return fmt.Errorf("私钥已加密，请输入私钥口令")
+	case strings.Contains(msg, "invalid private key or incorrect password"):
+		return fmt.Errorf("私钥无效或私钥口令错误")
+	case strings.Contains(msg, "legacy encrypted PEM"):
+		return fmt.Errorf("不支持传统加密PEM或多私钥文件，请使用加密PKCS#8格式")
+	case strings.Contains(msg, "unsupported private key PEM type"):
+		return fmt.Errorf("不支持的私钥PEM类型")
+	case strings.Contains(msg, "invalid private key encoding"):
+		return fmt.Errorf("私钥编码格式无效")
+	case strings.Contains(msg, "unsupported signature private key"), strings.Contains(msg, "unsupported signature public key"):
+		return fmt.Errorf("不支持的签名密钥算法")
+	case strings.Contains(msg, "expected one certificate"):
+		return fmt.Errorf("证书文件须仅包含单张证书")
+	default:
+		return fmt.Errorf("签署身份解析失败：%w", err)
+	}
+}
+
+// signaturePageAreaBox 按库层页面区域回退规则解析物理边界框
+// 入参: reader 阅读器, page 页面引用
+// 返回: ofdgo.Box 物理边界框, error 错误信息
+func signaturePageAreaBox(reader *ofdgo.Reader, page ofdgo.Page) (ofdgo.Box, error) {
+	area, err := reader.PageArea(page)
+	if err != nil {
+		return ofdgo.Box{}, err
+	}
+	raw := cmp.Or(strings.TrimSpace(area.PhysicalBox), strings.TrimSpace(area.ApplicationBox), strings.TrimSpace(area.ContentBox), "0 0 210 297")
+	box, err := ofdgo.ParseBox(raw)
+	if err != nil || box.W <= 0 || box.H <= 0 {
+		return ofdgo.Box{}, fmt.Errorf("invalid page box: %s", raw)
+	}
+	return box, nil
+}
+
+// signatureBoxText 编码印章毫米区域字符串
+// 入参: box 毫米区域
+// 返回: string 区域文本
+func signatureBoxText(box ofdgo.Box) string {
+	return strconv.FormatFloat(box.X, 'f', -1, 64) + " " + strconv.FormatFloat(box.Y, 'f', -1, 64) + " " + strconv.FormatFloat(box.W, 'f', -1, 64) + " " + strconv.FormatFloat(box.H, 'f', -1, 64)
+}
+
+// failureResult 统一原生及浏览器业务错误协议
+// 入参: err 业务错误
+// 返回: apiResult 错误响应结构
+func failureResult(err error) apiResult {
+	result := apiResult{Error: err.Error()}
+	switch {
+	case errors.Is(err, ofdgo.ErrOFDEntryProtected):
+		result.Code, result.Error = "ofdEntryProtected", "OFD.xml 入口受现有签名保护，无法直接修改入口或共享签名列表"
+	case errors.Is(err, ofdgo.ErrSignatureDependency):
+		result.Code, result.Error = "signatureDependency", "存在签名或版本依赖冲突，无法执行当前操作"
+	case errors.Is(err, ofdgo.ErrIncompleteDocument):
+		result.Code, result.Error = "documentPending", "文档尚未准备完成"
+	case errors.Is(err, ofdgo.ErrPDFPassword):
+		result.Code, result.Error = "pdfPassword", "PDF密码缺失或错误"
+	case errors.Is(err, ofdgo.ErrCredentialsRequired):
+		result.Code, result.Error = "credentialsRequired", "文档已加密"
+	case errors.Is(err, ofdgo.ErrInvalidCredentials):
+		result.Code, result.Error = "invalidCredentials", "凭据无效或文件损坏"
+	case errors.Is(err, ofdgo.ErrUnsupportedEncryption):
+		result.Code, result.Error = "unsupportedEncryption", "不支持此加密方式"
+	case errors.Is(err, ofdgo.ErrEncryptionPolicyRequired):
+		result.Code, result.Error = "encryptionPolicyRequired", "请设置加密方式"
+	}
+	var failure *ofdgo.EditError
+	if errors.As(err, &failure) {
+		result.ReasonCode = failure.Code
+	}
+	if errors.As(err, &result.MissingGlyphs) {
+		result.ReasonCode = ofdgo.EditMissingGlyphs
+	}
+	return result
+}
+
+// estimatePageContentBytes 估算页面内容在共享LRU缓存中的内存占用字节数
+// 入参: page 页面内容
+// 返回: int64 估算字节数
+func estimatePageContentBytes(page *ofdgo.PageContent) int64 {
+	if page == nil {
+		return 0
+	}
+	total := int64(4096) + int64(len(page.Template))*128 + int64(len(page.Actions))*256
+	for _, layer := range page.Content.Layer {
+		total += 256
+		objects := max(len(layer.Objects), len(layer.TextObject)+len(layer.PathObject)+len(layer.ImageObject)+len(layer.CompositeObject))
+		total += int64(objects) * 512
+		for _, text := range layer.TextObject {
+			for _, code := range text.TextCode {
+				total += int64(len(code.Value) + len(code.DeltaX) + len(code.DeltaY))
+			}
+		}
+		for _, path := range layer.PathObject {
+			total += int64(len(path.AbbreviatedData))
+		}
+		for _, obj := range layer.Objects {
+			for _, code := range obj.TextObject.TextCode {
+				total += int64(len(code.Value) + len(code.DeltaX) + len(code.DeltaY))
+			}
+			total += int64(len(obj.PathObject.AbbreviatedData))
+		}
+	}
+	return total
+}
+
+// translateContours 将对象轮廓中的SVG路径按给定偏移平移至视口坐标
+// 入参: contours 原始轮廓列表, dx 横向偏移, dy 纵向偏移
+// 返回: []ofdgo.ObjectContour 平移后的轮廓列表
+func translateContours(contours []ofdgo.ObjectContour, dx, dy float64) []ofdgo.ObjectContour {
+	if len(contours) == 0 || (dx == 0 && dy == 0) {
+		return contours
+	}
+	result := make([]ofdgo.ObjectContour, len(contours))
+	for i, contour := range contours {
+		result[i] = ofdgo.ObjectContour{Path: translateSVGPath(contour.Path, dx, dy), EvenOdd: contour.EvenOdd}
+	}
+	return result
+}
+
+// translateSVGPath 解析并平移SVG路径字符串，不依赖外部绘图后端
+// 入参: path 原始SVG路径, dx 横向偏移, dy 纵向偏移
+// 返回: string 平移后的SVG路径
+func translateSVGPath(path string, dx, dy float64) string {
+	if path == "" || (dx == 0 && dy == 0) {
+		return path
+	}
+	var out strings.Builder
+	out.Grow(len(path) + 32)
+	var cmd byte
+	argIdx := 0
+	firstMove := true
+	for i := 0; i < len(path); {
+		ch := path[i]
+		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == ',' {
+			i++
+			continue
+		}
+		if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') {
+			cmd = ch
+			argIdx = 0
+			if out.Len() > 0 {
+				out.WriteByte(' ')
+			}
+			out.WriteByte(cmd)
+			if cmd == 'Z' || cmd == 'z' {
+				cmd = 0
+			}
+			i++
+			continue
+		}
+		if (cmd == 'A' || cmd == 'a') && (argIdx%7 == 3 || argIdx%7 == 4) && (ch == '0' || ch == '1') {
+			out.WriteByte(' ')
+			out.WriteByte(ch)
+			argIdx++
+			i++
+			continue
+		}
+		start := i
+		if path[i] == '+' || path[i] == '-' {
+			i++
+		}
+		hasDot := false
+		hasExp := false
+		for i < len(path) {
+			c := path[i]
+			if c >= '0' && c <= '9' {
+				i++
+			} else if c == '.' && !hasDot && !hasExp {
+				hasDot = true
+				i++
+			} else if (c == 'e' || c == 'E') && !hasExp && i+1 < len(path) {
+				next := i + 1
+				if path[next] == '+' || path[next] == '-' {
+					next++
+				}
+				if next < len(path) && path[next] >= '0' && path[next] <= '9' {
+					hasExp = true
+					i = next + 1
+				} else {
+					break
+				}
+			} else {
+				break
+			}
+		}
+		if i == start {
+			return path
+		}
+		val, err := strconv.ParseFloat(path[start:i], 64)
+		if err != nil {
+			return path
+		}
+		switch cmd {
+		case 'M', 'L', 'T':
+			if argIdx%2 == 0 {
+				val += dx
+			} else {
+				val += dy
+			}
+			if cmd == 'M' && argIdx == 1 {
+				firstMove = false
+				cmd = 'L'
+				argIdx = -1
+			}
+		case 'm':
+			if firstMove && argIdx < 2 {
+				if argIdx == 0 {
+					val += dx
+				} else {
+					val += dy
+				}
+			}
+			if argIdx == 1 {
+				firstMove = false
+				cmd = 'l'
+				argIdx = -1
+			}
+		case 'H':
+			val += dx
+		case 'V':
+			val += dy
+		case 'C':
+			if argIdx%2 == 0 {
+				val += dx
+			} else {
+				val += dy
+			}
+		case 'S', 'Q':
+			if argIdx%2 == 0 {
+				val += dx
+			} else {
+				val += dy
+			}
+		case 'A':
+			pos := argIdx % 7
+			if pos == 5 {
+				val += dx
+			} else if pos == 6 {
+				val += dy
+			}
+		}
+		argIdx++
+		out.WriteByte(' ')
+		out.WriteString(strconv.FormatFloat(val, 'g', -1, 64))
+	}
+	return out.String()
+}
+
+// optionalString 读取可选字符串参数，非字符串值返回空字符串
+// 入参: v 平台参数值
+// 返回: string 字符串内容
+func optionalString(v platformValue) string {
+	if v.Type() == platformTypeString {
+		return v.String()
+	}
+	return ""
+}
+
+// cloneWebUIVPreferences 复制视图首选项结构，避免外部修改影响会话文档缓存
+// 入参: v 原始视图首选项指针
+// 返回: *ofdgo.VPreferences 独立副本
+func cloneWebUIVPreferences(v *ofdgo.VPreferences) *ofdgo.VPreferences {
+	if v == nil {
+		return nil
+	}
+	copied := *v
+	if v.HideToolbar != nil {
+		value := *v.HideToolbar
+		copied.HideToolbar = &value
+	}
+	if v.HideMenubar != nil {
+		value := *v.HideMenubar
+		copied.HideMenubar = &value
+	}
+	if v.HideWindowUI != nil {
+		value := *v.HideWindowUI
+		copied.HideWindowUI = &value
+	}
+	if v.Zoom != nil {
+		value := *v.Zoom
+		copied.Zoom = &value
+	}
+	return &copied
+}
+
+// sameDocumentSignatures 比较前后文档入口的签名路径是否一致
+// 入参: previous 原阅读器, current 新阅读器
+// 返回: bool 签名路径列表是否完全一致
+func sameDocumentSignatures(previous, current *ofdgo.Reader) bool {
+	if previous == nil || current == nil {
+		return false
+	}
+	prevBodies := previous.OFD().DocBody
+	currBodies := current.OFD().DocBody
+	if len(prevBodies) == 0 || len(prevBodies) != len(currBodies) {
+		return false
+	}
+	for i := range prevBodies {
+		if prevBodies[i].Signatures != currBodies[i].Signatures {
+			return false
+		}
+	}
+	return true
+}
+
+// sameExternalCustomTags 比较前后文档的外部自定义标引，排除编辑器内部排版标引
+// 入参: previous 原阅读器, current 新阅读器
+// 返回: bool 外部自定义标引是否未变化
+func sameExternalCustomTags(previous, current *ofdgo.Reader) bool {
+	prevDoc, prevErr := previous.DocStructure()
+	currDoc, currErr := current.DocStructure()
+	if prevErr != nil || currErr != nil {
+		return false
+	}
+	prevEmpty := prevDoc.CustomTags.Path == "" && len(prevDoc.CustomTags.CustomTag) == 0
+	currEmpty := currDoc.CustomTags.Path == "" && len(currDoc.CustomTags.CustomTag) == 0
+	if prevEmpty && currEmpty {
+		return true
+	}
+	prevTags, prevTagErr := previous.CustomTags()
+	currTags, currTagErr := current.CustomTags()
+	if prevTagErr != nil || currTagErr != nil {
+		return false
+	}
+	return slices.Equal(externalCustomTags(prevTags), externalCustomTags(currTags))
+}
+
+// externalCustomTags 过滤掉编辑器内部普通文字与富文本排版标引
+// 入参: tags 完整自定义标引列表
+// 返回: []ofdgo.CustomTag 外部自定义标引列表
+func externalCustomTags(tags []ofdgo.CustomTag) []ofdgo.CustomTag {
+	var result []ofdgo.CustomTag
+	for _, tag := range tags {
+		if tag.TypeID == webuiRichTextTagType && tag.NameSpace == webuiRichTextNamespace {
+			continue
+		}
+		if tag.TypeID == webuiTextTagType && tag.NameSpace == webuiTextNamespace {
+			continue
+		}
+		result = append(result, tag)
+	}
+	return result
+}
+
+// sameDocumentTemplates 比较前后文档的模板页声明及模板文件内容是否一致
+// 入参: previous 原阅读器, current 新阅读器
+// 返回: bool 模板页是否未变化
+func sameDocumentTemplates(previous, current *ofdgo.Reader) bool {
+	prevDoc, prevErr := previous.DocStructure()
+	currDoc, currErr := current.DocStructure()
+	if prevErr != nil || currErr != nil {
+		return false
+	}
+	prevTemplates := prevDoc.CommonData.TemplatePage
+	currTemplates := currDoc.CommonData.TemplatePage
+	if len(prevTemplates) != len(currTemplates) {
+		return false
+	}
+	for i := range prevTemplates {
+		if prevTemplates[i].ID != currTemplates[i].ID || prevTemplates[i].BaseLoc != currTemplates[i].BaseLoc {
+			return false
+		}
+		prevData, prevReadErr := previous.ResData(prevTemplates[i].BaseLoc)
+		currData, currReadErr := current.ResData(currTemplates[i].BaseLoc)
+		if prevReadErr != nil || currReadErr != nil || !bytes.Equal(prevData, currData) {
+			return false
+		}
+	}
+	return true
+}
+
+// hasUTF16BOM 判断字节切片是否以UTF-16字节序标记开头
+// 入参: data 原始字节数据
+// 返回: bool 是否包含UTF-16 BOM
+func hasUTF16BOM(data []byte) bool {
+	return len(data) >= 2 && ((data[0] == 0xFF && data[1] == 0xFE) || (data[0] == 0xFE && data[1] == 0xFF))
+}
+
+// containsFoldASCII 不区分ASCII大小写判断目标字节串是否存在
+// 入参: data 源字节切片, token 待匹配的ASCII字节串
+// 返回: bool 是否包含匹配片段
+func containsFoldASCII(data, token []byte) bool {
+	n := len(token)
+	if n == 0 || len(data) < n {
+		return false
+	}
+	limit := len(data) - n
+	for i := 0; i <= limit; i++ {
+		matched := true
+		for j := 0; j < n; j++ {
+			a, b := data[i+j], token[j]
+			if a == b {
+				continue
+			}
+			lowerB := b | 0x20
+			if lowerB < 'a' || lowerB > 'z' || (a|0x20) != lowerB {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+// close 关闭文档会话并释放会话拥有的底层输入与临时编辑器
+// 返回: error 错误信息
+func (s *session) close() error {
+	if s == nil {
+		return nil
+	}
+	reader := s.Reader
+	input := s.input
+	ownedEditor := s.ownedEditor
+	fontScanWorker := s.fontScanWorker
+	*s = session{}
+	var err error
+	if fontScanWorker != nil {
+		err = fontScanWorker.close()
+	}
+	if reader != nil {
+		err = errors.Join(err, reader.Close())
+	}
+	if ownedEditor != nil {
+		err = errors.Join(err, ownedEditor.Close())
+	}
+	if input != nil {
+		err = errors.Join(err, input.Close())
+	}
+	return err
+}
+
+// document 创建指定文档的会话，保留编辑内容和字体配置，不复用页面缓存
+// 不关闭原会话，输入文件的生命周期由原会话管理
+// 入参: index 文档索引，从0开始
+// 返回: *session 文档会话, error 错误信息
+func (s *session) document(index int) (*session, error) {
+	var reader *ofdgo.Reader
+	var err error
+	if s.editor != nil && s.editing {
+		if err = s.editor.SelectDocument(index); err != nil {
+			return nil, err
+		}
+		reader, err = s.editor.Reader(context.Background())
+	} else {
+		base := s.Reader
+		baseOwned := false
+		if s.editor != nil {
+			base, err = s.editor.Reader(context.Background())
+			if err != nil {
+				return nil, err
+			}
+			baseOwned = true
+		}
+		reader, err = base.Document(index)
+		if baseOwned {
+			_ = base.Close()
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	next, err := newSession(reader, openOptions{RenderAnnotations: s.Renderer.RenderAnnotations()})
+	if err != nil {
+		_ = reader.Close()
+		return nil, err
+	}
+	ofdgo.WithRenderBackends(s.Renderer.Backends())(next.Renderer)
+	next.fontFS = s.fontFS
+	if next.fontFS != nil {
+		next.Renderer.SetFontFS(next.fontFS)
+		if s.editor != nil && s.editing {
+			s.editor.SetFontFS(next.fontFS)
+		}
+	}
+	if s.editor != nil && s.editing {
+		s.editor.SetRenderBackends(next.Renderer.Backends())
+		next.editing = true
+	}
+	next.editor = s.editor
+	return next, nil
+}
+
+// documentVersion 创建版本阅读会话，保留未保存内容和字体配置，不修改默认版本
+// 入参: id 版本标识，空字符串选择主入口
+// 返回: *session 阅读会话, error 版本读取错误
+func (s *session) documentVersion(id string) (*session, error) {
+	reader := s.Reader
+	owned := false
+	if s.editor != nil {
+		var err error
+		reader, err = s.editor.Reader(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		owned = true
+		if reader.DocumentIndex() != s.Reader.DocumentIndex() {
+			nextReader, err := reader.Document(s.Reader.DocumentIndex())
+			_ = reader.Close()
+			if err != nil {
+				return nil, err
+			}
+			reader = nextReader
+		}
+	}
+	versionReader, err := reader.DocumentVersion(id)
+	if owned {
+		_ = reader.Close()
+	}
+	if err != nil {
+		return nil, err
+	}
+	next, err := newSession(versionReader, openOptions{RenderAnnotations: s.Renderer.RenderAnnotations()})
+	if err != nil {
+		_ = versionReader.Close()
+		return nil, err
+	}
+	ofdgo.WithRenderBackends(s.Renderer.Backends())(next.Renderer)
+	next.fontFS = s.fontFS
+	if next.fontFS != nil {
+		next.Renderer.SetFontFS(next.fontFS)
+	}
+	return next, nil
+}
+
+// setFonts 更新字体配置并保留文档、页面和验签结果
+// 入参: fonts 字体文件列表, extra 额外字体文件系统
+// 返回: error 错误信息
+func (s *session) setFonts(fonts []ofdgo.FontFile, extra ...fs.FS) error {
+	var sources []fs.FS
+	if len(fonts) > 0 {
+		fontFS := ofdgo.NewFontFS(fonts)
+		if fontFS.Len() == 0 {
+			return fmt.Errorf("invalid font file")
+		}
+		sources = append(sources, fontFS)
+		s.fontFS = fontFS
+	} else {
+		s.fontFS = nil
+	}
+	for _, fsys := range extra {
+		if fsys != nil {
+			sources = append(sources, fsys)
+		}
+	}
+	s.Renderer.SetFontFS(sources...)
+	s.textCache.Clear()
+	clear(s.svgFonts)
+	s.resetFontInfo()
+	return nil
+}
+
+// pageText 获取指定页面文字，复用当前会话的文字索引并响应会话取消上下文
+// 入参: index 页面索引
+// 返回: *ofdgo.PageText 页面文字, error 错误信息
+func (s *session) pageText(index int) (*ofdgo.PageText, error) {
+	text := s.cachedPageText(index)
+	if text == nil {
+		var err error
+		text, err = s.readPageText(s.outputContext(), index)
+		if err != nil {
+			return nil, err
+		}
+		s.cachePageText(index, text)
+	}
+	return text, nil
+}
+
+// pageTextStringContext 在指定上下文中获取页面原文
+// 入参: ctx 取消上下文, index 页面索引
+// 返回: string 页面原文, error 错误信息
+func (s *session) pageTextStringContext(ctx context.Context, index int) (string, error) {
+	text := s.cachedPageText(index)
+	if text == nil {
+		var err error
+		text, err = s.readPageText(ctx, index)
+		if err != nil {
+			return "", err
+		}
+	}
+	return text.String(), nil
+}
+
+// searchPageContext 搜索页面文字并限制累计结果，零上限返回全部，取消时不返回部分结果
+// 入参: ctx 取消上下文, index 页面索引, query 文字, limit 结果上限
+// 返回: []ofdgo.TextMatch 匹配结果, error 取消或读取错误
+func (s *session) searchPageContext(ctx context.Context, index int, query string, limit int) ([]ofdgo.TextMatch, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if query == "" {
+		return nil, nil
+	}
+	var matches []ofdgo.TextMatch
+	visit := func(match ofdgo.TextMatch) error {
+		matches = append(matches, match)
+		if limit > 0 && len(matches) >= limit {
+			return io.EOF
+		}
+		return nil
+	}
+	text := s.cachedPageText(index)
+	if text == nil && !s.hasCachedPage(index) {
+		err := s.Renderer.SearchText(ctx, query, func(_ int, match ofdgo.TextMatch) error { return visit(match) }, index)
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+		return matches, nil
+	}
+	if text == nil {
+		var err error
+		text, err = s.readPageText(ctx, index)
+		if err != nil {
+			return nil, err
+		}
+		s.cachePageText(index, text)
+	}
+	cached, err := s.textCache.SearchEach(ctx, index, query, visit)
+	if !cached && err == nil {
+		err = text.SearchEach(ctx, query, visit)
+	}
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return matches, nil
+}
+
+// cloneRendererWithBackend 按需派生使用指定后端组合的临时渲染器，不修改会话基准状态
+// 入参: name 后端名称
+// 返回: ofdgo.Renderer 渲染器副本, bool 是否切换了后端组合, error 错误信息
+func (s *session) cloneRendererWithBackend(name string) (ofdgo.Renderer, bool, error) {
+	if name == "" {
+		return *s.Renderer, false, nil
+	}
+	backends, err := ofdgo.NewRenderBackends(name)
+	if err != nil {
+		return ofdgo.Renderer{}, false, err
+	}
+	if reflect.DeepEqual(s.Renderer.Backends(), backends) {
+		return *s.Renderer, false, nil
+	}
+	dirs, sources := s.Renderer.FontSources()
+	renderer := ofdgo.NewRenderer(
+		s.Reader,
+		ofdgo.WithAnnotations(s.Renderer.RenderAnnotations()),
+		ofdgo.WithCompression(s.Renderer.Compression()),
+		ofdgo.WithRenderBackends(backends),
+		ofdgo.WithFontDirs(dirs...),
+		ofdgo.WithFontFS(sources...),
+	)
+	return *renderer, true, nil
+}
+
+// svgFontData 获取缓存页面引用的字体数据
+// 入参: name 字体资源标识
+// 返回: []byte 字体数据, error 错误信息
+func (s *session) svgFontData(name string) ([]byte, error) {
+	data, ok := s.svgFonts[name]
+	if !ok {
+		return nil, fmt.Errorf("svg font not found: %s", name)
+	}
+	return data, nil
+}
+
+// exportPage 导出单页
+// 入参: index 页面索引, value 导出格式, dpi 图片DPI, writer 输出流
+// 返回: ofdgo.OutputFormat 导出格式, error 错误信息
+func (s *session) exportPage(index int, value string, dpi float64, writer io.Writer) (ofdgo.OutputFormat, error) {
+	format, ok := exportFormat(value)
+	if !ok {
+		return ofdgo.OutputFormat{}, fmt.Errorf("unsupported export format %s", value)
+	}
+	page, err := s.pageContent(index)
+	if err != nil {
+		return ofdgo.OutputFormat{}, err
+	}
+	renderer := *s.Renderer
+	if dpi > 0 && (format.Value == "png" || format.Value == "jpg") {
+		if err := renderer.SetDPI(dpi); err != nil {
+			return ofdgo.OutputFormat{}, err
+		}
+	}
+	return format, renderer.RenderToContext(s.outputContext(), page, writer, format.Value)
+}
+
+// exportDocument 导出文档为PDF、TXT或逐页打包ZIP
+// 入参: value 导出格式, dpi 图片DPI, writer 输出流, indices 零基页面索引，省略则全部
+// 返回: ofdgo.OutputFormat 导出格式, error 错误信息
+func (s *session) exportDocument(value string, dpi float64, writer io.Writer, indices ...int) (ofdgo.OutputFormat, error) {
+	format, ok := exportFormat(value)
+	if !ok {
+		return ofdgo.OutputFormat{}, fmt.Errorf("unsupported export format %s", value)
+	}
+	if format.Value == "pdf" {
+		return format, s.exportPDF(writer, indices...)
+	}
+	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
+		return ofdgo.OutputFormat{}, fmt.Errorf("ofd document is not opened")
+	}
+	if format.Value == "txt" {
+		return format, s.Renderer.RenderToMultiPageTextContext(s.outputContext(), writer, indices...)
+	}
+	renderer := *s.Renderer
+	if dpi > 0 && (format.Value == "png" || format.Value == "jpg") {
+		if err := renderer.SetDPI(dpi); err != nil {
+			return ofdgo.OutputFormat{}, err
+		}
+	}
+	err := renderer.RenderToZIPContext(s.outputContext(), writer, format.Value, indices...)
+	return ofdgo.OutputFormat{Value: "zip", Label: "ZIP", Extension: "zip", MIME: "application/zip"}, err
+}
+
+// exportPDF 导出文档为PDF
+// 入参: writer 输出流, indices 零基页面索引，省略则全部
+// 返回: error 错误信息
+func (s *session) exportPDF(writer io.Writer, indices ...int) error {
+	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
+		return fmt.Errorf("ofd document is not opened")
+	}
+	ctx := s.outputContext()
+	if s.pdfSource != nil && s.editor == nil && len(indices) == 0 && s.Renderer.RenderAnnotations() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if s.Renderer.OnExportProgress != nil {
+			if err := s.Renderer.OnExportProgress(0, len(s.doc.Pages.Page)); err != nil {
+				return err
+			}
+		}
+		_, err := ofdgo.Convert(ctx, s.pdfSource, writer, ofdgo.ConvertOptions{Input: "pdf", Format: "pdf", Compression: s.Renderer.Compression()})
+		if err == nil && s.Renderer.OnExportProgress != nil {
+			err = s.Renderer.OnExportProgress(len(s.doc.Pages.Page), len(s.doc.Pages.Page))
+		}
+		if err == nil {
+			err = ctx.Err()
+		}
+		return err
+	}
+	return s.Renderer.RenderToMultiPagePDFContext(ctx, writer, indices...)
+}
+
+// get 查询页面并在命中时更新最近访问顺序
+// 入参: index 页面索引
+// 返回: *ofdgo.PageContent 页面内容, bool 是否命中
+func (c *sharedPageCache) get(index int) (*ofdgo.PageContent, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[index]
+	if entry == nil {
+		return nil, false
+	}
+	c.touchLocked(entry)
+	return entry.page, true
+}
+
+// has 检查指定页面是否位于缓存中
+// 入参: index 页面索引
+// 返回: bool 是否存在
+func (c *sharedPageCache) has(index int) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	_, ok := c.entries[index]
+	c.mu.Unlock()
+	return ok
+}
+
+// put 写入页面内容并按内存预算淘汰最久未使用的页面
+// 入参: index 页面索引, page 页面内容
+func (c *sharedPageCache) put(index int, page *ofdgo.PageContent) {
+	if c == nil || page == nil {
+		return
+	}
+	size := estimatePageContentBytes(page)
+	if c.budget > 0 && size > c.budget {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[int]*pageCacheEntry)
+	}
+	if entry := c.entries[index]; entry != nil {
+		c.bytes -= entry.bytes
+		entry.page = page
+		entry.bytes = size
+		c.bytes += size
+		c.touchLocked(entry)
+		for len(c.order) > 1 && c.budget > 0 && c.bytes > c.budget {
+			c.evictLocked()
+		}
+		return
+	}
+	for len(c.order) > 0 && c.budget > 0 && c.bytes+size > c.budget {
+		c.evictLocked()
+	}
+	entry := &pageCacheEntry{index: index, page: page, bytes: size}
+	c.entries[index] = entry
+	c.order = append(c.order, entry)
+	c.bytes += size
+}
+
+// delete 移除指定页面的缓存条目
+// 入参: index 页面索引
+func (c *sharedPageCache) delete(index int) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[index]
+	if entry == nil {
+		return
+	}
+	delete(c.entries, index)
+	c.bytes -= entry.bytes
+	for i, item := range c.order {
+		if item == entry {
+			copy(c.order[i:], c.order[i+1:])
+			c.order[len(c.order)-1] = nil
+			c.order = c.order[:len(c.order)-1]
+			return
+		}
+	}
+}
+
+// rangeEntries 遍历当前缓存中的所有页面快照
+// 入参: fn 遍历回调
+func (c *sharedPageCache) rangeEntries(fn func(index int, page *ofdgo.PageContent)) {
+	if c == nil || fn == nil {
+		return
+	}
+	c.mu.Lock()
+	snapshot := make([]pageCacheEntry, len(c.order))
+	for i, entry := range c.order {
+		snapshot[i] = *entry
+	}
+	c.mu.Unlock()
+	for _, entry := range snapshot {
+		fn(entry.index, entry.page)
+	}
+}
+
+// touchLocked 在持锁状态下将节点移至最近使用队尾
+// 入参: entry 缓存条目
+func (c *sharedPageCache) touchLocked(entry *pageCacheEntry) {
+	for i, item := range c.order {
+		if item == entry {
+			copy(c.order[i:], c.order[i+1:])
+			c.order[len(c.order)-1] = entry
+			return
+		}
+	}
+}
+
+// evictLocked 在持锁状态下淘汰最久未使用的队头条目
+func (c *sharedPageCache) evictLocked() {
+	evicted := c.order[0]
+	c.order[0] = nil
+	c.order = c.order[1:]
+	delete(c.entries, evicted.index)
+	c.bytes -= evicted.bytes
+}
+
+// Write 将数据块交给浏览器保存
+// 入参: data 导出数据
+// 返回: int 写入长度, error 错误信息
+func (w exportWriter) Write(data []byte) (int, error) {
+	size := len(data)
+	for len(data) > 0 {
+		n := min(len(data), 1<<20)
+		if err := awaitExport(w.write, bytesToJS(data[:n])); err != nil {
+			return size - len(data), err
+		}
+		data = data[n:]
+	}
+	return size, nil
+}
+
+// ReadAt 按需读取文件片段并定期交付取消检查点
+// 入参: data 目标缓冲, offset 文件偏移
+// 返回: int 读取字节数, error 读取错误
+func (r *browserReaderAt) ReadAt(data []byte, offset int64) (int, error) {
+	if offset < 0 {
+		return 0, fmt.Errorf("negative file offset")
+	}
+	n := 0
+	for len(data) > 0 {
+		if offset >= r.size {
+			return n, io.EOF
+		}
+		r.mu.Lock()
+		check := r.checkpoint.Type() == platformTypeFunction && time.Since(r.checked) >= 50*time.Millisecond
+		if check {
+			r.checked = time.Now()
+		}
+		r.mu.Unlock()
+		if check {
+			if err := awaitExport(r.checkpoint); err != nil {
+				return n, err
+			}
+		}
+		copied, err := r.readChunk(data, offset)
+		if err != nil {
+			return n, err
+		}
+		n += copied
+		offset += int64(copied)
+		data = data[copied:]
+	}
+	return n, nil
+}
+
+// readChunk 串行读取和复用缓存块，仅保留完整读取的内容
+// 入参: data 目标缓冲, offset 文件内偏移
+// 返回: int 复制字节数, error 读取错误
+func (r *browserReaderAt) readChunk(data []byte, offset int64) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.data) == 0 || offset < r.offset || offset-r.offset >= int64(len(r.data)) {
+		start := offset / (256 << 10) * (256 << 10)
+		size := int(min(int64(256<<10), r.size-start))
+		buffer := r.data
+		r.data = nil
+		if cap(buffer) < size {
+			buffer = make([]byte, size)
+		} else {
+			buffer = buffer[:size]
+		}
+		value := r.read.Invoke(float64(start), size)
+		if platformCopyBytes(buffer, value) != size {
+			return 0, io.ErrUnexpectedEOF
+		}
+		r.offset, r.data = start, buffer
+	}
+	return copy(data, r.data[offset-r.offset:]), nil
+}
+
 // Err 按操作间隔检查时间并处理浏览器消息，每次调用均检查已有取消状态
 // 返回: error 取消错误
 func (c *outputContext) Err() error {
@@ -971,40 +1798,310 @@ func (c *outputContext) Err() error {
 	return c.Context.Err()
 }
 
-// pendingPDF 保存当前标签的增量转换、输入及操作回调
-type pendingPDF struct {
-	importer  *ofdgo.PDFImport
-	retry     bool
-	input     *ofdgo.Input
-	fontNames []string
-	page      int
-	next      int
-	progress  platformValue
-	font      platformValue
-	operation *outputContext
-	report    func(string, int, int) error
-	stage     string
-	completed int
-	total     int
+// markClosed 标记渐进PDF任务已关闭并立即唤醒等待前台让步的后台协程
+func (p *pendingPDF) markClosed() {
+	p.closed.Store(true)
+	p.fgMu.Lock()
+	if p.closedCh == nil {
+		p.closedCh = make(chan struct{})
+	}
+	select {
+	case <-p.closedCh:
+	default:
+		close(p.closedCh)
+	}
+	p.fgMu.Unlock()
 }
 
-// businessEngine 独立文档、编辑、剪贴板及操作上下文
-type businessEngine struct {
-	resources       *ofdgo.Resources
-	currentSession  *Session
-	currentEditor   *ofdgo.Editor
-	pdf             *pendingPDF
-	pdfFont         platformValue
-	pdfWarnings     []byte
-	saveSnapshot    *ofdgo.Editor
-	printDocument   *ofdgo.PrintDocument
-	pendingImport   *ofdgo.Reader
-	copiedObjects   *editorClipboard
-	portableObjects *editorClipboard
-	copiedStyle     *ofdgo.GraphicObject
-	ctx             context.Context
-	resolveInput    func(context.Context, any) (io.ReaderAt, int64, error)
-	conversionPool  *ofdgo.ConversionPool
+// beginForeground 登记前台按需同步页面请求，促使后台转换主动让出互斥锁
+func (p *pendingPDF) beginForeground() {
+	p.fgMu.Lock()
+	if p.foregroundWaiters.Add(1) == 1 {
+		p.fgDone = make(chan struct{})
+	}
+	p.fgMu.Unlock()
+}
+
+// endForeground 注销前台按需同步请求并在全部完成时唤醒后台转换
+func (p *pendingPDF) endForeground() {
+	p.fgMu.Lock()
+	if p.foregroundWaiters.Add(-1) == 0 && p.fgDone != nil {
+		close(p.fgDone)
+		p.fgDone = nil
+	}
+	p.fgMu.Unlock()
+}
+
+// waitForeground 等待所有前台按需同步请求结束，响应上下文取消及任务关闭
+// 入参: ctx 取消上下文
+// 返回: error 取消错误
+func (p *pendingPDF) waitForeground(ctx context.Context) error {
+	for p.foregroundWaiters.Load() > 0 {
+		if p.closed.Load() {
+			return context.Canceled
+		}
+		p.fgMu.Lock()
+		if p.closed.Load() {
+			p.fgMu.Unlock()
+			return context.Canceled
+		}
+		done := p.fgDone
+		if p.closedCh == nil {
+			p.closedCh = make(chan struct{})
+		}
+		closedCh := p.closedCh
+		p.fgMu.Unlock()
+		if done == nil {
+			return ctx.Err()
+		}
+		select {
+		case <-done:
+		case <-closedCh:
+			return context.Canceled
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if p.closed.Load() {
+		return context.Canceled
+	}
+	return ctx.Err()
+}
+
+// getFor 按批次键查询已缓存的只读字体文件系统并登记调用方引擎引用
+// 入参: owner 业务引擎, key 批次字体缓存键
+// 返回: *ofdgo.FontFS 命中的只读字体文件系统，未命中为nil
+func (c *batchFontCache) getFor(owner *businessEngine, key string) *ofdgo.FontFS {
+	if key == "" {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fsys := c.byKey[key]
+	if fsys != nil && owner != nil {
+		c.addOwnerLocked(owner, key)
+	}
+	return fsys
+}
+
+// getOrBuild 按内容摘要复用或构建只读字体文件系统，并可选绑定批次键与调用方引擎
+// 入参: owner 业务引擎, key 批次字体缓存键，可为空, fonts 字体文件列表
+// 返回: *ofdgo.FontFS 只读字体文件系统
+func (c *batchFontCache) getOrBuild(owner *businessEngine, key string, fonts []ofdgo.FontFile) *ofdgo.FontFS {
+	if len(fonts) == 0 {
+		return emptyBatchFontFS
+	}
+	hash := sha256.New()
+	var length [8]byte
+	for _, font := range fonts {
+		binary.LittleEndian.PutUint64(length[:], uint64(len(font.Name)))
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write([]byte(font.Name))
+		binary.LittleEndian.PutUint64(length[:], uint64(len(font.Data)))
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write(font.Data)
+	}
+	var digest [32]byte
+	hash.Sum(digest[:0])
+	c.mu.Lock()
+	if existing, ok := c.byHash[digest]; ok {
+		c.bindKeyLocked(owner, key, digest, existing)
+		c.mu.Unlock()
+		return existing
+	}
+	c.mu.Unlock()
+	built := ofdgo.NewFontFS(fonts)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if existing, ok := c.byHash[digest]; ok {
+		c.bindKeyLocked(owner, key, digest, existing)
+		return existing
+	}
+	c.evictLocked(batchFontCacheLimit - 1)
+	c.order = append(c.order, digest)
+	c.byHash[digest] = built
+	c.bindKeyLocked(owner, key, digest, built)
+	return built
+}
+
+// release 显式释放批次键绑定，无其他引用时同步回收对应摘要缓存
+// 入参: key 批次字体缓存键
+func (c *batchFontCache) release(key string) {
+	if key == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.releaseLocked(key)
+}
+
+// releaseOwner 注销单个引擎对批次键的持有，全部关联引擎退出时兜底清理缓存
+// 入参: owner 业务引擎, key 批次字体缓存键
+func (c *batchFontCache) releaseOwner(owner *businessEngine, key string) {
+	if owner == nil || key == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	set := c.owners[key]
+	if set == nil {
+		return
+	}
+	delete(set, owner)
+	if len(set) == 0 {
+		c.releaseLocked(key)
+	}
+}
+
+// addOwnerLocked 在持锁状态下为批次键登记引擎持有者
+// 入参: owner 业务引擎, key 批次字体缓存键
+func (c *batchFontCache) addOwnerLocked(owner *businessEngine, key string) {
+	if owner == nil || key == "" {
+		return
+	}
+	if c.owners == nil {
+		c.owners = make(map[string]map[*businessEngine]struct{})
+	}
+	set := c.owners[key]
+	if set == nil {
+		set = make(map[*businessEngine]struct{})
+		c.owners[key] = set
+	}
+	set[owner] = struct{}{}
+}
+
+// releaseLocked 在持锁状态下移除批次键并在无引用时回收摘要缓存
+// 入参: key 批次字体缓存键
+func (c *batchFontCache) releaseLocked(key string) {
+	delete(c.owners, key)
+	digest, ok := c.keys[key]
+	delete(c.keys, key)
+	delete(c.byKey, key)
+	if !ok {
+		return
+	}
+	if count := c.refs[digest] - 1; count > 0 {
+		c.refs[digest] = count
+		return
+	}
+	delete(c.refs, digest)
+	delete(c.byHash, digest)
+	for i, item := range c.order {
+		if item == digest {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			break
+		}
+	}
+	c.evictLocked(batchFontCacheLimit)
+}
+
+// bindKeyLocked 在持锁状态下绑定批次键并维护摘要引用计数与持有者集合
+// 入参: owner 业务引擎, key 批次字体缓存键, digest 内容摘要, fsys 只读字体文件系统
+func (c *batchFontCache) bindKeyLocked(owner *businessEngine, key string, digest [32]byte, fsys *ofdgo.FontFS) {
+	if key == "" {
+		return
+	}
+	if old, exists := c.keys[key]; exists {
+		if old == digest {
+			c.byKey[key] = fsys
+			c.addOwnerLocked(owner, key)
+			return
+		}
+		if count := c.refs[old] - 1; count > 0 {
+			c.refs[old] = count
+		} else {
+			delete(c.refs, old)
+		}
+	}
+	c.byKey[key] = fsys
+	c.keys[key] = digest
+	c.refs[digest]++
+	c.addOwnerLocked(owner, key)
+}
+
+// evictLocked 在持锁状态下按FIFO淘汰无活跃批次绑定的摘要缓存直至不超过上限
+// 入参: limit 目标保留条目上限
+func (c *batchFontCache) evictLocked(limit int) {
+	for len(c.order) > limit {
+		evicted := false
+		for i, digest := range c.order {
+			if c.refs[digest] > 0 {
+				continue
+			}
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			delete(c.byHash, digest)
+			evicted = true
+			break
+		}
+		if !evicted {
+			return
+		}
+	}
+}
+
+// takeSaveSnapshot 原子取出并置空已准备的保存快照，防止并发重复读取
+// 返回: *ofdgo.Editor 保存快照，未准备时为nil
+func (e *businessEngine) takeSaveSnapshot() *ofdgo.Editor {
+	e.saveMu.Lock()
+	snapshot := e.saveSnapshot
+	e.saveSnapshot = nil
+	e.saveMu.Unlock()
+	return snapshot
+}
+
+// setSaveSnapshot 原子替换保存快照并释放此前尚未写出的旧快照
+// 入参: snapshot 新保存快照
+func (e *businessEngine) setSaveSnapshot(snapshot *ofdgo.Editor) {
+	e.saveMu.Lock()
+	previous := e.saveSnapshot
+	e.saveSnapshot = snapshot
+	e.saveMu.Unlock()
+	if previous != nil && previous != snapshot {
+		_ = previous.Close()
+	}
+}
+
+// closeSaveSnapshot 原子清理并关闭尚未写出的保存快照
+func (e *businessEngine) closeSaveSnapshot() {
+	if snapshot := e.takeSaveSnapshot(); snapshot != nil {
+		_ = snapshot.Close()
+	}
+}
+
+// closeCurrentEditor 关闭并清空当前文档编辑器及其字体缓存引用
+// 返回: error 关闭错误
+func (e *businessEngine) closeCurrentEditor() error {
+	editor := e.currentEditor
+	e.currentEditor = nil
+	e.editorFontOwner = nil
+	e.editorFontFS = nil
+	e.editorFontSynced = false
+	if e.currentSession != nil && e.currentSession.editor == editor {
+		e.currentSession.editor = nil
+	}
+	if editor != nil {
+		return editor.Close()
+	}
+	return nil
+}
+
+// clearPortableObjects 关闭并清理跨文档剪贴板持有的临时选区编辑器
+func (e *businessEngine) clearPortableObjects() {
+	if e.portableObjects != nil && e.portableObjects.packet != nil {
+		_ = e.portableObjects.packet.Close()
+		e.portableObjects.packet = nil
+	}
+	e.portableObjects = nil
+}
+
+// releaseBatchFonts 注销当前引擎对批量字体缓存的持有，全部关联引擎关闭时兜底回收内存
+func (e *businessEngine) releaseBatchFonts() {
+	key := e.batchFontKey
+	e.batchFontKey = ""
+	e.batchFontFS = nil
+	if key != "" {
+		sharedBatchFonts.releaseOwner(e, key)
+	}
 }
 
 // renderBackends 返回库提供的内置后端能力
@@ -1053,9 +2150,21 @@ func (e *businessEngine) clearPDF() {
 	if e.pdf == nil {
 		return
 	}
-	e.pdf.importer.Close()
-	e.pdf.input.Close()
+	pending := e.pdf
 	e.pdf = nil
+	pending.markClosed()
+	if pending.operation != nil && pending.operation.cancel != nil {
+		pending.operation.cancel()
+		pending.operation = nil
+	}
+	if pending.importer != nil {
+		_ = pending.importer.Close()
+		pending.importer = nil
+	}
+	if pending.input != nil {
+		_ = pending.input.Close()
+		pending.input = nil
+	}
 }
 
 // pdfContext 更新当前操作的取消、进度和按需字体读取回调
@@ -1106,18 +2215,25 @@ func (e *businessEngine) openPDF(args []platformValue) (any, error) {
 		}
 		password = slices.Clone(password)
 	}
-	e.bindPDFOperation(pending)
+	cancelPDF := e.bindPDFOperation(pending)
+	defer cancelPDF()
 	options := ofdgo.PDFImportOptions{Resources: e.resources, PasswordUTF8: true, Password: password,
 		OnProgress: func(stage string, completed, total int) error {
 			return pending.report(stage, completed, total)
 		},
 	}
 	sources := []fs.FS{ofdgo.NewFontFS(fonts)}
+	var lazyFontFS *ofdgo.FontFS
 	if names := e.stringsFromJS(args[4]); len(names) != 0 {
 		pending.fontNames = names
-		sources = append(sources, ofdgo.NewLazyFontFS(names, func(name string) ([]byte, error) {
+		lazyFontFS = ofdgo.NewLazyFontFS(names, func(name string) ([]byte, error) {
+			if e.loadFont != nil {
+				return e.loadFont(name)
+			}
 			return e.loadConversionFont(pending.font, name)
-		}))
+		})
+		pending.lazyFontFS = lazyFontFS
+		sources = append(sources, lazyFontFS)
 	}
 	options.RendererOptions = []ofdgo.RendererOption{ofdgo.WithFontFS(sources...)}
 	pending.importer, err = ofdgo.NewPDFImport(pending.operation, input, options)
@@ -1133,19 +2249,27 @@ func (e *businessEngine) openPDF(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	session, err := newSession(reader, OpenOptions{Fonts: fonts, RenderAnnotations: args[3].Bool()})
+	sessionOptions := openOptions{Fonts: fonts, RenderAnnotations: args[3].Bool()}
+	if lazyFontFS != nil {
+		sessionOptions.RendererOptions = []ofdgo.RendererOption{ofdgo.WithFontFS(lazyFontFS)}
+	}
+	nextSession, err := newSession(reader, sessionOptions)
 	if err != nil {
+		_ = reader.Close()
 		return nil, err
 	}
 	e.clearPDF()
 	e.clearImport()
-	e.currentSession.Close()
-	session.pdfFontNames = pending.fontNames
-	e.currentSession, e.currentEditor = session, nil
+	_ = e.closeCurrentEditor()
+	_ = e.currentSession.close()
+	pending.syncGen = 1
+	nextSession.pdfSyncGen = 1
+	nextSession.pdfFontNames = pending.fontNames
+	e.currentSession = nextSession
 	e.copiedObjects, e.copiedStyle = nil, nil
 	e.pdf, e.pdfFont = pending, args[6]
 	keep = true
-	return session.Summary(), nil
+	return nextSession.summary(nil), nil
 }
 
 // pdfError 记录需要重建的取消状态，后续请求可继续使用原文档
@@ -1153,7 +2277,7 @@ func (e *businessEngine) openPDF(args []platformValue) (any, error) {
 // 返回: error 原错误
 func (e *businessEngine) pdfError(err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		e.pdf.retry = true
+		e.pdf.retry.Store(true)
 	}
 	return err
 }
@@ -1163,7 +2287,11 @@ func (e *businessEngine) pdfError(err error) error {
 // 返回: error 会话创建错误
 func (e *businessEngine) replacePDFReader(reader *ofdgo.Reader) error {
 	previous := e.currentSession
-	next, err := newSession(reader, OpenOptions{RenderAnnotations: previous.Renderer.RenderAnnotations})
+	if previous == nil {
+		_ = reader.Close()
+		return fmt.Errorf("ofd document is not opened")
+	}
+	next, err := newSession(reader, openOptions{RenderAnnotations: previous.Renderer.RenderAnnotations()})
 	if err != nil {
 		return err
 	}
@@ -1171,14 +2299,18 @@ func (e *businessEngine) replacePDFReader(reader *ofdgo.Reader) error {
 	ofdgo.WithFontDirs(dirs...)(next.Renderer)
 	ofdgo.WithFontFS(sources...)(next.Renderer)
 	ofdgo.WithRenderBackends(previous.Renderer.Backends())(next.Renderer)
-	next.Renderer.OutputContext = e.pdf.operation
+	if e.pdf != nil && e.pdf.operation != nil {
+		next.ctx = e.pdf.operation
+	} else {
+		next.ctx = e.operationContext()
+	}
 	next.fontFS = previous.fontFS
 	next.pdfFontNames = previous.pdfFontNames
 	next.svgFonts = previous.svgFonts
 	next.textCache = previous.textCache
 	next.boxCache = previous.boxCache
 	e.currentSession = next
-	return previous.Close()
+	return previous.close()
 }
 
 // finishPDF 补全转换后直接创建阅读快照，不生成中间压缩包
@@ -1187,26 +2319,59 @@ func (e *businessEngine) finishPDF() ([]byte, error) {
 	if e.pdf == nil {
 		return e.pdfWarnings, nil
 	}
-	editor, report, err := e.pdf.importer.Finish(e.pdf.operation)
+	pending := e.pdf
+	editor, report, err := pending.importer.Finish(pending.operation)
 	if err != nil {
 		return nil, e.pdfError(err)
 	}
-	reader, err := editor.Reader(e.pdf.operation)
+	completed := false
+	keepEditor := false
+	defer func() {
+		if !keepEditor {
+			_ = editor.Close()
+		}
+		if !completed {
+			pending.retry.Store(true)
+		}
+	}()
+	warnings, err := json.Marshal(report.Warnings)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := editor.Reader(pending.operation)
 	if err != nil {
 		return nil, err
 	}
 	if err := e.replacePDFReader(reader); err != nil {
+		if e.currentSession == nil || e.currentSession.Reader != reader {
+			_ = reader.Close()
+		}
 		return nil, err
 	}
-	warnings, err := json.Marshal(report.Warnings)
-	e.currentSession.input = e.pdf.input
-	if !e.currentSession.Reader.Encryption().Encrypted {
-		e.currentSession.pdfSource = e.pdf.input
+	e.currentSession.textCache.Clear()
+	if pending.lazyFontFS != nil {
+		if e.currentSession.fontFS != nil {
+			e.currentSession.Renderer.SetFontFS(e.currentSession.fontFS)
+		} else {
+			e.currentSession.Renderer.SetFontFS()
+		}
 	}
-	e.pdf.importer.Close()
+	if e.currentSession.Reader.Encryption().Encrypted {
+		e.currentSession.ownedEditor = editor
+		keepEditor = true
+		if pending.input != nil {
+			_ = pending.input.Close()
+		}
+	} else {
+		e.currentSession.input = pending.input
+		e.currentSession.pdfSource = pending.input
+	}
+	pending.input = nil
+	completed = true
+	pending.importer.Close()
 	e.pdf = nil
 	e.pdfWarnings = warnings
-	return warnings, err
+	return warnings, nil
 }
 
 // loadPDF 按时间片补全未转换页面，全部完成后交付完整会话
@@ -1235,7 +2400,7 @@ func (e *businessEngine) loadPDF(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"done": true, "doc": e.currentSession.Summary(), "warnings": string(warnings)}, nil
+	return map[string]any{"done": true, "doc": e.currentSession.summary(nil), "warnings": string(warnings)}, nil
 }
 
 // checkDocument 检查命令所需内容，不隐式转换或产生输出
@@ -1246,9 +2411,9 @@ func (e *businessEngine) checkDocument(name string) error {
 		return nil
 	}
 	switch name {
-	case "ofdgoFontFaces", "ofdgoFontMenu", "ofdgoFontPreferenceOrder", "ofdgoFontFace", "ofdgoCheckTextFont", "ofdgoImagePageSize", "ofdgoImagePreview":
+	case "ofdgoFontFaces", "ofdgoFontMenu", "ofdgoFontPreferenceOrder", "ofdgoFontFace", "ofdgoCheckTextFont", "ofdgoImagePreview":
 		return nil
-	case "ofdgoDiscardObjects", "ofdgoExportObjects", "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDestinationView", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoPagesText", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoSaveDocument", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoClearImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
+	case "ofdgoDiscardObjects", "ofdgoExportObjects", "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDestinationView", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPagesText", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoSaveDocument", "ofdgoDetectFormat", "ofdgoSetBatchFonts", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoClearImport", "ofdgoCreateDocument", "ofdgoImportImages", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
 		return nil
 	default:
 		return ofdgo.ErrIncompleteDocument
@@ -1257,82 +2422,118 @@ func (e *businessEngine) checkDocument(name string) error {
 
 // bindPDFOperation 更新取消上下文并保留转换阶段，时间片检查不重置进度
 // 入参: pending 当前转换任务
-func (e *businessEngine) bindPDFOperation(pending *pendingPDF) {
-	operation, report := e.newEditorOperationContext(pending.progress)
+// 返回: func() 退出时释放派生取消上下文的清理函数
+func (e *businessEngine) bindPDFOperation(pending *pendingPDF) func() {
+	return e.bindPDFContext(pending, e.operationContext())
+}
+
+// bindPDFContext 为渐进PDF任务绑定指定取消上下文与当次进度回调
+// 入参: pending 当前转换任务, baseCtx 本次请求的取消上下文
+// 返回: func() 退出时释放派生取消上下文的清理函数
+func (e *businessEngine) bindPDFContext(pending *pendingPDF, baseCtx context.Context) func() {
+	if pending.operation != nil && pending.operation.cancel != nil {
+		pending.operation.cancel()
+	}
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(baseCtx)
+	progress := e.editorOperationProgress(pending.progress)
+	operation := &outputContext{Context: ctx, cancel: cancel, checkpoint: func() error {
+		return progress(pending.stage, pending.completed, pending.total)
+	}}
 	pending.operation = operation
 	pending.report = func(stage string, completed, total int) error {
 		pending.stage, pending.completed, pending.total = stage, completed, total
-		return report(stage, completed, total)
+		return progress(stage, completed, total)
 	}
-	operation.checkpoint = func() error {
-		return report(pending.stage, pending.completed, pending.total)
+	return func() {
+		cancel()
+		if pending.operation == operation {
+			pending.operation = nil
+		}
 	}
 }
 
 // preparePDF 为页面读取、定位和后台加载绑定转换上下文，不隐式补全文档
 // 入参: name 命令名称, args 命令参数
-// 返回: error 转换或取消错误
-func (e *businessEngine) preparePDF(name string, args []platformValue) error {
+// 返回: func() 退出时释放派生取消上下文的清理函数, error 转换或取消错误
+func (e *businessEngine) preparePDF(name string, args []platformValue) (func(), error) {
 	if e.pdf == nil {
-		return nil
+		return nil, nil
 	}
 	switch name {
-	case "ofdgoLoadPDF", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoOpenLinks", "ofdgoDestinationView":
+	case "ofdgoLoadPDF", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoOpenLinks", "ofdgoDestinationView":
 	default:
-		return nil
+		return nil, nil
 	}
-	e.bindPDFOperation(e.pdf)
+	cancelPDF := e.bindPDFOperation(e.pdf)
 	e.pdf.operation.checked = time.Now()
 	e.pdf.operation.interval = 255
-	e.currentSession.Renderer.OutputContext = e.pdf.operation
-	if e.pdf.retry {
+	e.currentSession.ctx = e.pdf.operation
+	if e.pdf.retry.Load() {
 		if err := e.pdf.importer.Reset(e.pdf.operation); err != nil {
-			return err
+			cancelPDF()
+			return nil, err
 		}
 		reader, err := e.pdf.importer.Reader(e.pdf.operation, -1)
 		if err != nil {
-			return err
+			cancelPDF()
+			return nil, err
 		}
 		e.currentSession.textCache.Clear()
 		clear(e.currentSession.svgFonts)
 		if err := e.replacePDFReader(reader); err != nil {
-			return err
+			if e.currentSession == nil || e.currentSession.Reader != reader {
+				_ = reader.Close()
+			}
+			cancelPDF()
+			return nil, err
 		}
-		e.pdf.page, e.pdf.next, e.pdf.retry = -1, 0, false
+		e.pdf.page, e.pdf.next = -1, 0
+		e.pdf.retry.Store(false)
+		e.pdf.syncGen++
+		e.currentSession.pdfSyncGen = e.pdf.syncGen
 	}
 	switch name {
-	case "ofdgoLoadPDF", "ofdgoDestinationView", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString":
-		return nil
+	case "ofdgoLoadPDF", "ofdgoDestinationView", "ofdgoSearchPage", "ofdgoSearchPages":
+		return cancelPDF, nil
 	case "ofdgoOpenLinks":
 		if len(args) == 0 {
-			return nil
+			return cancelPDF, nil
 		}
 		fallthrough
 	case "ofdgoRenderPage":
 		if len(args) == 0 {
-			return fmt.Errorf("missing page index")
+			cancelPDF()
+			return nil, fmt.Errorf("missing page index")
 		}
-		return e.preparePDFPage(args[0].Int())
+		if err := e.preparePDFPage(args[0].Int()); err != nil {
+			cancelPDF()
+			return nil, err
+		}
+		return cancelPDF, nil
 	default:
-		return nil
+		return cancelPDF, nil
 	}
 }
 
-// preparePDFPage 准备渐进文档的指定页面，保留其他页面的文字和尺寸缓存
+// preparePDFPage 按页增量同步渐进文档到常驻阅读器，保留渲染器已有字体和图片缓存
 // 入参: index 零基页面索引
-// 返回: error 转换或会话替换错误
+// 返回: error 转换或同步错误
 func (e *businessEngine) preparePDFPage(index int) error {
-	if e.pdf.page == index {
+	if e.pdf.importer.PageSynced(e.currentSession.Reader, index) {
+		e.pdf.page = index
 		return nil
 	}
-	reader, err := e.pdf.importer.Reader(e.pdf.operation, index)
-	if err != nil {
+	if err := e.pdf.importer.SyncReader(e.pdf.operation, e.currentSession.Reader, index); err != nil {
 		return e.pdfError(err)
 	}
-	if err := e.replacePDFReader(reader); err != nil {
-		return err
-	}
+	e.currentSession.Renderer.RebindReader(e.currentSession.Reader)
+	e.currentSession.invalidatePageCache(index)
 	e.pdf.page = index
+	e.pdf.syncGen++
+	e.currentSession.pdfSyncGen = e.pdf.syncGen
 	return nil
 }
 
@@ -1351,6 +2552,74 @@ func (e *businessEngine) preparePDFText(index int) error {
 	return nil
 }
 
+// setBatchFonts 预置或清理当前批次共享的只读字体文件系统，避免批量转换逐文件重复拷贝和解析
+// 入参: args 字体列表或空值，及可选批次缓存键
+// 返回: any 已缓存字体数或空值, error 参数或字体读取错误
+func (e *businessEngine) setBatchFonts(args []platformValue) (any, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("missing batch font arguments")
+	}
+	key := ""
+	if len(args) > 1 && args[1].Type() == platformTypeString {
+		key = args[1].String()
+	}
+	if args[0].IsNull() || args[0].IsUndefined() {
+		if key == "" {
+			key = e.batchFontKey
+		}
+		if e.batchFontKey == key {
+			e.batchFontKey = ""
+			e.batchFontFS = nil
+		}
+		sharedBatchFonts.release(key)
+		return nil, nil
+	}
+	fonts, err := e.fontsFromJS(args[0])
+	if err != nil {
+		return nil, err
+	}
+	if e.batchFontKey != "" && e.batchFontKey != key {
+		sharedBatchFonts.releaseOwner(e, e.batchFontKey)
+	}
+	fsys := sharedBatchFonts.getOrBuild(e, key, fonts)
+	e.batchFontKey, e.batchFontFS = key, fsys
+	return map[string]any{"count": fsys.Len()}, nil
+}
+
+// resolveBatchFonts 解析批量转换使用的只读字体文件系统，优先复用已预置或跨引擎共享缓存
+// 入参: value 缓存键字符串、空值或字体文件列表
+// 返回: *ofdgo.FontFS 只读字体文件系统, error 读取错误
+func (e *businessEngine) resolveBatchFonts(value platformValue) (*ofdgo.FontFS, error) {
+	if value.Type() == platformTypeString {
+		key := value.String()
+		if key == "" {
+			return emptyBatchFontFS, nil
+		}
+		if e.batchFontKey == key && e.batchFontFS != nil {
+			return e.batchFontFS, nil
+		}
+		if cached := sharedBatchFonts.getFor(e, key); cached != nil {
+			if e.batchFontKey != "" && e.batchFontKey != key {
+				sharedBatchFonts.releaseOwner(e, e.batchFontKey)
+			}
+			e.batchFontKey, e.batchFontFS = key, cached
+			return cached, nil
+		}
+		return nil, fmt.Errorf("missing batch font cache")
+	}
+	if value.IsNull() || value.IsUndefined() {
+		if e.batchFontFS != nil {
+			return e.batchFontFS, nil
+		}
+		return emptyBatchFontFS, nil
+	}
+	fonts, err := e.fontsFromJS(value)
+	if err != nil {
+		return nil, err
+	}
+	return sharedBatchFonts.getOrBuild(nil, "", fonts), nil
+}
+
 // convertFile 使用库转换独立文件，不读取或修改当前阅读和编辑会话
 // 入参: args 随机读取、文件大小、转换选项、写出、进度、文件边界、取消检查、字体及按需字体读取
 // 返回: any 转换报告, error 转换错误
@@ -1363,7 +2632,7 @@ func (e *businessEngine) convertFile(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	fonts, err := e.fontsFromJS(args[7])
+	fontFS, err := e.resolveBatchFonts(args[7])
 	if err != nil {
 		return nil, err
 	}
@@ -1390,7 +2659,7 @@ func (e *businessEngine) convertFile(args []platformValue) (any, error) {
 			return nil, err
 		}
 	}
-	fontSources := []fs.FS{ofdgo.NewFontFS(fonts)}
+	fontSources := []fs.FS{fontFS}
 	if names := settings.Get("fontNames"); !names.IsUndefined() && names.Length() > 0 {
 		fontSources = append(fontSources, ofdgo.NewLazyFontFS(e.stringsFromJS(names), func(name string) ([]byte, error) {
 			return e.loadConversionFont(args[8], name)
@@ -1437,7 +2706,9 @@ func (e *businessEngine) convertFile(args []platformValue) (any, error) {
 		return nil, err
 	}
 	defer input.Close()
-	report, err := ofdgo.Convert(e.newOutputContext(args[6]), input, writer, options)
+	convertCtx := e.newOutputContext(args[6])
+	defer convertCtx.cancel()
+	report, err := ofdgo.Convert(convertCtx, input, writer, options)
 	if err != nil {
 		return nil, err
 	}
@@ -1496,7 +2767,9 @@ func (e *businessEngine) packFiles(args []platformValue) (any, error) {
 			return nil, err
 		}
 	}
-	if _, err := ofdgo.WriteArchive(e.newOutputContext(args[4]), writer, entries, options); err != nil {
+	packCtx := e.newOutputContext(args[4])
+	defer packCtx.cancel()
+	if _, err := ofdgo.WriteArchive(packCtx, writer, entries, options); err != nil {
 		return nil, err
 	}
 	if err := writer.Flush(); err != nil {
@@ -1527,7 +2800,7 @@ func (e *businessEngine) openDocument(args []platformValue) (any, error) {
 		return nil, err
 	}
 	renderAnnotations := args[2].Bool()
-	options := OpenOptions{Fonts: fonts, RenderAnnotations: renderAnnotations, ReaderOptions: []ofdgo.ReaderOption{ofdgo.WithResources(e.resources)}}
+	options := openOptions{Fonts: fonts, RenderAnnotations: renderAnnotations, ReaderOptions: []ofdgo.ReaderOption{ofdgo.WithResources(e.resources)}}
 	if len(args) > 3 && !args[3].IsNull() && !args[3].IsUndefined() {
 		credentials, err := e.credentialsFromJS(args[3])
 		if err != nil {
@@ -1540,23 +2813,24 @@ func (e *businessEngine) openDocument(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	session, err := newSession(reader, options)
+	nextSession, err := newSession(reader, options)
 	if err != nil {
+		_ = reader.Close()
 		return nil, err
 	}
 	e.clearPDF()
 	e.clearImport()
-	e.currentEditor = nil
+	_ = e.closeCurrentEditor()
 	e.copiedObjects = nil
 	e.copiedStyle = nil
 	if e.currentSession != nil {
-		_ = e.currentSession.Close()
+		_ = e.currentSession.close()
 		e.currentSession = nil
 	}
-	e.currentSession = session
-	session.input = input
+	e.currentSession = nextSession
+	nextSession.input = input
 	keep = true
-	return e.currentSession.Summary(), nil
+	return e.currentSession.summary(nil), nil
 }
 
 // configureDocument 更新当前会话的字体和注解设置
@@ -1571,21 +2845,22 @@ func (e *businessEngine) configureDocument(args []platformValue) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := e.currentSession.SetFonts(fonts); err != nil {
+		var extra []fs.FS
+		if e.pdf != nil && e.pdf.lazyFontFS != nil {
+			extra = append(extra, e.pdf.lazyFontFS)
+		}
+		if err := e.currentSession.setFonts(fonts, extra...); err != nil {
 			return nil, err
 		}
 		if e.currentEditor != nil {
-			e.currentEditor.SetFontFS()
-			if e.currentSession.fontFS != nil {
-				e.currentEditor.SetFontFS(e.currentSession.fontFS)
-			}
+			e.syncEditorFontFS(e.currentEditor, e.currentSession.fontFS)
 		}
 	}
-	if e.currentSession.Renderer.RenderAnnotations != args[1].Bool() {
-		e.currentSession.Renderer.RenderAnnotations = args[1].Bool()
+	if e.currentSession.Renderer.RenderAnnotations() != args[1].Bool() {
+		e.currentSession.Renderer.SetRenderAnnotations(args[1].Bool())
 		e.currentSession.textCache.Clear()
 	}
-	return e.currentSession.Summary(), nil
+	return e.currentSession.summary(nil), nil
 }
 
 // documentInfo 获取字体统计和验签结果，首个参数为true时分批扫描
@@ -1604,7 +2879,7 @@ func (e *businessEngine) documentInfo(args []platformValue) (any, error) {
 		}
 		return map[string]any{"fonts": e.currentSession.fontInfos, "fontCount": len(e.currentSession.fontInfos), "detailsPending": false}, nil
 	}
-	return e.currentSession.Details(), nil
+	return e.currentSession.detailsContext(e.operationContext())
 }
 
 // documentImages 读取当前文档的原始图片目录
@@ -1710,6 +2985,7 @@ func (e *businessEngine) documentResources(args []platformValue) (any, error) {
 	ctx := e.operationContext()
 	if len(args) == 1 {
 		operation := e.newOutputContext(args[0])
+		defer operation.cancel()
 		operation.interval = 255
 		ctx = operation
 	}
@@ -1758,17 +3034,14 @@ func (e *businessEngine) documentInvoices(args []platformValue) (any, error) {
 // currentInvoiceReader 获取当前发票读取器
 // 返回: *ofdgo.Reader 当前读取器, func() 快照释放函数, error 快照错误
 func (e *businessEngine) currentInvoiceReader() (*ofdgo.Reader, func(), error) {
-	if e.currentEditor != nil {
-		r, err := e.currentEditor.Reader(e.operationContext())
-		if err != nil {
-			return nil, nil, err
-		}
-		return r, func() { _ = r.Close() }, nil
+	r, err := e.activeReader(e.operationContext())
+	if err != nil {
+		return nil, nil, err
 	}
-	if e.currentSession == nil {
-		return nil, nil, fmt.Errorf("ofd document is not opened")
+	if e.currentSession != nil && r == e.currentSession.Reader {
+		return r, func() {}, nil
 	}
-	return e.currentSession.Reader, func() {}, nil
+	return r, func() { _ = r.Close() }, nil
 }
 
 // decodeInvoiceRequest 解析发票参数并校验文档状态
@@ -1798,17 +3071,11 @@ func (e *businessEngine) decodeInvoiceRequest(args []platformValue) (invoiceRequ
 		request.Operations[i].indexProvided = presence.Operations[i].Index != nil
 	}
 	index := e.currentSession.Reader.DocumentIndex()
-	if e.currentEditor != nil {
-		index = e.currentEditor.DocumentIndex()
-	}
 	if request.DocumentIndex != nil && *request.DocumentIndex != index {
 		return request, fmt.Errorf("invoice document has changed")
 	}
 	if request.Version != nil {
 		version, err := e.currentSession.Reader.DocumentVersionID()
-		if e.currentEditor != nil {
-			version, err = e.currentEditor.DocumentVersionID()
-		}
 		if err != nil {
 			return request, err
 		}
@@ -1949,6 +3216,7 @@ func (e *businessEngine) validateInvoiceDraft(ctx context.Context, request invoi
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = editor.Close() }()
 	request.Operations = append([]invoiceRequest(nil), request.Operations...)
 	for i := range request.Operations {
 		operation := &request.Operations[i]
@@ -2021,6 +3289,9 @@ func (e *businessEngine) changeDocumentInvoice(args []platformValue) (any, error
 	ctx := e.operationContext()
 	var result ofdgo.InvoiceUpdateResult
 	info, err := e.changeAtomicObjects(func() error {
+		if err := e.syncEditorTarget(ctx); err != nil {
+			return err
+		}
 		return e.currentEditor.Transaction(func(editor *ofdgo.Editor) error {
 			var err error
 			result, err = e.applyInvoiceRequest(ctx, editor, request)
@@ -2385,7 +3656,7 @@ func (e *businessEngine) svgFontData(args []platformValue) (any, error) {
 	if e.currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	data, err := e.currentSession.SVGFontData(args[0].String())
+	data, err := e.currentSession.svgFontData(args[0].String())
 	if err != nil {
 		return nil, err
 	}
@@ -2393,7 +3664,7 @@ func (e *businessEngine) svgFontData(args []platformValue) (any, error) {
 }
 
 // renderPage 渲染OFD页面
-// 入参: args 页面索引、后端组合、DPI、光栅开关、已持有字体和图片、仅预览开关
+// 入参: args 页面索引、后端组合、DPI、光栅开关、已持有字体和图片、仅预览开关及可选调度优先级
 // 返回: any 页面SVG结果, error 错误信息
 func (e *businessEngine) renderPage(args []platformValue) (any, error) {
 	if e.currentSession == nil {
@@ -2402,7 +3673,7 @@ func (e *businessEngine) renderPage(args []platformValue) (any, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("missing page index")
 	}
-	backend, dpi := "canvas", 150.0
+	backend, dpi := "default", 150.0
 	if len(args) > 1 {
 		backend = args[1].String()
 	}
@@ -2417,7 +3688,7 @@ func (e *businessEngine) renderPage(args []platformValue) (any, error) {
 			known[args[i].Index(j).String()] = true
 		}
 	}
-	if e.currentEditor != nil {
+	if e.currentEditor != nil && e.currentSession.editing {
 		page, err := e.currentEditor.Page(args[0].Int())
 		if err != nil {
 			return nil, err
@@ -2430,12 +3701,12 @@ func (e *businessEngine) renderPage(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if e.currentEditor != nil && !reflect.DeepEqual(e.currentEditor.Backends(), e.currentSession.Renderer.Backends()) {
-		e.currentEditor.SetRenderBackends(e.currentSession.Renderer.Backends())
+	if e.currentEditor != nil {
+		e.syncEditorBackends(e.currentEditor, e.currentSession.Renderer.Backends())
 	}
 	text := &ofdgo.PageText{}
 	if !preview {
-		text, err = e.currentSession.PageText(args[0].Int())
+		text, err = e.currentSession.pageText(args[0].Int())
 		if err != nil {
 			return nil, err
 		}
@@ -2466,7 +3737,7 @@ func (e *businessEngine) renderPage(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return successResult(map[string]any{
+	result := map[string]any{
 		"previewOnly": preview,
 		"annotations": string(annotations),
 		"index":       page.Index,
@@ -2480,7 +3751,11 @@ func (e *businessEngine) renderPage(args []platformValue) (any, error) {
 		"images":      e.svgImagesToJS(page.Images),
 		"text":        string(textData),
 		"objects":     objects,
-	}), nil
+	}
+	if page.HasOpenAction != nil {
+		result["hasOpenAction"] = *page.HasOpenAction
+	}
+	return successResult(result), nil
 }
 
 // openLinks 获取文档或页面打开动作，不执行动作
@@ -2492,14 +3767,15 @@ func (e *businessEngine) openLinks(args []platformValue) (any, error) {
 	}
 	var links []ofdgo.PageLink
 	var err error
+	ctx := e.operationContext()
 	if len(args) == 0 {
-		links, err = e.currentSession.Renderer.DocumentOpenLinks()
+		links, err = e.currentSession.Renderer.DocumentOpenLinksContext(ctx)
 	} else if len(args) == 1 {
-		page, readErr := e.currentSession.Reader.PageContentByIndex(args[0].Int())
+		page, readErr := e.currentSession.pageContent(args[0].Int())
 		if readErr != nil {
 			return nil, readErr
 		}
-		links, err = e.currentSession.Renderer.PageOpenLinks(page)
+		links, err = e.currentSession.Renderer.PageOpenLinksContext(ctx, page)
 	} else {
 		return nil, fmt.Errorf("unexpected open action arguments")
 	}
@@ -2509,9 +3785,9 @@ func (e *businessEngine) openLinks(args []platformValue) (any, error) {
 	return e.linkResults(links)
 }
 
-// destinationView 统一计算PDF目标视图，并应用目标页显示边界
+// destinationView 统一计算PDF目标视图及定位语义
 // 入参: args 目标、页面变换及当前视口的JSON
-// 返回: any PDF定位坐标和缩放率，普通OFD返回nil, error 参数或计算错误
+// 返回: any PDF定位坐标、缩放率及视图模式，普通OFD返回nil, error 参数或计算错误
 func (e *businessEngine) destinationView(args []platformValue) (any, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("invalid destination view arguments")
@@ -2519,11 +3795,23 @@ func (e *businessEngine) destinationView(args []platformValue) (any, error) {
 	if e.currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
+	type destinationRect struct {
+		XMin float64 `json:"xMin"`
+		YMin float64 `json:"yMin"`
+		XMax float64 `json:"xMax"`
+		YMax float64 `json:"yMax"`
+	}
 	var request struct {
 		SourcePage int
 		Dest       ofdgo.Dest
-		Matrix     pdfgo.Matrix
-		Viewport   pdfgo.DestinationViewport
+		Matrix     [6]float64
+		Viewport   struct {
+			Width         float64                  `json:"width"`
+			Height        float64                  `json:"height"`
+			Current       ofdgo.PDFDestinationView `json:"current"`
+			PageBounds    destinationRect          `json:"pageBounds"`
+			ContentBounds *destinationRect         `json:"contentBounds"`
+		}
 	}
 	if err := json.Unmarshal([]byte(args[0].String()), &request); err != nil {
 		return nil, err
@@ -2543,21 +3831,49 @@ func (e *businessEngine) destinationView(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	view, err := target.View(request.Viewport)
+	viewport := ofdgo.PDFDestinationViewport{
+		Width:      request.Viewport.Width,
+		Height:     request.Viewport.Height,
+		Current:    request.Viewport.Current,
+		PageBounds: ofdgo.Box{X: request.Viewport.PageBounds.XMin, Y: request.Viewport.PageBounds.YMin, W: request.Viewport.PageBounds.XMax - request.Viewport.PageBounds.XMin, H: request.Viewport.PageBounds.YMax - request.Viewport.PageBounds.YMin},
+	}
+	if bounds := request.Viewport.ContentBounds; bounds != nil {
+		box := ofdgo.Box{X: bounds.XMin, Y: bounds.YMin, W: bounds.XMax - bounds.XMin, H: bounds.YMax - bounds.YMin}
+		viewport.ContentBounds = &box
+	}
+	view, err := target.View(viewport)
 	if err != nil {
 		return nil, err
 	}
-	zoom := math.Max(0.2, math.Min(4, view.Zoom))
-	if target.Mode == "Fit" || target.Mode == "FitR" {
-		view.Left += request.Viewport.Width * (1/view.Zoom - 1/zoom) / 2
-		view.Top += request.Viewport.Height * (1/view.Zoom - 1/zoom) / 2
+	fitMode := "free"
+	switch target.Mode {
+	case "XYZ":
+		if target.KeepZoom {
+			fitMode = ""
+		}
+	case "Fit", "FitB":
+		fitMode = "height"
+	case "FitH", "FitBH":
+		fitMode = "width"
 	}
-	view.Zoom = zoom
-	view, err = view.Constrain(request.Viewport)
-	if err != nil {
-		return nil, err
+	if fitMode == "free" {
+		zoom := math.Max(0.2, math.Min(4, view.Zoom))
+		if target.Mode == "FitR" {
+			view.Left += request.Viewport.Width * (1/view.Zoom - 1/zoom) / 2
+			view.Top += request.Viewport.Height * (1/view.Zoom - 1/zoom) / 2
+		}
+		view.Zoom = zoom
 	}
-	return map[string]any{"left": view.Left, "top": view.Top, "zoom": view.Zoom}, nil
+	keepLeft := target.Mode == "FitH" || target.Mode == "FitBH" || target.Mode == "XYZ" && target.KeepLeft
+	keepPosition := target.Mode == "XYZ" && target.KeepLeft && target.KeepTop && target.KeepZoom
+	return map[string]any{
+		"left":         view.Left,
+		"top":          view.Top,
+		"zoom":         view.Zoom,
+		"fitMode":      fitMode,
+		"keepLeft":     keepLeft,
+		"keepPosition": keepPosition,
+	}, nil
 }
 
 // outlineLinks 获取目录节点的有序动作目标
@@ -2570,7 +3886,7 @@ func (e *businessEngine) outlineLinks(args []platformValue) (any, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("missing outline path")
 	}
-	links, err := e.currentSession.Renderer.OutlineLinks(e.indexesFromJS(args[0]))
+	links, err := e.currentSession.Renderer.OutlineLinksContext(e.operationContext(), e.indexesFromJS(args[0]))
 	if err != nil {
 		return nil, err
 	}
@@ -2666,7 +3982,7 @@ func (e *businessEngine) structureObjects(args []platformValue) (any, error) {
 	if e.currentEditor == nil || e.currentSession == nil || len(args) != 1 {
 		return nil, fmt.Errorf("no document is being edited")
 	}
-	return e.currentSession.Renderer.StructureObjects(args[0].Int())
+	return e.currentSession.Renderer.StructureObjectsContext(e.operationContext(), args[0].Int())
 }
 
 // structureTargets 查询当前文档标引节点的原文与定位范围
@@ -2679,7 +3995,7 @@ func (e *businessEngine) structureTargets(args []platformValue) (any, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("missing structure path")
 	}
-	return e.currentSession.Renderer.StructureTargets(args[0].Int(), e.indexesFromJS(args[1]))
+	return e.currentSession.Renderer.StructureTargetsContext(e.operationContext(), args[0].Int(), e.indexesFromJS(args[1]))
 }
 
 // linkResults 将库层动作目标转换为浏览器数据
@@ -2732,8 +4048,7 @@ func (e *businessEngine) linkResults(source []ofdgo.PageLink) ([]any, error) {
 		if dest := link.Dest; dest != nil {
 			view := e.viewportLinkDest(*dest)
 			item["dest"] = map[string]any{"type": view.Type, "pageID": view.PageID, "left": view.Left, "top": view.Top,
-				"right": view.Right, "bottom": view.Bottom, "zoom": view.Zoom,
-				"omitLeft": view.OmitLeft, "omitTop": view.OmitTop, "omitZoom": view.OmitZoom}
+				"right": view.Right, "bottom": view.Bottom, "zoom": view.Zoom}
 		}
 		links[i] = item
 	}
@@ -2750,19 +4065,6 @@ func (e *businessEngine) resolvedPageID(id string) string {
 		}
 	}
 	return id
-}
-
-// pageTextString 提取OFD页面原文
-// 入参: args 页面索引
-// 返回: any 页面原文, error 错误信息
-func (e *businessEngine) pageTextString(args []platformValue) (any, error) {
-	if e.currentSession == nil {
-		return nil, fmt.Errorf("ofd document is not opened")
-	}
-	if err := e.preparePDFText(args[0].Int()); err != nil {
-		return nil, err
-	}
-	return e.currentSession.PageTextStringContext(e.operationContext(), args[0].Int())
 }
 
 // pagesText 在单次上下文中提取闭区间页面原文，支持取消
@@ -2785,7 +4087,9 @@ func (e *businessEngine) pagesText(args []platformValue) (any, error) {
 	}
 	ctx := e.operationContext()
 	if len(args) > 2 && args[2].Type() == platformTypeFunction {
-		ctx = e.newOutputContext(args[2])
+		operation := e.newOutputContext(args[2])
+		defer operation.cancel()
+		ctx = operation
 	}
 	var parts []string
 	for page := start; page <= end; page++ {
@@ -2798,7 +4102,7 @@ func (e *businessEngine) pagesText(args []platformValue) (any, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		text, err := e.currentSession.PageTextStringContext(ctx, page)
+		text, err := e.currentSession.pageTextStringContext(ctx, page)
 		if err != nil {
 			return nil, err
 		}
@@ -2826,7 +4130,7 @@ func (e *businessEngine) searchPage(args []platformValue) (any, error) {
 	if len(args) > 2 {
 		limit = max(1, min(limit, args[2].Int()))
 	}
-	return e.currentSession.SearchPageContext(e.operationContext(), args[0].Int(), args[1].String(), limit)
+	return e.currentSession.searchPageContext(e.operationContext(), args[0].Int(), args[1].String(), limit)
 }
 
 // searchPages 有界读取连续页面并复用会话文字缓存，取消时丢弃本批结果
@@ -2843,7 +4147,7 @@ func (e *businessEngine) searchPages(args []platformValue) (any, error) {
 		if err := e.preparePDFText(page); err != nil {
 			return nil, err
 		}
-		matches, err := e.currentSession.SearchPageContext(ctx, page, args[2].String(), limit-len(results))
+		matches, err := e.currentSession.searchPageContext(ctx, page, args[2].String(), limit-len(results))
 		if err != nil {
 			return nil, err
 		}
@@ -2861,7 +4165,7 @@ func (e *businessEngine) searchPages(args []platformValue) (any, error) {
 // 入参: args 浏览器参数
 // 返回: any 导出格式, error 错误信息
 func (e *businessEngine) exportFormats(args []platformValue) (any, error) {
-	return ExportFormats(), nil
+	return availableExportFormats(), nil
 }
 
 // parsePageRange 解析当前文档的导出页码
@@ -2888,12 +4192,13 @@ func (e *businessEngine) exportPage(args []platformValue) (any, error) {
 	if len(args) < 4 {
 		return nil, fmt.Errorf("missing export page arguments")
 	}
-	session, writerIndex, err := e.exportSession(args)
+	exportSess, writerIndex, cleanup, err := e.exportSession(args)
 	if err != nil {
 		return nil, err
 	}
+	defer cleanup()
 	writer := bufio.NewWriterSize(exportWriter{write: args[writerIndex]}, 1<<20)
-	format, err := session.ExportPage(args[0].Int(), args[1].String(), args[2].Float(), writer)
+	format, err := exportSess.exportPage(args[0].Int(), args[1].String(), args[2].Float(), writer)
 	if err != nil {
 		return nil, err
 	}
@@ -2913,11 +4218,12 @@ func (e *businessEngine) exportDocument(args []platformValue) (any, error) {
 	if e.currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	session, writerIndex, err := e.exportSession(args)
+	exportSess, writerIndex, cleanup, err := e.exportSession(args)
 	if err != nil {
 		return nil, err
 	}
-	renderer := session.Renderer
+	defer cleanup()
+	renderer := exportSess.Renderer
 	renderer.OnExportProgress = func(completed, total int) error {
 		return awaitExport(args[writerIndex+1], completed, total)
 	}
@@ -2930,7 +4236,7 @@ func (e *businessEngine) exportDocument(args []platformValue) (any, error) {
 		}
 	}
 	writer := bufio.NewWriterSize(exportWriter{write: args[writerIndex]}, 1<<20)
-	format, err := session.ExportDocument(args[0].String(), args[1].Float(), writer, indices...)
+	format, err := exportSess.exportDocument(args[0].String(), args[1].Float(), writer, indices...)
 	if err != nil {
 		return nil, err
 	}
@@ -2945,28 +4251,44 @@ func (e *businessEngine) exportDocument(args []platformValue) (any, error) {
 
 // exportSession 创建独立导出配置，写入回调前可指定光栅后端
 // 入参: args 浏览器参数
-// 返回: *Session 导出会话, int 写入回调位置, error 错误信息
-func (e *businessEngine) exportSession(args []platformValue) (*Session, int, error) {
-	session := *e.currentSession
-	renderer := *session.Renderer
-	session.Renderer = &renderer
+// 返回: *session 导出会话, int 写入回调位置, func() 取消上下文清理函数, error 错误信息
+func (e *businessEngine) exportSession(args []platformValue) (*session, int, func(), error) {
+	current := e.currentSession
+	backend := ""
 	writerIndex := 3
 	if args[3].Type() == platformTypeString {
-		if err := session.SetRenderBackend(args[3].String()); err != nil {
-			return nil, 0, err
-		}
+		backend = args[3].String()
 		writerIndex++
 	}
+	renderer, _, err := current.cloneRendererWithBackend(backend)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	copied := &session{
+		Reader:    current.Reader,
+		Renderer:  &renderer,
+		ctx:       current.ctx,
+		pdfSource: current.pdfSource,
+		fontFS:    current.fontFS,
+		doc:       current.doc,
+		pageCache: current.pageCache,
+		editor:    current.editor,
+	}
+	cleanup := func() {}
 	if args[writerIndex].Type() == platformTypeObject {
-		if err := e.compressionFromJS(args[writerIndex], &renderer.Compression); err != nil {
-			return nil, 0, err
+		compression := renderer.Compression()
+		if err := e.compressionFromJS(args[writerIndex], &compression); err != nil {
+			return nil, 0, nil, err
 		}
+		renderer.SetCompression(compression)
 		writerIndex++
 		if len(args) > writerIndex+1 {
-			renderer.OutputContext = e.newOutputContext(args[len(args)-1])
+			operation := e.newOutputContext(args[len(args)-1])
+			copied.ctx = operation
+			cleanup = operation.cancel
 		}
 	}
-	return &session, writerIndex, nil
+	return copied, writerIndex, cleanup, nil
 }
 
 // matchFontFiles 匹配文档所需的字体文件
@@ -2976,13 +4298,23 @@ func (e *businessEngine) matchFontFiles(args []platformValue) (any, error) {
 	if e.currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	ids := make([]string, 0, len(e.currentSession.fontInfos))
-	for _, info := range e.currentSession.fontInfos {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("missing font files")
+	}
+	return e.matchFontFilesWith(args[0], e.currentSession.fontInfos)
+}
+
+// matchFontFilesWith 按给定的字体诊断快照匹配文档所需的字体文件
+// 入参: files 可用字体文件名列表, fontInfos 文档字体诊断快照
+// 返回: []string 匹配的字体文件名称, error 错误信息
+func (e *businessEngine) matchFontFilesWith(files platformValue, fontInfos []ofdgo.FontInfo) ([]string, error) {
+	ids := make([]string, 0, len(fontInfos))
+	for _, info := range fontInfos {
 		if info.Used > 0 {
 			ids = append(ids, info.ID)
 		}
 	}
-	return e.currentSession.Reader.MatchFontFiles(e.stringsFromJS(args[0]), ids...)
+	return e.currentSession.Reader.MatchFontFiles(e.stringsFromJS(files), ids...)
 }
 
 // fontFaces 读取上传字体的名称和集合索引
@@ -3009,7 +4341,11 @@ func (e *businessEngine) fontMenu(args []platformValue) (any, error) {
 	if err := json.Unmarshal([]byte(args[0].String()), &request); err != nil {
 		return nil, err
 	}
-	return map[string]any{"groups": ofdgo.FontFamilyIndexes(request.Faces, request.Sources), "index": ofdgo.FontStyleIndex(request.Faces, request.Bold, request.Italic)}, nil
+	faces := make([]basefont.Face, len(request.Faces))
+	for i, face := range request.Faces {
+		faces[i] = basefont.Face(face)
+	}
+	return map[string]any{"groups": basefont.FamilyIndexes(faces, request.Sources), "index": basefont.StyleIndex(faces, request.Bold, request.Italic)}, nil
 }
 
 // fontPreferenceOrder 按字体族偏好排列编辑字体候选索引
@@ -3023,7 +4359,11 @@ func (e *businessEngine) fontPreferenceOrder(args []platformValue) (any, error) 
 	if err := json.Unmarshal([]byte(args[0].String()), &request); err != nil {
 		return nil, err
 	}
-	return ofdgo.FontPreferenceOrder(request.Faces, request.Families), nil
+	faces := make([]basefont.Face, len(request.Faces))
+	for i, face := range request.Faces {
+		faces[i] = basefont.Face(face)
+	}
+	return basefont.PreferenceOrder(faces, request.Families), nil
 }
 
 // fontFace 提取编辑时选定的字体，供输入预览和保存共用
@@ -3043,20 +4383,20 @@ func (e *businessEngine) fontFace(args []platformValue) (any, error) {
 
 // fontsFromJS 从浏览器值读取字体文件
 // 入参: value 浏览器值
-// 返回: []FontFile 字体文件, error 错误信息
-func (e *businessEngine) fontsFromJS(value platformValue) ([]FontFile, error) {
+// 返回: []ofdgo.FontFile 字体文件, error 错误信息
+func (e *businessEngine) fontsFromJS(value platformValue) ([]ofdgo.FontFile, error) {
 	if value.IsUndefined() || value.IsNull() {
 		return nil, nil
 	}
 	length := value.Get("length").Int()
-	fonts := make([]FontFile, 0, length)
+	fonts := make([]ofdgo.FontFile, 0, length)
 	for i := 0; i < length; i++ {
 		item := value.Index(i)
 		data, err := e.bytesFromJS(item.Get("data"))
 		if err != nil {
 			return nil, err
 		}
-		fonts = append(fonts, FontFile{Name: item.Get("name").String(), Data: data})
+		fonts = append(fonts, ofdgo.FontFile{Name: item.Get("name").String(), Data: data})
 	}
 	return fonts, nil
 }
@@ -3105,17 +4445,24 @@ func (e *businessEngine) editorState(args []platformValue) (any, error) {
 // 入参: indexes 增量页码，nil表示完整状态
 // 返回: editorInfo 文档与编辑状态
 func (e *businessEngine) editorSummaryPages(indexes []int) editorInfo {
-	info := editorInfo{DocumentInfo: e.currentSession.summary(indexes), Revision: e.currentEditor.Revision(), CanUndo: e.currentEditor.CanUndo(), CanRedo: e.currentEditor.CanRedo(), Changes: e.currentEditor.Changes(), Incremental: indexes != nil, DetailsUnchanged: indexes != nil && e.currentSession.detailsUnchanged, BaseRevision: e.currentSession.baseRevision}
+	info := editorInfo{documentInfo: e.currentSession.summary(indexes), Revision: e.currentEditor.Revision(), CanUndo: e.currentEditor.CanUndo(), CanRedo: e.currentEditor.CanRedo(), Changes: e.currentEditor.Changes(), Incremental: indexes != nil, DetailsUnchanged: indexes != nil && e.currentSession.detailsUnchanged, BaseRevision: e.currentSession.baseRevision}
 	if !e.currentSession.doc.Permissions.Edit {
 		info.EditWarnings = append(info.EditWarnings, "原文件声明不允许编辑")
 	}
-	if slices.ContainsFunc(e.currentSession.Reader.OFD.DocBody, func(body ofdgo.DocBody) bool { return body.Signatures != "" }) {
+	if slices.ContainsFunc(e.currentSession.Reader.OFD().DocBody, func(body ofdgo.DocBody) bool { return body.Signatures != "" }) {
 		info.EditWarnings = append(info.EditWarnings, "修改文档可能使原签名失效")
 	}
 	info.PageCapabilities = make([]uint, len(info.Pages))
-	for i := range info.PageCapabilities {
-		capability, _ := e.currentEditor.PageCapabilities(info.Pages[i].Index)
-		info.PageCapabilities[i] = e.pageCapabilityMask(capability)
+	if e.currentSession.doc.CommonData.DefaultCS == 0 {
+		fullMask := e.pageCapabilityMask(ofdgo.PageCapabilities{Insert: true, Copy: true, Delete: true, Move: true, Resize: true})
+		for i := range info.PageCapabilities {
+			info.PageCapabilities[i] = fullMask
+		}
+	} else {
+		for i := range info.PageCapabilities {
+			capability, _ := e.currentEditor.PageCapabilities(info.Pages[i].Index)
+			info.PageCapabilities[i] = e.pageCapabilityMask(capability)
+		}
 	}
 	return info
 }
@@ -3147,7 +4494,7 @@ func (e *businessEngine) restoreEditor(redo bool) (any, error) {
 	if !apply() {
 		return e.editorSummary(), nil
 	}
-	return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 }
 
 // editorObjects 提供编辑画布的对象范围、文字排版及原始图片边界
@@ -3155,7 +4502,7 @@ func (e *businessEngine) restoreEditor(redo bool) (any, error) {
 // 返回: []any 对象区域, error 错误信息
 func (e *businessEngine) editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 	objects := []any{}
-	if e.currentEditor == nil {
+	if e.currentEditor == nil || !e.currentSession.editing {
 		return objects, nil
 	}
 	page, err := e.currentEditor.Page(index)
@@ -3203,8 +4550,8 @@ func (e *businessEngine) editorObjects(index int, text *ofdgo.PageText) ([]any, 
 				id = object.ImageObject.ID
 			case "PathObject":
 				id = object.PathObject.ID
-			case "CompositeObject", "CompositeGraphicUnit":
-				id = object.CompositeGraphicUnit.ID
+			case "CompositeObject":
+				id = object.CompositeObject.ID
 			default:
 				continue
 			}
@@ -3215,7 +4562,7 @@ func (e *businessEngine) editorObjects(index int, text *ofdgo.PageText) ([]any, 
 			case "TextObject":
 				box = textBoxes[id]
 			default:
-				box, contours, err = e.currentSession.Renderer.ObjectGeometry(object, layer.DrawParam)
+				box, contours, err = e.currentSession.Renderer.ObjectGeometryContext(e.operationContext(), object, layer.DrawParam)
 				if err == nil && hasOffset {
 					if box.W > 0 && box.H > 0 {
 						box.X += offsetX
@@ -3257,7 +4604,7 @@ func (e *businessEngine) editorObjects(index int, text *ofdgo.PageText) ([]any, 
 						}
 					}
 				}
-				if object.Type == "PathObject" || object.Type == "ImageObject" || object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
+				if object.Type == "PathObject" || object.Type == "ImageObject" || object.Type == "CompositeObject" {
 					paths := make([]any, len(contours))
 					for i, contour := range contours {
 						paths[i] = map[string]any{"path": contour.Path, "evenOdd": contour.EvenOdd}
@@ -3334,14 +4681,20 @@ func (e *businessEngine) editorObjects(index int, text *ofdgo.PageText) ([]any, 
 		if annotation.Visible != nil && !*annotation.Visible {
 			continue
 		}
-		box, contours, err := e.currentSession.Renderer.AnnotationGeometry(annotation)
-		capabilities := map[string]any{"update": true, "transform": true, "arrange": true, "copy": true, "delete": true, "children": len(annotation.Appearance.Objects) != 0}
+		var appearanceObjects []ofdgo.GraphicObject
+		var appearanceBoundary string
+		if annotation.Appearance != nil {
+			appearanceObjects = annotation.Appearance.Objects
+			appearanceBoundary = annotation.Appearance.Boundary
+		}
+		box, contours, err := e.currentSession.Renderer.AnnotationGeometryContext(e.operationContext(), annotation)
+		capabilities := map[string]any{"update": true, "transform": true, "arrange": true, "copy": true, "delete": true, "children": len(appearanceObjects) != 0}
 		if err != nil {
 			capabilities["transform"], capabilities["arrange"], capabilities["children"] = false, false, false
 			capabilities["reason"], capabilities["reasonCode"] = err.Error(), "invalidObject"
 		}
 		if box.W <= 0 || box.H <= 0 {
-			box, _ = ofdgo.ParseBox(annotation.Appearance.Boundary)
+			box, _ = ofdgo.ParseBox(appearanceBoundary)
 		}
 		if hasOffset {
 			if box.W > 0 && box.H > 0 {
@@ -3355,7 +4708,7 @@ func (e *businessEngine) editorObjects(index int, text *ofdgo.PageText) ([]any, 
 			paths[i] = map[string]any{"path": contour.Path, "evenOdd": contour.EvenOdd}
 		}
 		alpha, mixed := 255, false
-		for i, object := range annotation.Appearance.Objects {
+		for i, object := range appearanceObjects {
 			var value *int
 			switch object.Type {
 			case "TextObject":
@@ -3364,8 +4717,8 @@ func (e *businessEngine) editorObjects(index int, text *ofdgo.PageText) ([]any, 
 				value = object.PathObject.Alpha
 			case "ImageObject":
 				value = object.ImageObject.Alpha
-			case "CompositeObject", "CompositeGraphicUnit":
-				value = object.CompositeGraphicUnit.Alpha
+			case "CompositeObject":
+				value = object.CompositeObject.Alpha
 			}
 			current := 255
 			if value != nil {
@@ -3380,32 +4733,28 @@ func (e *businessEngine) editorObjects(index int, text *ofdgo.PageText) ([]any, 
 		item := map[string]any{"id": "annotation:" + annotation.ID, "type": "Annotation", "annotationType": annotation.Type,
 			"x": box.X, "y": box.Y, "width": box.W, "height": box.H, "remark": annotation.Remark, "creator": annotation.Creator,
 			"alpha": alpha, "alphaMixed": mixed, "capabilities": capabilities}
-		if len(annotation.Appearance.Objects) == 0 && strings.TrimSpace(annotation.Remark) != "" {
+		if len(appearanceObjects) == 0 && strings.TrimSpace(annotation.Remark) != "" {
 			item["note"] = true
 		} else {
 			item["contours"] = paths
 		}
 		objects = append(objects, item)
 	}
-	stamps, err := e.currentSession.Reader.PageStamps(page.ID)
+	stamps, err := e.currentEditor.PageSignatureStampCapabilities(index)
 	if err != nil {
 		return nil, err
 	}
-	for _, stamp := range stamps {
-		box := stamp.Bounds()
-		if stamp.ID == "" || stamp.SignatureID == "" || box.W <= 0 || box.H <= 0 {
+	for _, item := range stamps {
+		box := item.Stamp.Bounds()
+		if item.Stamp.ID == "" || item.Stamp.SignatureID == "" || box.W <= 0 || box.H <= 0 {
 			continue
 		}
 		if hasOffset {
 			box.X += offsetX
 			box.Y += offsetY
 		}
-		capability, err := e.currentEditor.SignatureStampCapabilities(index, ofdgo.ObjectPath{ID: stamp.ID, Signature: stamp.SignatureID})
-		if err != nil {
-			return nil, err
-		}
-		objects = append(objects, map[string]any{"id": stamp.ObjectID(), "type": "Signature", "x": box.X, "y": box.Y, "width": box.W, "height": box.H,
-			"capabilities": e.editorCapabilities(capability, "Signature")})
+		objects = append(objects, map[string]any{"id": item.Stamp.ObjectID(), "type": "Signature", "x": box.X, "y": box.Y, "width": box.W, "height": box.H,
+			"capabilities": e.editorCapabilities(item.Capabilities, "Signature")})
 	}
 	return objects, nil
 }
@@ -3483,7 +4832,7 @@ func (e *businessEngine) writeAnnotation(args []platformValue) (any, error) {
 			if err != nil {
 				return err
 			}
-			font, err = e.currentEditor.AddFont(FontFile{Data: data}, 0)
+			font, err = e.currentEditor.AddFont(ofdgo.FontFile{Data: data}, 0)
 			if err != nil {
 				return err
 			}
@@ -3564,40 +4913,48 @@ func (e *businessEngine) writeAnnotation(args []platformValue) (any, error) {
 			}
 			return nil
 		}
-		for _, index := range pages {
-			box, err := e.pageBoxFromViewport(index, ofdgo.Box{X: options.X, Y: options.Y, W: options.Width, H: options.Height})
-			if err != nil {
-				return err
+		ctx := e.operationContext()
+		var added []string
+		if options.Kind == "link" {
+			links := make([]ofdgo.LinkAnnotation, len(pages))
+			for i, index := range pages {
+				box, err := e.pageBoxFromViewport(index, ofdgo.Box{X: options.X, Y: options.Y, W: options.Width, H: options.Height})
+				if err != nil {
+					return err
+				}
+				links[i] = ofdgo.LinkAnnotation{Box: box, Target: target, Creator: options.Creator}
 			}
-			var id string
-			if options.Kind == "link" {
-				id, err = e.currentEditor.AddLinkAnnotation(index, box, target, options.Creator)
-			} else {
-				annotation := ofdgo.Annotation{Creator: options.Creator, Appearance: ofdgo.Appearance{Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H)}}
+			added, err = e.currentEditor.AddLinkAnnotationsContext(ctx, pages, links)
+		} else {
+			annotations := make([]ofdgo.Annotation, len(pages))
+			for i, index := range pages {
+				box, err := e.pageBoxFromViewport(index, ofdgo.Box{X: options.X, Y: options.Y, W: options.Width, H: options.Height})
+				if err != nil {
+					return err
+				}
 				switch options.Kind {
 				case "note":
-					annotation.Type, annotation.Remark = "Path", options.Text
+					annotations[i] = ofdgo.Annotation{Type: "Path", Creator: options.Creator, Remark: options.Text, Appearance: &ofdgo.Appearance{Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H)}}
 				case "stamp":
-					annotation.Type = "Stamp"
 					if resource == "" {
 						return fmt.Errorf("stamp requires an image")
 					}
-					object := ofdgo.GraphicObject{Type: "ImageObject", ImageObject: ofdgo.ImageObject{ResourceID: resource, Boundary: fmt.Sprintf("0 0 %g %g", box.W, box.H), CTM: fmt.Sprintf("%g 0 0 %g 0 0", box.W, box.H), Alpha: &options.Alpha}}
-					angle := options.Angle * math.Pi / 180
-					matrix := ofdgo.NewMatrix(fmt.Sprintf("%g %g %g %g 0 0", math.Cos(angle), math.Sin(angle), -math.Sin(angle), math.Cos(angle)))
-					matrix = ofdgo.TranslationMatrix(box.W/2, box.H/2).Multiply(matrix).Multiply(ofdgo.TranslationMatrix(-box.W/2, -box.H/2))
-					object.ImageObject.CTM = matrix.Multiply(ofdgo.NewMatrix(object.ImageObject.CTM)).String()
-					annotation.Appearance.Objects = []ofdgo.GraphicObject{object}
+					annotations[i], err = ofdgo.NewImageStampAnnotation(ofdgo.ImageStampOptions{ResourceID: resource, Box: box, Angle: options.Angle, Alpha: &options.Alpha, Creator: options.Creator})
+					if err != nil {
+						return err
+					}
 				default:
 					return fmt.Errorf("unsupported annotation kind %q", options.Kind)
 				}
-				id, err = e.currentEditor.AddAnnotation(index, annotation)
 			}
-			if err != nil {
-				return err
-			}
+			added, err = e.currentEditor.AddAnnotationsContext(ctx, pages, annotations)
+		}
+		if err != nil {
+			return err
+		}
+		for i, index := range pages {
 			if index == page {
-				ids = append(ids, "annotation:"+id)
+				ids = append(ids, "annotation:"+added[i])
 			}
 		}
 		return nil
@@ -3789,7 +5146,7 @@ func (e *businessEngine) pasteEditorSelection(page int, clipboard *editorClipboa
 // 返回: map[string]any 前端能力
 func (e *businessEngine) editorCapabilities(capability ofdgo.ObjectCapabilities, kind string) map[string]any {
 	result := map[string]any{"update": capability.Update, "paint": capability.Paint, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason, "reasonCode": string(capability.ReasonCode),
-		"replaceImage": capability.ReplaceImage, "cropImage": capability.CropImage, "fitImage": capability.FitImage, "resetCrop": capability.ResetCrop, "ungroup": capability.Ungroup, "stretch": capability.Stretch, "children": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
+		"replaceImage": capability.ReplaceImage, "cropImage": capability.CropImage, "fitImage": capability.FitImage, "resetCrop": capability.ResetCrop, "ungroup": capability.Ungroup, "stretch": capability.Stretch, "children": capability.Transform && kind == "CompositeObject"}
 	result["textContent"] = capability.TextContent
 	result["rewriteText"] = capability.RewriteText
 	if missing := capability.MissingGlyphs; missing != nil {
@@ -3859,8 +5216,8 @@ func (e *businessEngine) editorAppearance(item map[string]any, object ofdgo.Grap
 			item["fillColor"], item["strokeColor"] = e.editorColorHex(path.FillColor), e.editorColorHex((*ofdgo.FillColor)(path.StrokeColor))
 			item["lineWidth"] = path.LineWidth * scale
 		}
-	case "CompositeObject", "CompositeGraphicUnit":
-		alpha = object.CompositeGraphicUnit.Alpha
+	case "CompositeObject":
+		alpha = object.CompositeObject.Alpha
 	}
 	item["alpha"] = 255
 	if alpha != nil {
@@ -4278,7 +5635,7 @@ func (e *businessEngine) changeCompositeText(page int, path ofdgo.ObjectPath, in
 		if err := e.checkFontGlyphs(data, text.String()); err != nil {
 			return err
 		}
-		style.Font, err = e.currentEditor.AddFont(FontFile{Data: data}, 0)
+		style.Font, err = e.currentEditor.AddFont(ofdgo.FontFile{Data: data}, 0)
 		if err != nil {
 			return err
 		}
@@ -4308,7 +5665,7 @@ func (e *businessEngine) editorFont(args []platformValue) (any, error) {
 		return nil, err
 	}
 	mapped := len(args) > 1 && args[1].Bool()
-	_, data, _, _, err = ofdgo.FixFontDataAggressive(data, mapped, false)
+	_, data, _, _, err = basefont.FixDataAggressive(data, mapped, false)
 	if err != nil {
 		return nil, err
 	}
@@ -4361,8 +5718,9 @@ func (e *businessEngine) previewText(args []platformValue) (any, error) {
 			return nil, err
 		}
 		editor = ofdgo.NewEditor()
+		defer func() { _ = editor.Close() }()
 		editor.SetResources(e.resources)
-		fontID, err = editor.AddFont(FontFile{Data: data}, 0)
+		fontID, err = editor.AddFont(ofdgo.FontFile{Data: data}, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -4536,7 +5894,7 @@ func (e *businessEngine) textSelection(args []platformValue) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		_, data, _, _, err = ofdgo.FixFontDataAggressive(data, true, false)
+		_, data, _, _, err = basefont.FixDataAggressive(data, true, false)
 		if err != nil {
 			return nil, err
 		}
@@ -4781,7 +6139,7 @@ func (e *businessEngine) applyTextUpdate(args []platformValue) error {
 		if err := e.checkFontGlyphs(data, value); err != nil {
 			return err
 		}
-		object.TextObject.Font, err = e.currentEditor.AddFont(FontFile{Data: data}, 0)
+		object.TextObject.Font, err = e.currentEditor.AddFont(ofdgo.FontFile{Data: data}, 0)
 		if err != nil {
 			return err
 		}
@@ -4822,7 +6180,7 @@ func (e *businessEngine) applyTextUpdate(args []platformValue) error {
 // 入参: data 字体数据, value 待替换文字
 // 返回: error 缺字或字体格式错误
 func (e *businessEngine) checkFontGlyphs(data []byte, value string) error {
-	missing, err := (FontFile{Data: data}).MissingGlyphs(0, value)
+	missing, err := (ofdgo.FontFile{Data: data}).MissingGlyphs(0, value)
 	if err != nil {
 		return err
 	}
@@ -4878,7 +6236,7 @@ func (e *businessEngine) styleText(args []platformValue) (any, error) {
 			if err := e.checkFontGlyphs(data, value.String()); err != nil {
 				return err
 			}
-			style.Font, err = e.currentEditor.AddFont(FontFile{Data: data}, 0)
+			style.Font, err = e.currentEditor.AddFont(ofdgo.FontFile{Data: data}, 0)
 			if err != nil {
 				return err
 			}
@@ -4952,7 +6310,7 @@ func (e *businessEngine) styleTextFonts(args []platformValue) (any, error) {
 			if err := e.checkFontGlyphs(data, entry.Get("text").String()); err != nil {
 				return err
 			}
-			id, err := e.currentEditor.AddFont(FontFile{Data: data}, 0)
+			id, err := e.currentEditor.AddFont(ofdgo.FontFile{Data: data}, 0)
 			if err != nil {
 				return err
 			}
@@ -5004,7 +6362,7 @@ func (e *businessEngine) pageFontName(index int, id string) string {
 // editorRichText 将富文本复合图元作为一个文本框提供给编辑器
 // 入参: item 浏览器对象, object 标准复合图元, value 富文本, index 页面索引, local 局部编辑框, matrix 页面变换
 func (e *businessEngine) editorRichText(item map[string]any, object ofdgo.GraphicObject, value ofdgo.RichText, index int, local ofdgo.Box, matrix ofdgo.Matrix) {
-	if len(value.Runs) == 0 || object.CompositeGraphicUnit.Clips != nil {
+	if len(value.Runs) == 0 || object.CompositeObject.Clips != nil {
 		return
 	}
 	width := local.W
@@ -5042,7 +6400,7 @@ func (e *businessEngine) editorRichText(item map[string]any, object ofdgo.Graphi
 	}
 	capabilities["children"], capabilities["ungroup"] = false, false
 	capabilities["stretch"] = false
-	if capabilities["reasonCode"] == string(ofdgo.EditUnsupportedObject) && capabilities["transform"] == true && capabilities["copy"] == true && object.CompositeGraphicUnit.Clips == nil {
+	if capabilities["reasonCode"] == string(ofdgo.EditUnsupportedObject) && capabilities["transform"] == true && capabilities["copy"] == true && object.CompositeObject.Clips == nil {
 		delete(capabilities, "reason")
 		delete(capabilities, "reasonCode")
 	}
@@ -5099,7 +6457,7 @@ func (e *businessEngine) richTextFonts(args []platformValue) (any, error) {
 	}
 	result := make([]any, 0, len(fonts))
 	for key, data := range fonts {
-		_, data, _, _, err = ofdgo.FixFontDataAggressive(data, false, false)
+		_, data, _, _, err = basefont.FixDataAggressive(data, false, false)
 		if err != nil {
 			return nil, err
 		}
@@ -5347,7 +6705,7 @@ func (e *businessEngine) insertText(args []platformValue) (any, error) {
 	box = ofdgo.Box{X: x + box.X, Y: y + box.Y, W: math.Min(width, box.W-x), H: box.H - y}
 	var id string
 	if err := e.currentEditor.Transaction(func(editor *ofdgo.Editor) error {
-		fontID, err := editor.AddFont(FontFile{Data: data}, 0)
+		fontID, err := editor.AddFont(ofdgo.FontFile{Data: data}, 0)
 		if err != nil {
 			return err
 		}
@@ -5366,7 +6724,7 @@ func (e *businessEngine) insertText(args []platformValue) (any, error) {
 	}); err != nil {
 		return nil, err
 	}
-	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 	return editorSelectionInfo{info, []string{id}}, err
 }
 
@@ -5412,7 +6770,7 @@ func (e *businessEngine) replaceImage(args []platformValue) (any, error) {
 	if e.currentEditor.Revision() == revision {
 		return e.editorSummary(), nil
 	}
-	return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 }
 
 // alignObject 将对象对齐页面并更新预览
@@ -5429,7 +6787,7 @@ func (e *businessEngine) alignObject(args []platformValue) (any, error) {
 	if e.currentEditor.Revision() == revision {
 		return e.editorSummary(), nil
 	}
-	return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 }
 
 // transformObject 等比缩放后平移对象
@@ -5451,7 +6809,7 @@ func (e *businessEngine) transformObject(args []platformValue) (any, error) {
 	if e.currentEditor.Revision() == revision {
 		return e.editorSummary(), nil
 	}
-	return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 }
 
 // reshapeObject 调整基本图形的尺寸或直线端点，保留绘制样式
@@ -5488,7 +6846,7 @@ func (e *businessEngine) reshapeObject(args []platformValue) (any, error) {
 	if e.currentEditor.Revision() == revision {
 		return e.editorSummary(), nil
 	}
-	return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 }
 
 // reshapeLine 修改直线端点与箭头类型，复用库层样式保留逻辑
@@ -5550,6 +6908,7 @@ func (e *businessEngine) captureObjects(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	e.clearPortableObjects()
 	e.copiedObjects = clipboard
 	e.portableObjects = &editorClipboard{token: clipboard.token, packet: packet}
 	return successResult(nil), nil
@@ -5567,8 +6926,7 @@ func (e *businessEngine) exportObjects(args []platformValue) (any, error) {
 	if _, err := clipboard.packet.WriteToWithOptions(e.operationContext(), &output, ofdgo.WriteOptions{}); err != nil {
 		return nil, err
 	}
-	e.portableObjects = nil
-	clipboard.packet = nil
+	e.clearPortableObjects()
 	return successResult(map[string]any{"bytes": bytesToJS(output.Bytes())}), nil
 }
 
@@ -5578,7 +6936,7 @@ func (e *businessEngine) exportObjects(args []platformValue) (any, error) {
 func (e *businessEngine) discardObjects(args []platformValue) (any, error) {
 	token := args[0].String()
 	if e.portableObjects != nil && e.portableObjects.token == token {
-		e.portableObjects = nil
+		e.clearPortableObjects()
 	}
 	if e.copiedObjects != nil && e.copiedObjects.token == token {
 		e.copiedObjects = nil
@@ -5597,7 +6955,7 @@ func (e *businessEngine) pasteObjects(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 	return editorSelectionInfo{info, ids}, err
 }
 
@@ -5628,20 +6986,21 @@ func (e *businessEngine) importObjects(args []platformValue) (any, error) {
 		return nil, err
 	}
 	dx, dy := args[2].Float(), args[3].Float()
-	if srcPage, srcErr := reader.PageContentByIndex(0); srcErr == nil {
-		if srcBox, boxErr := ofdgo.NewRenderer(reader).GetPageBox(srcPage); boxErr == nil {
+	ctx := e.operationContext()
+	if srcPage, srcErr := reader.PageContentByIndexContext(ctx, 0); srcErr == nil {
+		if srcBox, boxErr := ofdgo.NewRenderer(reader).GetPageBoxContext(ctx, srcPage); boxErr == nil {
 			dx += dstBox.X - srcBox.X
 			dy += dstBox.Y - srcBox.Y
 		}
 	}
-	objects, annotations, err := e.currentEditor.ImportSelection(context.Background(), reader, targetPage, ofdgo.ObjectImportOptions{DX: dx, DY: dy, AllowDecrypted: true})
+	objects, annotations, err := e.currentEditor.ImportSelectionContext(ctx, reader, targetPage, ofdgo.ObjectImportOptions{DX: dx, DY: dy, AllowDecrypted: true})
 	if err != nil {
 		return nil, err
 	}
 	for _, id := range annotations {
 		objects = append(objects, "annotation:"+id)
 	}
-	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 	return editorSelectionInfo{info, objects}, err
 }
 
@@ -5656,7 +7015,7 @@ func (e *businessEngine) copyEditorObjects(page int, objects []ofdgo.GraphicObje
 	if len(ids) == 0 {
 		return e.editorSummary(), nil
 	}
-	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 	return editorSelectionInfo{info, ids}, err
 }
 
@@ -5728,7 +7087,7 @@ func (e *businessEngine) deleteObject(args []platformValue) (any, error) {
 	if err := e.currentEditor.DeleteObject(args[0].Int(), args[1].String()); err != nil {
 		return nil, err
 	}
-	return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 }
 
 // changePage 管理创作文档的页面
@@ -5767,7 +7126,7 @@ func (e *businessEngine) changePage(args []platformValue) (any, error) {
 	if e.currentEditor.Revision() == revision {
 		return editorPageInfo{e.editorSummary(), index}, nil
 	}
-	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 	if err != nil {
 		return nil, err
 	}
@@ -6109,7 +7468,7 @@ func (e *businessEngine) loadImport(args []platformValue) (any, error) {
 		}
 	}()
 	var options []ofdgo.ReaderOption
-	options = append(options, ofdgo.WithResources(e.resources))
+	options = append(options, ofdgo.WithResources(e.resources), ofdgo.WithCloser(input))
 	if len(args) > 1 && !args[1].IsNull() && !args[1].IsUndefined() {
 		credentials, err := e.credentialsFromJS(args[1])
 		if err != nil {
@@ -6118,11 +7477,11 @@ func (e *businessEngine) loadImport(args []platformValue) (any, error) {
 		defer clear(credentials.Password)
 		options = append(options, ofdgo.WithCredentials(credentials))
 	}
-	reader, err := ofdgo.NewReader(input, options...)
+	reader, err := ofdgo.NewReaderContext(e.operationContext(), input, options...)
 	if err != nil {
 		return nil, err
 	}
-	reader.Closer = input
+	keep = true
 	doc, err := reader.Doc()
 	if err != nil {
 		reader.Close()
@@ -6133,11 +7492,10 @@ func (e *businessEngine) loadImport(args []platformValue) (any, error) {
 		return nil, fmt.Errorf("document has no pages")
 	}
 	e.pendingImport = reader
-	keep = true
-	entries := make([]DocumentEntry, reader.DocumentCount())
+	entries := make([]documentEntry, reader.DocumentCount())
 	signed := doc.Signatures != ""
-	for index, body := range reader.OFD.DocBody {
-		entries[index] = DocumentEntry{Index: index, DocumentMetadata: DocumentMetadata{Title: body.DocInfo.Title}, Root: body.DocRoot, ID: body.DocInfo.DocID}
+	for index, body := range reader.OFD().DocBody {
+		entries[index] = documentEntry{Index: index, documentMeta: documentMeta{Title: body.DocInfo.Title}, Root: body.DocRoot, ID: body.DocInfo.DocID}
 		signed = signed || body.Signatures != ""
 	}
 	return map[string]any{"pageCount": len(doc.Pages.Page), "signed": doc.Signatures != "", "documentsSigned": signed, "encrypted": reader.Encryption().Encrypted, "documents": entries, "documentCount": len(entries)}, nil
@@ -6174,13 +7532,15 @@ func (e *businessEngine) importPages(args []platformValue) (any, error) {
 		progressIndex = 4
 	}
 	if len(args) > progressIndex {
-		ctx, options.OnProgress = e.newEditorOperationContext(args[progressIndex])
+		operation, progress := e.newEditorOperationContext(args[progressIndex])
+		defer operation.cancel()
+		ctx, options.OnProgress = operation, progress
 	}
 	if _, err := e.currentEditor.ImportPagesContext(ctx, e.pendingImport, indexes, at, options); err != nil {
 		return nil, err
 	}
 	e.clearImport()
-	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 	return editorPageInfo{info, at}, err
 }
 
@@ -6205,13 +7565,15 @@ func (e *businessEngine) importDocuments(args []platformValue) (any, error) {
 	options := ofdgo.DocumentImportOptions{AllowDecrypted: args[2].Bool()}
 	ctx := e.operationContext()
 	if len(args) > 3 {
-		ctx, options.OnProgress = e.newEditorOperationContext(args[3])
+		operation, progress := e.newEditorOperationContext(args[3])
+		defer operation.cancel()
+		ctx, options.OnProgress = operation, progress
 	}
 	if _, err := e.currentEditor.ImportDocumentsContext(ctx, e.pendingImport, indexes, args[1].Int(), options); err != nil {
 		return nil, err
 	}
 	e.clearImport()
-	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 	return editorPageInfo{info, 0}, err
 }
 
@@ -6225,8 +7587,16 @@ func (e *businessEngine) importImages(args []platformValue) (any, error) {
 	}
 	at := args[2].Int()
 	editor := e.currentEditor
+	createdEditor := false
+	keepEditor := false
 	if at < 0 {
 		editor = ofdgo.NewEditor()
+		createdEditor = true
+		defer func() {
+			if createdEditor && !keepEditor {
+				_ = editor.Close()
+			}
+		}()
 		editor.SetResources(e.resources)
 		editor.Info.Title = args[3].String()
 	} else if editor == nil {
@@ -6255,31 +7625,13 @@ func (e *businessEngine) importImages(args []platformValue) (any, error) {
 	}
 	e.clearImport()
 	info, err := e.previewEditor(editor, args[4].Bool())
+	if err == nil {
+		keepEditor = true
+		if at < 0 {
+			e.clearPDF()
+		}
+	}
 	return editorPageInfo{info, position}, err
-}
-
-// imagePageSize 读取图片建页使用的物理尺寸和方向，不改变文档状态
-// 入参: args 图片数据
-// 返回: any 图片宽高，单位为毫米, error 错误信息
-func (e *businessEngine) imagePageSize(args []platformValue) (any, error) {
-	data, err := e.bytesFromJS(args[0])
-	if err != nil {
-		return nil, err
-	}
-	ctx := e.operationContext()
-	config, format, err := baseimage.DecodeConfigDataContext(ctx, data)
-	if err != nil {
-		return nil, err
-	}
-	metadata, err := baseimage.PageMetadataContext(ctx, data, format, 96)
-	if err != nil {
-		return nil, err
-	}
-	width, height := float64(config.Width)*25.4/metadata.XDPI, float64(config.Height)*25.4/metadata.YDPI
-	if metadata.Orientation >= 5 {
-		width, height = height, width
-	}
-	return successResult(map[string]any{"width": width, "height": height}), nil
 }
 
 // imagePreview 读取图片一次并生成统一方向和密度的建页预览
@@ -6304,6 +7656,12 @@ func (e *businessEngine) imagePreview(args []platformValue) (any, error) {
 func (e *businessEngine) createDocument(args []platformValue) (any, error) {
 	e.clearImport()
 	editor := ofdgo.NewEditor()
+	keepEditor := false
+	defer func() {
+		if !keepEditor {
+			_ = editor.Close()
+		}
+	}()
 	editor.SetResources(e.resources)
 	editor.Info.Title = args[0].String()
 	if _, err := editor.AddPage(args[1].Float(), args[2].Float()); err != nil {
@@ -6312,6 +7670,7 @@ func (e *businessEngine) createDocument(args []platformValue) (any, error) {
 	editor.SetHistoryLimit(100)
 	info, err := e.previewEditor(editor, args[3].Bool())
 	if err == nil {
+		keepEditor = true
 		e.clearPDF()
 	}
 	return info, err
@@ -6366,6 +7725,52 @@ func (e *businessEngine) updateInfo(args []platformValue) (any, error) {
 	})
 }
 
+// updatePermissions 修改或清除当前文档的Permissions权限声明
+// 入参: args 权限JSON字符串，空或null表示清除Permissions声明
+// 返回: any 编辑状态, error 校验或更新错误
+func (e *businessEngine) updatePermissions(args []platformValue) (any, error) {
+	return e.changeObjects(func() error {
+		if len(args) > 1 {
+			return fmt.Errorf("invalid document permissions arguments")
+		}
+		if len(args) == 0 || args[0].IsNull() || args[0].IsUndefined() {
+			return e.currentEditor.SetPermissions(nil)
+		}
+		raw := strings.TrimSpace(args[0].String())
+		if raw == "" || raw == "null" {
+			return e.currentEditor.SetPermissions(nil)
+		}
+		submitted := ofdgo.DefaultPermissions()
+		if err := json.Unmarshal([]byte(raw), &submitted); err != nil {
+			return err
+		}
+		return e.currentEditor.SetPermissions(&submitted)
+	})
+}
+
+// updateVPreferences 修改或清除当前文档的VPreferences视图首选项声明
+// 入参: args 视图首选项JSON字符串，空或null表示清除VPreferences声明
+// 返回: any 编辑状态, error 校验或更新错误
+func (e *businessEngine) updateVPreferences(args []platformValue) (any, error) {
+	return e.changeObjects(func() error {
+		if len(args) > 1 {
+			return fmt.Errorf("invalid document view preferences arguments")
+		}
+		if len(args) == 0 || args[0].IsNull() || args[0].IsUndefined() {
+			return e.currentEditor.SetVPreferences(nil)
+		}
+		raw := strings.TrimSpace(args[0].String())
+		if raw == "" || raw == "null" {
+			return e.currentEditor.SetVPreferences(nil)
+		}
+		var submitted ofdgo.VPreferences
+		if err := json.Unmarshal([]byte(raw), &submitted); err != nil {
+			return err
+		}
+		return e.currentEditor.SetVPreferences(&submitted)
+	})
+}
+
 // packageDocuments 按需读取管理列表的元数据和页数，不切换当前文档或解析页面内容
 // 入参: args 保留参数
 // 返回: any 文档列表, error 编辑状态错误
@@ -6373,16 +7778,17 @@ func (e *businessEngine) packageDocuments(args []platformValue) (any, error) {
 	if e.currentSession == nil || e.currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
 	}
-	entries := make([]DocumentEntry, e.currentEditor.DocumentCount())
+	docBodies := e.currentSession.Reader.OFD().DocBody
+	entries := make([]documentEntry, e.currentEditor.DocumentCount())
 	for i := range entries {
 		info, err := e.currentEditor.DocumentInfo(i)
 		if err != nil {
 			return nil, err
 		}
 		entry := &entries[i]
-		body := e.currentSession.Reader.OFD.DocBody[i]
+		body := docBodies[i]
 		entry.Index, entry.Root, entry.ID = i, body.DocRoot, info.DocID
-		entry.DocumentMetadata = documentMetadata(info)
+		entry.documentMeta = documentMetadata(info)
 		if i == e.currentEditor.DocumentIndex() {
 			count := e.currentEditor.PageCount()
 			entry.PageCount = &count
@@ -6397,28 +7803,25 @@ func (e *businessEngine) packageDocuments(args []platformValue) (any, error) {
 // 入参: args 保留参数
 // 返回: any 版本列表, error 读取错误
 func (e *businessEngine) documentVersions(args []platformValue) (any, error) {
-	if e.currentSession == nil {
-		return nil, fmt.Errorf("ofd document is not opened")
-	}
-	reader := e.currentSession.Reader
-	if e.currentEditor != nil {
-		var err error
-		reader, err = e.currentEditor.Reader(e.operationContext())
-		if err != nil {
-			return nil, err
-		}
-	}
-	versions, err := reader.DocumentVersionsContext(e.operationContext())
+	ctx := e.operationContext()
+	reader, err := e.activeReader(ctx)
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]VersionEntry, 0, len(versions)+1)
-	hasMain := reader.OFD.DocBody[reader.DocumentIndex()].DocRoot != ""
+	if e.currentSession == nil || reader != e.currentSession.Reader {
+		defer func() { _ = reader.Close() }()
+	}
+	versions, err := reader.DocumentVersionsContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]versionEntry, 0, len(versions)+1)
+	hasMain := reader.OFD().DocBody[reader.DocumentIndex()].DocRoot != ""
 	if hasMain {
-		entries = append(entries, VersionEntry{Default: true})
+		entries = append(entries, versionEntry{Default: true})
 	}
 	for _, version := range versions {
-		entries = append(entries, VersionEntry{ID: version.ID, Index: version.Index, Name: version.Name, Default: version.Current})
+		entries = append(entries, versionEntry{ID: version.ID, Index: version.Index, Name: version.Name, Default: version.Current})
 		if version.Current && hasMain {
 			entries[0].Default = false
 		}
@@ -6825,13 +8228,13 @@ func (e *businessEngine) exportVersion(args []platformValue) (any, error) {
 	}
 	compression, checkpoint := args[3], args[4]
 	ctx := e.newOutputContext(checkpoint)
-	reader := e.currentSession.Reader
-	if e.currentEditor != nil {
-		var err error
-		reader, err = e.currentEditor.Reader(ctx)
-		if err != nil {
-			return nil, err
-		}
+	defer ctx.cancel()
+	reader, err := e.activeReader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if e.currentSession == nil || reader != e.currentSession.Reader {
+		defer func() { _ = reader.Close() }()
 	}
 	version, err := reader.ExtractVersionContext(ctx, args[0].String())
 	if err != nil {
@@ -6842,6 +8245,7 @@ func (e *businessEngine) exportVersion(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = editor.Close() }()
 	return e.saveEditor(editor, []platformValue{args[1], args[2], platformNull(), compression, checkpoint})
 }
 
@@ -6852,17 +8256,18 @@ func (e *businessEngine) selectDocumentVersion(args []platformValue) (any, error
 	if e.currentSession == nil || len(args) != 1 || args[0].Type() != platformTypeString {
 		return nil, fmt.Errorf("invalid version selection")
 	}
-	session, err := e.currentSession.DocumentVersion(args[0].String())
+	nextSession, err := e.currentSession.documentVersion(args[0].String())
 	if err != nil {
 		return nil, err
 	}
-	session.editor = e.currentEditor
-	session.input, e.currentSession.input = e.currentSession.input, nil
-	_ = e.currentSession.Close()
-	e.currentSession = session
+	nextSession.editor = e.currentEditor
+	nextSession.input, e.currentSession.input = e.currentSession.input, nil
+	nextSession.ownedEditor, e.currentSession.ownedEditor = e.currentSession.ownedEditor, nil
+	_ = e.currentSession.close()
+	e.currentSession = nextSession
 	e.clearImport()
 	e.copiedObjects, e.copiedStyle = nil, nil
-	return session.Summary(), nil
+	return nextSession.summary(nil), nil
 }
 
 // changeDocumentVersion 调用库层版本操作，沿用编辑历史和预览更新流程
@@ -7005,6 +8410,7 @@ func (e *businessEngine) processFonts(args []platformValue) (any, error) {
 	options := ofdgo.FontProcessOptions{Mode: mode}
 	if len(args) > 1 && args[1].Type() == platformTypeFunction {
 		operation, report := e.newEditorOperationContext(args[1])
+		defer operation.cancel()
 		ctx = operation
 		options.OnProgress = func(stage string, completed, total int) error {
 			return report("fonts", completed, total)
@@ -7019,7 +8425,7 @@ func (e *businessEngine) processFonts(args []platformValue) (any, error) {
 	if e.currentEditor.Revision() == revision {
 		info = e.editorSummary()
 	} else {
-		info, err = e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+		info, err = e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 		if err != nil {
 			return nil, err
 		}
@@ -7069,25 +8475,145 @@ func (e *businessEngine) changePackageDocument(args []platformValue) (any, error
 }
 
 // selectDocument 切换包内文档，保留编辑快照与撤销历史并清除跨文档剪贴板
-// 入参: args 文档索引
+// 入参: args 文档索引及可选编辑态标志
 // 返回: any 文档信息, error 错误信息
 func (e *businessEngine) selectDocument(args []platformValue) (any, error) {
 	if e.currentSession == nil || len(args) == 0 {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	session, err := e.currentSession.Document(args[0].Int())
+	previousEditing := e.currentSession.editing
+	if len(args) > 1 && !args[1].IsNull() && !args[1].IsUndefined() && !args[1].Bool() {
+		e.currentSession.editing = false
+	}
+	nextSession, err := e.currentSession.document(args[0].Int())
 	if err != nil {
+		e.currentSession.editing = previousEditing
 		return nil, err
 	}
-	session.input, e.currentSession.input = e.currentSession.input, nil
-	_ = e.currentSession.Close()
-	e.currentSession, e.currentEditor = session, session.editor
+	nextSession.input, e.currentSession.input = e.currentSession.input, nil
+	nextSession.ownedEditor, e.currentSession.ownedEditor = e.currentSession.ownedEditor, nil
+	_ = e.currentSession.close()
+	e.currentSession, e.currentEditor = nextSession, nextSession.editor
 	e.clearImport()
 	e.copiedObjects, e.copiedStyle = nil, nil
 	if !e.currentSession.editing {
-		return e.currentSession.Summary(), nil
+		return e.currentSession.summary(nil), nil
 	}
 	return e.editorSummary(), nil
+}
+
+// activeReader 获取与当前视图文档及版本对齐的只读快照，保留未保存修改
+// 入参: ctx 取消上下文
+// 返回: *ofdgo.Reader 当前视图读取器, error 快照或定位错误
+func (e *businessEngine) activeReader(ctx context.Context) (*ofdgo.Reader, error) {
+	if e.currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	if e.currentEditor == nil {
+		return e.currentSession.Reader, nil
+	}
+	docIndex := e.currentSession.Reader.DocumentIndex()
+	verID, err := e.currentSession.Reader.DocumentVersionID()
+	if err != nil {
+		return nil, err
+	}
+	reader, err := e.currentEditor.Reader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	keep := false
+	defer func() {
+		if !keep && reader != nil {
+			_ = reader.Close()
+		}
+	}()
+	if reader.DocumentIndex() != docIndex {
+		next, err := reader.DocumentContext(ctx, docIndex)
+		if err != nil {
+			return nil, err
+		}
+		_ = reader.Close()
+		reader = next
+	}
+	currentVer, err := reader.DocumentVersionID()
+	if err != nil {
+		return nil, err
+	}
+	if currentVer != verID {
+		next, err := reader.DocumentVersionContext(ctx, verID)
+		if err != nil {
+			return nil, err
+		}
+		_ = reader.Close()
+		reader = next
+	}
+	keep = true
+	return reader, nil
+}
+
+// editorTargetMismatch 检查当前编辑器与会话视图的文档或版本是否不一致
+// 返回: bool 是否失步, error 版本读取错误
+func (e *businessEngine) editorTargetMismatch() (bool, error) {
+	if e.currentEditor == nil || e.currentSession == nil {
+		return false, nil
+	}
+	if e.currentEditor.DocumentIndex() != e.currentSession.Reader.DocumentIndex() {
+		return true, nil
+	}
+	verID, err := e.currentSession.Reader.DocumentVersionID()
+	if err != nil {
+		return false, err
+	}
+	editorVer, err := e.currentEditor.DocumentVersionID()
+	if err != nil {
+		return false, err
+	}
+	return editorVer != verID, nil
+}
+
+// alignEditorTarget 将指定编辑器原子对齐到当前会话视图的文档与版本
+// 入参: ctx 取消上下文, editor 目标编辑器
+// 返回: bool 是否发生切换, error 对齐或取消错误
+func (e *businessEngine) alignEditorTarget(ctx context.Context, editor *ofdgo.Editor) (bool, error) {
+	if editor == nil || e.currentSession == nil {
+		return false, nil
+	}
+	docIndex := e.currentSession.Reader.DocumentIndex()
+	verID, err := e.currentSession.Reader.DocumentVersionID()
+	if err != nil {
+		return false, err
+	}
+	editorVer, err := editor.DocumentVersionID()
+	if err != nil {
+		return false, err
+	}
+	if editor.DocumentIndex() == docIndex && editorVer == verID {
+		return false, nil
+	}
+	err = editor.Transaction(func(next *ofdgo.Editor) error {
+		if next.DocumentIndex() != docIndex {
+			if err := next.SelectDocumentContext(ctx, docIndex); err != nil {
+				return err
+			}
+		}
+		currentVer, err := next.DocumentVersionID()
+		if err != nil {
+			return err
+		}
+		if currentVer != verID {
+			return next.SelectVersionContext(ctx, verID)
+		}
+		return nil
+	})
+	return err == nil, err
+}
+
+// syncEditorTarget 将当前编辑器原子对齐到当前会话视图的文档与版本
+// 入参: ctx 取消上下文
+// 返回: error 对齐或取消错误
+func (e *businessEngine) syncEditorTarget(ctx context.Context) error {
+	_, err := e.alignEditorTarget(ctx, e.currentEditor)
+	return err
 }
 
 // editDocument 将已打开文档接入编辑器，沿用页面、资源及字体配置并同步阅读态切换的文档与版本
@@ -7103,32 +8629,14 @@ func (e *businessEngine) editDocument(args []platformValue) (any, error) {
 		page = args[0].Int()
 	}
 	if e.currentEditor != nil {
-		docIndex := e.currentSession.Reader.DocumentIndex()
-		verID, err := e.currentSession.Reader.DocumentVersionID()
+		switched, err := e.alignEditorTarget(ctx, e.currentEditor)
 		if err != nil {
 			return nil, err
-		}
-		switched := false
-		if e.currentEditor.DocumentIndex() != docIndex {
-			if err := e.currentEditor.SelectDocumentContext(ctx, docIndex); err != nil {
-				return nil, err
-			}
-			switched = true
-		}
-		editorVer, err := e.currentEditor.DocumentVersionID()
-		if err != nil {
-			return nil, err
-		}
-		if editorVer != verID {
-			if err := e.currentEditor.SelectVersionContext(ctx, verID); err != nil {
-				return nil, err
-			}
-			switched = true
 		}
 		if switched {
 			e.currentSession.editing = true
 			e.copiedObjects, e.copiedStyle = nil, nil
-			return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+			return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 		}
 		content, err := e.currentEditor.PageContext(ctx, page)
 		if err != nil {
@@ -7144,11 +8652,15 @@ func (e *businessEngine) editDocument(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	keepEditor := false
+	defer func() {
+		if !keepEditor {
+			_ = editor.Close()
+		}
+	}()
 	editor.SetHistoryLimit(100)
-	if e.currentSession.fontFS != nil {
-		editor.SetFontFS(e.currentSession.fontFS)
-	}
-	editor.SetRenderBackends(e.currentSession.Renderer.Backends())
+	e.syncEditorFontFS(editor, e.currentSession.fontFS)
+	e.syncEditorBackends(editor, e.currentSession.Renderer.Backends())
 	content, err := editor.PageContext(ctx, page)
 	if err != nil {
 		return nil, err
@@ -7162,6 +8674,7 @@ func (e *businessEngine) editDocument(args []platformValue) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	keepEditor = true
 	e.currentEditor = editor
 	e.currentSession.editor = editor
 	e.currentSession.editing = true
@@ -7170,11 +8683,39 @@ func (e *businessEngine) editDocument(args []platformValue) (any, error) {
 	return e.editorSummary(), nil
 }
 
+// setEditing 同步当前会话编辑态标志并刷新附件可见性
+// 入参: args 布尔编辑态开关
+// 返回: any 编辑态与最新附件列表, error 错误信息
+func (e *businessEngine) setEditing(args []platformValue) (any, error) {
+	if e.currentSession == nil || len(args) == 0 {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	editing := args[0].Bool()
+	if editing && e.currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	if e.currentSession.editing != editing {
+		e.currentSession.editing = editing
+		e.currentSession.textCache.Clear()
+	}
+	attachments, attachErr, err := e.currentSession.attachmentInfos(e.operationContext())
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"editing": editing, "attachments": attachments, "attachmentError": attachErr}, nil
+}
+
 // syncEditorPageIDs 同步编辑副本的对象编号，不改变原渲染属性或丢弃正常页面缓存
 // 入参: index 页面索引, content 编辑页面
 // 返回: error 页面读取错误
 func (e *businessEngine) syncEditorPageIDs(index int, content *ofdgo.PageContent) error {
-	page := e.currentSession.pageCache[index]
+	if e.currentSession == nil || content == nil {
+		return nil
+	}
+	if mismatch, err := e.editorTargetMismatch(); err != nil || mismatch {
+		return err
+	}
+	page, _ := e.currentSession.cachedPage(index)
 	if page == nil {
 		var err error
 		page, err = e.currentSession.pageContent(index)
@@ -7182,22 +8723,32 @@ func (e *businessEngine) syncEditorPageIDs(index int, content *ofdgo.PageContent
 			return err
 		}
 	}
+	if page == nil {
+		return nil
+	}
 	repaired := false
 	for i, layer := range content.Content.Layer {
+		if i >= len(page.Content.Layer) {
+			break
+		}
+		dstObjects := page.Content.Layer[i].Objects
 		for j, object := range layer.Objects {
-			before := &page.Content.Layer[i].Objects[j]
-			if before.TextObject.ID != object.TextObject.ID || before.PathObject.ID != object.PathObject.ID || before.ImageObject.ID != object.ImageObject.ID || before.CompositeGraphicUnit.ID != object.CompositeGraphicUnit.ID {
+			if j >= len(dstObjects) {
+				break
+			}
+			before := &dstObjects[j]
+			if before.TextObject.ID != object.TextObject.ID || before.PathObject.ID != object.PathObject.ID || before.ImageObject.ID != object.ImageObject.ID || before.CompositeObject.ID != object.CompositeObject.ID {
 				before.TextObject.ID = object.TextObject.ID
 				before.PathObject.ID = object.PathObject.ID
 				before.ImageObject.ID = object.ImageObject.ID
-				before.CompositeGraphicUnit.ID = object.CompositeGraphicUnit.ID
+				before.CompositeObject.ID = object.CompositeObject.ID
 				repaired = true
 			}
 		}
 	}
 	if repaired {
 		e.currentSession.textCache.Delete(index)
-		if e.currentSession.pageCache[index] == nil {
+		if !e.currentSession.hasCachedPage(index) {
 			e.currentSession.cachePageContent(index, page)
 		}
 	}
@@ -7215,21 +8766,22 @@ func (e *businessEngine) previewEditor(editor *ofdgo.Editor, annotations bool) (
 	if err != nil {
 		return editorInfo{}, err
 	}
-	opts := OpenOptions{RenderAnnotations: annotations}
+	opts := openOptions{RenderAnnotations: annotations}
 	if e.currentSession != nil {
 		opts.RendererOptions = append(opts.RendererOptions, ofdgo.WithRenderBackends(e.currentSession.Renderer.Backends()))
 		if e.currentSession.fontFS != nil {
 			opts.RendererOptions = append(opts.RendererOptions, ofdgo.WithFontFS(e.currentSession.fontFS))
 		}
 	}
-	session, err := newSession(reader, opts)
+	nextSession, err := newSession(reader, opts)
 	if err != nil {
+		_ = reader.Close()
 		return editorInfo{}, err
 	}
-	editor.SetFontFS()
+	var targetFontFS *ofdgo.FontFS
 	if e.currentSession != nil {
 		previous := e.currentSession.Reader
-		oldBody, newBody := previous.OFD.DocBody[previous.DocumentIndex()], reader.OFD.DocBody[reader.DocumentIndex()]
+		oldBody, newBody := previous.OFD().DocBody[previous.DocumentIndex()], reader.OFD().DocBody[reader.DocumentIndex()]
 		oldVersion, _ := previous.DocumentVersionID()
 		newVersion, _ := reader.DocumentVersionID()
 		sameDocument := oldBody.DocRoot == newBody.DocRoot && oldBody.DocInfo.DocID == newBody.DocInfo.DocID && oldVersion == newVersion
@@ -7238,58 +8790,96 @@ func (e *businessEngine) previewEditor(editor *ofdgo.Editor, annotations bool) (
 			e.clearImport()
 		}
 		if e.currentSession.fontFS != nil {
-			session.fontFS = e.currentSession.fontFS
-			editor.SetFontFS(session.fontFS)
+			nextSession.fontFS = e.currentSession.fontFS
+			targetFontFS = nextSession.fontFS
 		}
 		changes := editor.Changes()
-		if editor == e.currentEditor && sameDocument && !changes.All && len(session.boxCache) == len(e.currentSession.boxCache) {
-			session.summaryChanges = &changes
-			session.baseRevision = e.currentSession.revision
+		if editor == e.currentEditor && sameDocument && !changes.All && len(nextSession.boxCache) == len(e.currentSession.boxCache) {
+			nextSession.summaryChanges = &changes
+			nextSession.baseRevision = e.currentSession.revision
 			oldFonts, oldError := previous.Fonts()
 			newFonts, newError := reader.Fonts()
 			sameFonts := oldError == nil && newError == nil && reflect.DeepEqual(oldFonts, newFonts)
-			session.detailsUnchanged = sameFonts && session.doc.CustomTags.Path == "" && len(session.doc.CustomTags.CustomTag) == 0 && !slices.ContainsFunc(reader.OFD.DocBody, func(body ofdgo.DocBody) bool { return body.Signatures != "" })
+			nextSession.detailsUnchanged = sameFonts && sameDocumentSignatures(previous, reader) && sameExternalCustomTags(previous, reader)
 			if sameFonts && e.currentSession.fontScan != nil {
-				session.fontScan, _ = e.currentSession.fontScan.Refresh(session.Renderer, changes.Pages)
-				session.fontAnnotations = session.Renderer.RenderAnnotations
+				nextSession.fontScan, _ = e.currentSession.fontScan.Refresh(nextSession.Renderer, changes.Pages)
+				nextSession.fontAnnotations = nextSession.Renderer.RenderAnnotations()
 			}
 			changed := changes.Pages
-			for index, page := range e.currentSession.pageCache {
+			e.currentSession.pageCache.rangeEntries(func(index int, page *ofdgo.PageContent) {
 				if !slices.Contains(changed, index) {
-					session.pageCache[index] = page
+					nextSession.cachePageContent(index, page)
 				}
-			}
+			})
 			e.currentSession.textCache.Range(func(index int, text *ofdgo.PageText) bool {
 				if !slices.Contains(changed, index) {
-					session.cachePageText(index, text)
+					nextSession.cachePageText(index, text)
 				}
 				return true
 			})
 			for index, box := range e.currentSession.boxCache {
 				if !slices.Contains(changed, index) {
-					session.boxCache[index] = box
+					nextSession.boxCache[index] = box
+				}
+			}
+			if sameDocumentTemplates(previous, reader) {
+				for index, flag := range e.currentSession.openActionCache {
+					if !slices.Contains(changed, index) {
+						nextSession.openActionCache[index] = flag
+					}
 				}
 			}
 		}
 		if editor == e.currentEditor {
-			session.input, e.currentSession.input = e.currentSession.input, nil
+			nextSession.input, e.currentSession.input = e.currentSession.input, nil
+			nextSession.ownedEditor, e.currentSession.ownedEditor = e.currentSession.ownedEditor, nil
 		}
-		_ = e.currentSession.Close()
+		_ = e.currentSession.close()
 	}
-	editor.SetRenderBackends(session.Renderer.Backends())
-	e.currentSession = session
-	session.editor = editor
-	session.editing = true
-	session.revision = editor.Revision()
 	if e.currentEditor != editor {
+		_ = e.closeCurrentEditor()
 		e.copiedObjects = nil
 		e.copiedStyle = nil
 	}
+	e.syncEditorFontFS(editor, targetFontFS)
+	e.syncEditorBackends(editor, nextSession.Renderer.Backends())
+	e.currentSession = nextSession
+	nextSession.editor = editor
+	nextSession.editing = true
+	nextSession.revision = editor.Revision()
 	e.currentEditor = editor
-	if session.summaryChanges != nil {
-		return e.editorSummaryPages(append([]int{}, session.summaryChanges.Pages...)), nil
+	if nextSession.summaryChanges != nil {
+		return e.editorSummaryPages(append([]int{}, nextSession.summaryChanges.Pages...)), nil
 	}
 	return e.editorSummary(), nil
+}
+
+// syncEditorFontFS 仅在编辑器实例或外部字体文件系统变化时更新配置，保留字体度量缓存
+// 入参: editor 编辑实例, fontFS 目标外部字体文件系统
+func (e *businessEngine) syncEditorFontFS(editor *ofdgo.Editor, fontFS *ofdgo.FontFS) {
+	if editor == nil {
+		return
+	}
+	if e.editorFontSynced && e.editorFontOwner == editor && e.editorFontFS == fontFS {
+		return
+	}
+	if fontFS != nil {
+		editor.SetFontFS(fontFS)
+	} else {
+		editor.SetFontFS()
+	}
+	e.editorFontOwner = editor
+	e.editorFontFS = fontFS
+	e.editorFontSynced = true
+}
+
+// syncEditorBackends 仅在渲染后端实际变化时更新编辑器配置，避免无谓重建字体渲染器
+// 入参: editor 编辑实例, backends 目标渲染后端
+func (e *businessEngine) syncEditorBackends(editor *ofdgo.Editor, backends ofdgo.RenderBackends) {
+	if editor == nil || reflect.DeepEqual(editor.Backends(), backends) {
+		return
+	}
+	editor.SetRenderBackends(backends)
 }
 
 // setEditorColor 写入当前文档的RGB纯色，保留透明度并替换原颜色空间和索引
@@ -7334,59 +8924,53 @@ func (e *businessEngine) editorPathScale(object ofdgo.PathObject) float64 {
 	return math.Sqrt(math.Abs((ax-x)*(by-y) - (ay-y)*(bx-x)))
 }
 
+// pathStyleFromJS 将浏览器图形样式参数转换为库层样式增量
+// 入参: args 填充开关及色值、描边开关及色值、线宽，null保持原值
+// 返回: ofdgo.PathStyle 路径样式增量, error 色值解析错误
+func (e *businessEngine) pathStyleFromJS(args []platformValue) (ofdgo.PathStyle, error) {
+	var style ofdgo.PathStyle
+	if !args[0].IsNull() {
+		fill := args[0].Bool()
+		style.Fill = &fill
+	}
+	if !args[1].IsNull() {
+		var fillColor ofdgo.FillColor
+		if err := e.setEditorColor(&fillColor, args[1].String()); err != nil {
+			return ofdgo.PathStyle{}, err
+		}
+		style.FillColor = &fillColor
+	}
+	if !args[2].IsNull() {
+		stroke := args[2].Bool()
+		style.Stroke = &stroke
+	}
+	if !args[3].IsNull() {
+		var strokeColor ofdgo.StrokeColor
+		if err := e.setEditorColor((*ofdgo.FillColor)(&strokeColor), args[3].String()); err != nil {
+			return ofdgo.PathStyle{}, err
+		}
+		style.StrokeColor = &strokeColor
+	}
+	if !args[4].IsNull() {
+		width := args[4].Float()
+		style.LineWidth = &width
+	}
+	return style, nil
+}
+
 // setPathStyle 应用图形填充、描边和线宽
 // 入参: object 路径对象, args 填充开关及色值、描边开关及色值、线宽，null保持原值
 // 返回: error 错误信息
 func (e *businessEngine) setPathStyle(object *ofdgo.PathObject, args []platformValue) error {
-	fill, stroke := object.Fill != nil && *object.Fill, object.Stroke == nil || *object.Stroke
-	if !args[0].IsNull() {
-		fill = args[0].Bool()
+	style, err := e.pathStyleFromJS(args)
+	if err != nil {
+		return err
 	}
-	if !args[2].IsNull() {
-		stroke = args[2].Bool()
+	updated, err := ofdgo.StylePath(*object, style)
+	if err != nil {
+		return err
 	}
-	if kind, _ := object.Shape(); kind == ofdgo.ShapeLine || kind == ofdgo.ShapeArrow || kind == ofdgo.ShapeDoubleArrow {
-		fill, stroke = false, true
-	}
-	if !fill && !stroke {
-		if args[0].IsNull() || args[2].IsNull() {
-			stroke = true
-		} else {
-			return fmt.Errorf("fill or stroke must be enabled")
-		}
-	}
-	if !args[0].IsNull() || fill != (object.Fill != nil && *object.Fill) {
-		object.Fill = &fill
-	}
-	if !args[2].IsNull() || stroke != (object.Stroke == nil || *object.Stroke) {
-		object.Stroke = &stroke
-	}
-	if !args[4].IsNull() {
-		width := args[4].Float()
-		if width < 0 || math.IsNaN(width) || math.IsInf(width, 0) {
-			return fmt.Errorf("line width must be nonnegative and finite")
-		}
-		if scale := e.editorPathScale(*object); width != object.LineWidth*scale {
-			object.LineWidth = width / scale
-		}
-		object.LineWidthSet = width == 0
-	}
-	if !args[1].IsNull() {
-		if object.FillColor == nil {
-			object.FillColor = &ofdgo.FillColor{}
-		}
-		if err := e.setEditorColor(object.FillColor, args[1].String()); err != nil {
-			return err
-		}
-	}
-	if !args[3].IsNull() {
-		if object.StrokeColor == nil {
-			object.StrokeColor = &ofdgo.StrokeColor{}
-		}
-		if err := e.setEditorColor((*ofdgo.FillColor)(object.StrokeColor), args[3].String()); err != nil {
-			return err
-		}
-	}
+	*object = updated
 	return nil
 }
 
@@ -7417,22 +9001,11 @@ func (e *businessEngine) insertShape(args []platformValue) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func (e *businessEngine) updatePathStyle(args []platformValue) (any, error) {
 	return e.changeObjects(func() error {
-		page, ids := args[0].Int(), e.stringsFromJS(args[1])
-		objects := make([]ofdgo.GraphicObject, len(ids))
-		for i, id := range ids {
-			object, err := e.currentEditor.Object(page, id)
-			if err != nil {
-				return err
-			}
-			if object.Type != "PathObject" {
-				return fmt.Errorf("object is not a path")
-			}
-			if err := e.setPathStyle(&object.PathObject, args[2:]); err != nil {
-				return err
-			}
-			objects[i] = object
+		style, err := e.pathStyleFromJS(args[2:])
+		if err != nil {
+			return err
 		}
-		return e.currentEditor.UpdateObjects(page, objects)
+		return e.currentEditor.UpdatePathStyle(args[0].Int(), e.stringsFromJS(args[1]), style)
 	})
 }
 
@@ -7527,7 +9100,7 @@ func (e *businessEngine) previewImage(args []platformValue) (any, error) {
 		return nil, fmt.Errorf("image object %q not found", id)
 	}
 	var out bytes.Buffer
-	resources, err := e.currentSession.Renderer.RenderToSVGWithResources(page, &out)
+	resources, err := e.currentSession.Renderer.RenderToSVGWithResourcesContext(e.operationContext(), page, &out)
 	if err != nil {
 		return nil, err
 	}
@@ -7642,7 +9215,7 @@ func (e *businessEngine) changeAtomicObjects(apply func() error) (any, error) {
 	if e.currentEditor.Revision() == revision {
 		return e.editorSummary(), nil
 	}
-	return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 }
 
 // insertImage 按原始比例创建图片对象
@@ -7697,7 +9270,7 @@ func (e *businessEngine) insertImage(args []platformValue) (any, error) {
 	}); err != nil {
 		return nil, err
 	}
-	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 	return editorSelectionInfo{info, []string{id}}, err
 }
 
@@ -7729,7 +9302,7 @@ func (e *businessEngine) insertEditorObject(page int, object ofdgo.GraphicObject
 	if err != nil {
 		return nil, err
 	}
-	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations())
 	return editorSelectionInfo{info, []string{id}}, err
 }
 
@@ -7821,36 +9394,39 @@ func (e *businessEngine) verifySignatures(args []platformValue) (any, error) {
 		}
 		files[name] = data
 	}
-	now := time.Now()
+	var verifyTime *time.Time
 	if rawTime := strings.TrimSpace(optionalString(input.Get("verifyTime"))); rawTime != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, rawTime)
 		if err != nil {
 			return nil, fmt.Errorf("invalid verifyTime %q", rawTime)
 		}
-		now = parsed
+		verifyTime = &parsed
 	}
 	policy := ofdgo.SignaturePolicy{RejectWeakAlgorithms: true, RequireDocumentCoverage: true,
 		RequireTimestamp: input.Get("requireTimestamp").Bool(), RequireRevocation: input.Get("requireRevocation").Bool()}
 	options := []ofdgo.SignatureVerifyOption{
-		ofdgo.WithSignatureVerifyTime(now), ofdgo.WithSignaturePolicy(policy),
+		ofdgo.WithSignaturePolicy(policy),
 		ofdgo.WithSignatureTrustCerts(files["roots"]...), ofdgo.WithSignatureCerts(files["certificates"]...),
+	}
+	if verifyTime != nil {
+		options = append(options, ofdgo.WithSignatureVerifyTime(*verifyTime))
 	}
 	if policy.RequireTimestamp || len(files["timestampRoots"])+len(files["tokens"]) > 0 {
 		options = append(options, ofdgo.WithSignatureTimestamp(ofdgo.SignatureTimestampOptions{
-			TrustCerts: files["timestampRoots"], Certificates: files["certificates"], Tokens: files["tokens"], Required: policy.RequireTimestamp, VerifyTime: &now,
+			TrustCerts: files["timestampRoots"], Certificates: files["certificates"], Tokens: files["tokens"], Required: policy.RequireTimestamp, VerifyTime: verifyTime,
 		}))
 	}
 	if policy.RequireRevocation || len(files["crls"])+len(files["ocsp"]) > 0 {
 		options = append(options, ofdgo.WithSignatureRevocation(ofdgo.SignatureRevocationOptions{
 			SignatureRevocationEvidence: ofdgo.SignatureRevocationEvidence{CRLs: files["crls"], OCSPResponses: files["ocsp"]},
-			Certificates:                append(files["certificates"], files["roots"]...), Required: policy.RequireRevocation, VerifyTime: &now,
+			Certificates:                slices.Concat(files["certificates"], files["roots"]), Required: policy.RequireRevocation, VerifyTime: verifyTime,
 		}))
 	}
-	reports, err := e.currentSession.Reader.VerifyDocumentSignatures(e.currentSession.Reader.DocumentIndex(), options...)
+	reports, err := e.currentSession.Reader.VerifyDocumentSignaturesContext(e.operationContext(), e.currentSession.Reader.DocumentIndex(), options...)
 	if err != nil {
 		return nil, err
 	}
-	infos := make([]SignatureInfo, len(reports))
+	infos := make([]signatureInfo, len(reports))
 	for i, report := range reports {
 		infos[i] = e.currentSession.signatureInfo(report)
 	}
@@ -7876,6 +9452,8 @@ func (e *businessEngine) setEncryption(args []platformValue) (any, error) {
 		if _, err := e.editDocument(nil); err != nil {
 			return nil, err
 		}
+	} else if err := e.syncEditorTarget(e.operationContext()); err != nil {
+		return nil, err
 	}
 	if err := e.currentEditor.SetEncryption(options); err != nil {
 		return nil, err
@@ -7957,32 +9535,12 @@ func (e *businessEngine) previewSignatureSeal(args []platformValue) (any, error)
 		}
 		pages = append(pages, map[string]any{"index": index, "width": box.W, "height": box.H})
 	}
-	editor := ofdgo.NewEditor()
-	editor.SetResources(e.resources)
-	if _, err := editor.AddPage(seal.Width, seal.Height); err != nil {
-		return nil, err
-	}
-	reader, err := editor.Reader(e.operationContext())
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
-	doc, err := reader.Doc()
-	if err != nil {
-		return nil, err
-	}
-	reader.Stamps = map[string][]ofdgo.Stamp{doc.Pages.Page[0].ID: {{Box: ofdgo.Box{W: seal.Width, H: seal.Height}, Type: seal.Type, Data: seal.Data}}}
-	renderer := ofdgo.NewRenderer(reader, ofdgo.WithRenderBackends(e.currentSession.Renderer.Backends()))
-	renderer.TransparentBackground = true
+	rendererOpts := []ofdgo.RendererOption{ofdgo.WithRenderBackends(e.currentSession.Renderer.Backends())}
 	if e.currentSession.fontFS != nil {
-		renderer.SetFontFS(e.currentSession.fontFS)
-	}
-	page, err := reader.PageContentByIndex(0)
-	if err != nil {
-		return nil, err
+		rendererOpts = append(rendererOpts, ofdgo.WithFontFS(e.currentSession.fontFS))
 	}
 	var svg bytes.Buffer
-	if err := renderer.RenderToSVG(page, &svg); err != nil {
+	if err := ofdgo.RenderStampToSVG(e.operationContext(), ofdgo.Stamp{Box: ofdgo.Box{W: seal.Width, H: seal.Height}, Type: seal.Type, Data: seal.Data}, &svg, rendererOpts...); err != nil {
 		return nil, err
 	}
 	return map[string]any{"svg": svg.String(), "width": seal.Width, "height": seal.Height, "pages": pages}, nil
@@ -8009,7 +9567,7 @@ func (e *businessEngine) signatureStampsFromJS(input platformValue) ([]ofdgo.Sig
 			if err != nil {
 				return nil, err
 			}
-			pageStamps, err := e.currentSession.Reader.SignaturePageStamps([]int{index + 1}, ofdgo.Box{X: pageBox.X + box.X, Y: pageBox.Y + box.Y, W: box.W, H: box.H})
+			pageStamps, err := e.currentSession.Reader.SignaturePageStamps([]int{index}, ofdgo.Box{X: pageBox.X + box.X, Y: pageBox.Y + box.Y, W: box.W, H: box.H})
 			if err != nil {
 				return nil, err
 			}
@@ -8017,14 +9575,80 @@ func (e *businessEngine) signatureStampsFromJS(input platformValue) ([]ofdgo.Sig
 		}
 		return stamps, nil
 	case "seam":
-		pages := make([]int, len(indices))
-		for i, index := range indices {
-			pages[i] = index + 1
-		}
-		return e.currentSession.Reader.SignatureSeamStamps(pages, box)
+		return e.currentSession.signatureSeamStamps(indices, box)
 	default:
 		return nil, fmt.Errorf("invalid stamp placement")
 	}
+}
+
+// signatureSeamStamps 按视口页面边界与物理区域差值换算骑缝印章位置
+// 入参: indices 零基页码列表, box 视口基准下的右侧内缩、顶部偏移和完整印章尺寸
+// 返回: []ofdgo.SignatureStamp 骑缝印章位置列表, error 校验或读取错误
+func (s *session) signatureSeamStamps(indices []int, box ofdgo.Box) ([]ofdgo.SignatureStamp, error) {
+	if s == nil || s.Reader == nil || s.doc == nil {
+		return nil, fmt.Errorf("invalid seam stamp parameters")
+	}
+	if len(indices) < 2 || math.IsNaN(box.X) || math.IsInf(box.X, 0) || math.IsNaN(box.Y) || math.IsInf(box.Y, 0) || math.IsNaN(box.W) || math.IsInf(box.W, 0) || math.IsNaN(box.H) || math.IsInf(box.H, 0) || box.X < 0 || box.Y < 0 || box.W <= 0 || box.H <= 0 {
+		return s.Reader.SignatureSeamStamps(indices, box)
+	}
+	pageBoxes := make([]ofdgo.Box, len(indices))
+	physicalBoxes := make([]ofdgo.Box, len(indices))
+	seen := make(map[int]bool, len(indices))
+	uniform := true
+	var baseDX, baseDY float64
+	for i, index := range indices {
+		if index < 0 || index >= len(s.doc.Pages.Page) || seen[index] {
+			return s.Reader.SignatureSeamStamps(indices, box)
+		}
+		seen[index] = true
+		pageBox, err := s.pageBox(index, nil)
+		if err != nil {
+			return nil, err
+		}
+		physical, err := signaturePageAreaBox(s.Reader, s.doc.Pages.Page[index])
+		if err != nil {
+			return nil, err
+		}
+		pageBoxes[i], physicalBoxes[i] = pageBox, physical
+		dx := (physical.X + physical.W) - (pageBox.X + pageBox.W)
+		dy := pageBox.Y - physical.Y
+		if i == 0 {
+			baseDX, baseDY = dx, dy
+		} else if math.Abs(dx-baseDX) > 1e-9 || math.Abs(dy-baseDY) > 1e-9 {
+			uniform = false
+		}
+	}
+	if uniform && box.X+baseDX >= 0 && box.Y+baseDY >= 0 {
+		return s.Reader.SignatureSeamStamps(indices, ofdgo.Box{X: box.X + baseDX, Y: box.Y + baseDY, W: box.W, H: box.H})
+	}
+	pageIDs := make(map[string]bool, len(s.doc.Pages.Page))
+	for _, page := range s.doc.Pages.Page {
+		id := strings.TrimSpace(page.ID)
+		if id == "" || pageIDs[id] {
+			return nil, fmt.Errorf("ambiguous stamp page ID: %s", page.ID)
+		}
+		pageIDs[id] = true
+	}
+	sliceW := box.W / float64(len(indices))
+	stamps := make([]ofdgo.SignatureStamp, 0, len(indices))
+	for i, index := range indices {
+		pageBox, physical := pageBoxes[i], physicalBoxes[i]
+		clip := ofdgo.Box{X: float64(i) * sliceW, W: sliceW, H: box.H}
+		boundary := ofdgo.Box{X: pageBox.X + pageBox.W - box.X - sliceW - clip.X, Y: pageBox.Y + box.Y, W: box.W, H: box.H}
+		visX, visY := boundary.X+clip.X, boundary.Y
+		if visX < physical.X-1e-9 || visY < physical.Y-1e-9 || visX+sliceW > physical.X+physical.W+1e-9 || visY+box.H > physical.Y+physical.H+1e-9 {
+			return nil, fmt.Errorf("stamp is outside page %d", index+1)
+		}
+		stamps = append(stamps, ofdgo.SignatureStamp{
+			PageRef:  s.doc.Pages.Page[index].ID,
+			Boundary: signatureBoxText(boundary),
+			Clip:     signatureBoxText(clip),
+		})
+	}
+	if _, err := s.Reader.SignatureStampPositions(stamps); err != nil {
+		return nil, err
+	}
+	return stamps, nil
 }
 
 // signaturePlacement 校验预览确认的印章范围，不生成签名
@@ -8065,7 +9689,7 @@ func (e *businessEngine) saveSigned(args []platformValue) (any, error) {
 	}
 	signer, certificate, err := ofdgo.ParseSignatureIdentity(certificate, key, password)
 	if err != nil {
-		return nil, fmt.Errorf("证书、私钥或口令无效")
+		return nil, signatureIdentityError(err)
 	}
 	roots, err := e.securityFilesFromJS(input.Get("roots"))
 	if err != nil {
@@ -8075,8 +9699,12 @@ func (e *businessEngine) saveSigned(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	prepareAllDocuments := e.currentSession.Reader.DocumentCount() > 1
+	if field := input.Get("prepareAllDocuments"); !field.IsUndefined() && !field.IsNull() {
+		prepareAllDocuments = field.Bool()
+	}
 	options := ofdgo.SignatureWriteOptions{Signer: signer, Certificate: certificate, TrustRoots: roots,
-		Intermediates: intermediates, Lock: input.Get("lock").Bool()}
+		Intermediates: intermediates, Lock: input.Get("lock").Bool(), PrepareAllDocuments: prepareAllDocuments}
 	if compression := input.Get("compression"); !compression.IsUndefined() && !compression.IsNull() {
 		if err := e.compressionFromJS(compression, &options.Compression); err != nil {
 			return nil, err
@@ -8124,8 +9752,14 @@ func (e *businessEngine) saveSigned(args []platformValue) (any, error) {
 		var editor *ofdgo.Editor
 		if e.currentEditor != nil {
 			editor, err = e.currentEditor.Snapshot(ctx)
+			if err == nil {
+				_, err = e.alignEditorTarget(ctx, editor)
+			}
 		} else {
 			editor, err = e.currentSession.Reader.EditorContext(ctx)
+		}
+		if editor != nil {
+			defer func() { _ = editor.Close() }()
 		}
 		if err != nil {
 			return nil, err
@@ -8135,12 +9769,29 @@ func (e *businessEngine) saveSigned(args []platformValue) (any, error) {
 		}
 		editor.OnWriteProgress = progress
 		defer func() { editor.OnWriteProgress = nil }()
-		_, err = ofdgo.SignEditorToContext(ctx, writer, editor, options)
+		_, err = editor.SignToContext(ctx, writer, options)
 	} else if e.currentEditor != nil {
-		e.currentEditor.OnWriteProgress = progress
-		defer func() { e.currentEditor.OnWriteProgress = nil }()
-		_, err = ofdgo.SignEditorToContext(ctx, writer, e.currentEditor, options)
+		editor := e.currentEditor
+		var mismatch bool
+		mismatch, err = e.editorTargetMismatch()
+		if err == nil && mismatch {
+			var snapshot *ofdgo.Editor
+			snapshot, err = e.currentEditor.Snapshot(ctx)
+			if snapshot != nil {
+				defer func() { _ = snapshot.Close() }()
+			}
+			if err == nil {
+				_, err = e.alignEditorTarget(ctx, snapshot)
+				editor = snapshot
+			}
+		}
+		if err == nil {
+			editor.OnWriteProgress = progress
+			defer func() { editor.OnWriteProgress = nil }()
+			_, err = editor.SignToContext(ctx, writer, options)
+		}
 	} else {
+		options.OnProgress = progress
 		_, err = e.currentSession.Reader.SignToContext(ctx, writer, options)
 	}
 	if err != nil {
@@ -8159,27 +9810,34 @@ func (e *businessEngine) saveSigned(args []platformValue) (any, error) {
 // 入参: args 取消检查回调
 // 返回: any 快照修订, error 准备错误
 func (e *businessEngine) prepareSave(args []platformValue) (any, error) {
-	e.saveSnapshot = nil
+	e.closeSaveSnapshot()
+	ctx := e.operationContext()
+	if len(args) > 0 {
+		operation := e.newOutputContext(args[0])
+		defer operation.cancel()
+		ctx = operation
+	}
 	editor := e.currentEditor
 	if editor == nil {
 		if e.currentSession == nil {
 			return nil, fmt.Errorf("ofd document is not opened")
 		}
 		var err error
-		editor, err = e.currentSession.Reader.Editor()
+		editor, err = e.currentSession.Reader.EditorContext(ctx)
 		if err != nil {
 			return nil, err
 		}
-	}
-	ctx := e.operationContext()
-	if len(args) > 0 {
-		ctx = e.newOutputContext(args[0])
+		defer func() { _ = editor.Close() }()
 	}
 	snapshot, err := editor.Snapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
-	e.saveSnapshot = snapshot
+	if _, err := e.alignEditorTarget(ctx, snapshot); err != nil {
+		_ = snapshot.Close()
+		return nil, err
+	}
+	e.setSaveSnapshot(snapshot)
 	return successResult(map[string]any{"revision": editor.Revision()}), nil
 }
 
@@ -8187,11 +9845,11 @@ func (e *businessEngine) prepareSave(args []platformValue) (any, error) {
 // 入参: args 写出回调、进度回调及输出配置
 // 返回: any 保存结果, error 保存错误
 func (e *businessEngine) savePrepared(args []platformValue) (any, error) {
-	snapshot := e.saveSnapshot
-	e.saveSnapshot = nil
+	snapshot := e.takeSaveSnapshot()
 	if snapshot == nil {
 		return nil, fmt.Errorf("save snapshot is not prepared")
 	}
+	defer func() { _ = snapshot.Close() }()
 	return e.saveEditor(snapshot, args)
 }
 
@@ -8199,7 +9857,7 @@ func (e *businessEngine) savePrepared(args []platformValue) (any, error) {
 // 入参: args 空参数
 // 返回: any 操作结果, error 错误信息
 func (e *businessEngine) discardSave(args []platformValue) (any, error) {
-	e.saveSnapshot = nil
+	e.closeSaveSnapshot()
 	return successResult(nil), nil
 }
 
@@ -8234,9 +9892,32 @@ func (e *businessEngine) saveDocument(args []platformValue) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		defer func() { _ = editor.Close() }()
 		return e.saveEditor(editor, args)
 	}
-	return e.saveEditor(e.currentEditor, args)
+	editor := e.currentEditor
+	mismatch, err := e.editorTargetMismatch()
+	if err != nil {
+		return nil, err
+	}
+	if mismatch {
+		ctx := e.operationContext()
+		if len(args) > 4 {
+			operation := e.newOutputContext(args[4])
+			defer operation.cancel()
+			ctx = operation
+		}
+		snapshot, err := editor.Snapshot(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = snapshot.Close() }()
+		if _, err := e.alignEditorTarget(ctx, snapshot); err != nil {
+			return nil, err
+		}
+		editor = snapshot
+	}
+	return e.saveEditor(editor, args)
 }
 
 // savePDFCompressed 将未编辑的明文PDF直接按有损压缩流式转为OFD，避免生成中间无损图像快照
@@ -8249,12 +9930,17 @@ func (e *businessEngine) savePDFCompressed(input *ofdgo.Input, args []platformVa
 	writer := bufio.NewWriterSize(exportWriter{write: args[0]}, 1<<20)
 	ctx := e.operationContext()
 	if len(args) > 4 {
-		ctx = e.newOutputContext(args[4])
+		operation := e.newOutputContext(args[4])
+		defer operation.cancel()
+		ctx = operation
 	}
 	dirs, sources := e.currentSession.Renderer.FontSources()
 	fontNames, fontCallback := e.currentSession.pdfFontNames, e.pdfFont
-	if len(fontNames) != 0 && fontCallback.Type() == platformTypeFunction {
+	if len(fontNames) != 0 && (e.loadFont != nil || fontCallback.Type() == platformTypeFunction) {
 		sources = append(slices.Clone(sources), ofdgo.NewLazyFontFS(fontNames, func(name string) ([]byte, error) {
+			if e.loadFont != nil {
+				return e.loadFont(name)
+			}
 			return e.loadConversionFont(fontCallback, name)
 		}))
 	}
@@ -8296,7 +9982,9 @@ func (e *businessEngine) saveEditor(editor *ofdgo.Editor, args []platformValue) 
 		}
 	}
 	if len(args) > 4 {
-		ctx = e.newOutputContext(args[4])
+		operation := e.newOutputContext(args[4])
+		defer operation.cancel()
+		ctx = operation
 	}
 	if len(args) > 2 && !args[2].IsNull() && !args[2].IsUndefined() {
 		_, err = editor.WritePagesTo(ctx, writer, e.indexesFromJS(args[2]), options)
@@ -8387,6 +10075,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoChangeVersion":          e.changeDocumentVersion,
 		"ofdgoChangeDocument":         e.changePackageDocument,
 		"ofdgoPackageDocuments":       e.packageDocuments,
+		"ofdgoSetBatchFonts":          e.setBatchFonts,
 		"ofdgoConvertFile":            e.convertFile,
 		"ofdgoPackFiles":              e.packFiles,
 		"ofdgoOutputFormats":          func([]platformValue) (any, error) { return ofdgo.OutputFormats(), nil },
@@ -8406,7 +10095,6 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoSVGFontData":            e.svgFontData,
 		"ofdgoSearchPage":             e.searchPage,
 		"ofdgoSearchPages":            e.searchPages,
-		"ofdgoPageTextString":         e.pageTextString,
 		"ofdgoPagesText":              e.pagesText,
 		"ofdgoExportFormats":          e.exportFormats,
 		"ofdgoParsePageRange":         e.parsePageRange,
@@ -8431,10 +10119,12 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoFontFace":               e.fontFace,
 		"ofdgoCreateDocument":         e.createDocument,
 		"ofdgoImportImages":           e.importImages,
-		"ofdgoImagePageSize":          e.imagePageSize,
 		"ofdgoImagePreview":           e.imagePreview,
 		"ofdgoEditDocument":           e.editDocument,
+		"ofdgoSetEditing":             e.setEditing,
 		"ofdgoUpdateInfo":             e.updateInfo,
+		"ofdgoUpdatePermissions":      e.updatePermissions,
+		"ofdgoUpdateVPreferences":     e.updateVPreferences,
 		"ofdgoChangeAttachment":       e.changeAttachment,
 		"ofdgoChangeSignature":        e.changeSignature,
 		"ofdgoChangePage":             e.changePage,
@@ -8538,7 +10228,7 @@ func (e *businessEngine) editorPageBox(page int) (ofdgo.Box, error) {
 		if err != nil {
 			return ofdgo.Box{}, err
 		}
-		return e.currentSession.Renderer.GetPageBox(content)
+		return e.currentSession.Renderer.GetPageBoxContext(e.operationContext(), content)
 	}
 	return ofdgo.Box{}, fmt.Errorf("page index %d out of range", page)
 }
@@ -8635,78 +10325,120 @@ func (e *businessEngine) translateDest(dest ofdgo.Dest, toViewport bool) ofdgo.D
 	if toViewport {
 		sign = -1.0
 	}
-	if !dest.OmitLeft {
-		dest.Left += sign * targetBox.X
+	shift := func(value *float64, delta float64) *float64 {
+		if value == nil {
+			return nil
+		}
+		next := *value + delta
+		return &next
 	}
-	if !dest.OmitTop {
-		dest.Top += sign * targetBox.Y
+	shiftOrZero := func(value *float64, delta float64) *float64 {
+		if value == nil && delta == 0 {
+			return nil
+		}
+		next := delta
+		if value != nil {
+			next += *value
+		}
+		return &next
 	}
 	if dest.Type == "FitR" {
-		dest.Right += sign * targetBox.X
-		dest.Bottom += sign * targetBox.Y
+		dest.Left = shiftOrZero(dest.Left, sign*targetBox.X)
+		dest.Top = shiftOrZero(dest.Top, sign*targetBox.Y)
+		dest.Right = shift(dest.Right, sign*targetBox.X)
+		dest.Bottom = shift(dest.Bottom, sign*targetBox.Y)
+		return dest
 	}
+	dest.Left = shift(dest.Left, sign*targetBox.X)
+	dest.Top = shift(dest.Top, sign*targetBox.Y)
 	return dest
-}
-
-// pageSearchMatch 保存批量搜索匹配及其零基页面索引
-type pageSearchMatch struct {
-	ofdgo.TextMatch
-	Page int `json:"page"`
-}
-
-// documentMetadata 复制文档描述，集合字段与读取器及编辑器互不影响
-// 入参: info 文档描述
-// 返回: DocumentMetadata 界面元数据
-func documentMetadata(info ofdgo.DocInfo) DocumentMetadata {
-	metadata := DocumentMetadata{
-		DocID: info.DocID, Title: info.Title, Author: info.Author, Subject: info.Subject, Abstract: info.Abstract,
-		CreationDate: info.CreationDate, ModDate: info.ModDate, DocUsage: info.DocUsage, Cover: info.Cover,
-		Keywords: slices.Clone(info.Keywords), Creator: info.Creator, CreatorVersion: info.CreatorVersion,
-	}
-	if info.CustomDatas != nil {
-		metadata.CustomData = slices.Clone(info.CustomDatas.CustomData)
-	}
-	return metadata
 }
 
 // cachedPageText 获取缓存索引并更新最近访问顺序
 // 入参: index 页面索引
 // 返回: *ofdgo.PageText 文字索引，未缓存时为nil
-func (s *Session) cachedPageText(index int) *ofdgo.PageText {
+func (s *session) cachedPageText(index int) *ofdgo.PageText {
 	return s.textCache.Get(index)
 }
 
 // cachePageText 按内存预算保留页面文字索引，复用阅读与搜索结果
 // 入参: index 页面索引, text 文字索引
-func (s *Session) cachePageText(index int, text *ofdgo.PageText) {
+func (s *session) cachePageText(index int, text *ofdgo.PageText) {
 	s.textCache.Put(index, text)
 }
 
 // summary 获取完整摘要或指定页面的增量摘要
 // 入参: indexes 增量页码，nil表示全部页面
-// 返回: DocumentInfo 文档摘要
-func (s *Session) summary(indexes []int) DocumentInfo {
-	info := DocumentInfo{
+// 返回: documentInfo 文档摘要
+func (s *session) summary(indexes []int) documentInfo {
+	pages := s.pageInfosAt(indexes)
+	docHasOpen := s.hasDocumentOpenAction()
+	firstPageHasOpen := false
+	if len(s.doc.Pages.Page) > 0 {
+		if indexes == nil && len(pages) > 0 {
+			firstPageHasOpen = pages[0].HasOpenAction
+		} else {
+			firstPageHasOpen = s.pageHasOpenAction(0)
+		}
+	}
+	info := documentInfo{
 		DocumentIndex:  s.Reader.DocumentIndex(),
 		Encryption:     s.encryptionInfo(),
 		Version:        s.Reader.Version(),
 		DocType:        s.Reader.DocType(),
 		PageCount:      len(s.doc.Pages.Page),
-		Pages:          s.pageInfosAt(indexes),
+		HasOpenAction:  docHasOpen || firstPageHasOpen,
 		Outlines:       s.doc.OutlineInfos(),
+		Permissions:    s.permissionsInfo(),
+		VPreferences:   cloneWebUIVPreferences(s.doc.VPreferences),
 		DetailsPending: true,
+	}
+	if indexes == nil && !s.editing && info.PageCount > 1024 && len(pages) > 0 {
+		counts := make(map[pageSize]int)
+		var defaultSize pageSize
+		bestCount := 0
+		pageIDs := make([]string, len(pages))
+		for i, page := range pages {
+			pageIDs[i] = page.ID
+			size := pageSize{Width: page.Width, Height: page.Height}
+			counts[size]++
+			if counts[size] > bestCount {
+				bestCount = counts[size]
+				defaultSize = size
+			}
+		}
+		var overrides []pageInfo
+		for _, page := range pages {
+			if page.Width != defaultSize.Width || page.Height != defaultSize.Height || page.HasOpenAction {
+				overrides = append(overrides, page)
+			}
+		}
+		info.DefaultPageSize = &defaultSize
+		info.PageOverrides = overrides
+		info.PageIDs = pageIDs
+		info.Pages = nil
+	} else {
+		info.Pages = pages
 	}
 	info.DocumentVersion, _ = s.Reader.DocumentVersionID()
 	info.VersionCount, _ = s.Reader.DocumentVersionCount()
-	for index, body := range s.Reader.OFD.DocBody {
-		info.Documents = append(info.Documents, DocumentEntry{Index: index, DocumentMetadata: DocumentMetadata{Title: body.DocInfo.Title}, Root: body.DocRoot, ID: body.DocInfo.DocID})
+	info.OFDSignatureProtected = s.ofdSignatureProtectedContext(s.outputContext())
+	for index, body := range s.Reader.OFD().DocBody {
+		info.Documents = append(info.Documents, documentEntry{Index: index, documentMeta: documentMeta{Title: body.DocInfo.Title}, Root: body.DocRoot, ID: body.DocInfo.DocID})
 	}
 	if docInfo, err := s.Reader.DocInfo(); err == nil && docInfo != nil {
-		info.DocumentMetadata = documentMetadata(*docInfo)
+		info.documentMeta = documentMetadata(*docInfo)
 	}
-	if fonts, err := s.Reader.Fonts(); err == nil {
+	var fonts []ofdgo.Font
+	var fontErr error
+	if indexes == nil && !s.editing && len(s.doc.Pages.Page) > 1024 {
+		fonts, fontErr = s.Reader.DocumentFonts()
+	} else {
+		fonts, fontErr = s.Reader.Fonts()
+	}
+	if fontErr == nil {
 		for _, font := range fonts {
-			info.Fonts = append(info.Fonts, FontInfo{
+			info.Fonts = append(info.Fonts, ofdgo.FontInfo{
 				ID:         font.ID,
 				FontName:   font.FontName,
 				FamilyName: font.FamilyName,
@@ -8721,36 +10453,75 @@ func (s *Session) summary(indexes []int) DocumentInfo {
 	return info
 }
 
+// permissionsInfo 构造文档权限声明的结构化摘要，保留是否显式声明标记
+// 返回: permissionsInfo 权限信息副本
+func (s *session) permissionsInfo() permissionsInfo {
+	p := s.doc.Permissions
+	info := permissionsInfo{
+		Declared:    s.doc.HasPermissions(),
+		Edit:        p.Edit,
+		Annot:       p.Annot,
+		Export:      p.Export,
+		Signature:   p.Signature,
+		Watermark:   p.Watermark,
+		PrintScreen: p.PrintScreen,
+		Print:       p.Print,
+		Copies:      p.Copies,
+	}
+	if p.ValidPeriod != nil {
+		period := *p.ValidPeriod
+		info.ValidPeriod = &period
+	}
+	return info
+}
+
 // renderPage 按需生成预览及交互数据，省略调用方已持有的资源字节
 // 入参: index 页面索引, backend 后端组合, dpi 光栅分辨率, raster 光栅显示, preview 仅预览, known 已持有资源
-// 返回: PageSVG 页面结果, error 渲染错误
-func (s *Session) renderPage(index int, backend string, dpi float64, raster, preview bool, known map[string]bool) (PageSVG, error) {
-	if backend != "" {
-		if err := s.SetRenderBackend(backend); err != nil {
-			return PageSVG{}, err
-		}
+// 返回: pageSVG 页面结果, error 渲染错误
+func (s *session) renderPage(index int, backend string, dpi float64, raster, preview bool, known map[string]bool) (pageSVG, error) {
+	renderer, backendChanged, err := s.cloneRendererWithBackend(backend)
+	if err != nil {
+		return pageSVG{}, err
+	}
+	ctx := s.outputContext()
+	if err := ctx.Err(); err != nil {
+		return pageSVG{}, err
 	}
 	page, err := s.pageContent(index)
 	if err != nil {
-		return PageSVG{}, err
+		return pageSVG{}, err
 	}
 	box, err := s.pageBox(index, page)
 	if err != nil {
-		return PageSVG{}, err
+		return pageSVG{}, err
 	}
 	var buf bytes.Buffer
-	renderer := *s.Renderer
-	if !preview && s.cachedPageText(index) == nil {
+	if !preview && !backendChanged && s.cachedPageText(index) == nil {
 		renderer.OnPageText = func(_ *ofdgo.PageContent, text *ofdgo.PageText) {
 			s.cachePageText(index, text)
 		}
 	}
-	if raster {
-		renderer.DPI = dpi
+	if raster && dpi != 0 {
+		if err := renderer.SetDPI(dpi); err != nil {
+			return pageSVG{}, err
+		}
 	}
-	resources, err := renderer.RenderPreview(page, &buf, ofdgo.PreviewOptions{Raster: raster, Objects: !raster && s.editing && !preview, KnownResources: known})
+	idPrefix, precision := fmt.Sprintf("p%d-", index), 3
+	var pathMerge *ofdgo.SVGPathMergeOptions
+	if preview {
+		idPrefix, precision = fmt.Sprintf("t%d-", index), 2
+		pathMerge = &ofdgo.SVGPathMergeOptions{Mode: ofdgo.SVGPathMergeFull}
+	}
+	resources, err := renderer.RenderPreviewContext(ctx, page, &buf, ofdgo.PreviewOptions{
+		Raster:         raster,
+		Objects:        !raster && s.editing && !preview,
+		KnownResources: known,
+		IDPrefix:       idPrefix,
+		Precision:      precision,
+		PathMerge:      pathMerge,
+	})
 	if err != nil {
-		return PageSVG{}, err
+		return pageSVG{}, err
 	}
 	fonts := make(map[string][]byte, len(resources.Fonts))
 	keep := make(map[string]bool, len(resources.Fonts))
@@ -8763,35 +10534,41 @@ func (s *Session) renderPage(index int, backend string, dpi float64, raster, pre
 	}
 	s.retainPageSVGFonts(fonts, keep)
 	if preview {
-		return PageSVG{Index: index, Number: index + 1, ID: page.ID, Width: box.W, Height: box.H, SVG: buf.String(), Fonts: resources.Fonts, Images: resources.Images}, nil
+		return pageSVG{Index: index, Number: index + 1, ID: page.ID, Width: box.W, Height: box.H, SVG: buf.String(), Fonts: resources.Fonts, Images: resources.Images}, nil
 	}
-	links, err := s.Renderer.PageLinks(page)
+	if err := ctx.Err(); err != nil {
+		return pageSVG{}, err
+	}
+	links, err := renderer.PageLinksContext(ctx, page)
 	if err != nil {
-		return PageSVG{}, err
+		return pageSVG{}, err
 	}
 	infos, err := s.Reader.AnnotationInfosByIndex(index)
 	if err != nil {
-		return PageSVG{}, err
+		return pageSVG{}, err
 	}
 	var pageAnnotations []ofdgo.Annotation
 	if len(infos) > 0 {
-		pageAnnotations, err = s.Reader.PageAnnotations(page.ID)
+		pageAnnotations, err = s.Reader.PageAnnotationsContext(ctx, page.ID)
 		if err != nil {
-			return PageSVG{}, err
+			return pageSVG{}, err
 		}
 	}
 	defer renderer.BindPageResources(page)()
-	annotations := make([]AnnotationPreview, len(infos))
+	annotations := make([]annotationPreview, len(infos))
 	for i, info := range infos {
+		if err := ctx.Err(); err != nil {
+			return pageSVG{}, err
+		}
 		if box.X != 0 || box.Y != 0 {
 			info.X -= box.X
 			info.Y -= box.Y
 		}
 		annotations[i].AnnotationInfo = info
-		if i >= len(pageAnnotations) || !renderer.RenderAnnotations || !info.Visible || strings.TrimSpace(info.Remark) == "" || info.Type == "Link" || info.Type == "Path" && info.Subtype == "Link" {
+		if i >= len(pageAnnotations) || !renderer.RenderAnnotations() || !info.Visible || strings.TrimSpace(info.Remark) == "" || info.Type == "Link" || info.Type == "Path" && info.Subtype == "Link" {
 			continue
 		}
-		bounds, contours, err := renderer.AnnotationGeometry(pageAnnotations[i])
+		bounds, contours, err := renderer.AnnotationGeometryContext(ctx, pageAnnotations[i])
 		if err == nil {
 			if box.X != 0 || box.Y != 0 {
 				if bounds.W > 0 || bounds.H > 0 {
@@ -8803,18 +10580,31 @@ func (s *Session) renderPage(index int, backend string, dpi float64, raster, pre
 			annotations[i].Bounds, annotations[i].Contours = bounds, contours
 		}
 	}
-	return PageSVG{Index: index, Number: index + 1, ID: page.ID, Width: box.W, Height: box.H, SVG: buf.String(), Links: links, Fonts: resources.Fonts, Images: resources.Images, Annotations: annotations}, nil
+	var hasOpenAction *bool
+	if len(s.doc.Pages.Page) > 1024 && index >= 64 {
+		openLinks, openErr := renderer.PageOpenLinksContext(ctx, page)
+		hasOpen := openErr == nil && len(openLinks) > 0
+		hasOpenAction = &hasOpen
+		if index >= 0 && index < len(s.openActionCache) {
+			if hasOpen {
+				s.openActionCache[index] = 2
+			} else {
+				s.openActionCache[index] = 1
+			}
+		}
+	}
+	return pageSVG{Index: index, Number: index + 1, ID: page.ID, Width: box.W, Height: box.H, SVG: buf.String(), HasOpenAction: hasOpenAction, Links: links, Fonts: resources.Fonts, Images: resources.Images, Annotations: annotations}, nil
 }
 
 // retainSVGFonts 合并页面字体，在预算内保留其他页面的数据，当前页面字体不被淘汰
 // 入参: fonts 当前页面字体
-func (s *Session) retainSVGFonts(fonts map[string][]byte) {
+func (s *session) retainSVGFonts(fonts map[string][]byte) {
 	s.retainPageSVGFonts(fonts, nil)
 }
 
 // retainPageSVGFonts 合并非空页面字体并在预算内保留其他页面数据，保护当前页字体不被淘汰
 // 入参: fonts 新增页面字体数据, keep 当前页面使用的字体名称集合
-func (s *Session) retainPageSVGFonts(fonts map[string][]byte, keep map[string]bool) {
+func (s *session) retainPageSVGFonts(fonts map[string][]byte, keep map[string]bool) {
 	if s.svgFonts == nil {
 		s.svgFonts = make(map[string][]byte)
 	}
@@ -8841,52 +10631,23 @@ func (s *Session) retainPageSVGFonts(fonts map[string][]byte, keep map[string]bo
 	}
 }
 
-// newSession 从文档快照创建阅读会话
-// 入参: reader 文档读取器, opts 打开选项
-// 返回: *Session 文档会话, error 错误信息
-func newSession(reader *ofdgo.Reader, opts OpenOptions) (*Session, error) {
-	doc, err := reader.Doc()
-	if err != nil {
-		reader.Close()
-		return nil, err
-	}
-	var rendererOptions []ofdgo.RendererOption
-	var fontFS *ofdgo.FontFS
-	if len(opts.Fonts) > 0 {
-		fontFS = ofdgo.NewFontFS(opts.Fonts)
-		if fontFS.Len() == 0 {
-			reader.Close()
-			return nil, fmt.Errorf("invalid font file")
-		}
-		rendererOptions = append(rendererOptions, ofdgo.WithFontFS(fontFS))
-	}
-	rendererOptions = append(rendererOptions, ofdgo.WithAnnotations(opts.RenderAnnotations))
-	rendererOptions = append(rendererOptions, opts.RendererOptions...)
-	return &Session{
-		Reader:    reader,
-		Renderer:  ofdgo.NewRenderer(reader, rendererOptions...),
-		fontFS:    fontFS,
-		doc:       doc,
-		pageCache: make(map[int]*ofdgo.PageContent),
-		boxCache:  make([]pageBoxInfo, len(doc.Pages.Page)),
-		textCache: ofdgo.NewPageTextCache(sessionTextCacheBytes),
-		svgFonts:  make(map[string][]byte),
-	}, nil
-}
-
 // resetFontInfo 清除字体统计及扫描状态，供字体或注解配置变更后重算
-func (s *Session) resetFontInfo() {
+func (s *session) resetFontInfo() {
 	s.fontScan = nil
+	if s.fontScanWorker != nil {
+		_ = s.fontScanWorker.close()
+		s.fontScanWorker = nil
+	}
 	s.fontInfos = nil
 	s.fontsRead = false
 }
 
 // scanFontInfo 分步统计字体，每次最多处理一页，完成后保留当前会话的诊断
 // 返回: bool 是否完成
-func (s *Session) scanFontInfo() bool {
-	if s.fontAnnotations != s.Renderer.RenderAnnotations {
+func (s *session) scanFontInfo() bool {
+	if s.fontAnnotations != s.Renderer.RenderAnnotations() {
 		s.resetFontInfo()
-		s.fontAnnotations = s.Renderer.RenderAnnotations
+		s.fontAnnotations = s.Renderer.RenderAnnotations()
 	}
 	if s.fontsRead {
 		return true
@@ -8913,23 +10674,23 @@ func (s *Session) scanFontInfo() bool {
 
 // localizeFontInfos 统一内嵌字体在概要和完整统计中的中文名称
 // 入参: fonts 当前文档的字体诊断信息
-func (s *Session) localizeFontInfos(fonts []FontInfo) {
+func (s *session) localizeFontInfos(fonts []ofdgo.FontInfo) {
 	s.Renderer.LocalizeFontInfos(fonts, 3, 0x0804)
 }
 
 // scanFontInfoBatch 为大文档批量统计字体，限制每次处理的页数与耗时
 // 返回: bool 是否完成
-func (s *Session) scanFontInfoBatch() bool {
-	limit := 1
+func (s *session) scanFontInfoBatch() bool {
+	limit := 32
 	if len(s.doc.Pages.Page) > 256 {
-		limit = 64
+		limit = 256
 	}
 	start := time.Now()
 	for range limit {
 		if s.scanFontInfo() {
 			return true
 		}
-		if time.Since(start) >= 8*time.Millisecond {
+		if time.Since(start) >= 24*time.Millisecond {
 			break
 		}
 	}
@@ -8939,20 +10700,161 @@ func (s *Session) scanFontInfoBatch() bool {
 // readPageText 复用已加载页面，否则只解析文字所需图元
 // 入参: ctx 取消上下文, index 页面索引
 // 返回: *ofdgo.PageText 页面文字, error 错误信息
-func (s *Session) readPageText(ctx context.Context, index int) (*ofdgo.PageText, error) {
-	if page := s.pageCache[index]; page != nil {
+func (s *session) readPageText(ctx context.Context, index int) (*ofdgo.PageText, error) {
+	if page, ok := s.cachedPage(index); ok {
 		return s.Renderer.PageTextContext(ctx, page)
 	}
 	return s.Renderer.PageTextByIndexContext(ctx, index)
 }
 
-// pageInfosAt 获取指定页面的真实尺寸，nil表示完整列表
-// 入参: indexes 页面索引
-// 返回: []PageInfo 独立页面信息列表
-func (s *Session) pageInfosAt(indexes []int) []PageInfo {
+// hasDocumentOpenAction 检测文档根节点是否存在有效的打开动作
+// 返回: bool 是否存在文档打开动作
+func (s *session) hasDocumentOpenAction() bool {
+	if s == nil || s.doc == nil || len(s.doc.Actions) == 0 {
+		return false
+	}
+	links, err := s.Renderer.DocumentOpenLinksContext(s.outputContext())
+	return err == nil && len(links) > 0
+}
+
+// openActionTemplateIDs 返回包含页面打开动作的模板标识集合
+// 返回: map[string]bool 存在页面打开动作的模板集合
+func (s *session) openActionTemplateIDs() map[string]bool {
+	if s.openTemplatesLoaded {
+		return s.openTemplates
+	}
+	s.openTemplatesLoaded = true
+	if s.doc == nil || len(s.doc.CommonData.TemplatePage) == 0 {
+		return nil
+	}
+	for _, tpl := range s.doc.CommonData.TemplatePage {
+		data, err := s.Reader.ResData(tpl.BaseLoc)
+		if err != nil {
+			continue
+		}
+		var actions []ofdgo.Action
+		if hasUTF16BOM(data) {
+			content, readErr := s.Reader.PageContentContext(s.outputContext(), ofdgo.Page{ID: tpl.ID, BaseLoc: tpl.BaseLoc})
+			if readErr != nil {
+				continue
+			}
+			actions = content.Actions
+		} else {
+			if !bytes.Contains(data, []byte("Actions")) || !containsFoldASCII(data, []byte("PO")) {
+				continue
+			}
+			var parsed struct {
+				Actions []ofdgo.Action `xml:"Actions>Action"`
+			}
+			if err := xml.Unmarshal(data, &parsed); err != nil {
+				content, readErr := s.Reader.PageContentContext(s.outputContext(), ofdgo.Page{ID: tpl.ID, BaseLoc: tpl.BaseLoc})
+				if readErr != nil {
+					continue
+				}
+				actions = content.Actions
+			} else {
+				actions = parsed.Actions
+			}
+		}
+		for _, action := range actions {
+			if strings.EqualFold(action.Event, "PO") {
+				if s.openTemplates == nil {
+					s.openTemplates = make(map[string]bool)
+				}
+				s.openTemplates[tpl.ID] = true
+				break
+			}
+		}
+	}
+	return s.openTemplates
+}
+
+// pageHasOpenAction 轻量检测指定页面及其模板是否存在打开动作并缓存结果
+// 入参: index 页面索引
+// 返回: bool 是否存在页面打开动作
+func (s *session) pageHasOpenAction(index int) bool {
+	if s == nil || s.doc == nil || index < 0 || index >= len(s.doc.Pages.Page) {
+		return false
+	}
+	if index < len(s.openActionCache) && s.openActionCache[index] != 0 {
+		return s.openActionCache[index] == 2
+	}
+	record := func(has bool) bool {
+		if index < len(s.openActionCache) {
+			if has {
+				s.openActionCache[index] = 2
+			} else {
+				s.openActionCache[index] = 1
+			}
+		}
+		return has
+	}
+	ctx := s.outputContext()
+	if cached, ok := s.cachedPage(index); ok {
+		links, err := s.Renderer.PageOpenLinksContext(ctx, cached)
+		return record(err == nil && len(links) > 0)
+	}
+	data, err := s.Reader.ResData(s.doc.Pages.Page[index].BaseLoc)
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	if !hasUTF16BOM(data) {
+		openTemplates := s.openActionTemplateIDs()
+		maybeAction := bytes.Contains(data, []byte("Actions")) && containsFoldASCII(data, []byte("PO"))
+		maybeTemplate := len(openTemplates) > 0 && bytes.Contains(data, []byte("Template"))
+		if !maybeAction && !maybeTemplate {
+			return record(false)
+		}
+	}
+	page, err := s.Reader.PageContentByIndexContext(ctx, index)
+	if err != nil {
+		return false
+	}
+	links, err := s.Renderer.PageOpenLinksContext(ctx, page)
+	return record(err == nil && len(links) > 0)
+}
+
+// pageInfosAt 获取指定页面的真实尺寸，大页数首屏摘要先使用文档默认区域并精确预读前64页
+// 入参: indexes 页面索引，nil表示完整列表
+// 返回: []pageInfo 独立页面信息列表
+func (s *session) pageInfosAt(indexes []int) []pageInfo {
 	count := len(s.doc.Pages.Page)
 	if indexes != nil {
 		count = len(indexes)
+	}
+	if indexes == nil && !s.editing && count > 1024 {
+		if defaultBox, err := s.Renderer.GetPageBoxContext(s.outputContext(), &ofdgo.PageContent{Area: s.doc.CommonData.PageArea}); err == nil && defaultBox.W > 0 && defaultBox.H > 0 {
+			eager := min(64, count)
+			var pendingPages []ofdgo.Page
+			var pendingIndexes []int
+			for index := range eager {
+				if !s.boxCache[index].valid {
+					pendingPages = append(pendingPages, s.doc.Pages.Page[index])
+					pendingIndexes = append(pendingIndexes, index)
+				}
+			}
+			if len(pendingPages) > 0 {
+				if areas, err := s.Reader.PageAreas(pendingPages); err == nil {
+					for i, area := range areas {
+						_, _ = s.pageBox(pendingIndexes[i], &ofdgo.PageContent{Area: area})
+					}
+				}
+			}
+			pages := make([]pageInfo, count)
+			for index := range count {
+				page := s.doc.Pages.Page[index]
+				box := defaultBox
+				if cached := s.boxCache[index]; cached.valid {
+					box = cached.box
+				}
+				hasOpen := false
+				if index < eager || (index < len(s.openActionCache) && s.openActionCache[index] != 0) || s.hasCachedPage(index) {
+					hasOpen = s.pageHasOpenAction(index)
+				}
+				pages[index] = pageInfo{Index: index, ID: page.ID, Width: box.W, Height: box.H, HasOpenAction: hasOpen}
+			}
+			return pages
+		}
 	}
 	var pendingPages []ofdgo.Page
 	var pendingIndexes []int
@@ -8983,7 +10885,7 @@ func (s *Session) pageInfosAt(indexes []int) []PageInfo {
 			}
 		}
 	}
-	pages := make([]PageInfo, count)
+	pages := make([]pageInfo, count)
 	for position := range pages {
 		index := position
 		if indexes != nil {
@@ -8997,68 +10899,84 @@ func (s *Session) pageInfosAt(indexes []int) []PageInfo {
 				box, _ = s.pageBox(index, &ofdgo.PageContent{Area: area})
 			}
 		}
-		pages[position] = PageInfo{Index: index, ID: page.ID, Width: box.W, Height: box.H}
+		pages[position] = pageInfo{Index: index, ID: page.ID, Width: box.W, Height: box.H, HasOpenAction: s.pageHasOpenAction(index)}
 	}
 	return pages
 }
 
-// pageContent 读取页面，在有界窗口内保留最近解析结果
+// cachedPage 从共享LRU缓存读取指定页面内容
+// 入参: index 页面索引
+// 返回: *ofdgo.PageContent 页面内容, bool 是否命中
+func (s *session) cachedPage(index int) (*ofdgo.PageContent, bool) {
+	if s == nil || s.pageCache == nil {
+		return nil, false
+	}
+	return s.pageCache.get(index)
+}
+
+// hasCachedPage 检查指定页面是否位于共享LRU缓存中
+// 入参: index 页面索引
+// 返回: bool 是否已缓存
+func (s *session) hasCachedPage(index int) bool {
+	if s == nil || s.pageCache == nil {
+		return false
+	}
+	return s.pageCache.has(index)
+}
+
+// invalidatePageCache 仅失效指定页面的共享缓存与打开动作标记
+// 入参: index 页面索引
+func (s *session) invalidatePageCache(index int) {
+	if s == nil {
+		return
+	}
+	if s.pageCache != nil {
+		s.pageCache.delete(index)
+	}
+	if index >= 0 && index < len(s.openActionCache) {
+		s.openActionCache[index] = 0
+	}
+}
+
+// pageContent 读取页面并在共享有界LRU缓存中保留最近解析结果
 // 入参: index 页面索引
 // 返回: *ofdgo.PageContent 页面内容, error 错误信息
-func (s *Session) pageContent(index int) (*ofdgo.PageContent, error) {
+func (s *session) pageContent(index int) (*ofdgo.PageContent, error) {
 	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	if page, ok := s.pageCache[index]; ok {
+	if page, ok := s.cachedPage(index); ok {
 		return page, nil
 	}
-	ctx := s.Renderer.OutputContext
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	page, err := s.Reader.PageContentByIndexContext(ctx, index)
+	page, err := s.Reader.PageContentByIndexContext(s.outputContext(), index)
 	if err != nil {
 		return nil, err
 	}
-	if pageObjectCount(page) <= sessionPageCacheObjectLimit {
-		s.cachePageContent(index, page)
-	}
+	s.cachePageContent(index, page)
 	return page, nil
 }
 
-// cachePageContent 在有界窗口内写入页面缓存，超出页数上限时淘汰距离最远页
+// cachePageContent 将页面内容写入跨工作会话共享的有界LRU缓存
 // 入参: index 页面索引, page 页面内容
-func (s *Session) cachePageContent(index int, page *ofdgo.PageContent) {
-	if len(s.pageCache) >= sessionPageCacheLimit {
-		var victim int
-		hasVictim := false
-		for cachedIndex := range s.pageCache {
-			dist := cachedIndex - index
-			if dist < 0 {
-				dist = -dist
-			}
-			best := victim - index
-			if best < 0 {
-				best = -best
-			}
-			if !hasVictim || dist > best {
-				victim = cachedIndex
-				hasVictim = true
-			}
-		}
-		if hasVictim {
-			delete(s.pageCache, victim)
-		}
+func (s *session) cachePageContent(index int, page *ofdgo.PageContent) {
+	if s == nil || page == nil {
+		return
 	}
-	s.pageCache[index] = page
+	if s.pageCache == nil {
+		s.pageCache = newSharedPageCache(sessionPageCacheBytes)
+	}
+	s.pageCache.put(index, page)
 }
 
 // pageBox 获取页面物理区域
 // 入参: index 页面索引, page 页面内容
 // 返回: ofdgo.Box 页面物理区域, error 错误信息
-func (s *Session) pageBox(index int, page *ofdgo.PageContent) (ofdgo.Box, error) {
-	if index < 0 || index >= len(s.boxCache) {
+func (s *session) pageBox(index int, page *ofdgo.PageContent) (ofdgo.Box, error) {
+	if s == nil || s.doc == nil || index < 0 || index >= len(s.doc.Pages.Page) {
 		return ofdgo.Box{}, fmt.Errorf("page index %d out of range", index)
+	}
+	if len(s.boxCache) != len(s.doc.Pages.Page) {
+		s.boxCache = make([]pageBoxInfo, len(s.doc.Pages.Page))
 	}
 	if cached := s.boxCache[index]; cached.valid {
 		return cached.box, nil
@@ -9070,7 +10988,7 @@ func (s *Session) pageBox(index int, page *ofdgo.PageContent) (ofdgo.Box, error)
 		}
 		page = &ofdgo.PageContent{Area: area}
 	}
-	box, err := s.Renderer.GetPageBox(page)
+	box, err := s.Renderer.GetPageBoxContext(s.outputContext(), page)
 	if err != nil {
 		return ofdgo.Box{}, err
 	}
@@ -9078,69 +10996,156 @@ func (s *Session) pageBox(index int, page *ofdgo.PageContent) (ofdgo.Box, error)
 	return box, nil
 }
 
-// exportFormat 获取导出格式
-// 入参: value 格式值
-// 返回: ExportFormat 导出格式, bool 是否支持
-func exportFormat(value string) (ExportFormat, bool) {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "jpeg" {
-		value = "jpg"
-	}
-	for _, format := range ExportFormats() {
-		if format.Value == value {
-			return format, true
-		}
-	}
-	return ExportFormat{}, false
-}
-
 // encryptionInfo 获取当前文档的保存策略，不包含凭据
-// 返回: EncryptionInfo 加密状态
-func (s *Session) encryptionInfo() EncryptionInfo {
+// 返回: encryptionInfo 加密状态
+func (s *session) encryptionInfo() encryptionInfo {
 	info := s.Reader.Encryption()
 	if s.editor != nil {
 		info = s.editor.Encryption()
 	}
-	return EncryptionInfo{Encrypted: info.Encrypted, Method: info.Method, Users: info.Users, Layers: info.Layers, PolicyRequired: info.PolicyRequired}
+	return encryptionInfo{Encrypted: info.Encrypted, Method: info.Method, Users: info.Users, Layers: info.Layers, PolicyRequired: info.PolicyRequired}
 }
 
-// signatureInfos 获取签名验证信息
-// 返回: []SignatureInfo 签名验证信息, error 错误信息
-func (s *Session) signatureInfos() ([]SignatureInfo, error) {
+// outputContext 返回当前会话绑定的可取消上下文，未设置时返回背景上下文
+// 返回: context.Context 操作上下文
+func (s *session) outputContext() context.Context {
+	if s != nil && s.ctx != nil {
+		return s.ctx
+	}
+	return context.Background()
+}
+
+// attachmentInfos 按当前编辑态过滤并读取文档附件摘要
+// 入参: ctx 取消上下文
+// 返回: []attachmentInfo 附件列表, string 非取消读取错误文本, error 取消错误
+func (s *session) attachmentInfos(ctx context.Context) ([]attachmentInfo, string, error) {
+	attachments, err := s.Reader.AttachmentsContext(ctx)
+	if err != nil {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, "", err
+		}
+		return nil, err.Error(), nil
+	}
+	infos := make([]attachmentInfo, 0, len(attachments))
+	for _, attachment := range attachments {
+		if attachment.Visible || s.editing {
+			infos = append(infos, attachmentInfo{
+				ID:       attachment.ID,
+				Name:     attachment.Name,
+				Format:   attachment.Format,
+				Size:     attachment.Size,
+				FileName: attachment.FileName(),
+				Visible:  attachment.Visible,
+			})
+		}
+	}
+	return infos, "", nil
+}
+
+// detailsContext 获取文档标引、附件、可取消验签及声明字体信息
+// 入参: ctx 取消上下文
+// 返回: documentDetails 文档补充信息, error 取消错误
+func (s *session) detailsContext(ctx context.Context) (documentDetails, error) {
+	if err := ctx.Err(); err != nil {
+		return documentDetails{}, err
+	}
+	info := documentDetails{
+		Permissions:  s.permissionsInfo(),
+		VPreferences: cloneWebUIVPreferences(s.doc.VPreferences),
+	}
+	if structures, err := s.Reader.Structure(); err == nil {
+		info.Structures = structures
+	} else {
+		info.StructureError = err.Error()
+	}
+	if err := ctx.Err(); err != nil {
+		return documentDetails{}, err
+	}
+	attachments, attachErr, err := s.attachmentInfos(ctx)
+	if err != nil {
+		return documentDetails{}, err
+	}
+	info.Attachments = attachments
+	info.AttachmentError = attachErr
+	if err := ctx.Err(); err != nil {
+		return documentDetails{}, err
+	}
+	if signatures, err := s.signatureInfosContext(ctx); err == nil {
+		info.Signatures = signatures
+	} else if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return documentDetails{}, err
+	} else {
+		info.SignatureError = err.Error()
+	}
+	info.SignatureCount = len(info.Signatures)
+	info.OFDSignatureProtected = s.ofdSignatureProtectedContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return documentDetails{}, err
+	}
+	if fonts, err := s.Renderer.DeclaredFontInfos(); err == nil {
+		s.localizeFontInfos(fonts)
+		info.Fonts = fonts
+		info.FontCount = len(fonts)
+	}
+	return info, ctx.Err()
+}
+
+// ofdSignatureProtectedContext 探测并缓存当前会话的OFD.xml入口是否受签名保护
+// 入参: ctx 取消上下文
+// 返回: bool 是否受签名保护
+func (s *session) ofdSignatureProtectedContext(ctx context.Context) bool {
+	if s.ofdProtectedRead {
+		return s.ofdProtected
+	}
+	protected, err := s.Reader.OFDEntrySignatureProtected(ctx)
+	if err == nil || ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		s.ofdProtected = protected
+		s.ofdProtectedRead = true
+	}
+	return s.ofdProtected
+}
+
+// signatureInfosContext 在可取消上下文中执行当前文档验签，取消时不缓存未完成状态
+// 入参: ctx 取消上下文
+// 返回: []signatureInfo 签名验证信息, error 验证或取消错误
+func (s *session) signatureInfosContext(ctx context.Context) ([]signatureInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if s.signaturesRead {
 		return s.signatures, s.signatureError
 	}
-	s.signaturesRead = true
-	reports, err := s.Reader.VerifyDocumentSignatures(s.Reader.DocumentIndex())
+	reports, err := s.Reader.VerifyDocumentSignaturesContext(ctx, s.Reader.DocumentIndex())
 	if err != nil {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		s.signaturesRead = true
 		s.signatureError = err
 		return nil, err
 	}
-	infos := make([]SignatureInfo, 0, len(reports))
+	infos := make([]signatureInfo, 0, len(reports))
 	for _, report := range reports {
 		infos = append(infos, s.signatureInfo(report))
 	}
+	s.signaturesRead = true
 	s.signatures = infos
 	return infos, nil
 }
 
 // signatureInfo 转换签名验证信息
 // 入参: report 签名验证报告
-// 返回: SignatureInfo 签名验证信息
-func (s *Session) signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInfo {
-	status := "unchecked"
-	if report.Valid {
-		status = "valid"
-	} else if report.HasFailure() {
-		status = "invalid"
-	}
+// 返回: signatureInfo 签名验证信息
+func (s *session) signatureInfo(report ofdgo.SignatureVerifyReport) signatureInfo {
+	status := signatureReportStatus(report)
 	dateTime := report.SignatureDateTime
 	if !report.SignatureTime.IsZero() {
 		dateTime = report.SignatureTime.Format(time.RFC3339Nano)
 	}
 	checked, passed := signatureReferenceCounts(report.References)
-	info := SignatureInfo{
+	info := signatureInfo{
 		DocIndex:             report.DocIndex,
+		VersionID:            report.VersionID,
 		DocRoot:              report.DocRoot,
 		ID:                   report.ID,
 		Type:                 string(report.Type),
@@ -9156,16 +11161,26 @@ func (s *Session) signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInf
 		SealType:             report.SealType,
 		SealID:               report.SealInfo.ID,
 		SealVendor:           report.SealInfo.VendorID,
+		SealVersion:          report.SealInfo.Version,
+		SealCreateTime:       securityTime(report.SealInfo.CreateTime),
+		SealValidStart:       securityTime(report.SealInfo.ValidStart),
+		SealValidEnd:         securityTime(report.SealInfo.ValidEnd),
 		Version:              report.Provider.Version,
 		SignSubject:          report.SignCert.Subject,
 		SignIssuer:           report.SignCert.Issuer,
 		SignSerial:           report.SignCert.SerialNumber,
+		SignNotBefore:        securityTime(report.SignCert.NotBefore),
+		SignNotAfter:         securityTime(report.SignCert.NotAfter),
 		SealSubject:          report.SealCert.Subject,
+		SealNotBefore:        securityTime(report.SealCert.NotBefore),
+		SealNotAfter:         securityTime(report.SealCert.NotAfter),
 		SignatureMethod:      report.SignatureMethod,
 		DigestMethod:         report.DigestMethod,
+		DigestOK:             report.DigestOK,
 		ReferenceCount:       len(report.References),
 		ReferenceChecked:     checked,
 		ReferencePassed:      passed,
+		FailedReferences:     signatureFailedReferences(report.References),
 		Stamps:               s.signatureStampInfos(report.StampPositions),
 		DataHashChecked:      report.DataHashChecked,
 		DataHashOK:           report.DataHashOK,
@@ -9201,8 +11216,9 @@ func (s *Session) signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInf
 		RevocationOK:         report.RevocationOK,
 	}
 	for _, stamp := range report.Timestamps {
-		info.Timestamps = append(info.Timestamps, TimestampInfo{
-			Time: securityTime(stamp.Time), Valid: stamp.Valid,
+		info.Timestamps = append(info.Timestamps, timestampInfo{
+			Time: securityTime(stamp.Time), Signer: cmp.Or(stamp.Signer.CommonName, stamp.Signer.Subject),
+			PolicyOID: stamp.PolicyOID, SerialNumber: stamp.SerialNumber, Valid: stamp.Valid,
 			BindingChecked: stamp.BindingChecked, BindingOK: stamp.BindingOK,
 			SignedValueChecked: stamp.SignedValueChecked, SignedValueOK: stamp.SignedValueOK,
 			CertTrustChecked: stamp.CertTrustChecked, CertTrustOK: stamp.CertTrustOK,
@@ -9210,7 +11226,7 @@ func (s *Session) signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInf
 		})
 	}
 	for _, revocation := range report.Revocations {
-		info.Revocations = append(info.Revocations, RevocationInfo{
+		info.Revocations = append(info.Revocations, revocationInfo{
 			Subject: revocation.Certificate.Subject, Source: revocation.Source, Status: revocation.Status,
 			Checked: revocation.Checked, OK: revocation.OK, ThisUpdate: securityTime(revocation.ThisUpdate),
 			NextUpdate: securityTime(revocation.NextUpdate), RevokedAt: securityTime(revocation.RevokedAt), Error: revocation.Error,
@@ -9219,66 +11235,11 @@ func (s *Session) signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInf
 	return info
 }
 
-// securityTime 格式化已提供的安全证据时间，零值不展示
-// 入参: value 时间
-// 返回: string 标准时间文本
-func securityTime(value time.Time) string {
-	if value.IsZero() {
-		return ""
-	}
-	return value.Format(time.RFC3339Nano)
-}
-
-// signatureSigner 获取签名人名称
-// 入参: report 签名验证报告
-// 返回: string 签名人名称
-func signatureSigner(report ofdgo.SignatureVerifyReport) string {
-	if report.Signer != "" {
-		return report.Signer
-	}
-	if report.SignCert.CommonName != "" {
-		return report.SignCert.CommonName
-	}
-	if report.SignCert.Organization != "" {
-		return report.SignCert.Organization
-	}
-	return report.SignCert.Subject
-}
-
-// signatureReferenceCounts 获取保护文件检查数量
-// 入参: refs 保护文件验证结果
-// 返回: int 已检查数量, int 已通过数量
-func signatureReferenceCounts(refs []ofdgo.SignatureReferenceVerify) (int, int) {
-	checked, passed := 0, 0
-	for _, ref := range refs {
-		if ref.Checked {
-			checked++
-		}
-		if ref.OK {
-			passed++
-		}
-	}
-	return checked, passed
-}
-
-// signatureReportError 获取签名错误信息
-// 入参: report 签名验证报告
-// 返回: string 错误信息
-func signatureReportError(report ofdgo.SignatureVerifyReport) string {
-	if report.Error != "" && report.StampPositionError != "" {
-		return report.Error + "; " + report.StampPositionError
-	}
-	if report.Error != "" {
-		return report.Error
-	}
-	return report.StampPositionError
-}
-
 // signatureStampInfos 转换签名外观位置并对齐视口原点
 // 入参: positions 签名外观位置
-// 返回: []SignatureStampInfo 签名外观信息
-func (s *Session) signatureStampInfos(positions []ofdgo.SignatureStampPosition) []SignatureStampInfo {
-	infos := make([]SignatureStampInfo, 0, len(positions))
+// 返回: []signatureStampInfo 签名外观信息
+func (s *session) signatureStampInfos(positions []ofdgo.SignatureStampPosition) []signatureStampInfo {
+	infos := make([]signatureStampInfo, 0, len(positions))
 	for _, position := range positions {
 		x, y := position.Box.X, position.Box.Y
 		if position.Page > 0 {
@@ -9287,7 +11248,7 @@ func (s *Session) signatureStampInfos(positions []ofdgo.SignatureStampPosition) 
 				y -= box.Y
 			}
 		}
-		infos = append(infos, SignatureStampInfo{
+		infos = append(infos, signatureStampInfo{
 			ID:       position.ID,
 			Page:     position.Page,
 			PageID:   position.PageID,
@@ -9299,204 +11260,4 @@ func (s *Session) signatureStampInfos(positions []ofdgo.SignatureStampPosition) 
 		})
 	}
 	return infos
-}
-
-// failureResult 统一原生及浏览器业务错误协议
-// 入参: err 业务错误
-// 返回: apiResult 错误响应结构
-func failureResult(err error) apiResult {
-	result := apiResult{Error: err.Error()}
-	switch {
-	case errors.Is(err, ofdgo.ErrSignatureDependency):
-		result.Code, result.Error = "signatureDependency", "存在签名或版本依赖，无法移除"
-	case errors.Is(err, ofdgo.ErrIncompleteDocument):
-		result.Code, result.Error = "documentPending", "文档尚未准备完成"
-	case errors.Is(err, ofdgo.ErrPrintDenied):
-		result.Code, result.Error = "printDenied", "文档禁止打印"
-	case errors.Is(err, ofdgo.ErrPDFPassword):
-		result.Code, result.Error = "pdfPassword", "PDF密码缺失或错误"
-	case errors.Is(err, ofdgo.ErrCredentialsRequired):
-		result.Code, result.Error = "credentialsRequired", "文档已加密"
-	case errors.Is(err, ofdgo.ErrInvalidCredentials):
-		result.Code, result.Error = "invalidCredentials", "凭据无效或文件损坏"
-	case errors.Is(err, ofdgo.ErrUnsupportedEncryption):
-		result.Code, result.Error = "unsupportedEncryption", "不支持此加密方式"
-	case errors.Is(err, ofdgo.ErrEncryptionPolicyRequired):
-		result.Code, result.Error = "encryptionPolicyRequired", "请设置加密方式"
-	}
-	var failure *ofdgo.EditError
-	if errors.As(err, &failure) {
-		result.ReasonCode = failure.Code
-	}
-	if errors.As(err, &result.MissingGlyphs) {
-		result.ReasonCode = ofdgo.EditMissingGlyphs
-	}
-	return result
-}
-
-// pageObjectCount 统计单页各图层的图元总数
-// 入参: page 页面内容
-// 返回: int 图元总数
-func pageObjectCount(page *ofdgo.PageContent) int {
-	if page == nil {
-		return 0
-	}
-	count := 0
-	for _, layer := range page.Content.Layer {
-		count += max(len(layer.Objects), len(layer.TextObject)+len(layer.PathObject)+len(layer.ImageObject)+len(layer.CompositeGraphicUnit))
-	}
-	return count
-}
-
-// translateContours 将对象轮廓中的SVG路径按给定偏移平移至视口坐标
-// 入参: contours 原始轮廓列表, dx 横向偏移, dy 纵向偏移
-// 返回: []ofdgo.ObjectContour 平移后的轮廓列表
-func translateContours(contours []ofdgo.ObjectContour, dx, dy float64) []ofdgo.ObjectContour {
-	if len(contours) == 0 || (dx == 0 && dy == 0) {
-		return contours
-	}
-	result := make([]ofdgo.ObjectContour, len(contours))
-	for i, contour := range contours {
-		result[i] = ofdgo.ObjectContour{Path: translateSVGPath(contour.Path, dx, dy), EvenOdd: contour.EvenOdd}
-	}
-	return result
-}
-
-// translateSVGPath 解析并平移SVG路径字符串，不依赖外部绘图后端
-// 入参: path 原始SVG路径, dx 横向偏移, dy 纵向偏移
-// 返回: string 平移后的SVG路径
-func translateSVGPath(path string, dx, dy float64) string {
-	if path == "" || (dx == 0 && dy == 0) {
-		return path
-	}
-	var out strings.Builder
-	out.Grow(len(path) + 32)
-	var cmd byte
-	argIdx := 0
-	firstMove := true
-	for i := 0; i < len(path); {
-		ch := path[i]
-		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == ',' {
-			i++
-			continue
-		}
-		if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') {
-			cmd = ch
-			argIdx = 0
-			if out.Len() > 0 {
-				out.WriteByte(' ')
-			}
-			out.WriteByte(cmd)
-			if cmd == 'Z' || cmd == 'z' {
-				cmd = 0
-			}
-			i++
-			continue
-		}
-		if (cmd == 'A' || cmd == 'a') && (argIdx%7 == 3 || argIdx%7 == 4) && (ch == '0' || ch == '1') {
-			out.WriteByte(' ')
-			out.WriteByte(ch)
-			argIdx++
-			i++
-			continue
-		}
-		start := i
-		if path[i] == '+' || path[i] == '-' {
-			i++
-		}
-		hasDot := false
-		hasExp := false
-		for i < len(path) {
-			c := path[i]
-			if c >= '0' && c <= '9' {
-				i++
-			} else if c == '.' && !hasDot && !hasExp {
-				hasDot = true
-				i++
-			} else if (c == 'e' || c == 'E') && !hasExp && i+1 < len(path) {
-				next := i + 1
-				if path[next] == '+' || path[next] == '-' {
-					next++
-				}
-				if next < len(path) && path[next] >= '0' && path[next] <= '9' {
-					hasExp = true
-					i = next + 1
-				} else {
-					break
-				}
-			} else {
-				break
-			}
-		}
-		if i == start {
-			return path
-		}
-		val, err := strconv.ParseFloat(path[start:i], 64)
-		if err != nil {
-			return path
-		}
-		switch cmd {
-		case 'M', 'L', 'T':
-			if argIdx%2 == 0 {
-				val += dx
-			} else {
-				val += dy
-			}
-			if cmd == 'M' && argIdx == 1 {
-				firstMove = false
-				cmd = 'L'
-				argIdx = -1
-			}
-		case 'm':
-			if firstMove && argIdx < 2 {
-				if argIdx == 0 {
-					val += dx
-				} else {
-					val += dy
-				}
-			}
-			if argIdx == 1 {
-				firstMove = false
-				cmd = 'l'
-				argIdx = -1
-			}
-		case 'H':
-			val += dx
-		case 'V':
-			val += dy
-		case 'C':
-			if argIdx%2 == 0 {
-				val += dx
-			} else {
-				val += dy
-			}
-		case 'S', 'Q':
-			if argIdx%2 == 0 {
-				val += dx
-			} else {
-				val += dy
-			}
-		case 'A':
-			pos := argIdx % 7
-			if pos == 5 {
-				val += dx
-			} else if pos == 6 {
-				val += dy
-			}
-		}
-		argIdx++
-		out.WriteByte(' ')
-		out.WriteString(strconv.FormatFloat(val, 'g', -1, 64))
-	}
-	return out.String()
-}
-
-// optionalString 读取可选字符串参数，非字符串值返回空字符串
-// 入参: v 平台参数值
-// 返回: string 字符串内容
-func optionalString(v platformValue) string {
-	if v.Type() == platformTypeString {
-		return v.String()
-	}
-	return ""
 }

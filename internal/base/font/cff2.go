@@ -156,12 +156,18 @@ func staticCIDFont(table map[string][]byte, chars [][]byte) ([]byte, error) {
 	if units < 16 || units > 16384 {
 		return nil, fmt.Errorf("invalid CFF design units")
 	}
-	name := FaceInfo(table["name"], 0).PostScriptName
+	name := faceInfo(table["name"], 0).PostScriptName
 	if name == "" {
 		name = "OpenTypeInstance"
 	}
-	names := encodeCFFIndex([][]byte{[]byte(name)})
-	strings := encodeCFFIndex([][]byte{[]byte("Adobe"), []byte("Identity")})
+	names, err := encodeCFFIndexChecked([][]byte{[]byte(name)})
+	if err != nil {
+		return nil, err
+	}
+	strings, err := encodeCFFIndexChecked([][]byte{[]byte("Adobe"), []byte("Identity")})
+	if err != nil {
+		return nil, err
+	}
 	cids := make([]int, len(chars))
 	for gid := 1; gid < len(chars); gid++ {
 		cids[gid] = gid
@@ -169,8 +175,14 @@ func staticCIDFont(table map[string][]byte, chars [][]byte) ([]byte, error) {
 	charset := encodeCFFSubsetCharset(cids)
 	selects := []byte{3, 0, 1, 0, 0, 0}
 	selects = binary.BigEndian.AppendUint16(selects, uint16(len(chars)))
-	fonts := encodeCFFIndex([][]byte{encodeCFFDict(cffDict{18: {0, 0}})})
-	charIndex := encodeCFFIndex(chars)
+	fonts, err := encodeCFFIndexChecked([][]byte{encodeCFFDict(cffDict{18: {0, 0}})})
+	if err != nil {
+		return nil, err
+	}
+	charIndex, err := encodeCFFIndexChecked(chars)
+	if err != nil {
+		return nil, err
+	}
 	scale := 1 / float64(units)
 	dict := cffDict{1230: {391, 392, 0}, 1234: {float64(len(chars))}, 1207: {scale, 0, 0, scale, 0, 0}, 15: {0}, 17: {0}, 1236: {0}, 1237: {0}}
 	for i := 0; i < 4; i++ {
@@ -178,7 +190,10 @@ func staticCIDFont(table map[string][]byte, chars [][]byte) ([]byte, error) {
 	}
 	var top []byte
 	for range 16 {
-		top = encodeCFFIndex([][]byte{encodeCFFDict(dict)})
+		top, err = encodeCFFIndexChecked([][]byte{encodeCFFDict(dict)})
+		if err != nil {
+			return nil, err
+		}
 		offset := 4 + len(names) + len(top) + len(strings) + 2
 		if dict[15][0] == float64(offset) {
 			var output bytes.Buffer

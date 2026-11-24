@@ -24,6 +24,7 @@ import (
 	"iter"
 	"maps"
 	"path"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -47,409 +48,6 @@ type editorResourceRefs struct {
 	definitions    map[string]*editorResourceRefs
 	customTagFiles map[string][]CustomTag
 	fontUnsafe     bool
-}
-
-// addCustomTagFile 按路径去重追加标引入口描述
-// 入参: target 包内路径, tag 标引入口描述
-func (r *editorResourceRefs) addCustomTagFile(target string, tag CustomTag) {
-	if target == "" {
-		return
-	}
-	if r.customTagFiles == nil {
-		r.customTagFiles = make(map[string][]CustomTag)
-	}
-	if !slices.Contains(r.customTagFiles[target], tag) {
-		r.customTagFiles[target] = append(r.customTagFiles[target], tag)
-	}
-}
-
-// scan 流式读取包内XML引用，二进制条目只探测文件头，不展开页面对象或图片像素
-// 入参: input 文件流, name 包内路径
-// 返回: bool 是否资源索引, bool 是否可完整判断引用
-func (r *editorResourceRefs) scan(input io.Reader, name string) (bool, bool) {
-	return r.scanContext(nil, input, name)
-}
-
-// scanContext 流式收集资源引用，在读取和字体用字处理期间检查取消
-// 入参: ctx 取消上下文，可为nil, input 文件流, name 包内路径
-// 返回: bool 是否资源索引, bool 是否完整收集引用，取消时为false
-func (r *editorResourceRefs) scanContext(ctx context.Context, input io.Reader, name string) (bool, bool) {
-	if ctx != nil {
-		if ctx.Err() != nil {
-			return false, false
-		}
-		input = imageInput{ReadCloser: io.NopCloser(input), ctx: ctx}
-	}
-	buffer := bufio.NewReader(input)
-	found, err := editorXMLPrefix(buffer)
-	if err != nil {
-		return false, false
-	}
-	if !found {
-		return false, !strings.EqualFold(path.Ext(name), ".xml")
-	}
-	decoder := xml.NewDecoder(buffer)
-	scan := editorReferenceScan{ctx: ctx, refs: r, name: name, safe: true}
-	for {
-		if ctx != nil && ctx.Err() != nil {
-			return false, false
-		}
-		token, err := decoder.Token()
-		if err == io.EOF {
-			return scan.resource, scan.seen && len(scan.stack) == 0
-		}
-		if err != nil {
-			return false, false
-		}
-		if !scan.accept(token) {
-			return false, false
-		}
-	}
-}
-
-// scanCustomTagEntries 逐一校验同一标引文件关联的全部入口元数据与根节点语义
-// 入参: ctx 取消上下文, input 文件流, name 包内路径, tags 关联的标引入口列表
-// 返回: bool 是否全部入口均满足安全引用条件
-func (r *editorResourceRefs) scanCustomTagEntries(ctx context.Context, input io.Reader, name string, tags []CustomTag) bool {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if ctx.Err() != nil || len(tags) == 0 {
-		return false
-	}
-	data, err := io.ReadAll(imageInput{ReadCloser: io.NopCloser(input), ctx: ctx})
-	if err != nil {
-		return false
-	}
-	scannedInternal := false
-	for _, tag := range tags {
-		if ctx.Err() != nil {
-			return false
-		}
-		isText := tag.TypeID == textTagType && tag.NameSpace == textNamespace
-		isRich := tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace
-		if isText || isRich {
-			if tag.SchemaLoc != "" {
-				return false
-			}
-			root, err := parseStructure(ctx, data, tag)
-			if err != nil || root == nil {
-				return false
-			}
-			if isText && (root.Name != "Text" || root.Namespace != textNamespace) {
-				return false
-			}
-			if isRich && (root.Name != "RichText" || root.Namespace != richTextNamespace) {
-				return false
-			}
-			if !scannedInternal {
-				local := &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
-				if _, safe := local.scanContext(ctx, bytes.NewReader(data), name); !safe {
-					return false
-				}
-				r.merge(local)
-				scannedInternal = true
-			}
-			continue
-		}
-		root, err := parseStructure(ctx, data, tag)
-		if err != nil || !knownResourceSafeCustomTag(tag, root) {
-			return false
-		}
-	}
-	return ctx.Err() == nil
-}
-
-// reference 记录标准资源标识和路径引用，不将普通数字或资源自身ID视为引用
-// 入参: name 当前文件, base 资源目录, key 字段, value 值, resource 是否资源索引
-func (r *editorResourceRefs) reference(name, base, key, value string, resource bool) {
-	kind := editorResourceReferenceKind(key, resource)
-	if kind == editorReferenceNone {
-		return
-	}
-	if kind == editorReferenceID {
-		if id := editorResourceID(value); id != "" {
-			r.ids[id] = true
-		}
-		return
-	}
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return
-	}
-	r.files[editorResourceLocation(name, base, value)] = true
-	r.files[cleanPackagePath(resolveResourcePath(name, base, value))] = true
-}
-
-// compactResourceReferences 按文档引用清理输出副本，兼顾新建文档与已有包
-// 入参: parts 输出条目, reader 原包，可为空, progress 保存进度回调, generated 自产引用, retired 待移除附件
-// 返回: map[string]bool 可移除条目, error 读取或取消错误
-func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Reader, progress editorProgress, generated map[string]editorGeneratedReferences, retired map[string]bool) (map[string]bool, error) {
-	multiple := reader != nil && reader.DocumentCount() > 1
-	versioned := reader != nil && reader.OFD.DocBody[reader.documentIndex].versioned
-	prune := e.output != nil && e.output.options.Mode != CompressionUnchanged
-	if e.output != nil && e.output.protected {
-		return nil, nil
-	}
-	if !multiple && len(parts) == 0 && len(retired) == 0 && e.revision == 0 && (e.output == nil || e.output.options.Mode == CompressionUnchanged) {
-		return nil, nil
-	}
-	generated = e.generatedVectorReferences(parts, generated)
-	ctx := context.Background()
-	if e.output != nil {
-		ctx = e.output.ctx
-	}
-	if reader != nil {
-		protected, err := reader.hasOutputSignatures(ctx)
-		if err != nil || protected {
-			return nil, err
-		}
-	}
-	progress = progress.withContext(ctx)
-	_, scope, err := reader.versionResourceFiles(ctx, parts, generated)
-	if err != nil {
-		if multiple && !prune {
-			return nil, ctx.Err()
-		}
-		return nil, err
-	}
-	names := make(map[string]bool)
-	if reader != nil {
-		for name := range reader.fileIndex {
-			names[name] = true
-		}
-		for name := range reader.files {
-			names[name] = true
-		}
-		if src := reader.encryptedSource(); src != nil {
-			for _, name := range src.names() {
-				names[name] = true
-			}
-		}
-	}
-	for name := range parts {
-		names[name] = true
-	}
-	if scope != nil {
-		for name := range names {
-			if !scope[cleanPackagePath(name)] {
-				delete(names, name)
-			}
-		}
-	}
-	refs, resources, references, safe, err := e.scanOutputResourcesWithRetired(ctx, reader, parts, generated, names, retired, progress, multiple || prune)
-	if err != nil {
-		return nil, err
-	}
-	if !safe {
-		return nil, nil
-	}
-	var scoped map[string]*editorResourceRefs
-	if prune {
-		for _, name := range resources {
-			data, ok := parts[name]
-			if !ok {
-				data, err = reader.readFileViewContext(ctx, name)
-				if err != nil {
-					return nil, err
-				}
-			}
-			indexed, err := editorResourceDefinitions(ctx, data, name, references[name], refs.versions[cleanPackagePath(name)])
-			if err != nil || indexed == nil {
-				return nil, err
-			}
-			references[name] = indexed
-		}
-	}
-	if multiple || prune {
-		selected := ""
-		if reader != nil && reader.OFD.DocBody[reader.documentIndex].versioned {
-			selected, err = reader.DocumentRootContext(ctx)
-			if err != nil {
-				return nil, err
-			}
-		}
-		scoped, err = resourceReferenceScopes(ctx, refs.documents, resources, references, selected)
-		if err != nil || scoped == nil {
-			return nil, err
-		}
-	}
-	ordered := slices.Sorted(maps.Keys(names))
-	removed := maps.Clone(retired)
-	if removed == nil {
-		removed = make(map[string]bool)
-	}
-	var usedFiles map[string]bool
-	var protectedProfiles map[string]bool
-	var profiles map[string][]editorProfileReference
-	if prune {
-		usedFiles = make(map[string]bool)
-		protectedProfiles = make(map[string]bool)
-		profiles = make(map[string][]editorProfileReference)
-		for name, source := range references {
-			if source.definitions == nil {
-				maps.Copy(usedFiles, source.files)
-				maps.Copy(protectedProfiles, source.files)
-				continue
-			}
-			usage := scoped[name]
-			for id, definition := range source.definitions {
-				if refs.versions[cleanPackagePath(name)] || usage == nil || usage.ids[id] {
-					maps.Copy(usedFiles, definition.files)
-					if refs.versions[cleanPackagePath(name)] || usage == nil {
-						maps.Copy(protectedProfiles, definition.files)
-					}
-				}
-			}
-		}
-	} else {
-		usedFiles = maps.Clone(refs.files)
-	}
-	updates := make(map[string][]byte)
-	fontFiles := make(map[string]*editorFontUsage)
-	for i, name := range resources {
-		if err := progress.report("resources", i, len(resources)); err != nil {
-			return nil, err
-		}
-		data, ok := parts[name]
-		if !ok {
-			var err error
-			data, err = reader.readFileViewContext(ctx, name)
-			if err != nil {
-				return nil, err
-			}
-		}
-		root, err := parseEditorXMLContext(ctx, data)
-		if err != nil {
-			return nil, ctx.Err()
-		}
-		usageRefs := refs
-		if multiple || prune {
-			usageRefs = scoped[name]
-		}
-		preserved := refs.versions[cleanPackagePath(name)] || usageRefs == nil
-		var patches []editorXMLPatch
-		for _, group := range root.children {
-			var members []editorXMLPatch
-			for _, node := range group.children {
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
-				field := ""
-				if group.name.Local == "Fonts" && node.name.Local == "Font" {
-					field = "FontFile"
-				} else if group.name.Local == "MultiMedias" && node.name.Local == "MultiMedia" {
-					field = "MediaFile"
-				}
-				if field == "" && (!prune || node.name.Local != editorResourceElement(group.name.Local)) {
-					continue
-				}
-				id := editorResourceID(node.attr("ID"))
-				keep := preserved || id == "" || usageRefs.ids[id] || field == "MediaFile" && node.attr("Type") != "Image"
-				profile := prune && group.name.Local == "ColorSpaces" && node.name.Local == "ColorSpace"
-				if prune && keep && !profile {
-					maps.Copy(protectedProfiles, references[name].definitions[id].files)
-				}
-				var value string
-				if file := node.child(field); file != nil {
-					if err := xml.Unmarshal(data[file.start:file.end], &value); err != nil {
-						return nil, nil
-					}
-				} else if profile {
-					value = node.attr("Profile")
-				}
-				if location := editorResourceLocation(name, root.attr("BaseLoc"), value); location != "" {
-					alternate := cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))
-					if field == "FontFile" && !multiple && !versioned && keep {
-						var usage *editorFontUsage
-						if usageRefs != nil {
-							usage = usageRefs.fonts[id]
-						}
-						charset := node.attr("Charset")
-						unsafe := preserved || refs.fontUnsafe || id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != alternate
-						for _, file := range []string{location, alternate} {
-							if fontFiles[file] == nil {
-								fontFiles[file] = newEditorFontUsage()
-							}
-							fontFiles[file].merge(usage, unsafe || keep && usage == nil)
-						}
-					}
-					if keep {
-						usedFiles[location] = true
-						usedFiles[alternate] = true
-						if prune {
-							if profile && !preserved && location == alternate {
-								profiles[location] = append(profiles[location], editorProfileReference{index: name, id: id})
-							} else {
-								protectedProfiles[location] = true
-								protectedProfiles[alternate] = true
-							}
-						}
-					} else {
-						removed[location] = true
-					}
-				}
-				if !keep {
-					members = append(members, editorXMLPatch{start: node.start, end: node.end})
-				}
-			}
-			if len(members) > 0 && len(members) == len(group.children) {
-				patches = append(patches, editorXMLPatch{start: group.start, end: group.end})
-			} else {
-				patches = append(patches, members...)
-			}
-		}
-		if len(patches) != 0 {
-			updates[name] = editorPatchXML(data, patches)
-		}
-	}
-	if err := progress.report("resources", len(resources), len(resources)); err != nil {
-		return nil, err
-	}
-	for name := range usedFiles {
-		delete(removed, name)
-	}
-	var fontCache editorSourceFontCache
-	for i, name := range ordered {
-		if err := progress.report("fonts", i, len(ordered)); err != nil {
-			return nil, err
-		}
-		key := cleanPackagePath(name)
-		usage := fontFiles[key]
-		if e.backends.FontResources == nil || refs.fontUnsafe || usage == nil || usage.unsafe || refs.files[key] || removed[key] || parts[name] != nil {
-			continue
-		}
-		data, err := reader.readFile(name)
-		if err != nil {
-			return nil, err
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		subset, err := fontCache.subset(ctx, e.backends.FontResources, data, usage)
-		if err != nil {
-			return nil, fmt.Errorf("subset font %s: %w", name, err)
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if subset != nil {
-			updates[name] = subset
-		}
-	}
-	if err := progress.report("fonts", len(ordered), len(ordered)); err != nil {
-		return nil, err
-	}
-	maps.Copy(parts, updates)
-	for name := range parts {
-		if removed[cleanPackagePath(name)] {
-			delete(parts, name)
-		}
-	}
-	if err := compactResourceProfiles(ctx, reader, parts, profiles, protectedProfiles, removed); err != nil {
-		return nil, err
-	}
-	return removed, nil
 }
 
 // editorResourceReferenceKind 区分标准标识和文件引用，其他文本不参与资源扫描
@@ -602,4 +200,575 @@ func knownResourceSafeCustomTag(tag CustomTag, root *StructureNode) bool {
 		return false
 	}
 	return structureInvoiceReferences(root) || tag.TypeID == pdfAuxiliaryTagType && root.Namespace == pdfStructureNamespace || tag.TypeID == pdfInformationTagType && root.Namespace == pdfInformationNamespace
+}
+
+// sourcePageMayShrink 判断已修改原页面是否可能减少原包资源引用或缩减原文文字内容
+// 入参: page 当前页面内容, orig 原页面快照
+// 返回: bool 是否可能缩减资源引用或文本用字
+func sourcePageMayShrink(page PageContent, orig *editorSourcePage) bool {
+	if orig == nil || orig.original == nil {
+		return false
+	}
+	if len(orig.original.Actions) != 0 && !reflect.DeepEqual(page.Actions, orig.original.Actions) {
+		beforeRefs := make(map[string]bool)
+		collectActionReferences(orig.original.Actions, beforeRefs)
+		normalizeResourceReferences(beforeRefs)
+		if len(beforeRefs) != 0 {
+			afterRefs := make(map[string]bool)
+			collectActionReferences(page.Actions, afterRefs)
+			normalizeResourceReferences(afterRefs)
+			for id := range beforeRefs {
+				if !afterRefs[id] {
+					return true
+				}
+			}
+		}
+	}
+	if len(page.Content.Layer) < len(orig.original.Content.Layer) {
+		return true
+	}
+	for i, origLayer := range orig.original.Content.Layer {
+		curLayer := page.Content.Layer[i]
+		if curLayer.ID != origLayer.ID {
+			return true
+		}
+		if origLayer.DrawParam != "" && curLayer.DrawParam != origLayer.DrawParam {
+			return true
+		}
+		if len(origLayer.Objects) == 0 {
+			continue
+		}
+		curObjects := make(map[string]GraphicObject, len(curLayer.Objects))
+		for _, obj := range curLayer.Objects {
+			curObjects[editorObjectID(obj)] = obj
+		}
+		for _, origObj := range origLayer.Objects {
+			curObj, ok := curObjects[editorObjectID(origObj)]
+			if !ok {
+				return true
+			}
+			if reflect.DeepEqual(origObj, curObj) {
+				continue
+			}
+			if !objectPreservesRefsAndText(origObj, curObj) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// objectPreservesRefsAndText 判断对象修改是否保留原有文字内容及全部既有资源引用
+// 入参: before 原对象, after 新对象
+// 返回: bool 是否未缩减原有资源引用或文本用字
+func objectPreservesRefsAndText(before, after GraphicObject) bool {
+	if !editorPreservedObject(before, after) {
+		return false
+	}
+	beforeRefs := make(map[string]bool)
+	collectObjectReferences(before, beforeRefs)
+	delete(beforeRefs, "")
+	if len(beforeRefs) == 0 {
+		return true
+	}
+	afterRefs := make(map[string]bool)
+	collectObjectReferences(after, afterRefs)
+	delete(afterRefs, "")
+	normalizeResourceReferences(beforeRefs)
+	normalizeResourceReferences(afterRefs)
+	for id := range beforeRefs {
+		if !afterRefs[id] {
+			return false
+		}
+	}
+	return true
+}
+
+// addCustomTagFile 按路径去重追加标引入口描述
+// 入参: target 包内路径, tag 标引入口描述
+func (r *editorResourceRefs) addCustomTagFile(target string, tag CustomTag) {
+	if target == "" {
+		return
+	}
+	if r.customTagFiles == nil {
+		r.customTagFiles = make(map[string][]CustomTag)
+	}
+	if !slices.Contains(r.customTagFiles[target], tag) {
+		r.customTagFiles[target] = append(r.customTagFiles[target], tag)
+	}
+}
+
+// scanContext 流式收集资源引用，在读取和字体用字处理期间检查取消
+// 入参: ctx 取消上下文，可为nil, input 文件流, name 包内路径
+// 返回: bool 是否资源索引, bool 是否完整收集引用，取消时为false
+func (r *editorResourceRefs) scanContext(ctx context.Context, input io.Reader, name string) (bool, bool) {
+	if ctx != nil {
+		if ctx.Err() != nil {
+			return false, false
+		}
+		input = imageInput{ReadCloser: io.NopCloser(input), ctx: ctx}
+	}
+	buffer := bufio.NewReader(input)
+	found, err := editorXMLPrefix(buffer)
+	if err != nil {
+		return false, false
+	}
+	if !found {
+		return false, !strings.EqualFold(path.Ext(name), ".xml")
+	}
+	decoder := xml.NewDecoder(buffer)
+	scan := editorReferenceScan{ctx: ctx, refs: r, name: name, safe: true}
+	for {
+		if ctx != nil && ctx.Err() != nil {
+			return false, false
+		}
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return scan.resource, scan.seen && len(scan.stack) == 0
+		}
+		if err != nil {
+			return false, false
+		}
+		if !scan.accept(token) {
+			return false, false
+		}
+	}
+}
+
+// scanCustomTagEntries 逐一校验同一标引文件关联的全部入口元数据与根节点语义
+// 入参: ctx 取消上下文, input 文件流, name 包内路径, tags 关联的标引入口列表
+// 返回: bool 是否全部入口均满足安全引用条件
+func (r *editorResourceRefs) scanCustomTagEntries(ctx context.Context, input io.Reader, name string, tags []CustomTag) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil || len(tags) == 0 {
+		return false
+	}
+	data, err := io.ReadAll(imageInput{ReadCloser: io.NopCloser(input), ctx: ctx})
+	if err != nil {
+		return false
+	}
+	scannedInternal := false
+	for _, tag := range tags {
+		if ctx.Err() != nil {
+			return false
+		}
+		isText := tag.TypeID == textTagType && tag.NameSpace == textNamespace
+		isRich := tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace
+		if isText || isRich {
+			if tag.SchemaLoc != "" {
+				return false
+			}
+			root, err := parseStructure(ctx, data, tag)
+			if err != nil || root == nil {
+				return false
+			}
+			if isText && (root.Name != "Text" || root.Namespace != textNamespace) {
+				return false
+			}
+			if isRich && (root.Name != "RichText" || root.Namespace != richTextNamespace) {
+				return false
+			}
+			if !scannedInternal {
+				local := &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
+				if _, safe := local.scanContext(ctx, bytes.NewReader(data), name); !safe {
+					return false
+				}
+				r.merge(local)
+				scannedInternal = true
+			}
+			continue
+		}
+		root, err := parseStructure(ctx, data, tag)
+		if err != nil || !knownResourceSafeCustomTag(tag, root) {
+			return false
+		}
+	}
+	return ctx.Err() == nil
+}
+
+// reference 记录标准资源标识和路径引用，不将普通数字或资源自身ID视为引用
+// 入参: name 当前文件, base 资源目录, key 字段, value 值, resource 是否资源索引
+func (r *editorResourceRefs) reference(name, base, key, value string, resource bool) {
+	kind := editorResourceReferenceKind(key, resource)
+	if kind == editorReferenceNone {
+		return
+	}
+	if kind == editorReferenceID {
+		if id := editorResourceID(value); id != "" {
+			r.ids[id] = true
+		}
+		return
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	r.files[editorResourceLocation(name, base, value)] = true
+	r.files[cleanPackagePath(resolveResourcePath(name, base, value))] = true
+}
+
+// compactResourceReferences 按文档引用清理输出副本，兼顾新建文档与已有包
+// 入参: parts 输出条目, reader 原包，可为空, progress 保存进度回调, generated 自产引用, retired 待移除附件
+// 返回: map[string]bool 可移除条目, error 读取或取消错误
+func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Reader, progress editorProgress, generated map[string]editorGeneratedReferences, retired map[string]bool) (map[string]bool, error) {
+	multiple := reader != nil && reader.DocumentCount() > 1
+	currentVersioned := reader != nil && reader.currentVersioned()
+	packageVersioned := reader != nil && reader.packageVersioned()
+	prune := e.output != nil && e.output.options.Mode != CompressionUnchanged
+	if e.output != nil && e.output.protected {
+		return nil, nil
+	}
+	if !multiple && len(parts) == 0 && len(retired) == 0 && e.revision == 0 && (e.output == nil || e.output.options.Mode == CompressionUnchanged) {
+		return nil, nil
+	}
+	if !multiple && !currentVersioned && !prune && len(retired) == 0 && e.canSkipResourceCompaction(reader) {
+		return nil, nil
+	}
+	generated = e.generatedVectorReferences(parts, generated)
+	ctx := context.Background()
+	if e.output != nil {
+		ctx = e.output.ctx
+	}
+	var protectedFiles map[string]bool
+	if reader != nil {
+		var protected bool
+		var err error
+		_, protectedFiles, protected, err = e.outputProtection(ctx, reader)
+		if err != nil || protected {
+			return nil, err
+		}
+	}
+	progress = progress.withContext(ctx)
+	selectedVersionFiles, scope, err := reader.versionResourceFiles(ctx, parts, generated)
+	if err != nil {
+		if multiple && !prune {
+			return nil, ctx.Err()
+		}
+		return nil, err
+	}
+	names := make(map[string]bool)
+	if reader != nil {
+		for name := range reader.fileIndex {
+			names[name] = true
+		}
+		for name := range reader.files {
+			names[name] = true
+		}
+		if src := reader.encryptedSource(); src != nil {
+			for _, name := range src.names() {
+				names[name] = true
+			}
+		}
+	}
+	for name := range parts {
+		names[name] = true
+	}
+	if scope != nil {
+		for name := range names {
+			if !scope[cleanPackagePath(name)] {
+				delete(names, name)
+			}
+		}
+	}
+	refs, resources, references, safe, err := e.scanOutputResourcesWithRetired(ctx, reader, parts, generated, names, retired, progress, multiple || prune)
+	if err != nil {
+		return nil, err
+	}
+	if !safe {
+		return nil, nil
+	}
+	if packageVersioned {
+		preserved, err := reader.versionPreservedFiles(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for name := range preserved {
+			if !currentVersioned || !selectedVersionFiles[name] {
+				refs.files[name], refs.versions[name] = true, true
+			}
+		}
+	}
+	for name := range protectedFiles {
+		refs.files[name] = true
+	}
+	var scoped map[string]*editorResourceRefs
+	if prune {
+		for _, name := range resources {
+			data, ok := parts[name]
+			if !ok {
+				data, err = reader.readFileViewContext(ctx, name)
+				if err != nil {
+					return nil, err
+				}
+			}
+			cleanName := cleanPackagePath(name)
+			indexed, err := editorResourceDefinitions(ctx, data, name, references[name], refs.versions[cleanName] || protectedFiles[cleanName])
+			if err != nil || indexed == nil {
+				return nil, err
+			}
+			references[name] = indexed
+		}
+	}
+	if multiple || prune {
+		selected := ""
+		if currentVersioned {
+			selected, err = reader.DocumentRootContext(ctx)
+			if err != nil {
+				return nil, err
+			}
+		}
+		scoped, err = resourceReferenceScopes(ctx, refs.documents, resources, references, selected)
+		if err != nil || scoped == nil {
+			return nil, err
+		}
+	}
+	ordered := slices.Sorted(maps.Keys(names))
+	removed := maps.Clone(retired)
+	if removed == nil {
+		removed = make(map[string]bool)
+	}
+	var usedFiles map[string]bool
+	var protectedProfiles map[string]bool
+	var profiles map[string][]editorProfileReference
+	if prune {
+		usedFiles = make(map[string]bool)
+		protectedProfiles = make(map[string]bool)
+		profiles = make(map[string][]editorProfileReference)
+		for name, source := range references {
+			if source.definitions == nil {
+				maps.Copy(usedFiles, source.files)
+				maps.Copy(protectedProfiles, source.files)
+				continue
+			}
+			cleanName := cleanPackagePath(name)
+			usage := scoped[name]
+			for id, definition := range source.definitions {
+				if refs.versions[cleanName] || protectedFiles[cleanName] || usage == nil || usage.ids[id] {
+					maps.Copy(usedFiles, definition.files)
+					if refs.versions[cleanName] || protectedFiles[cleanName] || usage == nil {
+						maps.Copy(protectedProfiles, definition.files)
+					}
+				}
+			}
+		}
+		for name := range protectedFiles {
+			usedFiles[name] = true
+			protectedProfiles[name] = true
+		}
+	} else {
+		usedFiles = maps.Clone(refs.files)
+	}
+	updates := make(map[string][]byte)
+	fontFiles := make(map[string]*editorFontUsage)
+	for i, name := range resources {
+		if err := progress.report("resources", i, len(resources)); err != nil {
+			return nil, err
+		}
+		data, ok := parts[name]
+		if !ok {
+			var err error
+			data, err = reader.readFileViewContext(ctx, name)
+			if err != nil {
+				return nil, err
+			}
+		}
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			return nil, ctx.Err()
+		}
+		usageRefs := refs
+		if multiple || prune {
+			usageRefs = scoped[name]
+		}
+		cleanName := cleanPackagePath(name)
+		preserved := refs.versions[cleanName] || protectedFiles[cleanName] || usageRefs == nil
+		var patches []editorXMLPatch
+		for _, group := range root.children {
+			var members []editorXMLPatch
+			for _, node := range group.children {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				field := ""
+				if group.name.Local == "Fonts" && node.name.Local == "Font" {
+					field = "FontFile"
+				} else if group.name.Local == "MultiMedias" && node.name.Local == "MultiMedia" {
+					field = "MediaFile"
+				}
+				if field == "" && (!prune || node.name.Local != editorResourceElement(group.name.Local)) {
+					continue
+				}
+				id := editorResourceID(node.attr("ID"))
+				keep := preserved || id == "" || usageRefs.ids[id] || field == "MediaFile" && node.attr("Type") != "Image"
+				profile := prune && group.name.Local == "ColorSpaces" && node.name.Local == "ColorSpace"
+				if prune && keep && !profile {
+					maps.Copy(protectedProfiles, references[name].definitions[id].files)
+				}
+				var value string
+				if file := node.child(field); file != nil {
+					if err := xml.Unmarshal(data[file.start:file.end], &value); err != nil {
+						return nil, nil
+					}
+				} else if profile {
+					value = node.attr("Profile")
+				}
+				if location := editorResourceLocation(name, root.attr("BaseLoc"), value); location != "" {
+					alternate := cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))
+					if field == "FontFile" && !multiple && !currentVersioned && keep {
+						var usage *editorFontUsage
+						if usageRefs != nil {
+							usage = usageRefs.fonts[id]
+						}
+						charset := node.attr("Charset")
+						unsafe := preserved || refs.fontUnsafe || protectedFiles[location] || protectedFiles[alternate] || id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != alternate
+						for _, file := range []string{location, alternate} {
+							if fontFiles[file] == nil {
+								fontFiles[file] = newEditorFontUsage()
+							}
+							fontFiles[file].merge(usage, unsafe || keep && usage == nil)
+						}
+					}
+					if keep {
+						usedFiles[location] = true
+						usedFiles[alternate] = true
+						if prune {
+							if profile && !preserved && !protectedFiles[location] && location == alternate {
+								profiles[location] = append(profiles[location], editorProfileReference{index: name, id: id})
+							} else {
+								protectedProfiles[location] = true
+								protectedProfiles[alternate] = true
+							}
+						}
+					} else {
+						removed[location] = true
+					}
+				}
+				if !keep {
+					members = append(members, editorXMLPatch{start: node.start, end: node.end})
+				}
+			}
+			if len(members) > 0 && len(members) == len(group.children) {
+				patches = append(patches, editorXMLPatch{start: group.start, end: group.end})
+			} else {
+				patches = append(patches, members...)
+			}
+		}
+		if len(patches) != 0 {
+			updates[name] = editorPatchXML(data, patches)
+		}
+	}
+	if err := progress.report("resources", len(resources), len(resources)); err != nil {
+		return nil, err
+	}
+	for name := range usedFiles {
+		delete(removed, name)
+	}
+	for name := range protectedFiles {
+		delete(removed, name)
+	}
+	var fontCache editorSourceFontCache
+	for i, name := range ordered {
+		if err := progress.report("fonts", i, len(ordered)); err != nil {
+			return nil, err
+		}
+		key := cleanPackagePath(name)
+		usage := fontFiles[key]
+		if e.backends.FontResources == nil || refs.fontUnsafe || usage == nil || usage.unsafe || refs.files[key] || protectedFiles[key] || removed[key] || parts[name] != nil {
+			continue
+		}
+		data, err := reader.readFileViewContext(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		subset, err := fontCache.subset(ctx, e.backends.FontResources, data, usage)
+		if err != nil {
+			return nil, fmt.Errorf("subset font %s: %w", name, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if subset != nil {
+			updates[name] = subset
+		}
+	}
+	if err := progress.report("fonts", len(ordered), len(ordered)); err != nil {
+		return nil, err
+	}
+	maps.Copy(parts, updates)
+	for name := range parts {
+		if removed[cleanPackagePath(name)] {
+			delete(parts, name)
+		}
+	}
+	if err := compactResourceProfiles(ctx, reader, parts, profiles, protectedProfiles, removed); err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
+// recordAppendOnlyFiles 记录通过纯追加路径写入内存覆盖层的条目，保持快照写时复制隔离
+// 入参: files 本次纯追加写入的包内路径及字节切片
+func (s *editorSource) recordAppendOnlyFiles(files map[string][]byte) {
+	if s == nil || len(files) == 0 {
+		return
+	}
+	next := maps.Clone(s.appendOnlyFiles)
+	if next == nil {
+		next = make(map[string][]byte, len(files))
+	}
+	for name, data := range files {
+		next[cleanPackagePath(name)] = data
+	}
+	s.appendOnlyFiles = next
+}
+
+// canSkipResourceCompaction 判断当前未压缩保存是否未发生删除、替换或文本缩减，可安全跳过全包重扫与原包字体重子集化
+// 入参: reader 原包阅读器
+// 返回: bool 是否允许短路跳过全包资源重扫
+func (e *Editor) canSkipResourceCompaction(reader *Reader) bool {
+	if e.source == nil || reader == nil || e.source.mayShrinkResources {
+		return false
+	}
+	if len(e.removedPages) != 0 || len(e.source.retiredAttachments) != 0 || len(e.source.removedAttachments) != 0 {
+		return false
+	}
+	if e.source.info.Cover != "" && e.Info.Cover != e.source.info.Cover {
+		return false
+	}
+	if e.outlines != nil && len(e.source.document.Outlines.OutlineElem) != 0 {
+		return false
+	}
+	if len(e.pages) < len(e.source.pages) {
+		return false
+	}
+	for name, data := range reader.files {
+		clean := cleanPackagePath(name)
+		if initial, ok := e.source.initialFiles[clean]; ok && sameByteSlice(initial, data) {
+			continue
+		}
+		if appended, ok := e.source.appendOnlyFiles[clean]; ok && sameByteSlice(appended, data) {
+			continue
+		}
+		return false
+	}
+	keptSourceCount := 0
+	for _, page := range e.pages {
+		orig := e.source.pages[page.ID]
+		if orig == nil {
+			continue
+		}
+		keptSourceCount++
+		if orig.original == nil || sourcePageUntouched(page, orig) {
+			continue
+		}
+		if sourcePageMayShrink(page, orig) {
+			return false
+		}
+	}
+	return keptSourceCount == len(e.source.pages)
 }

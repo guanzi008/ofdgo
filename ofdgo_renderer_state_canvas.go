@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"image"
 	"math"
 
 	"github.com/tdewolff/canvas"
@@ -66,6 +67,37 @@ type canvasStrokeKey struct {
 // canvasOutlineCacheKey 区分子渲染器共享的字体轮廓解析缓存
 type canvasOutlineCacheKey struct{}
 
+// canvasTextGlyphCacheKey 区分跨渲染器共享的字形路径缓存
+type canvasTextGlyphCacheKey struct{}
+
+// canvasTemplateCommandsKey 区分跨渲染器共享的模板页光栅指令缓存
+type canvasTemplateCommandsKey struct{}
+
+// svgTemplateCacheKey 区分跨渲染器共享的模板页SVG片段缓存
+type svgTemplateCacheKey struct{}
+
+// stampImageCacheKey 区分跨渲染器共享的图像印章缓存
+type stampImageCacheKey struct{}
+
+// stampOFDCacheKey 区分跨渲染器共享的OFD印章解析缓存
+type stampOFDCacheKey struct{}
+
+// imageEffectCacheKey 区分跨渲染器共享的透明与蒙版图像缓存
+type imageEffectCacheKey struct{}
+
+// templateRasterCacheKey 按模板页面、视口与渲染模式区分共享光栅指令
+type templateRasterCacheKey struct {
+	template      *PageContent
+	width         float64
+	height        float64
+	offsetX       float64
+	offsetY       float64
+	dpi           float64
+	printing      bool
+	printContents string
+	decodeImages  bool
+}
+
 // canvasFillKey 保存完整几何摘要及填充规则
 type canvasFillKey struct {
 	digest [32]byte
@@ -78,41 +110,16 @@ type canvasPathKey struct {
 	epsilon float64
 }
 
-// canvasBackendState 保存Canvas字体与字形适配缓存
+// canvasBackendState 保存当前渲染器的Canvas快速查找缓存
 type canvasBackendState struct {
-	resources          *Resources
-	fontFamilies       map[canvasFontKey]*canvas.FontFamily
-	fontMap            map[canvasFontMapKey]*canvas.FontFamily
-	fontDigests        map[*canvas.Font][32]byte
-	svgFontCache       map[*canvas.Font]SVGFont
-	textGlyphPathCache renderCache[textGlyphPathCacheKey, textGlyphPathCacheValue]
-	fontOutlines       map[*canvas.Font]*basefont.Outliner
-}
-
-// resetFonts 清除Canvas字体及字形缓存
-func (s *canvasBackendState) resetFonts() {
-	s.textGlyphPathCache.clear()
-	s.fontFamilies = make(map[canvasFontKey]*canvas.FontFamily)
-	s.fontMap = make(map[canvasFontMapKey]*canvas.FontFamily)
-	s.fontDigests = make(map[*canvas.Font][32]byte)
-	s.svgFontCache = make(map[*canvas.Font]SVGFont)
-	s.textGlyphPathCache = *resourceCache[textGlyphPathCacheKey, textGlyphPathCacheValue](s.resources, 16<<20)
-	s.fontOutlines = make(map[*canvas.Font]*basefont.Outliner)
-}
-
-// forkSharedState 将Canvas后端的线程安全共享缓存传递给Fork子渲染器
-// 入参: src 源渲染器, dst 目标子渲染器
-func (CanvasBackend) forkSharedState(src, dst *Renderer) {
-	dst.sharedBackendStates[CanvasBackend{}] = src.canvasFontData()
-	dst.sharedBackendStates[canvasOutlineCacheKey{}] = src.canvasFontOutlines()
-	dst.sharedBackendStates[canvasClipUnionKey{}] = src.canvasClipUnions()
-	dst.sharedBackendStates[canvasPathCacheKey{}] = src.canvasParsedPaths()
-	dst.sharedBackendStates[canvasClipCacheKey{}] = src.canvasClipIntersections()
-	dst.sharedBackendStates[canvasFillCacheKey{}] = src.canvasSettledPaths()
-	dst.sharedBackendStates[canvasDrawClipCacheKey{}] = src.canvasDrawClips()
-	dst.sharedBackendStates[canvasStrokeCacheKey{}] = src.canvasStrokeClips()
-	dst.sharedBackendStates[svgResourceCacheKey{}] = src.svgImageResources()
-	dst.sharedBackendStates[svgFontCacheKey{}] = src.svgFontResources()
+	resources       *Resources
+	fontFamilies    map[canvasFontKey]*canvas.FontFamily
+	fontFamilyCache *renderCache[canvasFontKey, *canvas.FontFamily]
+	fontMap         map[canvasFontMapKey]*canvas.FontFamily
+	fontDigests     map[*canvas.Font][32]byte
+	svgFontCache    map[*canvas.Font]SVGFont
+	fontOutlines    map[*canvas.Font]*basefont.Outliner
+	stampSessions   map[[32]byte]*cachedStampSession
 }
 
 // sharedCanvasCache 获取或初始化指定键名的线程安全Canvas共享缓存
@@ -125,9 +132,69 @@ func sharedCanvasCache[K comparable, V any](r *Renderer, key any, limit int) *re
 	if r.sharedBackendStates == nil {
 		r.sharedBackendStates = make(map[any]any)
 	}
-	cache := resourceCache[K, V](r.Reader.resources, limit)
+	cache := resourceCache[K, V](r.reader.resources, limit)
 	r.sharedBackendStates[key] = cache
 	return cache
+}
+
+// canvasGeometryDigest 按完整坐标、路径顺序及几何容差计算摘要
+// 入参: paths 非空路径序列
+// 返回: [32]byte 几何摘要
+func canvasGeometryDigest(paths ...*canvas.Path) [32]byte {
+	hash := sha256.New()
+	var data [512]byte
+	binary.LittleEndian.PutUint64(data[:8], math.Float64bits(canvas.Tolerance))
+	binary.LittleEndian.PutUint64(data[8:16], math.Float64bits(canvas.Epsilon))
+	binary.LittleEndian.PutUint64(data[16:24], math.Float64bits(canvas.BentleyOttmannEpsilon))
+	hash.Write(data[:24])
+	for _, path := range paths {
+		values := path.Data()
+		binary.LittleEndian.PutUint64(data[:8], uint64(len(values)))
+		hash.Write(data[:8])
+		for len(values) > 0 {
+			count := min(len(values), len(data)/8)
+			for i, value := range values[:count] {
+				binary.LittleEndian.PutUint64(data[i*8:], math.Float64bits(value))
+			}
+			hash.Write(data[:count*8])
+			values = values[count:]
+		}
+	}
+	var key [32]byte
+	hash.Sum(key[:0])
+	return key
+}
+
+// resetFonts 清除Canvas字体及字形缓存
+func (s *canvasBackendState) resetFonts() {
+	s.fontFamilies = make(map[canvasFontKey]*canvas.FontFamily)
+	s.fontFamilyCache = nil
+	s.fontMap = make(map[canvasFontMapKey]*canvas.FontFamily)
+	s.fontDigests = make(map[*canvas.Font][32]byte)
+	s.svgFontCache = make(map[*canvas.Font]SVGFont)
+	s.fontOutlines = make(map[*canvas.Font]*basefont.Outliner)
+	s.stampSessions = make(map[[32]byte]*cachedStampSession)
+}
+
+// forkSharedState 将Canvas后端的线程安全共享缓存传递给Fork子渲染器
+// 入参: src 源渲染器, dst 目标子渲染器
+func (DefaultBackend) forkSharedState(src, dst *Renderer) {
+	dst.sharedBackendStates[DefaultBackend{}] = src.canvasFontData()
+	dst.sharedBackendStates[canvasTextGlyphCacheKey{}] = src.canvasTextGlyphPaths()
+	dst.sharedBackendStates[canvasOutlineCacheKey{}] = src.canvasFontOutlines()
+	dst.sharedBackendStates[canvasClipUnionKey{}] = src.canvasClipUnions()
+	dst.sharedBackendStates[canvasPathCacheKey{}] = src.canvasParsedPaths()
+	dst.sharedBackendStates[canvasClipCacheKey{}] = src.canvasClipIntersections()
+	dst.sharedBackendStates[canvasFillCacheKey{}] = src.canvasSettledPaths()
+	dst.sharedBackendStates[canvasDrawClipCacheKey{}] = src.canvasDrawClips()
+	dst.sharedBackendStates[canvasStrokeCacheKey{}] = src.canvasStrokeClips()
+	dst.sharedBackendStates[canvasTemplateCommandsKey{}] = src.canvasTemplateCommands()
+	dst.sharedBackendStates[svgResourceCacheKey{}] = src.svgImageResources()
+	dst.sharedBackendStates[svgFontCacheKey{}] = src.svgFontResources()
+	dst.sharedBackendStates[svgTemplateCacheKey{}] = src.svgTemplateFragments()
+	dst.sharedBackendStates[stampImageCacheKey{}] = src.stampImageCache()
+	dst.sharedBackendStates[stampOFDCacheKey{}] = src.stampOFDCache()
+	dst.sharedBackendStates[imageEffectCacheKey{}] = src.imageEffectCache()
 }
 
 // canvasClipIntersections 获取子渲染器共享的几何交集缓存，限制结果保留量
@@ -157,7 +224,7 @@ func (r *Renderer) canvasSettledPaths() *renderCache[canvasFillKey, *canvas.Path
 // canvasFontData 获取子渲染器共享的只读字体字节缓存，限制解析数据保留量
 // 返回: *renderCache[[32]byte, []byte] 字体数据缓存
 func (r *Renderer) canvasFontData() *renderCache[[32]byte, []byte] {
-	return sharedCanvasCache[[32]byte, []byte](r, CanvasBackend{}, 32<<20)
+	return sharedCanvasCache[[32]byte, []byte](r, DefaultBackend{}, 32<<20)
 }
 
 // canvasDrawClips 获取派生渲染器共享的绘制裁剪缓存
@@ -172,28 +239,29 @@ func (r *Renderer) canvasStrokeClips() *renderCache[canvasStrokeKey, *canvas.Pat
 	return sharedCanvasCache[canvasStrokeKey, *canvas.Path](r, canvasStrokeCacheKey{}, 16<<20)
 }
 
-// strokeClippedCanvasPath 复用原生描边与裁剪结果，自定义几何后端沿用逐次调用
-// 入参: path 绘制路径, clip 裁剪路径, options 描边样式, fill 是否允许重叠填充轮廓
-// 返回: *canvas.Path 可独立变换的描边轮廓
+// strokeClippedCanvasPath 复用原生描边与裁剪结果，纯描边按原点归一化共享缓存，自定义几何后端沿用逐次调用
+// 入参: path 原始路径, clip 裁剪路径, options 描边选项, fill 是否同时填充
+// 返回: *canvas.Path 描边并裁剪后的路径
 func (r *Renderer) strokeClippedCanvasPath(path, clip *canvas.Path, options StrokeOptions, fill bool) *canvas.Path {
 	geometry, err := r.Geometry()
 	if err != nil {
 		r.renderError = err
 		return &canvas.Path{}
 	}
-	render := func() (*canvas.Path, int, error) {
+	applyResultClip := func(stroked *canvas.Path) *canvas.Path {
+		if fill {
+			return applyFillClipPath(stroked, clip)
+		}
+		return applyClipPath(stroked, clip)
+	}
+	strokeOnly := func(target *canvas.Path) (*canvas.Path, int, error) {
 		stroke := canvasStrokePath
 		if fill && !r.compactStrokes {
 			stroke = canvasStrokeFillPath
 		}
-		result, err := stroke(geometry, path, options)
+		result, err := stroke(geometry, target, options)
 		if err != nil {
 			return nil, 0, err
-		}
-		if fill {
-			result = applyFillClipPath(result, clip)
-		} else {
-			result = applyClipPath(result, clip)
 		}
 		return result, len(result.Data())*8 + 256, nil
 	}
@@ -204,23 +272,44 @@ func (r *Renderer) strokeClippedCanvasPath(path, clip *canvas.Path, options Stro
 			r.renderError = encodeErr
 			return &canvas.Path{}
 		}
-		paths := []*canvas.Path{path}
 		if clip != nil {
-			paths = append(paths, clip)
+			key := canvasStrokeKey{digest: canvasGeometryDigest(path, clip), options: string(encoded), fill: fill, compact: r.compactStrokes}
+			if cached, ok := r.canvasStrokeClips().get(key); ok {
+				return cached.Copy()
+			}
 		}
-		key := canvasStrokeKey{digest: canvasGeometryDigest(paths...), options: string(encoded), fill: fill, compact: r.compactStrokes}
-		result, err = r.canvasStrokeClips().load(r.pageContext, key, render)
-		if err == nil {
-			return result.Copy()
+		bounds := path.Bounds()
+		tx, ty := bounds.X0, bounds.Y0
+		normPath := path
+		shifted := (tx != 0 || ty != 0) && !path.Empty()
+		if shifted {
+			normPath = path.Copy().Translate(-tx, -ty)
 		}
-	} else {
-		result, _, err = render()
+		strokeKey := canvasStrokeKey{digest: canvasGeometryDigest(normPath), options: string(encoded), fill: fill, compact: r.compactStrokes}
+		stroked, strokeErr := r.canvasStrokeClips().load(r.pageContext, strokeKey, func() (*canvas.Path, int, error) {
+			return strokeOnly(normPath)
+		})
+		if strokeErr != nil {
+			r.renderError = strokeErr
+			return &canvas.Path{}
+		}
+		result = stroked.Copy()
+		if shifted {
+			result = result.Translate(tx, ty)
+		}
+		if clip != nil {
+			result = applyResultClip(result)
+			clipKey := canvasStrokeKey{digest: canvasGeometryDigest(path, clip), options: string(encoded), fill: fill, compact: r.compactStrokes}
+			r.canvasStrokeClips().put(clipKey, result.Copy(), len(result.Data())*8+256)
+		}
+		return result
 	}
+	result, _, err = strokeOnly(path)
 	if err != nil {
 		r.renderError = err
 		return &canvas.Path{}
 	}
-	return result
+	return applyResultClip(result)
 }
 
 // applyCachedClipPath 复用绘制轮廓的裁剪结果，返回可独立变换的副本
@@ -251,15 +340,55 @@ func (r *Renderer) canvasFontOutlines() *renderCache[[32]byte, *basefont.Outline
 	return sharedCanvasCache[[32]byte, *basefont.Outliner](r, canvasOutlineCacheKey{}, 32<<20)
 }
 
+// canvasFontFamilies 获取当前渲染器私有的字体族缓存，不跨Fork共享
+// 返回: *renderCache[canvasFontKey, *canvas.FontFamily] 字体族缓存
+func (r *Renderer) canvasFontFamilies() *renderCache[canvasFontKey, *canvas.FontFamily] {
+	state := r.canvasState()
+	if state.fontFamilyCache == nil {
+		state.fontFamilyCache = resourceCache[canvasFontKey, *canvas.FontFamily](r.reader.resources, 64<<20)
+	}
+	return state.fontFamilyCache
+}
+
+// canvasTextGlyphPaths 获取跨渲染器共享的字形轮廓路径缓存
+// 返回: *renderCache[textGlyphPathCacheKey, textGlyphPathCacheValue] 字形路径缓存
+func (r *Renderer) canvasTextGlyphPaths() *renderCache[textGlyphPathCacheKey, textGlyphPathCacheValue] {
+	return sharedCanvasCache[textGlyphPathCacheKey, textGlyphPathCacheValue](r, canvasTextGlyphCacheKey{}, 16<<20)
+}
+
+// canvasTemplateCommands 获取跨渲染器共享的模板页光栅指令缓存
+// 返回: *renderCache[templateRasterCacheKey, []RasterCommand] 模板光栅指令缓存
+func (r *Renderer) canvasTemplateCommands() *renderCache[templateRasterCacheKey, []RasterCommand] {
+	return sharedCanvasCache[templateRasterCacheKey, []RasterCommand](r, canvasTemplateCommandsKey{}, 32<<20)
+}
+
+// stampImageCache 获取跨渲染器共享的图像印章缓存
+// 返回: *renderCache[[32]byte, image.Image] 图像印章缓存
+func (r *Renderer) stampImageCache() *renderCache[[32]byte, image.Image] {
+	return sharedCanvasCache[[32]byte, image.Image](r, stampImageCacheKey{}, 32<<20)
+}
+
+// stampOFDCache 获取跨渲染器共享的OFD印章解析缓存
+// 返回: *renderCache[[32]byte, *cachedStampOFD] OFD印章缓存
+func (r *Renderer) stampOFDCache() *renderCache[[32]byte, *cachedStampOFD] {
+	return sharedCanvasCache[[32]byte, *cachedStampOFD](r, stampOFDCacheKey{}, 32<<20)
+}
+
+// imageEffectCache 获取跨渲染器共享的透明与蒙版图像合成缓存
+// 返回: *renderCache[imageEffectKey, image.Image] 效果图像缓存
+func (r *Renderer) imageEffectCache() *renderCache[imageEffectKey, image.Image] {
+	return sharedCanvasCache[imageEffectKey, image.Image](r, imageEffectCacheKey{}, 32<<20)
+}
+
 // canvasState 获取当前渲染器的Canvas私有缓存，按需创建且不向其他后端暴露
 // 返回: *canvasBackendState Canvas缓存
 func (r *Renderer) canvasState() *canvasBackendState {
-	key := CanvasBackend{}
+	key := DefaultBackend{}
 	if state, ok := r.backendStates[key]; ok {
 		return state.(*canvasBackendState)
 	}
 	state := &canvasBackendState{
-		resources: r.Reader.resources,
+		resources: r.reader.resources,
 	}
 	state.resetFonts()
 	r.backendStates[key] = state
@@ -283,32 +412,4 @@ func (r *Renderer) settleCanvasPath(path *canvas.Path, rule canvas.FillRule) *ca
 		cache.put(key, result.Copy(), cost)
 	}
 	return result
-}
-
-// canvasGeometryDigest 按完整坐标、路径顺序及几何容差计算摘要
-// 入参: paths 非空路径序列
-// 返回: [32]byte 几何摘要
-func canvasGeometryDigest(paths ...*canvas.Path) [32]byte {
-	hash := sha256.New()
-	var data [512]byte
-	binary.LittleEndian.PutUint64(data[:8], math.Float64bits(canvas.Tolerance))
-	binary.LittleEndian.PutUint64(data[8:16], math.Float64bits(canvas.Epsilon))
-	binary.LittleEndian.PutUint64(data[16:24], math.Float64bits(canvas.BentleyOttmannEpsilon))
-	hash.Write(data[:24])
-	for _, path := range paths {
-		values := path.Data()
-		binary.LittleEndian.PutUint64(data[:8], uint64(len(values)))
-		hash.Write(data[:8])
-		for len(values) > 0 {
-			count := min(len(values), len(data)/8)
-			for i, value := range values[:count] {
-				binary.LittleEndian.PutUint64(data[i*8:], math.Float64bits(value))
-			}
-			hash.Write(data[:count*8])
-			values = values[count:]
-		}
-	}
-	var key [32]byte
-	hash.Sum(key[:0])
-	return key
 }

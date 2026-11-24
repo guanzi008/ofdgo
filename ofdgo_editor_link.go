@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"slices"
@@ -25,6 +26,116 @@ import (
 type AnnotationLink struct {
 	URI  *URI
 	Dest *Dest
+}
+
+// LinkAnnotation 描述待添加的标准链接注解参数，区域位于页面毫米坐标
+type LinkAnnotation struct {
+	Box     Box
+	Target  AnnotationLink
+	Creator string
+}
+
+// buildLinkAnnotation 根据链接参数构造带点击跳转动作的标准链接注解
+// 入参: item 链接注解参数
+// 返回: Annotation 链接注解, error 校验错误
+func buildLinkAnnotation(item LinkAnnotation) (Annotation, error) {
+	if err := validateCreationBox(item.Box); err != nil {
+		return Annotation{}, err
+	}
+	if _, err := annotationLinkXML(item.Target); err != nil {
+		return Annotation{}, err
+	}
+	object, err := NewShape(ShapeRectangle, Box{W: item.Box.W, H: item.Box.H})
+	if err != nil {
+		return Annotation{}, err
+	}
+	no := false
+	object.Fill, object.Stroke = &no, &no
+	action := Action{Event: "CLICK", URI: cloneEditorData(item.Target.URI)}
+	if item.Target.Dest != nil {
+		action.Goto = &Goto{Dest: cloneEditorData(item.Target.Dest)}
+	}
+	object.Actions = []Action{action}
+	return Annotation{
+		Type:    "Link",
+		Creator: item.Creator,
+		Appearance: &Appearance{
+			Boundary: editorBoxString(item.Box),
+			Objects:  []GraphicObject{{Type: "PathObject", PathObject: object}},
+		},
+	}, nil
+}
+
+// collectActionReferences 收集播放动作引用的音视频资源
+// 入参: actions 动作列表, used 引用集合
+func collectActionReferences(actions []Action, used map[string]bool) {
+	for _, action := range actions {
+		if action.Sound != nil {
+			used[action.Sound.ResourceID] = true
+		}
+		if action.Movie != nil {
+			used[action.Movie.ResourceID] = true
+		}
+	}
+}
+
+// annotationLinkNodes 获取外观内的点击跳转和基本对象，不进入私有扩展
+// 入参: root 注解根节点
+// 返回: []*editorXML 跳转目标, []*editorXML 基本对象
+func annotationLinkNodes(root *editorXML) ([]*editorXML, []*editorXML) {
+	var targets, objects []*editorXML
+	var walk func(*editorXML)
+	walk = func(n *editorXML) {
+		if n.name.Space != root.name.Space {
+			return
+		}
+		if n.name.Local == "Action" && n.attr("Event") == "CLICK" {
+			for _, child := range n.children {
+				if child.name.Space == n.name.Space && (child.name.Local == "URI" || child.name.Local == "Goto") {
+					targets = append(targets, child)
+				}
+			}
+		}
+		if slices.Contains([]string{"TextObject", "PathObject", "ImageObject"}, n.name.Local) {
+			objects = append(objects, n)
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	if appearance := root.child("Appearance"); appearance != nil {
+		walk(appearance)
+	}
+	return targets, objects
+}
+
+// annotationLinkXML 序列化标准跳转目标，不改写其他动作或命名空间
+// 入参: target 跳转目标
+// 返回: []byte 独立XML片段, error 错误信息
+func annotationLinkXML(target AnnotationLink) ([]byte, error) {
+	if (target.URI == nil) == (target.Dest == nil) {
+		return nil, fmt.Errorf("specify one URI or destination")
+	}
+	var data []byte
+	var err error
+	if target.URI != nil {
+		attrs := ofdAttrs{{Name: xml.Name{Local: "URI"}, Value: target.URI.URI}}
+		attrs.add("Base", target.URI.Base)
+		attrs.add("Target", target.URI.Target)
+		data, err = editorXMLContainer("URI", attrs, nil)
+	} else {
+		dest := target.Dest
+		var attrs ofdAttrs
+		attrs, err = dest.attributes()
+		if err != nil {
+			return nil, err
+		}
+		data, err = editorXMLContainer("Dest", attrs, nil)
+		if err == nil {
+			data, err = editorXMLContainer("Goto", nil, bytes.TrimPrefix(data, []byte(xml.Header)))
+		}
+	}
+	return bytes.TrimPrefix(data, []byte(xml.Header)), err
 }
 
 // SetObjectLink 修改对象的单个点击链接，保留其他事件和点击区域，nil移除链接
@@ -49,8 +160,8 @@ func (e *Editor) SetObjectLink(page int, ids []string, link *AnnotationLink) err
 			actions = &objects[i].PathObject.Actions
 		case "ImageObject":
 			actions = &objects[i].ImageObject.Actions
-		case "CompositeObject", "CompositeGraphicUnit":
-			actions = &objects[i].CompositeGraphicUnit.Actions
+		case "CompositeObject":
+			actions = &objects[i].CompositeObject.Actions
 		default:
 			return fmt.Errorf("object %q cannot contain links", ids[i])
 		}
@@ -102,8 +213,8 @@ func (e *Editor) SetObjectActions(page int, ids []string, actions []Action) erro
 			objects[i].PathObject.Actions = cloneEditorData(actions)
 		case "ImageObject":
 			objects[i].ImageObject.Actions = cloneEditorData(actions)
-		case "CompositeObject", "CompositeGraphicUnit":
-			objects[i].CompositeGraphicUnit.Actions = cloneEditorData(actions)
+		case "CompositeObject":
+			objects[i].CompositeObject.Actions = cloneEditorData(actions)
 		default:
 			return fmt.Errorf("object %q cannot contain actions", ids[i])
 		}
@@ -137,29 +248,49 @@ func (e *Editor) AnnotationLink(page int, id string) (Action, error) {
 // 入参: page 页面索引, box 点击区域, target 链接目标, creator 作者
 // 返回: string 注解标识, error 错误信息
 func (e *Editor) AddLinkAnnotation(page int, box Box, target AnnotationLink, creator string) (string, error) {
-	var id string
-	err := e.Transaction(func(edit *Editor) error {
-		if _, err := annotationLinkXML(target); err != nil {
-			return err
-		}
-		object, err := NewShape(ShapeRectangle, Box{W: box.W, H: box.H})
-		if err != nil {
-			return err
-		}
-		no := false
-		object.Fill, object.Stroke = &no, &no
-		id, err = edit.AddAnnotation(page, Annotation{Type: "Link", Creator: creator, Appearance: Appearance{
-			Boundary: editorBoxString(box), Objects: []GraphicObject{{Type: "PathObject", PathObject: object}},
-		}})
-		if err != nil {
-			return err
-		}
-		return edit.UpdateAnnotationLink(page, id, target)
-	})
+	ids, err := e.AddLinkAnnotationsContext(context.Background(), []int{page}, []LinkAnnotation{{Box: box, Target: target, Creator: creator}})
 	if err != nil {
 		return "", err
 	}
-	return id, nil
+	return ids[0], nil
+}
+
+// AddLinkAnnotations 批量新增标准链接注解并单次提交，支持多页共用单个参数或按页一一对应
+// 同一页面可重复出现，返回的新注解标识与pages一一对应，一次批量操作计入一条撤销记录
+// 入参: pages 目标页面索引列表, links 单个或与页码等长的链接注解参数
+// 返回: []string 新注解标识列表, error 错误信息
+func (e *Editor) AddLinkAnnotations(pages []int, links []LinkAnnotation) ([]string, error) {
+	return e.AddLinkAnnotationsContext(context.Background(), pages, links)
+}
+
+// AddLinkAnnotationsContext 批量新增标准链接注解并单次提交，准备和提交过程响应取消
+// 入参: ctx 取消上下文, pages 目标页面索引列表, links 单个或与页码等长的链接注解参数
+// 返回: []string 新注解标识列表, error 参数、校验或取消错误
+func (e *Editor) AddLinkAnnotationsContext(ctx context.Context, pages []int, links []LinkAnnotation) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(pages) == 0 {
+		if len(links) <= 1 {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("link annotation count %d does not match page count %d", len(links), len(pages))
+	}
+	if len(links) != 1 && len(links) != len(pages) {
+		return nil, fmt.Errorf("link annotation count %d does not match page count %d", len(links), len(pages))
+	}
+	annotations := make([]Annotation, len(links))
+	for i, item := range links {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		annotation, err := buildLinkAnnotation(item)
+		if err != nil {
+			return nil, err
+		}
+		annotations[i] = annotation
+	}
+	return e.AddAnnotationsContext(ctx, pages, annotations)
 }
 
 // UpdateAnnotationLink 修改注解中唯一的点击跳转，保留动作区域、其他动作及扩展属性
@@ -276,76 +407,4 @@ func (e *Editor) UpdateAnnotationLink(page int, id string, target AnnotationLink
 		}
 		return editorAnnotationDate(data)
 	})
-}
-
-// collectActionReferences 收集播放动作引用的音视频资源
-// 入参: actions 动作列表, used 引用集合
-func collectActionReferences(actions []Action, used map[string]bool) {
-	for _, action := range actions {
-		if action.Sound != nil {
-			used[action.Sound.ResourceID] = true
-		}
-		if action.Movie != nil {
-			used[action.Movie.ResourceID] = true
-		}
-	}
-}
-
-// annotationLinkNodes 获取外观内的点击跳转和基本对象，不进入私有扩展
-// 入参: root 注解根节点
-// 返回: []*editorXML 跳转目标, []*editorXML 基本对象
-func annotationLinkNodes(root *editorXML) ([]*editorXML, []*editorXML) {
-	var targets, objects []*editorXML
-	var walk func(*editorXML)
-	walk = func(n *editorXML) {
-		if n.name.Space != root.name.Space {
-			return
-		}
-		if n.name.Local == "Action" && n.attr("Event") == "CLICK" {
-			for _, child := range n.children {
-				if child.name.Space == n.name.Space && (child.name.Local == "URI" || child.name.Local == "Goto") {
-					targets = append(targets, child)
-				}
-			}
-		}
-		if slices.Contains([]string{"TextObject", "PathObject", "ImageObject"}, n.name.Local) {
-			objects = append(objects, n)
-		}
-		for _, child := range n.children {
-			walk(child)
-		}
-	}
-	if appearance := root.child("Appearance"); appearance != nil {
-		walk(appearance)
-	}
-	return targets, objects
-}
-
-// annotationLinkXML 序列化标准跳转目标，不改写其他动作或命名空间
-// 入参: target 跳转目标
-// 返回: []byte 独立XML片段, error 错误信息
-func annotationLinkXML(target AnnotationLink) ([]byte, error) {
-	if (target.URI == nil) == (target.Dest == nil) {
-		return nil, fmt.Errorf("specify one URI or destination")
-	}
-	var data []byte
-	var err error
-	if target.URI != nil {
-		attrs := ofdAttrs{{Name: xml.Name{Local: "URI"}, Value: target.URI.URI}}
-		attrs.add("Base", target.URI.Base)
-		attrs.add("Target", target.URI.Target)
-		data, err = editorXMLContainer("URI", attrs, nil)
-	} else {
-		dest := target.Dest
-		var attrs ofdAttrs
-		attrs, err = dest.attributes()
-		if err != nil {
-			return nil, err
-		}
-		data, err = editorXMLContainer("Dest", attrs, nil)
-		if err == nil {
-			data, err = editorXMLContainer("Goto", nil, bytes.TrimPrefix(data, []byte(xml.Header)))
-		}
-	}
-	return bytes.TrimPrefix(data, []byte(xml.Header)), err
 }

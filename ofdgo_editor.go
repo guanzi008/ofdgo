@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"embed"
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
@@ -81,6 +82,7 @@ type Editor struct {
 	structureRemaps    map[string][]map[string]string
 	outlines           []byte
 	encryption         *encryptionState
+	encHold            *encryptionHold
 	output             *outputOptimization
 	saveTarget         Output
 	snapshotArchive    *editorSnapshotArchive
@@ -95,7 +97,32 @@ type Editor struct {
 	ownedReader        *Reader
 	ownedOwner         *Editor
 	ownedTx            *EditorChanges
-	ownedRevision      uint64
+}
+
+// editorResource 文档内嵌资源
+type editorResource struct {
+	name         string
+	data         []byte
+	font         *Font
+	image        *MultiMedia
+	space        *ColorSpace
+	composite    string
+	vectorKey    [32]byte
+	vectorStates map[string]editorCompositeState
+	objectIDs    map[string]string
+	references   []string
+	usage        *editorVectorUsage
+	subset       *editorFontSubset
+	states       map[string]editorCompositeState
+	draw         *DrawParam
+	drawSource   string
+}
+
+// editorResourceKey 资源内容和字体集合索引
+type editorResourceKey struct {
+	checksum [32]byte
+	index    int
+	kind     string
 }
 
 // NewEditor 创建空白文档，保存前至少添加一页
@@ -122,9 +149,350 @@ func NewEditor() *Editor {
 	}
 }
 
+// formatUnitID 格式化文档对象与资源标识
+// 入参: id 无符号标识数值
+// 返回: string 十进制标识文本
+func formatUnitID(id uint64) string {
+	return strconv.FormatUint(id, 10)
+}
+
+// cloneEditorObject 复制对象全部已解析字段，保留不可变的段落信息
+// 入参: object 对象内容
+// 返回: GraphicObject 独立副本, error 错误信息
+func cloneEditorObject(object GraphicObject) (GraphicObject, error) {
+	switch object.Type {
+	case "TextObject":
+		return GraphicObject{Type: object.Type, TextObject: cloneEditorData(object.TextObject), state: object.state}, nil
+	case "PathObject":
+		return GraphicObject{Type: object.Type, PathObject: cloneEditorData(object.PathObject), state: object.state}, nil
+	case "ImageObject":
+		return GraphicObject{Type: object.Type, ImageObject: cloneEditorData(object.ImageObject), state: object.state}, nil
+	case "CompositeObject":
+		return GraphicObject{Type: "CompositeObject", CompositeObject: cloneEditorData(object.CompositeObject), state: object.state}, nil
+	}
+	return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
+}
+
+// transformEditorObject 变换独立对象副本，保留绘制属性和编辑中的段落信息
+// 入参: object 对象副本, dx 横向位移, dy 纵向位移, scale 正缩放比例
+// 返回: GraphicObject 变换后的对象, error 错误信息
+func transformEditorObject(object GraphicObject, dx, dy, scale float64) (GraphicObject, error) {
+	if object.Type == "CompositeObject" || object.Type == "TextObject" && len(object.TextObject.CGTransform) != 0 {
+		return transformEditorMatrix(object, Matrix{a: scale, d: scale, e: dx, f: dy}), nil
+	}
+	var boundary, ctm *string
+	switch object.Type {
+	case "TextObject":
+		obj := &object.TextObject
+		boundary, ctm = &obj.Boundary, &obj.CTM
+		if scale != 1 {
+			obj.Size *= scale
+			if obj.layout != nil {
+				layout := *obj.layout
+				layout.options.LineHeight *= scale
+				layout.options.LetterSpacing *= scale
+				layout.options.LeftIndent *= scale
+				layout.options.RightIndent *= scale
+				layout.options.FirstLineIndent *= scale
+				obj.layout = &layout
+			}
+			if obj.LineWidth == 0 && !obj.LineWidthSet && obj.Stroke != nil && *obj.Stroke {
+				obj.LineWidth = defaultPathLineWidth
+			}
+			obj.LineWidth *= scale
+			var err error
+			obj.DashPattern, err = scaleTextNumbers(obj.DashPattern, scale)
+			if err != nil {
+				return GraphicObject{}, err
+			}
+			if obj.DashOffset != nil {
+				offset := *obj.DashOffset * scale
+				obj.DashOffset = &offset
+			}
+			for i := range obj.TextCode {
+				code := &obj.TextCode[i]
+				for _, value := range []*string{&code.X, &code.Y, &code.DeltaX, &code.DeltaY} {
+					*value, err = scaleTextNumbers(*value, scale)
+					if err != nil {
+						return GraphicObject{}, err
+					}
+				}
+			}
+		}
+	case "PathObject":
+		boundary, ctm = &object.PathObject.Boundary, &object.PathObject.CTM
+	case "ImageObject":
+		boundary, ctm = &object.ImageObject.Boundary, &object.ImageObject.CTM
+	default:
+		return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
+	}
+	if clips := editorObjectClips(&object); scale != 1 && *clips != nil && (object.Type == "TextObject" || !(*clips).usesObjectMatrix()) {
+		*clips = transformObjectClips(*clips, Matrix{a: scale, d: scale})
+	}
+	box, err := ParseBox(*boundary)
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	if object.Type == "ImageObject" && *ctm == "" && scale != 1 {
+		*ctm = Matrix{a: box.W, d: box.H}.String()
+	}
+	*boundary = fmt.Sprintf("%s %s %s %s", ofdNumber(box.X*scale+dx), ofdNumber(box.Y*scale+dy), ofdNumber(box.W*scale), ofdNumber(box.H*scale))
+	if scale != 1 && (*ctm != "" || object.Type != "TextObject") {
+		m := NewMatrix(*ctm)
+		if object.Type != "TextObject" {
+			m.a, m.b, m.c, m.d = m.a*scale, m.b*scale, m.c*scale, m.d*scale
+		}
+		*ctm = fmt.Sprintf("%s %s %s %s %s %s", ofdNumber(m.a), ofdNumber(m.b), ofdNumber(m.c), ofdNumber(m.d), ofdNumber(m.e*scale), ofdNumber(m.f*scale))
+	}
+	return object, nil
+}
+
+// scaleTextNumbers 校验并缩放文字定位数值，保留g重复编码
+// 入参: value 定位数值, scale 缩放比例
+// 返回: string 缩放后的数值, error 定位编码或结果错误
+func scaleTextNumbers(value string, scale float64) (string, error) {
+	fields := strings.Fields(value)
+	for i := 0; i < len(fields); i++ {
+		if fields[i] == "g" {
+			if i+2 >= len(fields) {
+				return "", fmt.Errorf("incomplete delta repetition")
+			}
+			repeat, err := strconv.Atoi(fields[i+1])
+			if err != nil || repeat <= 0 {
+				return "", fmt.Errorf("invalid delta repetition")
+			}
+			i += 2
+		}
+		number, err := strconv.ParseFloat(fields[i], 64)
+		if err != nil || !finite(number*scale) {
+			return "", fmt.Errorf("invalid scaled text position")
+		}
+		fields[i] = ofdNumber(number * scale)
+	}
+	return strings.Join(fields, " "), nil
+}
+
+// creationDeltas 校验文字位移数组及g重复编码
+// 入参: value 位移数组
+// 返回: error 错误信息
+func creationDeltas(value string) error {
+	fields := strings.Fields(value)
+	for i := 0; i < len(fields); i++ {
+		if fields[i] == "g" {
+			if i+2 >= len(fields) {
+				return fmt.Errorf("incomplete delta repetition")
+			}
+			repeat, err := strconv.Atoi(fields[i+1])
+			if err != nil || repeat <= 0 {
+				return fmt.Errorf("invalid delta repetition")
+			}
+			i += 2
+		}
+		if _, err := creationNumbers(fields[i], 1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// creationPath 校验紧缩路径的命令及有限数值参数
+// 入参: value 路径数据
+// 返回: error 错误信息
+func creationPath(value string) error {
+	count, err := walkGeometryPath(value, nil)
+	if err == nil && count == 0 {
+		return fmt.Errorf("empty path")
+	}
+	return err
+}
+
+// creationNumbers 解析创建接口的有限十进制数值序列
+// 入参: value 数值序列, count 数值数量
+// 返回: []float64 数值, error 错误信息
+func creationNumbers(value string, count int) ([]float64, error) {
+	fields := strings.Fields(value)
+	if len(fields) != count {
+		return nil, fmt.Errorf("expected %d numbers", count)
+	}
+	values := make([]float64, count)
+	for i, field := range fields {
+		number, err := strconv.ParseFloat(field, 64)
+		if err != nil || !finite(number) || strings.ContainsAny(field, "xX_") {
+			return nil, fmt.Errorf("invalid number %q", field)
+		}
+		values[i] = number
+	}
+	return values, nil
+}
+
+// creationBox 校验对象边界
+// 入参: value 边界描述
+// 返回: Box 矩形, error 错误信息
+func creationBox(value string) (Box, error) {
+	values, err := creationNumbers(value, 4)
+	if err != nil {
+		return Box{}, err
+	}
+	box := Box{X: values[0], Y: values[1], W: values[2], H: values[3]}
+	if err := validateCreationBox(box); err != nil {
+		return Box{}, err
+	}
+	return box, nil
+}
+
+// validateCreationBox 校验编辑范围的有限坐标、端点及正尺寸
+// 入参: box 矩形范围
+// 返回: error 非有限坐标或非正尺寸
+func validateCreationBox(box Box) error {
+	if !finite(box.X) || !finite(box.Y) || !finite(box.W) || !finite(box.H) || !finite(box.X+box.W) || !finite(box.Y+box.H) {
+		return fmt.Errorf("boundary coordinates must be finite")
+	}
+	if box.W <= 0 || box.H <= 0 {
+		return fmt.Errorf("boundary dimensions must be positive")
+	}
+	return nil
+}
+
+// creationColor 校验默认RGB颜色空间中的基本颜色
+// 入参: color 颜色
+// 返回: error 错误信息
+func creationColor(color *FillColor) error {
+	if color == nil {
+		return nil
+	}
+	if color.ColorSpace != "" || color.Index != nil || color.Pattern != nil || color.AxialShd != nil || color.RadialShd != nil || color.GouraudShd != nil || color.LaGouraudShd != nil || color.unsupported {
+		return fmt.Errorf("only direct RGB colors are supported for creation")
+	}
+	values, err := creationNumbers(color.Value, 3)
+	if err != nil {
+		return err
+	}
+	for _, value := range values {
+		if value < 0 || value > 255 || math.Trunc(value) != value {
+			return fmt.Errorf("RGB channels must be integers between 0 and 255")
+		}
+	}
+	if color.Alpha != nil && (*color.Alpha < 0 || *color.Alpha > 255) {
+		return fmt.Errorf("color alpha must be between 0 and 255")
+	}
+	return nil
+}
+
+// finite 判断数值是否有限
+// 入参: value 数值
+// 返回: bool 是否有限
+func finite(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+// ofdNumber 格式化OFD数值
+// 入参: value 数值
+// 返回: string 数值文本
+func ofdNumber(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+// escapeOFDText 转义控制字符和反斜线，空格由XML写出层转义
+// 入参: value 原文
+// 返回: string OFD文字编码
+func escapeOFDText(value string) string {
+	var text strings.Builder
+	for _, char := range value {
+		if char < ' ' || char == '\\' || char == '\ufffe' || char == '\uffff' {
+			fmt.Fprintf(&text, "\\%04X", char)
+		} else {
+			text.WriteRune(char)
+		}
+	}
+	return text.String()
+}
+
+// sameFS 判断两个字体文件系统配置是否明确不可变且等价，避免可变文件系统跳过缓存刷新
+// 入参: left 原文件系统, right 新文件系统
+// 返回: bool 是否等价
+func sameFS(left, right fs.FS) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	l, lok := left.(embed.FS)
+	r, rok := right.(embed.FS)
+	return lok && rok && l == r
+}
+
+// sameFontFS 判断字体文件系统切片配置是否完全一致
+// 入参: left 原配置, right 新配置
+// 返回: bool 是否一致
+func sameFontFS(left, right []fs.FS) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !sameFS(left[i], right[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// sameRenderBackends 判断完整后端组合的不可变配置是否完全一致
+// 入参: left 原后端组合, right 新后端组合
+// 返回: bool 是否一致
+func sameRenderBackends(left, right RenderBackends) bool {
+	return sameBackend(left.FontResources, right.FontResources) &&
+		sameBackend(left.Fonts, right.Fonts) &&
+		sameBackend(left.Geometry, right.Geometry) &&
+		sameBackend(left.Compiler, right.Compiler) &&
+		sameBackend(left.Raster, right.Raster) &&
+		sameBackend(left.SVG, right.SVG) &&
+		sameBackend(left.PDF, right.PDF) &&
+		sameBackend(left.EPS, right.EPS)
+}
+
+// Close 释放编辑器持有的临时快照缓存并清理敏感凭据状态，重复调用安全
+// 返回: error 关闭错误
+func (e *Editor) Close() error {
+	if e == nil {
+		return nil
+	}
+	var err error
+	if e.ownedReader != nil && e.ownedOwner == e {
+		err = e.ownedReader.Close()
+	}
+	e.encHold.release()
+	e.encHold = nil
+	e.encryption = nil
+	if e.snapshotArchive != nil {
+		if e.snapshotArchive.retained != nil {
+			e.snapshotArchive.retained.clear()
+		}
+		e.snapshotArchive.files = nil
+		e.snapshotArchive.retained = nil
+		e.snapshotArchive = nil
+	}
+	e.previewPages = nil
+	e.objectIndices = nil
+	e.fontRenderer = nil
+	e.fontMetrics = nil
+	e.fontSourcesCache = nil
+	e.validatedPaths = nil
+	e.nameCache = nil
+	e.richIndex = nil
+	e.history = nil
+	e.historyIndex = 0
+	e.source = nil
+	e.ownedReader = nil
+	e.ownedOwner = nil
+	e.ownedTx = nil
+	e.saveTarget = nil
+	return err
+}
+
 // SetFontDirs 设置编辑与几何度量使用的外部字体目录，不嵌入或替换文档字体
 // 入参: dirs 字体目录，空参数清除目录配置
 func (e *Editor) SetFontDirs(dirs ...string) {
+	if slices.Equal(e.fontDirs, dirs) {
+		return
+	}
 	e.fontDirs = slices.Clone(dirs)
 	e.fontRenderer = nil
 	e.fontSourcesCache = nil
@@ -134,6 +502,9 @@ func (e *Editor) SetFontDirs(dirs ...string) {
 // SetFontFS 设置编辑与几何度量使用的外部字体来源，不嵌入或替换文档字体
 // 入参: fsys 字体文件系统，空参数清除文件系统配置
 func (e *Editor) SetFontFS(fsys ...fs.FS) {
+	if sameFontFS(e.fontFS, fsys) {
+		return
+	}
 	e.fontFS = slices.Clone(fsys)
 	e.fontRenderer = nil
 	e.fontSourcesCache = nil
@@ -144,6 +515,9 @@ func (e *Editor) SetFontFS(fsys ...fs.FS) {
 // 与Renderer使用相同实例可统一显示、搜索和选区，nil禁用度量，不隐式回退
 // 入参: compiler 页面编译器
 func (e *Editor) SetPageCompiler(compiler PageCompiler) {
+	if sameBackend(e.backends.Compiler, compiler) {
+		return
+	}
 	e.backends.Compiler = compiler
 	e.fontRenderer = nil
 }
@@ -151,6 +525,9 @@ func (e *Editor) SetPageCompiler(compiler PageCompiler) {
 // SetRenderBackends 设置完整后端组合，字体能力变化时更新度量，不改变文档或撤销历史
 // 入参: backends 后端组合，未配置的能力不会沿用默认实现
 func (e *Editor) SetRenderBackends(backends RenderBackends) {
+	if sameRenderBackends(e.backends, backends) {
+		return
+	}
 	fontsChanged := !sameBackend(e.backends.Fonts, backends.Fonts)
 	if !sameBackend(e.backends.FontResources, backends.FontResources) {
 		e.clearFontResourceCache()
@@ -179,7 +556,14 @@ func (e *Editor) SetResources(resources *Resources) {
 		return
 	}
 	e.runtimeResources = resources
-	e.snapshotArchive = nil
+	if e.snapshotArchive != nil {
+		if e.snapshotArchive.retained != nil {
+			e.snapshotArchive.retained.clear()
+		}
+		e.snapshotArchive.files = nil
+		e.snapshotArchive.retained = nil
+		e.snapshotArchive = nil
+	}
 	e.fontRenderer = nil
 	e.fontSourcesCache = newFontSourceCache(resources)
 	e.validatedPaths = nil
@@ -189,6 +573,7 @@ func (e *Editor) SetResources(resources *Resources) {
 		e.source.reader = cloneEditorReader(e.source.reader)
 		e.source.reader.resources = resources
 		e.source.reader.pageContents = resourceCache[pageContentKey, PageContent](resources, 16<<20)
+		e.source.reader.stampSealCache = newStampSealCache(resources)
 	}
 }
 
@@ -231,7 +616,7 @@ func (e *Editor) PageContext(ctx context.Context, index int) (*PageContent, erro
 	result.XMLName = xml.Name{Space: ofdNamespace2016, Local: "Page"}
 	for i := range result.Content.Layer {
 		layer := &result.Content.Layer[i]
-		layer.TextObject, layer.PathObject, layer.ImageObject, layer.CompositeGraphicUnit = nil, nil, nil, nil
+		layer.TextObject, layer.PathObject, layer.ImageObject, layer.CompositeObject = nil, nil, nil, nil
 		for _, object := range layer.Objects {
 			if err := ctx.Err(); err != nil {
 				return nil, err
@@ -243,8 +628,8 @@ func (e *Editor) PageContext(ctx context.Context, index int) (*PageContent, erro
 				layer.PathObject = append(layer.PathObject, object.PathObject)
 			case "ImageObject":
 				layer.ImageObject = append(layer.ImageObject, object.ImageObject)
-			case "CompositeObject", "CompositeGraphicUnit":
-				layer.CompositeGraphicUnit = append(layer.CompositeGraphicUnit, object.CompositeGraphicUnit)
+			case "CompositeObject":
+				layer.CompositeObject = append(layer.CompositeObject, object.CompositeObject)
 			}
 		}
 	}
@@ -264,10 +649,18 @@ func (e *Editor) AddPage(width, height float64) (int, error) {
 	if e.maxID > maxUnitID-2 {
 		return 0, fmt.Errorf("MaxUnitID exceeds uint32 range")
 	}
+	pageID, err := e.nextID()
+	if err != nil {
+		return 0, err
+	}
+	layerID, err := e.nextID()
+	if err != nil {
+		return 0, err
+	}
 	e.pages = append(e.pages, PageContent{
-		ID:      e.nextID(),
+		ID:      pageID,
 		Area:    PageArea{PhysicalBox: fmt.Sprintf("0 0 %s %s", ofdNumber(width), ofdNumber(height))},
-		Content: Content{Layer: []Layer{{ID: e.nextID(), Type: "Body"}}},
+		Content: Content{Layer: []Layer{{ID: layerID, Type: "Body"}}},
 	})
 	index := len(e.pages) - 1
 	e.recordPageAddition(index)
@@ -584,7 +977,7 @@ func (e *Editor) UpdateObject(page int, id string, object GraphicObject) error {
 	case "ImageObject":
 		object.ImageObject.ID = id
 	case "CompositeObject":
-		object.CompositeGraphicUnit.ID = id
+		object.CompositeObject.ID = id
 	default:
 		return fmt.Errorf("unsupported object type %q", object.Type)
 	}
@@ -748,25 +1141,6 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 	return LayoutText(obj, value, options, metrics)
 }
 
-// editorResource 文档内嵌资源
-type editorResource struct {
-	name         string
-	data         []byte
-	font         *Font
-	image        *MultiMedia
-	space        *ColorSpace
-	composite    string
-	vectorKey    [32]byte
-	vectorStates map[string]editorCompositeState
-	objectIDs    map[string]string
-	references   []string
-	usage        *editorVectorUsage
-	subset       *editorFontSubset
-	states       map[string]editorCompositeState
-	draw         *DrawParam
-	drawSource   string
-}
-
 // definition 获取独立定义资源的标识
 // 返回: string 复合资源或绘制参数标识
 func (r editorResource) definition() string {
@@ -789,13 +1163,6 @@ func (r editorResource) id() string {
 	default:
 		return r.definition()
 	}
-}
-
-// editorResourceKey 资源内容和字体集合索引
-type editorResourceKey struct {
-	checksum [32]byte
-	index    int
-	kind     string
 }
 
 // addDecodedImage 注册图片并复用与编码数据一致的像素
@@ -855,10 +1222,10 @@ func (e *Editor) addImage(ctx context.Context, data []byte, size image.Point, fo
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if e.maxID >= maxUnitID {
-		return "", fmt.Errorf("MaxUnitID exceeds uint32 range")
+	id, err := e.nextID()
+	if err != nil {
+		return "", err
 	}
-	id := e.nextID()
 	extension := format
 	if extension == "jpeg" {
 		extension = "jpg"
@@ -967,21 +1334,14 @@ func (e *Editor) reorderPages(order []int) {
 	}
 }
 
-// formatUnitID 格式化文档对象与资源标识
-// 入参: id 无符号标识数值
-// 返回: string 十进制标识文本
-func formatUnitID(id uint64) string {
-	return strconv.FormatUint(id, 10)
-}
-
-// nextID 分配文档内唯一标识，达到ST_ID上限时触发panic防止静默溢出
-// 返回: string 对象标识
-func (e *Editor) nextID() string {
+// nextID 分配文档内唯一标识，达到ST_ID上限时返回错误防止溢出
+// 返回: string 对象标识, error 标识耗尽错误
+func (e *Editor) nextID() (string, error) {
 	if e.maxID >= maxUnitID {
-		panic("ofdgo: MaxUnitID exceeds uint32 range")
+		return "", fmt.Errorf("ofdgo: MaxUnitID exceeds uint32 range")
 	}
 	e.maxID++
-	return formatUnitID(e.maxID)
+	return formatUnitID(e.maxID), nil
 }
 
 // findObject 查找页面各图层中的对象
@@ -1086,9 +1446,9 @@ func (v *editorValidation) prepareObject(id string, object GraphicObject) (Graph
 		join = obj.Join
 		alpha, clips, actions = obj.Alpha, obj.Clips, obj.Actions
 	case "CompositeObject":
-		obj := &object.CompositeGraphicUnit
-		if obj.ResourceID == "" || len(obj.Objects)+len(obj.TextObject)+len(obj.PathObject)+len(obj.ImageObject)+len(obj.CompositeGraphicUnit) != 0 || obj.extentSet || obj.Width != 0 || obj.Height != 0 || obj.Thumbnail != "" || obj.Substitution != "" {
-			return GraphicObject{}, fmt.Errorf("composite requires a vector resource without inline content")
+		obj := &object.CompositeObject
+		if obj.ResourceID == "" {
+			return GraphicObject{}, fmt.Errorf("composite requires a vector resource")
 		}
 		if err := v.validateVector(obj.ResourceID); err != nil {
 			return GraphicObject{}, err
@@ -1202,122 +1562,6 @@ func (v *editorValidation) validateObjectClips(clips *Clips) error {
 	return nil
 }
 
-// cloneEditorObject 复制对象全部已解析字段，保留不可变的段落信息
-// 入参: object 对象内容
-// 返回: GraphicObject 独立副本, error 错误信息
-func cloneEditorObject(object GraphicObject) (GraphicObject, error) {
-	switch object.Type {
-	case "TextObject":
-		return GraphicObject{Type: object.Type, TextObject: cloneEditorData(object.TextObject), state: object.state}, nil
-	case "PathObject":
-		return GraphicObject{Type: object.Type, PathObject: cloneEditorData(object.PathObject), state: object.state}, nil
-	case "ImageObject":
-		return GraphicObject{Type: object.Type, ImageObject: cloneEditorData(object.ImageObject), state: object.state}, nil
-	case "CompositeObject", "CompositeGraphicUnit":
-		return GraphicObject{Type: object.Type, CompositeGraphicUnit: cloneEditorData(object.CompositeGraphicUnit), state: object.state}, nil
-	}
-	return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
-}
-
-// transformEditorObject 变换独立对象副本，保留绘制属性和编辑中的段落信息
-// 入参: object 对象副本, dx 横向位移, dy 纵向位移, scale 正缩放比例
-// 返回: GraphicObject 变换后的对象, error 错误信息
-func transformEditorObject(object GraphicObject, dx, dy, scale float64) (GraphicObject, error) {
-	if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" || object.Type == "TextObject" && len(object.TextObject.CGTransform) != 0 {
-		return transformEditorMatrix(object, Matrix{a: scale, d: scale, e: dx, f: dy}), nil
-	}
-	var boundary, ctm *string
-	switch object.Type {
-	case "TextObject":
-		obj := &object.TextObject
-		boundary, ctm = &obj.Boundary, &obj.CTM
-		if scale != 1 {
-			obj.Size *= scale
-			if obj.layout != nil {
-				layout := *obj.layout
-				layout.options.LineHeight *= scale
-				layout.options.LetterSpacing *= scale
-				layout.options.LeftIndent *= scale
-				layout.options.RightIndent *= scale
-				layout.options.FirstLineIndent *= scale
-				obj.layout = &layout
-			}
-			if obj.LineWidth == 0 && !obj.LineWidthSet && obj.Stroke != nil && *obj.Stroke {
-				obj.LineWidth = defaultPathLineWidth
-			}
-			obj.LineWidth *= scale
-			var err error
-			obj.DashPattern, err = scaleTextNumbers(obj.DashPattern, scale)
-			if err != nil {
-				return GraphicObject{}, err
-			}
-			if obj.DashOffset != nil {
-				offset := *obj.DashOffset * scale
-				obj.DashOffset = &offset
-			}
-			for i := range obj.TextCode {
-				code := &obj.TextCode[i]
-				for _, value := range []*string{&code.X, &code.Y, &code.DeltaX, &code.DeltaY} {
-					*value, err = scaleTextNumbers(*value, scale)
-					if err != nil {
-						return GraphicObject{}, err
-					}
-				}
-			}
-		}
-	case "PathObject":
-		boundary, ctm = &object.PathObject.Boundary, &object.PathObject.CTM
-	case "ImageObject":
-		boundary, ctm = &object.ImageObject.Boundary, &object.ImageObject.CTM
-	default:
-		return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
-	}
-	if clips := editorObjectClips(&object); scale != 1 && *clips != nil && (object.Type == "TextObject" || !(*clips).usesObjectMatrix()) {
-		*clips = transformObjectClips(*clips, Matrix{a: scale, d: scale})
-	}
-	box, err := ParseBox(*boundary)
-	if err != nil {
-		return GraphicObject{}, err
-	}
-	if object.Type == "ImageObject" && *ctm == "" && scale != 1 {
-		*ctm = Matrix{a: box.W, d: box.H}.String()
-	}
-	*boundary = fmt.Sprintf("%s %s %s %s", ofdNumber(box.X*scale+dx), ofdNumber(box.Y*scale+dy), ofdNumber(box.W*scale), ofdNumber(box.H*scale))
-	if scale != 1 && (*ctm != "" || object.Type != "TextObject") {
-		m := NewMatrix(*ctm)
-		if object.Type != "TextObject" {
-			m.a, m.b, m.c, m.d = m.a*scale, m.b*scale, m.c*scale, m.d*scale
-		}
-		*ctm = fmt.Sprintf("%s %s %s %s %s %s", ofdNumber(m.a), ofdNumber(m.b), ofdNumber(m.c), ofdNumber(m.d), ofdNumber(m.e*scale), ofdNumber(m.f*scale))
-	}
-	return object, nil
-}
-
-// scaleTextNumbers 校验并缩放文字定位数值，保留g重复编码
-// 入参: value 定位数值, scale 缩放比例
-// 返回: string 缩放后的数值, error 定位编码或结果错误
-func scaleTextNumbers(value string, scale float64) (string, error) {
-	fields := strings.Fields(value)
-	for i := 0; i < len(fields); i++ {
-		if fields[i] == "g" {
-			if i+2 >= len(fields) {
-				return "", fmt.Errorf("incomplete delta repetition")
-			}
-			repeat, err := strconv.Atoi(fields[i+1])
-			if err != nil || repeat <= 0 {
-				return "", fmt.Errorf("invalid delta repetition")
-			}
-			i += 2
-		}
-		number, err := strconv.ParseFloat(fields[i], 64)
-		if err != nil || !finite(number*scale) {
-			return "", fmt.Errorf("invalid scaled text position")
-		}
-		fields[i] = ofdNumber(number * scale)
-	}
-	return strings.Join(fields, " "), nil
-}
-
 // prepareText 校验并补全标准文字定位，避免依赖阅读器的缺省字距补偿
 // 入参: obj 文字对象
 // 返回: error 错误信息
@@ -1417,40 +1661,6 @@ func (e *Editor) prepareText(obj *TextObject) error {
 	return missingGlyphError(obj.Font, missing)
 }
 
-// creationDeltas 校验文字位移数组及g重复编码
-// 入参: value 位移数组
-// 返回: error 错误信息
-func creationDeltas(value string) error {
-	fields := strings.Fields(value)
-	for i := 0; i < len(fields); i++ {
-		if fields[i] == "g" {
-			if i+2 >= len(fields) {
-				return fmt.Errorf("incomplete delta repetition")
-			}
-			repeat, err := strconv.Atoi(fields[i+1])
-			if err != nil || repeat <= 0 {
-				return fmt.Errorf("invalid delta repetition")
-			}
-			i += 2
-		}
-		if _, err := creationNumbers(fields[i], 1); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// creationPath 校验紧缩路径的命令及有限数值参数
-// 入参: value 路径数据
-// 返回: error 错误信息
-func creationPath(value string) error {
-	count, err := walkGeometryPath(value, nil)
-	if err == nil && count == 0 {
-		return fmt.Errorf("empty path")
-	}
-	return err
-}
-
 // creationPath 复用相同路径的成功校验，不缓存错误或依赖可变资源
 // 入参: value 路径数据
 // 返回: error 错误信息
@@ -1488,105 +1698,4 @@ func (e *Editor) pathValidationCache() *renderCache[string, bool] {
 		e.validatedPaths = resourceCache[string, bool](e.runtimeResources, 8<<20)
 	}
 	return e.validatedPaths
-}
-
-// creationNumbers 解析创建接口的有限十进制数值序列
-// 入参: value 数值序列, count 数值数量
-// 返回: []float64 数值, error 错误信息
-func creationNumbers(value string, count int) ([]float64, error) {
-	fields := strings.Fields(value)
-	if len(fields) != count {
-		return nil, fmt.Errorf("expected %d numbers", count)
-	}
-	values := make([]float64, count)
-	for i, field := range fields {
-		number, err := strconv.ParseFloat(field, 64)
-		if err != nil || !finite(number) || strings.ContainsAny(field, "xX_") {
-			return nil, fmt.Errorf("invalid number %q", field)
-		}
-		values[i] = number
-	}
-	return values, nil
-}
-
-// creationBox 校验对象边界
-// 入参: value 边界描述
-// 返回: Box 矩形, error 错误信息
-func creationBox(value string) (Box, error) {
-	values, err := creationNumbers(value, 4)
-	if err != nil {
-		return Box{}, err
-	}
-	box := Box{X: values[0], Y: values[1], W: values[2], H: values[3]}
-	if err := validateCreationBox(box); err != nil {
-		return Box{}, err
-	}
-	return box, nil
-}
-
-// validateCreationBox 校验编辑范围的有限坐标、端点及正尺寸
-// 入参: box 矩形范围
-// 返回: error 非有限坐标或非正尺寸
-func validateCreationBox(box Box) error {
-	if !finite(box.X) || !finite(box.Y) || !finite(box.W) || !finite(box.H) || !finite(box.X+box.W) || !finite(box.Y+box.H) {
-		return fmt.Errorf("boundary coordinates must be finite")
-	}
-	if box.W <= 0 || box.H <= 0 {
-		return fmt.Errorf("boundary dimensions must be positive")
-	}
-	return nil
-}
-
-// creationColor 校验默认RGB颜色空间中的基本颜色
-// 入参: color 颜色
-// 返回: error 错误信息
-func creationColor(color *FillColor) error {
-	if color == nil {
-		return nil
-	}
-	if color.ColorSpace != "" || color.Index != nil || color.Pattern != nil || color.AxialShd != nil || color.RadialShd != nil || color.GouraudShd != nil || color.LaGouraudShd != nil || color.unsupported {
-		return fmt.Errorf("only direct RGB colors are supported for creation")
-	}
-	values, err := creationNumbers(color.Value, 3)
-	if err != nil {
-		return err
-	}
-	for _, value := range values {
-		if value < 0 || value > 255 || math.Trunc(value) != value {
-			return fmt.Errorf("RGB channels must be integers between 0 and 255")
-		}
-	}
-	if color.Alpha != nil && (*color.Alpha < 0 || *color.Alpha > 255) {
-		return fmt.Errorf("color alpha must be between 0 and 255")
-	}
-	return nil
-}
-
-// finite 判断数值是否有限
-// 入参: value 数值
-// 返回: bool 是否有限
-func finite(value float64) bool {
-	return !math.IsNaN(value) && !math.IsInf(value, 0)
-}
-
-// ofdNumber 格式化OFD数值
-// 入参: value 数值
-// 返回: string 数值文本
-func ofdNumber(value float64) string {
-	return strconv.FormatFloat(value, 'f', -1, 64)
-}
-
-// escapeOFDText 转义控制字符和反斜线，空格由XML写出层转义
-// 入参: value 原文
-// 返回: string OFD文字编码
-func escapeOFDText(value string) string {
-	var text strings.Builder
-	for _, char := range value {
-		if char < ' ' || char == '\\' || char == '\ufffe' || char == '\uffff' {
-			fmt.Fprintf(&text, "\\%04X", char)
-		} else {
-			text.WriteRune(char)
-		}
-	}
-	return text.String()
 }

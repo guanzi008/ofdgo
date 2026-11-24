@@ -32,9 +32,22 @@ type SFNT struct {
 	IsTrueType, IsCFF                  bool
 	cmaps                              []sfntCmap
 	hasUnicodeCmap                     bool
+	hasCmapVariations                  bool
 	units, count, horizontal, vertical uint16
 	reverseOnce                        sync.Once
 	reverse                            map[uint16][]rune
+	cidOnce                            sync.Once
+	cidToGID                           map[uint16]uint16
+}
+
+// sfntCmap 保存编码记录及字符映射，连续区间与共享子表不重复展开
+type sfntCmap struct {
+	platform, encoding, format uint16
+	offset                     uint32
+	mapping                    map[rune]uint16
+	groups                     []byte
+	entries                    uint64
+	duplicate                  bool
 }
 
 // ParseSFNT 校验独立字体的必需表、度量范围及字符映射
@@ -83,6 +96,7 @@ func ParseSFNTTables(table map[string][]byte) (*SFNT, error) {
 	}
 	f.cmaps = cmaps
 	f.hasUnicodeCmap = slices.ContainsFunc(cmaps, func(c sfntCmap) bool { return c.isUnicode() })
+	f.hasCmapVariations = slices.ContainsFunc(cmaps, func(c sfntCmap) bool { return c.format == 14 })
 	for _, cmap := range f.cmaps {
 		if cmap.duplicate {
 			continue
@@ -94,6 +108,94 @@ func ParseSFNTTables(table map[string][]byte) (*SFNT, error) {
 		}
 	}
 	return f, nil
+}
+
+// validSFNTMetrics 校验完整度量记录和末尾边距数组的范围
+// 入参: data 度量表, count 字形数, metrics 完整度量记录数
+// 返回: bool 是否有效
+func validSFNTMetrics(data []byte, count, metrics uint16) bool {
+	return metrics != 0 && metrics <= count && len(data) >= int(metrics)*4+int(count-metrics)*2
+}
+
+// readSFNTCmaps 校验各编码子表并保留原顺序，共享子表只解析一次
+// 入参: data cmap表
+// 返回: []sfntCmap 编码记录, error 表结构错误
+func readSFNTCmaps(data []byte) ([]sfntCmap, error) {
+	data, err := normalizeCmap(data)
+	if err != nil {
+		return nil, err
+	}
+	if _, _, err := tables.ParseCmap(data); err != nil {
+		return nil, err
+	}
+	count := int(binary.BigEndian.Uint16(data[2:]))
+	result := make([]sfntCmap, 0, count)
+	parsed := make(map[uint32]sfntCmap)
+	for i := range count {
+		record := data[4+8*i:]
+		offset := binary.BigEndian.Uint32(record[4:])
+		if uint64(offset)+2 > uint64(len(data)) {
+			return nil, fmt.Errorf("invalid cmap offset")
+		}
+		sub := data[offset:]
+		format := binary.BigEndian.Uint16(sub)
+		cmap, found := parsed[offset]
+		if !found {
+			cmap.mapping = make(map[rune]uint16)
+			var err error
+			switch format {
+			case 0:
+				parseCmapFormat0(sub, cmap.mapping)
+			case 4:
+				parseCmapFormat4(sub, cmap.mapping)
+			case 6:
+				parseCmapFormat6(sub, cmap.mapping)
+			case 12:
+				if len(sub) >= 16 {
+					length := uint64(binary.BigEndian.Uint32(sub[4:]))
+					count := uint64(binary.BigEndian.Uint32(sub[12:]))
+					if length >= 16 && length <= uint64(len(sub)) && count <= (length-16)/12 {
+						cmap.groups = sub[16 : 16+12*count]
+						for offset := 0; offset < len(cmap.groups); offset += 12 {
+							first := binary.BigEndian.Uint32(cmap.groups[offset:])
+							last := binary.BigEndian.Uint32(cmap.groups[offset+4:])
+							if first > last || offset != 0 && first <= binary.BigEndian.Uint32(cmap.groups[offset-8:]) {
+								cmap.groups = nil
+								parseCmapFormat12(sub, cmap.mapping)
+								break
+							}
+						}
+						if cmap.groups != nil {
+							cmap.mapping = nil
+							for range cmap.pairs() {
+								cmap.entries++
+							}
+						}
+					}
+				}
+			case 2:
+				cmap.mapping, err = parseCmapFormat2(sub)
+			case 8, 10, 13:
+				cmap.mapping, err = parseCmapExtended(sub)
+			case 14:
+			default:
+				return nil, fmt.Errorf("unsupported cmap format %d", format)
+			}
+			if err != nil {
+				return nil, err
+			}
+			parsed[offset] = cmap
+		}
+		cmap.platform, cmap.encoding, cmap.format, cmap.offset = binary.BigEndian.Uint16(record), binary.BigEndian.Uint16(record[2:]), format, offset
+		result = append(result, cmap)
+	}
+	slices.SortStableFunc(result, func(a, b sfntCmap) int { return a.priority() - b.priority() })
+	seen := make(map[uint32]bool, len(result))
+	for i := range result {
+		result[i].duplicate = seen[result[i].offset]
+		seen[result[i].offset] = true
+	}
+	return result, nil
 }
 
 // UnitsPerEm 返回字体设计单位
@@ -127,6 +229,16 @@ func (f *SFNT) GlyphIndex(char rune) uint16 {
 		}
 	}
 	return 0
+}
+
+// GlyphToUnicode 返回指定字形在Unicode优先级编码表下对应的全部字符
+// 入参: gid 字形编号
+// 返回: []rune 排序后的字符列表
+func (f *SFNT) GlyphToUnicode(gid uint16) []rune {
+	if f == nil {
+		return nil
+	}
+	return f.glyphCharacters(gid)
 }
 
 // GlyphAdvance 返回水平字宽
@@ -177,14 +289,22 @@ func (f *SFNT) VerticalMetrics() (uint16, uint16, uint16) {
 // 返回: []byte 独立字体
 func (f *SFNT) Write() []byte { data, _ := SerializeOTF(f.Tables); return data }
 
-// sfntCmap 保存编码记录及字符映射，连续区间与共享子表不重复展开
-type sfntCmap struct {
-	platform, encoding, format uint16
-	offset                     uint32
-	mapping                    map[rune]uint16
-	groups                     []byte
-	entries                    uint64
-	duplicate                  bool
+// HasCmapVariations 判断已解析字体是否包含格式14变体序列子表
+// 返回: bool 是否包含格式14子表
+func (f *SFNT) HasCmapVariations() bool {
+	return f != nil && f.hasCmapVariations
+}
+
+// CFFCIDToGID 返回CID编码CFF字体的CID到GID反查表，结果在字体实例内复用
+// 返回: map[uint16]uint16 CID到GID映射，非CID字体返回nil
+func (f *SFNT) CFFCIDToGID() map[uint16]uint16 {
+	if f == nil || !f.IsCFF {
+		return nil
+	}
+	f.cidOnce.Do(func() {
+		f.cidToGID = cffCIDToGIDFromCFF(f.Tables["CFF "])
+	})
+	return f.cidToGID
 }
 
 // isUnicode 判断编码子表是否为常规Unicode字符映射
@@ -262,94 +382,6 @@ func (c sfntCmap) lookup(char rune) (uint16, bool) {
 		}
 	}
 	return 0, false
-}
-
-// validSFNTMetrics 校验完整度量记录和末尾边距数组的范围
-// 入参: data 度量表, count 字形数, metrics 完整度量记录数
-// 返回: bool 是否有效
-func validSFNTMetrics(data []byte, count, metrics uint16) bool {
-	return metrics != 0 && metrics <= count && len(data) >= int(metrics)*4+int(count-metrics)*2
-}
-
-// readSFNTCmaps 校验各编码子表并保留原顺序，共享子表只解析一次
-// 入参: data cmap表
-// 返回: []sfntCmap 编码记录, error 表结构错误
-func readSFNTCmaps(data []byte) ([]sfntCmap, error) {
-	data, err := NormalizeCmap(data)
-	if err != nil {
-		return nil, err
-	}
-	if _, _, err := tables.ParseCmap(data); err != nil {
-		return nil, err
-	}
-	count := int(binary.BigEndian.Uint16(data[2:]))
-	result := make([]sfntCmap, 0, count)
-	parsed := make(map[uint32]sfntCmap)
-	for i := range count {
-		record := data[4+8*i:]
-		offset := binary.BigEndian.Uint32(record[4:])
-		if uint64(offset)+2 > uint64(len(data)) {
-			return nil, fmt.Errorf("invalid cmap offset")
-		}
-		sub := data[offset:]
-		format := binary.BigEndian.Uint16(sub)
-		cmap, found := parsed[offset]
-		if !found {
-			cmap.mapping = make(map[rune]uint16)
-			var err error
-			switch format {
-			case 0:
-				parseCmapFormat0(sub, cmap.mapping)
-			case 4:
-				parseCmapFormat4(sub, cmap.mapping)
-			case 6:
-				parseCmapFormat6(sub, cmap.mapping)
-			case 12:
-				if len(sub) >= 16 {
-					length := uint64(binary.BigEndian.Uint32(sub[4:]))
-					count := uint64(binary.BigEndian.Uint32(sub[12:]))
-					if length >= 16 && length <= uint64(len(sub)) && count <= (length-16)/12 {
-						cmap.groups = sub[16 : 16+12*count]
-						for offset := 0; offset < len(cmap.groups); offset += 12 {
-							first := binary.BigEndian.Uint32(cmap.groups[offset:])
-							last := binary.BigEndian.Uint32(cmap.groups[offset+4:])
-							if first > last || offset != 0 && first <= binary.BigEndian.Uint32(cmap.groups[offset-8:]) {
-								cmap.groups = nil
-								parseCmapFormat12(sub, cmap.mapping)
-								break
-							}
-						}
-						if cmap.groups != nil {
-							cmap.mapping = nil
-							for range cmap.pairs() {
-								cmap.entries++
-							}
-						}
-					}
-				}
-			case 2:
-				cmap.mapping, err = parseCmapFormat2(sub)
-			case 8, 10, 13:
-				cmap.mapping, err = parseCmapExtended(sub)
-			case 14:
-			default:
-				return nil, fmt.Errorf("unsupported cmap format %d", format)
-			}
-			if err != nil {
-				return nil, err
-			}
-			parsed[offset] = cmap
-		}
-		cmap.platform, cmap.encoding, cmap.format, cmap.offset = binary.BigEndian.Uint16(record), binary.BigEndian.Uint16(record[2:]), format, offset
-		result = append(result, cmap)
-	}
-	slices.SortStableFunc(result, func(a, b sfntCmap) int { return a.priority() - b.priority() })
-	seen := make(map[uint32]bool, len(result))
-	for i := range result {
-		result[i].duplicate = seen[result[i].offset]
-		seen[result[i].offset] = true
-	}
-	return result, nil
 }
 
 // skipCmap 判断查找字符映射时是否跳过该编码子表

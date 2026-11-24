@@ -62,7 +62,7 @@ func FontProgram(source *pdfgo.Font, type1 *basefont.Type1Program) ([]byte, Font
 			type1 = &parsed
 		}
 		var err error
-		program, err = type1.ToCFF(FontIdentity(source))
+		program, err = type1.ToCFF(fontIdentity(source))
 		if err != nil {
 			return nil, repair, err
 		}
@@ -149,7 +149,7 @@ func FontProgram(source *pdfgo.Font, type1 *basefont.Type1Program) ([]byte, Font
 			changed = true
 		}
 	}
-	if len(tables["cmap"]) == 0 || source.Subtype == "Type0" && invalidCmap || (source.Subtype == "Type0" || source.Subtype == "TrueType") && CmapNeedsRebuild(tables["cmap"]) {
+	if len(tables["cmap"]) == 0 || source.Subtype == "Type0" && invalidCmap || (source.Subtype == "Type0" || source.Subtype == "TrueType") && cmapNeedsRebuild(tables["cmap"]) {
 		mapping, err := source.GlyphMap()
 		if err != nil {
 			return nil, repair, err
@@ -164,7 +164,7 @@ func FontProgram(source *pdfgo.Font, type1 *basefont.Type1Program) ([]byte, Font
 		changed = true
 	}
 	if len(basefont.NamesFromTable(tables["name"])) == 0 {
-		fontName := FontIdentity(source)
+		fontName := fontIdentity(source)
 		name := utf16.Encode([]rune(fontName))
 		if len(name) > 32767 {
 			return nil, repair, fmt.Errorf("PDF font name exceeds name table capacity")
@@ -208,10 +208,10 @@ func FontProgram(source *pdfgo.Font, type1 *basefont.Type1Program) ([]byte, Font
 	return result, repair, err
 }
 
-// FontIdentity 返回字体名称或由原始程序生成的稳定封装标识
+// fontIdentity 返回字体名称或由原始程序生成的稳定封装标识
 // 入参: source PDF字体
 // 返回: string 字体标识
-func FontIdentity(source *pdfgo.Font) string {
+func fontIdentity(source *pdfgo.Font) string {
 	if source.Name != "" {
 		return source.Name
 	}
@@ -219,10 +219,10 @@ func FontIdentity(source *pdfgo.Font) string {
 	return fmt.Sprintf("PDF-%x", checksum[:28])
 }
 
-// CmapNeedsRebuild 检查字体封装字符表是否存在结构错误或交叠区段
+// cmapNeedsRebuild 检查字体封装字符表是否存在结构错误或交叠区段
 // 入参: data cmap表数据
 // 返回: bool 是否需要按PDF显式字形编号重建
-func CmapNeedsRebuild(data []byte) bool {
+func cmapNeedsRebuild(data []byte) bool {
 	if len(data) < 4 || binary.BigEndian.Uint16(data) != 0 {
 		return true
 	}
@@ -285,15 +285,17 @@ func sfntMissingPadding(program []byte) bool {
 	if len(program) < 12 {
 		return true
 	}
-	count := int(binary.BigEndian.Uint16(program[4:6]))
-	if count > (len(program)-12)/16 {
+	size := uint64(len(program))
+	count := uint64(binary.BigEndian.Uint16(program[4:6]))
+	if count > (size-12)/16 {
 		return true
 	}
-	for index := range count {
+	for index := uint64(0); index < count; index++ {
 		record := program[12+16*index:]
-		offset := int(binary.BigEndian.Uint32(record[8:12]))
-		length := int(binary.BigEndian.Uint32(record[12:16]))
-		if offset > len(program) || length > len(program)-offset || (4-length%4)%4 > len(program)-offset-length {
+		offset := uint64(binary.BigEndian.Uint32(record[8:12]))
+		length := uint64(binary.BigEndian.Uint32(record[12:16]))
+		pad := (4 - length%4) % 4
+		if offset > size || length > size-offset || pad > size-offset-length {
 			return true
 		}
 	}
@@ -318,16 +320,16 @@ func missingLeftBearings(tables map[string][]byte, start, count int) ([]byte, er
 	if len(loca) < (count+1)*entrySize {
 		return nil, fmt.Errorf("incomplete embedded PDF font glyph locations")
 	}
-	location := func(index int) int {
+	location := func(index int) uint64 {
 		if format == 0 {
-			return int(binary.BigEndian.Uint16(loca[index*2:])) * 2
+			return uint64(binary.BigEndian.Uint16(loca[index*2:])) * 2
 		}
-		return int(binary.BigEndian.Uint32(loca[index*4:]))
+		return uint64(binary.BigEndian.Uint32(loca[index*4:]))
 	}
 	result := make([]byte, 2*(count-start))
 	for index := start; index < count; index++ {
 		from, to := location(index), location(index+1)
-		if from > to || to > len(glyf) {
+		if from > to || to > uint64(len(glyf)) {
 			return nil, fmt.Errorf("invalid embedded PDF font glyph location")
 		}
 		if from == to {

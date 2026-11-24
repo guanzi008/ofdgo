@@ -17,9 +17,11 @@ package ofdgo
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"iter"
 	"maps"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -57,7 +59,7 @@ type Annotation struct {
 	ReadOnly    *bool                 `xml:"ReadOnly,attr"`
 	Remark      string                `xml:"Remark"`
 	Parameters  *AnnotationParameters `xml:"Parameters,omitempty"`
-	Appearance  Appearance
+	Appearance  *Appearance           `xml:"Appearance,omitempty"`
 }
 
 // AnnotationParameters 保存注释参数集合
@@ -94,12 +96,42 @@ type AnnotationInfo struct {
 
 // Appearance 注释外观
 type Appearance struct {
-	Boundary             string                 `xml:"Boundary,attr"`
-	Objects              []GraphicObject        `xml:"-"`
-	TextObject           []TextObject           `xml:"TextObject"`
-	PathObject           []PathObject           `xml:"PathObject"`
-	ImageObject          []ImageObject          `xml:"ImageObject"`
-	CompositeGraphicUnit []CompositeGraphicUnit `xml:"CompositeGraphicUnit"`
+	Boundary        string            `xml:"Boundary,attr"`
+	Objects         []GraphicObject   `xml:"-"`
+	TextObject      []TextObject      `xml:"TextObject"`
+	PathObject      []PathObject      `xml:"PathObject"`
+	ImageObject     []ImageObject     `xml:"ImageObject"`
+	CompositeObject []CompositeObject `xml:"CompositeObject"`
+	PageBlock       []PageBlock       `xml:"PageBlock"`
+}
+
+// annotationInfo 提取单条注释摘要，不保留外观图元引用
+// 入参: index 页面索引, pageID 页面标识, annotation 注释
+// 返回: AnnotationInfo 注释摘要
+func annotationInfo(index int, pageID string, annotation Annotation) AnnotationInfo {
+	var box Box
+	if annotation.Appearance != nil {
+		box, _ = ParseBox(annotation.Appearance.Boundary)
+	}
+	return AnnotationInfo{
+		ID:          annotation.ID,
+		Page:        index + 1,
+		PageID:      pageID,
+		Type:        annotation.Type,
+		Subtype:     annotation.Subtype,
+		Creator:     annotation.Creator,
+		LastModDate: annotation.LastModDate,
+		Remark:      annotation.Remark,
+		Visible:     annotation.Visible == nil || *annotation.Visible,
+		Print:       annotation.Print == nil || *annotation.Print,
+		NoZoom:      annotation.NoZoom,
+		NoRotate:    annotation.NoRotate,
+		ReadOnly:    annotation.ReadOnly == nil || *annotation.ReadOnly,
+		X:           box.X,
+		Y:           box.Y,
+		Width:       box.W,
+		Height:      box.H,
+	}
 }
 
 // UnmarshalXML 解析注释入口，按命名空间读取直接页面引用
@@ -305,6 +337,9 @@ func (r *Reader) PageAnnotationsContext(ctx context.Context, pageID string) ([]A
 // 返回: iter.Seq[*GraphicObject] 图形对象指针序列
 func (a *Appearance) objects() iter.Seq[*GraphicObject] {
 	return func(yield func(*GraphicObject) bool) {
+		if a == nil {
+			return
+		}
 		if len(a.Objects) != 0 {
 			for i := range a.Objects {
 				if !yield(&a.Objects[i]) {
@@ -331,13 +366,67 @@ func (a *Appearance) objects() iter.Seq[*GraphicObject] {
 				return
 			}
 		}
-		for _, object := range a.CompositeGraphicUnit {
-			item := GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: object}
+		for _, object := range a.CompositeObject {
+			item := GraphicObject{Type: "CompositeObject", CompositeObject: object}
 			if !yield(&item) {
 				return
 			}
 		}
+		for i := range a.PageBlock {
+			if !yieldPageBlockPtrs(&a.PageBlock[i], nil, yield) {
+				return
+			}
+		}
 	}
+}
+
+// yieldPageBlockPtrs 递归按绘制顺序遍历页块中的图形对象指针
+// 入参: block 页块, prefix 父级页块标识栈, yield 回调函数
+// 返回: bool 是否继续遍历
+func yieldPageBlockPtrs(block *PageBlock, prefix []string, yield func(*GraphicObject) bool) bool {
+	stack := append(slices.Clone(prefix), block.ID)
+	if len(block.Objects) != 0 {
+		for i := range block.Objects {
+			item := block.Objects[i]
+			if len(item.pageBlocks) == 0 {
+				item.pageBlocks = stack
+			}
+			if !yield(&item) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, object := range block.TextObject {
+		item := GraphicObject{Type: "TextObject", TextObject: object, pageBlocks: stack}
+		if !yield(&item) {
+			return false
+		}
+	}
+	for _, object := range block.PathObject {
+		item := GraphicObject{Type: "PathObject", PathObject: object, pageBlocks: stack}
+		if !yield(&item) {
+			return false
+		}
+	}
+	for _, object := range block.ImageObject {
+		item := GraphicObject{Type: "ImageObject", ImageObject: object, pageBlocks: stack}
+		if !yield(&item) {
+			return false
+		}
+	}
+	for _, object := range block.CompositeObject {
+		item := GraphicObject{Type: "CompositeObject", CompositeObject: object, pageBlocks: stack}
+		if !yield(&item) {
+			return false
+		}
+	}
+	for i := range block.PageBlock {
+		if !yieldPageBlockPtrs(&block.PageBlock[i], stack, yield) {
+			return false
+		}
+	}
+	return true
 }
 
 // annotationInfos 提取已加载页面的注释摘要列表
@@ -345,7 +434,7 @@ func (a *Appearance) objects() iter.Seq[*GraphicObject] {
 // 返回: []AnnotationInfo 注释信息
 func (r *Reader) annotationInfos(index int, pageID string) []AnnotationInfo {
 	var infos []AnnotationInfo
-	for _, annotation := range r.Annots[r.resolveAnnotPageID(pageID)] {
+	for _, annotation := range r.annots[r.resolveAnnotPageID(pageID)] {
 		infos = append(infos, annotationInfo(index, pageID, annotation))
 	}
 	return infos
@@ -358,7 +447,7 @@ func (r *Reader) ensureAnnotationIndexContext(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if r == nil || (r.doc == nil && r.OFD == nil) {
+	if r == nil || (r.doc == nil && r.ofd == nil) {
 		return nil
 	}
 	doc, err := r.docStructureContext(ctx)
@@ -368,7 +457,9 @@ func (r *Reader) ensureAnnotationIndexContext(ctx context.Context) error {
 	if r.annotIndexLoaded {
 		return nil
 	}
-	_ = r.parseAnnotations(ctx, doc)
+	if err := r.parseAnnotations(ctx, doc); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -386,8 +477,8 @@ func (r *Reader) parseAnnotations(ctx context.Context, doc *Document) error {
 	if _, err := r.annotationIndexContext(ctx, doc); err != nil {
 		return err
 	}
-	if r.Annots == nil {
-		r.Annots = make(map[string][]Annotation)
+	if r.annots == nil {
+		r.annots = make(map[string][]Annotation)
 	}
 	if r.pageAnnotsLoaded == nil {
 		r.pageAnnotsLoaded = make(map[string]bool)
@@ -402,29 +493,98 @@ func (r *Reader) resolveAnnotPageID(pageID string) string {
 	if _, ok := r.pageAnnotFiles[pageID]; ok {
 		return pageID
 	}
-	if _, ok := r.Annots[pageID]; ok {
+	if _, ok := r.annots[pageID]; ok {
 		return pageID
 	}
 	if key := editorResourceID(pageID); key != "" {
-		for _, candidate := range slices.Sorted(maps.Keys(r.pageAnnotFiles)) {
-			if editorResourceID(candidate) == key {
+		if len(r.pageAnnotFiles) > 0 {
+			if candidate, ok := r.resolvePageAnnotFileByCanon(key); ok {
 				return candidate
 			}
 		}
-		for _, candidate := range slices.Sorted(maps.Keys(r.Annots)) {
-			if editorResourceID(candidate) == key {
+		if len(r.annots) > 0 {
+			if candidate, ok := r.resolveAnnotMapByCanon(key); ok {
 				return candidate
 			}
 		}
-		if r.doc != nil {
-			for _, page := range r.doc.Pages.Page {
-				if editorResourceID(page.ID) == key {
-					return page.ID
-				}
-			}
+		if id, ok := r.resolveDocPageIDByCanon(key); ok {
+			return id
 		}
 	}
 	return pageID
+}
+
+// resolvePageAnnotFileByCanon 按规范标识常数时间查找注释文件索引中的页面键
+// 入参: key 规范化十进制页面标识
+// 返回: string 匹配的页面键, bool 是否命中
+func (r *Reader) resolvePageAnnotFileByCanon(key string) (string, bool) {
+	if r.pageAnnotCanon == nil {
+		index := make(map[string]string, len(r.pageAnnotFiles))
+		for candidate := range r.pageAnnotFiles {
+			if canon := editorResourceID(candidate); canon != "" {
+				if prev, exists := index[canon]; !exists || candidate < prev {
+					index[canon] = candidate
+				}
+			}
+		}
+		r.pageAnnotCanon = index
+	}
+	candidate, ok := r.pageAnnotCanon[key]
+	if ok {
+		if _, exists := r.pageAnnotFiles[candidate]; exists {
+			return candidate, true
+		}
+		r.pageAnnotCanon = nil
+		return r.resolvePageAnnotFileByCanon(key)
+	}
+	return "", false
+}
+
+// resolveAnnotMapByCanon 按规范标识常数时间查找已加载注释映射中的页面键
+// 入参: key 规范化十进制页面标识
+// 返回: string 匹配的页面键, bool 是否命中
+func (r *Reader) resolveAnnotMapByCanon(key string) (string, bool) {
+	rebuild := func() {
+		index := make(map[string]string, len(r.annots))
+		for candidate := range r.annots {
+			if canon := editorResourceID(candidate); canon != "" {
+				if prev, exists := index[canon]; !exists || candidate < prev {
+					index[canon] = candidate
+				}
+			}
+		}
+		r.annotCanon = index
+		r.annotCanonLen = len(r.annots)
+	}
+	rebuilt := false
+	if r.annotCanon == nil || r.annotCanonLen != len(r.annots) {
+		rebuild()
+		rebuilt = true
+	}
+	candidate, ok := r.annotCanon[key]
+	if ok {
+		if _, exists := r.annots[candidate]; exists {
+			return candidate, true
+		}
+		if !rebuilt {
+			rebuild()
+			if candidate, ok = r.annotCanon[key]; ok {
+				if _, exists := r.annots[candidate]; exists {
+					return candidate, true
+				}
+			}
+		}
+		return "", false
+	}
+	if !rebuilt && len(r.annots) > 0 {
+		rebuild()
+		if candidate, ok = r.annotCanon[key]; ok {
+			if _, exists := r.annots[candidate]; exists {
+				return candidate, true
+			}
+		}
+	}
+	return "", false
 }
 
 // pageAnnotationsContext 按页面标识惰性加载并缓存单页注释
@@ -437,19 +597,19 @@ func (r *Reader) pageAnnotationsContext(ctx context.Context, pageID string) ([]A
 	if r == nil {
 		return nil, nil
 	}
-	if r.doc != nil || r.OFD != nil {
+	if r.doc != nil || r.ofd != nil {
 		if err := r.ensureAnnotationIndexContext(ctx); err != nil {
 			return nil, err
 		}
 	}
 	resolvedID := r.resolveAnnotPageID(pageID)
-	if r.doc == nil && r.OFD == nil && r.pageAnnotFiles == nil {
-		return r.Annots[resolvedID], nil
+	if r.doc == nil && r.ofd == nil && r.pageAnnotFiles == nil {
+		return r.annots[resolvedID], nil
 	}
 	if r.pageAnnotsLoaded != nil && (r.pageAnnotsLoaded[resolvedID] || r.pageAnnotsLoaded[pageID]) {
 		r.pageAnnotsLoaded[resolvedID] = true
 		r.pageAnnotsLoaded[pageID] = true
-		return r.Annots[resolvedID], nil
+		return r.annots[resolvedID], nil
 	}
 	paths := r.pageAnnotFiles[resolvedID]
 	var loaded []Annotation
@@ -459,31 +619,42 @@ func (r *Reader) pageAnnotationsContext(ctx context.Context, pageID string) ([]A
 		}
 		af, err := r.openFile(annotPath)
 		if err != nil {
-			continue
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("open page annotation %s: %w", annotPath, err)
 		}
 		var pageAnnot PageAnnot
 		err = xml.NewDecoder(imageInput{ReadCloser: af, ctx: ctx}).Decode(&pageAnnot)
 		_ = af.Close()
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("parse page annotation %s: %w", annotPath, err)
 		}
 		loaded = append(loaded, pageAnnot.Annot...)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if r.Annots == nil {
-		r.Annots = make(map[string][]Annotation)
+	if r.annots == nil {
+		r.annots = make(map[string][]Annotation)
 	}
 	if len(loaded) > 0 {
-		r.Annots[resolvedID] = append(r.Annots[resolvedID], loaded...)
+		r.annots[resolvedID] = append(r.annots[resolvedID], loaded...)
+		if r.annotCanon != nil {
+			if canon := editorResourceID(resolvedID); canon != "" {
+				if prev, exists := r.annotCanon[canon]; !exists || resolvedID < prev {
+					r.annotCanon[canon] = resolvedID
+				}
+			}
+			r.annotCanonLen = len(r.annots)
+		}
 	}
 	if r.pageAnnotsLoaded == nil {
 		r.pageAnnotsLoaded = make(map[string]bool)
 	}
 	r.pageAnnotsLoaded[resolvedID] = true
 	r.pageAnnotsLoaded[pageID] = true
-	return r.Annots[resolvedID], nil
+	return r.annots[resolvedID], nil
 }
 
 // ensureAllAnnotationsContext 补齐当前文档全部尚未加载的分页注释
@@ -552,31 +723,6 @@ func (r *Reader) annotationIndexContext(ctx context.Context, doc *Document) (Ann
 	}
 	r.annotationFiles = files
 	r.pageAnnotFiles = byPage
+	r.pageAnnotCanon = nil
 	return annotations, nil
-}
-
-// annotationInfo 提取单条注释摘要，不保留外观图元引用
-// 入参: index 页面索引, pageID 页面标识, annotation 注释
-// 返回: AnnotationInfo 注释摘要
-func annotationInfo(index int, pageID string, annotation Annotation) AnnotationInfo {
-	box, _ := ParseBox(annotation.Appearance.Boundary)
-	return AnnotationInfo{
-		ID:          annotation.ID,
-		Page:        index + 1,
-		PageID:      pageID,
-		Type:        annotation.Type,
-		Subtype:     annotation.Subtype,
-		Creator:     annotation.Creator,
-		LastModDate: annotation.LastModDate,
-		Remark:      annotation.Remark,
-		Visible:     annotation.Visible == nil || *annotation.Visible,
-		Print:       annotation.Print == nil || *annotation.Print,
-		NoZoom:      annotation.NoZoom,
-		NoRotate:    annotation.NoRotate,
-		ReadOnly:    annotation.ReadOnly == nil || *annotation.ReadOnly,
-		X:           box.X,
-		Y:           box.Y,
-		Width:       box.W,
-		Height:      box.H,
-	}
 }

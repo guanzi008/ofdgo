@@ -17,6 +17,7 @@ package image
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"image"
@@ -42,6 +43,15 @@ type EncodedImage struct {
 	result     atomic.Pointer[encodedImageResult]
 	mu         sync.Mutex
 	pending    chan struct{}
+	metaOnce   sync.Once
+	metaDigest [32]byte
+	metaMIME   string
+}
+
+// encodedImageResult 保存已完成的像素解码结果，不保存取消或超时错误
+type encodedImageResult struct {
+	image image.Image
+	err   error
 }
 
 // NewEncodedImage 校验PNG或JPEG头信息后复制输入，不解码像素
@@ -56,6 +66,57 @@ func NewEncodedImage(data []byte) (*EncodedImage, error) {
 	return img, nil
 }
 
+// newEncodedImage 接管编码数据并读取头信息
+// 入参: data 原始编码
+// 返回: *EncodedImage 惰性图片, error 头信息或格式错误
+func newEncodedImage(data []byte) (*EncodedImage, error) {
+	return newEncodedImageContext(context.Background(), data)
+}
+
+// newEncodedImageContext 读取PNG或JPEG头信息，元数据扫描期间响应取消，不复制输入或解码像素
+// 入参: ctx 取消上下文, data 只读图片编码
+// 返回: *EncodedImage 惰性图片, error 头信息、格式或取消错误
+func newEncodedImageContext(ctx context.Context, data []byte) (*EncodedImage, error) {
+	config, format, err := image.DecodeConfig(contextInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		return nil, cancelErr
+	}
+	if err != nil {
+		return nil, err
+	}
+	if format != "jpeg" && format != "png" {
+		return nil, fmt.Errorf("unsupported encoded image %q", format)
+	}
+	img := &EncodedImage{data: data, format: format, config: config}
+	if format == "jpeg" {
+		img.profile, err = jpegColorProfile(ctx, data, config.ColorModel)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if format == "png" {
+		img.profile, img.pngColor, err = pngColorProfile(ctx, data)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if isEightBitRGBModel(config.ColorModel) {
+		if img.profile != nil {
+			if space, profileErr := pdfgo.NewICCColorSpace(img.profile); profileErr == nil {
+				if isEquivalentSRGBSpace(space, false) {
+					img.profile = nil
+				} else {
+					img.colorSpace = space
+				}
+			}
+		}
+		if img.pngColor != nil && isEquivalentSRGBSpace(img.pngColor.space, img.pngColor.linearSRGB) {
+			img.pngColor = nil
+		}
+	}
+	return img, nil
+}
+
 // Bytes 返回只读原始编码，调用方不得修改
 // 返回: []byte 原始编码
 func (img *EncodedImage) Bytes() []byte { return img.data }
@@ -63,6 +124,19 @@ func (img *EncodedImage) Bytes() []byte { return img.data }
 // MIME 返回图片媒体类型
 // 返回: string 媒体类型
 func (img *EncodedImage) MIME() string { return "image/" + img.format }
+
+// ContentMeta 惰性计算并缓存原始编码的内容摘要与规范化媒体类型
+// 返回: [32]byte SHA-256摘要, string 规范化媒体类型
+func (img *EncodedImage) ContentMeta() ([32]byte, string) {
+	img.metaOnce.Do(func() {
+		img.metaDigest = sha256.Sum256(img.data)
+		img.metaMIME = img.MIME()
+		if bytes.HasPrefix(img.data, []byte{255, 216}) {
+			img.metaMIME = "image/jpeg"
+		}
+	})
+	return img.metaDigest, img.metaMIME
+}
 
 // ColorModel 返回显示像素的颜色模型，不解码像素
 // 返回: color.Model 颜色模型
@@ -135,12 +209,6 @@ func (img *EncodedImage) At(x, y int) color.Color {
 	return decoded.At(x, y)
 }
 
-// encodedImageResult 保存已完成的像素解码结果，不保存取消或超时错误
-type encodedImageResult struct {
-	image image.Image
-	err   error
-}
-
 // decodeContext 执行本次解码，退出时唤醒等待方，只缓存完整结果及稳定错误
 // 入参: ctx 取消上下文, pending 本次解码的完成通知
 // 返回: image.Image 只读像素, error 解码或取消错误
@@ -197,55 +265,4 @@ func (img *EncodedImage) decodePixels(ctx context.Context) (image.Image, error) 
 		pixels, err = applyImageColorProfile(ctx, pixels, img.pngColor.space, img.pngColor.linearSRGB)
 	}
 	return pixels, err
-}
-
-// newEncodedImage 接管编码数据并读取头信息
-// 入参: data 原始编码
-// 返回: *EncodedImage 惰性图片, error 头信息或格式错误
-func newEncodedImage(data []byte) (*EncodedImage, error) {
-	return newEncodedImageContext(context.Background(), data)
-}
-
-// newEncodedImageContext 读取PNG或JPEG头信息，元数据扫描期间响应取消，不复制输入或解码像素
-// 入参: ctx 取消上下文, data 只读图片编码
-// 返回: *EncodedImage 惰性图片, error 头信息、格式或取消错误
-func newEncodedImageContext(ctx context.Context, data []byte) (*EncodedImage, error) {
-	config, format, err := image.DecodeConfig(contextInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
-	if cancelErr := ctx.Err(); cancelErr != nil {
-		return nil, cancelErr
-	}
-	if err != nil {
-		return nil, err
-	}
-	if format != "jpeg" && format != "png" {
-		return nil, fmt.Errorf("unsupported encoded image %q", format)
-	}
-	img := &EncodedImage{data: data, format: format, config: config}
-	if format == "jpeg" {
-		img.profile, err = jpegColorProfile(ctx, data, config.ColorModel)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if format == "png" {
-		img.profile, img.pngColor, err = pngColorProfile(ctx, data)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if isEightBitRGBModel(config.ColorModel) {
-		if img.profile != nil {
-			if space, profileErr := pdfgo.NewICCColorSpace(img.profile); profileErr == nil {
-				if isEquivalentSRGBSpace(space, false) {
-					img.profile = nil
-				} else {
-					img.colorSpace = space
-				}
-			}
-		}
-		if img.pngColor != nil && isEquivalentSRGBSpace(img.pngColor.space, img.pngColor.linearSRGB) {
-			img.pngColor = nil
-		}
-	}
-	return img, nil
 }

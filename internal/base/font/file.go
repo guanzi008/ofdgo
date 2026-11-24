@@ -24,13 +24,11 @@ import (
 	"unicode/utf8"
 )
 
+// 字体集合流式读取的字体数、表目录项数及单表字节上限
 const (
-	// maxFaceCount 限制单个集合流式读取的最大字体数量
-	maxFaceCount = 4096
-	// maxFaceTableCount 限制单个字体的最大表目录项数
+	maxFaceCount      = 4096
 	maxFaceTableCount = 4096
-	// maxFaceTableSize 限制流式读取名称与度量单表的最大字节数
-	maxFaceTableSize = 4 << 20
+	maxFaceTableSize  = 4 << 20
 )
 
 // Face 字体文件中的字体名称与零起始索引，不依赖文件名
@@ -50,10 +48,10 @@ type Face struct {
 	Italic         bool     `json:"italic"`
 }
 
-// FaceInfo 从名称表读取字体信息
+// faceInfo 从名称表读取字体信息
 // 入参: data 名称表数据, index 零起始字体索引
 // 返回: Face 字体信息
-func FaceInfo(data []byte, index int) Face {
+func faceInfo(data []byte, index int) Face {
 	return faceInfoLanguage(data, index, 0xffff, 0xffff)
 }
 
@@ -246,7 +244,7 @@ func ExtractFace(data []byte, index int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmap, err := NormalizeCmap(tables["cmap"])
+	cmap, err := normalizeCmap(tables["cmap"])
 	if err != nil {
 		return nil, err
 	}

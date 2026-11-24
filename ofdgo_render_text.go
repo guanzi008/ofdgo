@@ -20,7 +20,6 @@ import (
 	"math"
 
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
 // PositionedGlyph 保存页面坐标字形与对应原文区间
@@ -38,13 +37,6 @@ type PositionedText struct {
 	Matrix Matrix
 }
 
-// PositionText 定位文字、字形与搜索范围，不依赖页面输出后端
-// 入参: object 文字对象, state 继承状态
-// 返回: *PositionedText 定位结果, error 字体或几何错误
-func (r *Renderer) PositionText(object TextObject, state RenderState) (*PositionedText, error) {
-	return r.positionText(object, state, false)
-}
-
 // glyphOutlineKey 区分字体、字形与毫米字号
 type glyphOutlineKey struct {
 	digest [32]byte
@@ -53,15 +45,94 @@ type glyphOutlineKey struct {
 	size   float64
 }
 
+// renderObjectMatrix 统一边界、局部变换与父变换的组合顺序
+// 入参: boundary 对象边界, local 局部矩阵, state 继承状态
+// 返回: Matrix 页面矩阵, Matrix 不含边界平移的组合矩阵
+func renderObjectMatrix(boundary string, local Matrix, state RenderState) (Matrix, Matrix) {
+	box, _ := ParseBox(boundary)
+	linear := local
+	if state.Parent != nil {
+		linear = state.Parent.Multiply(local)
+	}
+	matrix := TranslationMatrix(box.X, box.Y).Multiply(linear)
+	if state.BoundaryInCTM && state.Parent != nil {
+		matrix = state.Parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(local)
+	}
+	return matrix, linear
+}
+
+// sfntTablesBold 依据字体自身OS/2字重与head粗体标志判定是否本身已是粗体
+// 入参: tables OpenType字表映射
+// 返回: bool 字体本身是否为粗体
+func sfntTablesBold(tables map[string][]byte) bool {
+	if os2 := tables["OS/2"]; len(os2) >= 6 && binary.BigEndian.Uint16(os2[4:6]) >= 700 {
+		return true
+	}
+	if head := tables["head"]; len(head) >= 46 && binary.BigEndian.Uint16(head[44:46])&1 != 0 {
+		return true
+	}
+	return false
+}
+
+// sfntTablesItalic 检查字体OS/2与head表是否声明字库本身为斜体
+// 入参: tables OpenType原始表数据
+// 返回: bool 字体本身是否为斜体
+func sfntTablesItalic(tables map[string][]byte) bool {
+	if os2 := tables["OS/2"]; len(os2) >= 64 && binary.BigEndian.Uint16(os2[62:64])&1 != 0 {
+		return true
+	}
+	if head := tables["head"]; len(head) >= 46 && binary.BigEndian.Uint16(head[44:46])&2 != 0 {
+		return true
+	}
+	return false
+}
+
+// preparedFontBold 读取已准备字体的OpenType表以判定字库本身是否为粗体
+// 入参: prepared 已准备字体, metrics 字体度量
+// 返回: bool 字体本身是否为粗体
+func preparedFontBold(prepared *PreparedFont, metrics FontMetrics) bool {
+	if sfnt, ok := metrics.(*sfntFontMetrics); ok && sfnt != nil && sfnt.SFNT != nil {
+		return sfntTablesBold(sfnt.Tables)
+	}
+	if prepared == nil || len(prepared.Data) == 0 {
+		return false
+	}
+	tables, err := basefont.FileTables(prepared.Data, 0)
+	if err != nil {
+		return false
+	}
+	return sfntTablesBold(tables)
+}
+
+// preparedFontItalic 读取已准备字体的OpenType表以判定字库本身是否为斜体
+// 入参: prepared 已准备字体, metrics 字体度量
+// 返回: bool 字体本身是否为斜体
+func preparedFontItalic(prepared *PreparedFont, metrics FontMetrics) bool {
+	if sfnt, ok := metrics.(*sfntFontMetrics); ok && sfnt != nil && sfnt.SFNT != nil {
+		return sfntTablesItalic(sfnt.Tables)
+	}
+	if prepared == nil || len(prepared.Data) == 0 {
+		return false
+	}
+	tables, err := basefont.FileTables(prepared.Data, 0)
+	if err != nil {
+		return false
+	}
+	return sfntTablesItalic(tables)
+}
+
+// PositionText 定位文字、字形与搜索范围，不依赖页面输出后端
+// 入参: object 文字对象, state 继承状态
+// 返回: *PositionedText 定位结果, error 字体或几何错误
+func (r *Renderer) PositionText(object TextObject, state RenderState) (*PositionedText, error) {
+	return r.positionText(object, state, false)
+}
+
 // positionText 提取原文，按需计算字形与搜索范围
 // 入参: object 文字对象, state 继承状态, contentOnly 仅提取原文
 // 返回: *PositionedText 定位结果, error 字体或几何错误
 func (r *Renderer) positionText(object TextObject, state RenderState, contentOnly bool) (*PositionedText, error) {
-	defaults := r.drawParamDefaults(object.DrawParam, state.Defaults)
 	size := object.Size
-	if size == 0 && defaults != nil && defaults.Size > 0 {
-		size = defaults.Size
-	}
 	if size == 0 {
 		size = 3.5
 	}
@@ -90,9 +161,6 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 		horizontal = 1
 	}
 	id := object.Font
-	if id == "" && defaults != nil && defaults.Font != "" {
-		id = defaults.Font
-	}
 	prepared, err := r.PrepareFont(id)
 	if err != nil {
 		return nil, err
@@ -102,8 +170,8 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 			return result, nil
 		}
 		box, _ := ParseBox(object.Boundary)
-		boundary, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
-		path, err := geometry.Transform(GeometryPath(basegeom.Rectangle(Box{W: box.W, H: box.H})), boundary)
+		boundary, _ := renderObjectMatrix(object.Boundary, IdentityMatrix(), state)
+		path, err := geometry.Transform(geometryRectangle(Box{W: box.W, H: box.H}), boundary)
 		if err != nil {
 			return nil, err
 		}
@@ -125,23 +193,24 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 		return nil, err
 	}
 	weight := object.Weight
-	if weight == 0 && !object.WeightSet && defaults != nil && (defaults.Weight > 0 || defaults.WeightSet) {
-		weight = defaults.Weight
-	}
 	italic := object.Italic
-	if !object.ItalicSet && !italic && defaults != nil && defaults.Italic {
-		italic = true
-	}
 	bold := weight >= 700
 	if definition := r.fontDefinition(id); definition != nil {
-		bold = bold && !definition.Bold
-		if basefont.NoSyntheticBold(definition.FontName, definition.FamilyName) {
+		if bold && basefont.NoSyntheticBold(definition.FontName, definition.FamilyName) {
 			bold = false
 		}
-		italic = italic && !definition.Italic
+		if definition.Bold {
+			bold = true
+		}
+		if definition.Italic {
+			italic = true
+		}
 	}
 	if bold && preparedFontBold(prepared, metrics) {
 		bold = false
+	}
+	if italic && preparedFontItalic(prepared, metrics) {
+		italic = false
 	}
 	ascent, descent, _ := metrics.VerticalMetrics()
 	unit := size / float64(metrics.UnitsPerEm())
@@ -377,7 +446,7 @@ func (r *Renderer) objectGeometryClip(clips *Clips, boundary string, local Matri
 		if box.W <= 0 || box.H <= 0 {
 			return new(GeometryPath), nil
 		}
-		matrix, _ := renderObjectMatrix(boundary, IdentityMatrix, state)
+		matrix, _ := renderObjectMatrix(boundary, IdentityMatrix(), state)
 		clip, err = r.geometryExtentClip(box.W, box.H, matrix, clip)
 		if err != nil {
 			return nil, err
@@ -388,7 +457,7 @@ func (r *Renderer) objectGeometryClip(clips *Clips, boundary string, local Matri
 	}
 	matrix, _ := renderObjectMatrix(boundary, local, state)
 	if !clips.usesObjectMatrix() {
-		matrix, _ = renderObjectMatrix(boundary, IdentityMatrix, state)
+		matrix, _ = renderObjectMatrix(boundary, IdentityMatrix(), state)
 	}
 	geometry, err := r.Geometry()
 	if err != nil {
@@ -406,7 +475,7 @@ func (r *Renderer) imageBorderClip(clips *Clips, boundary string, local Matrix, 
 	}
 	matrix, _ := renderObjectMatrix(boundary, local, state)
 	if !clips.usesObjectMatrix() {
-		matrix, _ = renderObjectMatrix(boundary, IdentityMatrix, state)
+		matrix, _ = renderObjectMatrix(boundary, IdentityMatrix(), state)
 	}
 	geometry, err := r.Geometry()
 	if err != nil {
@@ -424,7 +493,7 @@ func (run *TextRun) addGeometrySpan(geometry GeometryBackend, start, end int, bo
 		return nil
 	}
 	if clip != nil {
-		path, err := geometry.Transform(GeometryPath(basegeom.Rectangle(bounds)), matrix)
+		path, err := geometry.Transform(geometryRectangle(bounds), matrix)
 		if err != nil {
 			return err
 		}
@@ -458,50 +527,4 @@ func (run *TextRun) addGeometrySpan(geometry GeometryBackend, start, end int, bo
 	}
 	run.Spans = append(run.Spans, TextSpan{Start: start, End: end, Matrix: matrix.Values()})
 	return nil
-}
-
-// renderObjectMatrix 统一边界、局部变换与父变换的组合顺序
-// 入参: boundary 对象边界, local 局部矩阵, state 继承状态
-// 返回: Matrix 页面矩阵, Matrix 不含边界平移的组合矩阵
-func renderObjectMatrix(boundary string, local Matrix, state RenderState) (Matrix, Matrix) {
-	box, _ := ParseBox(boundary)
-	linear := local
-	if state.Parent != nil {
-		linear = state.Parent.Multiply(local)
-	}
-	matrix := TranslationMatrix(box.X, box.Y).Multiply(linear)
-	if state.BoundaryInCTM && state.Parent != nil {
-		matrix = state.Parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(local)
-	}
-	return matrix, linear
-}
-
-// sfntTablesBold 依据字体自身OS/2字重与head粗体标志判定是否本身已是粗体
-// 入参: tables OpenType字表映射
-// 返回: bool 字体本身是否为粗体
-func sfntTablesBold(tables map[string][]byte) bool {
-	if os2 := tables["OS/2"]; len(os2) >= 6 && binary.BigEndian.Uint16(os2[4:6]) >= 700 {
-		return true
-	}
-	if head := tables["head"]; len(head) >= 46 && binary.BigEndian.Uint16(head[44:46])&1 != 0 {
-		return true
-	}
-	return false
-}
-
-// preparedFontBold 读取已准备字体的OpenType表以判定字库本身是否为粗体
-// 入参: prepared 已准备字体, metrics 字体度量
-// 返回: bool 字体本身是否为粗体
-func preparedFontBold(prepared *PreparedFont, metrics FontMetrics) bool {
-	if sfnt, ok := metrics.(*sfntFontMetrics); ok && sfnt != nil && sfnt.SFNT != nil {
-		return sfntTablesBold(sfnt.Tables)
-	}
-	if prepared == nil || len(prepared.Data) == 0 {
-		return false
-	}
-	tables, err := basefont.FileTables(prepared.Data, 0)
-	if err != nil {
-		return false
-	}
-	return sfntTablesBold(tables)
 }

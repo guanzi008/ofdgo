@@ -39,141 +39,20 @@ type stampContentState struct {
 	cache     renderCache[stampContentKey, []RasterCommand]
 }
 
-// resetFonts 使包含文字的签章编译结果随字体配置失效
-func (s *stampContentState) resetFonts() {
-	s.cache.clear()
-	s.cache = *resourceCache[stampContentKey, []RasterCommand](s.resources, 16<<20)
-}
-
 // stampContentStateKey 隔离渲染器私有的共享签章数据
 type stampContentStateKey struct{}
 
-// patternCellKey 区分共享底纹、透明度和影响单元语义的页面变换
+// patternCellKey 区分共享底纹、透明度、分辨率、页面资源作用域、打印状态、底纹页变换与影响单元语义的变换
 type patternCellKey struct {
-	pattern *Pattern
-	alpha   int
-	matrix  [6]float64
-}
-
-// sharedStamp 复用相同签章的解码、嵌套文档编译及局部裁剪，不缓存放置位置
-// 入参: stamp 签章, compile 未缓存的签章编译方法
-// 返回: error 签章解析或编译错误
-func (c *semanticCompiler) sharedStamp(stamp Stamp, compile func(*semanticCompiler, Stamp) error) error {
-	if c.textOnly || c.measure || len(stamp.Data) == 0 {
-		return nil
-	}
-	r := c.renderer
-	ctx := r.pageContext
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	state, _ := r.backendStates[stampContentStateKey{}].(*stampContentState)
-	config := r.backends
-	if state == nil || !sameBackend(state.config.Fonts, config.Fonts) || !sameBackend(state.config.Geometry, config.Geometry) ||
-		!sameBackend(state.config.Compiler, config.Compiler) || !sameBackend(state.config.Raster, config.Raster) {
-		state = &stampContentState{config: config, resources: r.Reader.resources}
-		state.resetFonts()
-		r.backendStates[stampContentStateKey{}] = state
-	}
-	key := stampContentKey{data: sha256.Sum256(stamp.Data), kind: stamp.Type, width: stamp.Box.W, height: stamp.Box.H, dpi: c.page.DPI, clipped: stamp.Clip != nil, annotations: r.RenderAnnotations}
-	if stamp.Clip != nil {
-		key.clip = *stamp.Clip
-	}
-	commands, ok := state.cache.get(key)
-	if !ok {
-		local := stamp
-		local.Box.X, local.Box.Y = 0, 0
-		page := &RasterPage{Width: c.page.Width, Height: c.page.Height, DPI: c.page.DPI}
-		child := &semanticCompiler{renderer: r, geometry: c.geometry, page: page, patterns: c.patterns}
-		err := compile(child, local)
-		if cancelErr := ctx.Err(); cancelErr != nil {
-			return cancelErr
-		}
-		if err != nil {
-			return err
-		}
-		commands = page.Commands
-		cost := rasterCommandsCost(commands, state.cache.limit)
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		state.cache.put(key, commands, cost)
-	}
-	c.page.Commands = append(c.page.Commands, translatePatternCommands(commands, stamp.Box.X, stamp.Box.Y)...)
-	return nil
-}
-
-// patternCell 复用同次编译中相同底纹单元并施加单元宽高边界裁剪，不污染单元内部默认颜色
-// 入参: pattern 底纹画刷, matrix 单元到页面矩阵
-// 返回: []RasterCommand 只读单元指令, error 编译错误
-func (c *semanticCompiler) patternCell(pattern *PatternPaint, matrix Matrix) ([]RasterCommand, error) {
-	if c.patternReferences[pattern.Pattern] {
-		return nil, fmt.Errorf("cyclic pattern paint")
-	}
-	if pattern.Width <= 0 || pattern.Height <= 0 {
-		return nil, nil
-	}
-	x, y := 0.0, 0.0
-	if patternCellTranslatable(pattern) {
-		x, y = matrix.e, matrix.f
-		matrix.e, matrix.f = 0, 0
-	}
-	key := patternCellKey{pattern: pattern.Pattern, alpha: 255, matrix: matrix.Values()}
-	if pattern.Alpha != nil {
-		key.alpha = *pattern.Alpha
-	}
-	if commands, ok := c.patterns.get(key); ok {
-		return translatePatternCommands(commands, x, y), nil
-	}
-	if c.patternReferences == nil {
-		c.patternReferences = make(map[*Pattern]bool)
-	}
-	c.patternReferences[pattern.Pattern] = true
-	defer delete(c.patternReferences, pattern.Pattern)
-	cellClip, err := c.renderer.geometryExtentClip(pattern.Width, pattern.Height, matrix, nil)
-	if err != nil {
-		return nil, err
-	}
-	child := &semanticCompiler{renderer: c.renderer, geometry: c.geometry, page: &RasterPage{Width: c.page.Width, Height: c.page.Height, DPI: c.page.DPI}, pattern: true, patterns: c.patterns, patternReferences: c.patternReferences, patternPage: &matrix}
-	for object := range pattern.CellContent.objects() {
-		object = mergeGraphicObjectAlpha(object, pattern.Alpha)
-		if err := c.renderer.WalkObject(&object, RenderState{Defaults: nil, Parent: &matrix, BoundaryInCTM: true, Clip: cellClip}, child); err != nil {
-			return nil, err
-		}
-	}
-	cost := rasterCommandsCost(child.page.Commands, c.patterns.limit)
-	c.patterns.put(key, child.page.Commands, cost)
-	return translatePatternCommands(child.page.Commands, x, y), nil
-}
-
-// appendClippedCommands 合并页面裁剪后追加指令，不修改原始指令
-// 入参: commands 绘制指令, clip 页面裁剪, segments 已转换裁剪
-// 返回: error 裁剪合并错误
-func (c *semanticCompiler) appendClippedCommands(commands []RasterCommand, clip GeometryPath, segments []RasterSegment) error {
-	for _, command := range commands {
-		if command.Group != RasterGroupNone {
-			c.page.Commands = append(c.page.Commands, command)
-			continue
-		}
-		commandClip := segments
-		if command.Clip != nil {
-			path := geometryFromRaster(command.Clip)
-			combined, err := c.geometry.Combine(path, clip, GeometryIntersect)
-			if err != nil {
-				return err
-			}
-			commandClip, err = c.segments(combined)
-			if err != nil {
-				return err
-			}
-		}
-		command.Clip = commandClip
-		c.page.Commands = append(c.page.Commands, command)
-	}
-	return nil
+	pattern        *Pattern
+	alpha          int
+	matrix         [6]float64
+	dpi            float64
+	printing       bool
+	printContents  string
+	pageScope      *pdfPageScopeNode
+	hasPatternPage bool
+	patternPage    [6]float64
 }
 
 // patternCellTranslatable 检查无需按页面位置重新解释的叶子单元
@@ -194,6 +73,9 @@ func patternCellTranslatable(pattern *PatternPaint) bool {
 			}
 			fill, stroke = object.TextObject.FillColor, (*FillColor)(object.TextObject.StrokeColor)
 		case "ImageObject":
+			if object.ImageObject.DrawParam != "" {
+				return false
+			}
 			if object.ImageObject.Border != nil {
 				stroke = (*FillColor)(object.ImageObject.Border.BorderColor)
 			}
@@ -248,4 +130,211 @@ func geometryFromRaster(path []RasterSegment) GeometryPath {
 		result = append(result, GeometrySegment{Verb: verb, End: Point{X: s.End.X, Y: s.End.Y}, Control1: Point{X: s.Control1.X, Y: s.Control1.Y}, Control2: Point{X: s.Control2.X, Y: s.Control2.Y}})
 	}
 	return result
+}
+
+// resetFonts 使包含文字的签章编译结果随字体配置失效
+func (s *stampContentState) resetFonts() {
+	s.cache.clear()
+	s.cache = *resourceCache[stampContentKey, []RasterCommand](s.resources, 16<<20)
+}
+
+// sharedStamp 复用相同签章的解码、嵌套文档编译及局部裁剪，不缓存放置位置
+// 入参: stamp 签章, compile 未缓存的签章编译方法
+// 返回: error 签章解析或编译错误
+func (c *semanticCompiler) sharedStamp(stamp Stamp, compile func(*semanticCompiler, Stamp) error) error {
+	if c.textOnly || c.measure || len(stamp.Data) == 0 {
+		return nil
+	}
+	r := c.renderer
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	state, _ := r.backendStates[stampContentStateKey{}].(*stampContentState)
+	config := r.backends
+	if state == nil || !sameBackend(state.config.Fonts, config.Fonts) || !sameBackend(state.config.Geometry, config.Geometry) ||
+		!sameBackend(state.config.Compiler, config.Compiler) || !sameBackend(state.config.Raster, config.Raster) {
+		state = &stampContentState{config: config, resources: r.reader.resources}
+		state.resetFonts()
+		r.backendStates[stampContentStateKey{}] = state
+	}
+	key := stampContentKey{data: sha256.Sum256(stamp.Data), kind: stamp.Type, width: stamp.Box.W, height: stamp.Box.H, dpi: c.page.DPI, clipped: stamp.Clip != nil, annotations: r.renderAnnotations}
+	if stamp.Clip != nil {
+		key.clip = *stamp.Clip
+	}
+	commands, ok := state.cache.get(key)
+	if !ok {
+		local := stamp
+		local.Box.X, local.Box.Y = 0, 0
+		page := &RasterPage{Width: c.page.Width, Height: c.page.Height, DPI: c.page.DPI}
+		child := &semanticCompiler{renderer: r, geometry: c.geometry, page: page, patterns: c.patterns}
+		err := compile(child, local)
+		if cancelErr := ctx.Err(); cancelErr != nil {
+			return cancelErr
+		}
+		if err != nil {
+			return err
+		}
+		commands = page.Commands
+		cost := rasterCommandsCost(commands, state.cache.limit)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		state.cache.put(key, commands, cost)
+	}
+	c.page.Commands = append(c.page.Commands, translatePatternCommands(commands, stamp.Box.X, stamp.Box.Y)...)
+	return nil
+}
+
+// internPageScope 驻留当前页面局部资源作用域序列以供底纹单元缓存隔离
+// 入参: res 页面局部资源列表
+// 返回: *pdfPageScopeNode 唯一作用域节点
+func (c *semanticCompiler) internPageScope(res []*parsedRes) *pdfPageScopeNode {
+	var cur *pdfPageScopeNode
+	for _, item := range res {
+		if item == nil {
+			continue
+		}
+		if c.pageScopes == nil {
+			c.pageScopes = make(map[pdfPageScopeNode]*pdfPageScopeNode)
+		}
+		k := pdfPageScopeNode{res: item, prev: cur}
+		if existing, ok := c.pageScopes[k]; ok {
+			cur = existing
+			continue
+		}
+		node := &pdfPageScopeNode{res: item, prev: cur}
+		c.pageScopes[k] = node
+		cur = node
+	}
+	return cur
+}
+
+// patternCell 复用同次编译中相同底纹单元并施加单元宽高边界裁剪，不污染单元内部默认颜色
+// 入参: pattern 底纹画刷, matrix 单元到页面矩阵
+// 返回: []RasterCommand 只读单元指令, error 编译错误
+func (c *semanticCompiler) patternCell(pattern *PatternPaint, matrix Matrix) ([]RasterCommand, error) {
+	ctx := c.renderer.pageContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c.patternReferences[pattern.Pattern] {
+		return nil, fmt.Errorf("cyclic pattern paint")
+	}
+	if pattern.Width <= 0 || pattern.Height <= 0 {
+		return nil, nil
+	}
+	tileMatrix := matrix
+	x, y := 0.0, 0.0
+	translatable := patternCellTranslatable(pattern)
+	if translatable {
+		x, y = matrix.e, matrix.f
+		matrix.e, matrix.f = 0, 0
+	}
+	patternAlpha := 255
+	if pattern.Alpha != nil {
+		patternAlpha = max(0, min(255, *pattern.Alpha))
+	}
+	if patternAlpha == 0 {
+		return nil, nil
+	}
+	key := patternCellKey{
+		pattern:       pattern.Pattern,
+		alpha:         patternAlpha,
+		matrix:        matrix.Values(),
+		dpi:           c.page.DPI,
+		printing:      c.renderer.printing,
+		printContents: c.renderer.printContents,
+		pageScope:     c.internPageScope(c.renderer.pageResources),
+	}
+	if !translatable && c.patternPage != nil {
+		key.hasPatternPage = true
+		key.patternPage = c.patternPage.Values()
+	}
+	if commands, ok := c.patterns.get(key); ok {
+		return translatePatternCommands(commands, x, y), nil
+	}
+	if c.patternReferences == nil {
+		c.patternReferences = make(map[*Pattern]bool)
+	}
+	c.patternReferences[pattern.Pattern] = true
+	defer delete(c.patternReferences, pattern.Pattern)
+	cellClip, err := c.renderer.geometryExtentClip(pattern.Width, pattern.Height, matrix, nil)
+	if err != nil {
+		return nil, err
+	}
+	count := 0
+	for range pattern.CellContent.objects() {
+		count++
+		if count > 1 {
+			break
+		}
+	}
+	useGroup := patternAlpha < 255 && count > 1
+	cellPatternPage := tileMatrix
+	child := &semanticCompiler{renderer: c.renderer, geometry: c.geometry, page: &RasterPage{Width: c.page.Width, Height: c.page.Height, DPI: c.page.DPI}, pattern: true, patterns: c.patterns, patternReferences: c.patternReferences, patternPage: &cellPatternPage, pageScopes: c.pageScopes}
+	prevPatternPage := c.renderer.patternPage
+	c.renderer.patternPage = &cellPatternPage
+	defer func() {
+		c.renderer.patternPage = prevPatternPage
+		if c.pageScopes == nil && child.pageScopes != nil {
+			c.pageScopes = child.pageScopes
+		}
+	}()
+	if useGroup {
+		child.page.Commands = append(child.page.Commands, RasterCommand{Group: RasterGroupBegin, GroupAlpha: uint8(patternAlpha)})
+	}
+	for object := range pattern.CellContent.objects() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if !useGroup {
+			object = mergeGraphicObjectAlpha(object, pattern.Alpha)
+		}
+		if err := c.renderer.WalkObjectContext(ctx, &object, RenderState{Defaults: nil, Parent: &matrix, BoundaryInCTM: true, Clip: cellClip}, child); err != nil {
+			return nil, err
+		}
+	}
+	if useGroup {
+		child.page.Commands = append(child.page.Commands, RasterCommand{Group: RasterGroupEnd})
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cost := rasterCommandsCost(child.page.Commands, c.patterns.limit)
+	c.patterns.put(key, child.page.Commands, cost)
+	return translatePatternCommands(child.page.Commands, x, y), nil
+}
+
+// appendClippedCommands 合并页面裁剪后追加指令，不修改原始指令
+// 入参: commands 绘制指令, clip 页面裁剪, segments 已转换裁剪
+// 返回: error 裁剪合并错误
+func (c *semanticCompiler) appendClippedCommands(commands []RasterCommand, clip GeometryPath, segments []RasterSegment) error {
+	for _, command := range commands {
+		if command.Group != RasterGroupNone {
+			c.page.Commands = append(c.page.Commands, command)
+			continue
+		}
+		commandClip := segments
+		if command.Clip != nil {
+			path := geometryFromRaster(command.Clip)
+			combined, err := c.geometry.Combine(path, clip, GeometryIntersect)
+			if err != nil {
+				return err
+			}
+			commandClip, err = c.segments(combined)
+			if err != nil {
+				return err
+			}
+		}
+		command.Clip = commandClip
+		c.page.Commands = append(c.page.Commands, command)
+	}
+	return nil
 }

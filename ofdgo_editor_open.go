@@ -15,8 +15,10 @@
 package ofdgo
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
+	"compress/flate"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -26,12 +28,18 @@ import (
 	"maps"
 	"path"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
+
+// editorMaxIDFastLimit 限制标识字节快扫在内存中缓存的单文件字节上限
+const editorMaxIDFastLimit = 4 << 20
 
 // ObjectCapabilities 已有对象可执行的操作，Reason说明受限原因
 // Update表示完整替换内容，ReplaceFont表示可显式替换文字字体，Transform表示保留文字定位的几何变换，Order仅限同一图层或末级页块
@@ -77,6 +85,650 @@ type PageCapabilities struct {
 	Resize bool
 }
 
+// editorSource 保留输入包及按需加载的原始页面
+type editorSource struct {
+	reader              *Reader
+	document            *Document
+	info                DocInfo
+	fallbackDocID       string
+	directory           string
+	fromNew             bool
+	pages               map[string]*editorSourcePage
+	origins             map[string]*editorObjectOrigin
+	idsReady            bool
+	pageResLoaded       bool
+	pageResList         []*parsedRes
+	annotationStates    map[string]map[string]editorCompositeState
+	annotationPages     map[string]bool
+	retiredAttachments  map[string]bool
+	removedAttachments  map[string]bool
+	structureObjects    map[string]map[string]bool
+	structureStarts     map[int]map[string]int
+	attachmentIDs       map[string]bool
+	richTextTagPath     string
+	richTextTagIndex    int
+	richTextTagKnown    bool
+	customTagCount      int
+	customTagCountReady bool
+	scanCache           *renderCache[editorSourceScanKey, editorScanValue]
+	initialFiles        map[string][]byte
+	appendOnlyFiles     map[string][]byte
+	mayShrinkResources  bool
+}
+
+// editorObjectOrigin 保留原对象的XML语义，供复制和局部更新复用
+type editorObjectOrigin struct {
+	editor   *Editor
+	document editorDocumentIdentity
+	page     *editorSourcePage
+	data     []byte
+	node     *editorXML
+	object   GraphicObject
+	reason   error
+}
+
+// editorSourcePage 保存页面原文、解析快照及图层和页块内的对象位置
+type editorSourcePage struct {
+	ref              Page
+	data             []byte
+	root             *editorXML
+	original         *PageContent
+	initialLayers    []Layer
+	initialActions   []Action
+	initialTemplates []Template
+	initialPageRes   []string
+	nodes            map[string]*editorXML
+	repaired         bool
+}
+
+// editorMaxIDScanner 复用工作协程的解压器与读缓冲以加速包内XML标识扫描
+type editorMaxIDScanner struct {
+	flate io.ReadCloser
+	buf   bytes.Buffer
+}
+
+// editorMaxIDChunkResult 汇总单批并行标识扫描的局部最大值与首个错误
+type editorMaxIDChunkResult struct {
+	maxID      uint64
+	archiveMax uint64
+	err        error
+}
+
+// isNonXMLPackageFile 按扩展名识别明显为二进制媒体、字体或签章数据的非XML条目
+// 入参: name 包内文件路径
+// 返回: bool 是否应跳过XML标识扫描
+func isNonXMLPackageFile(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".jb2", ".jbig2", ".jp2", ".jpx", ".gif", ".webp",
+		".ttf", ".otf", ".ttc", ".otc", ".cff", ".woff", ".woff2", ".icc", ".icm",
+		".mp3", ".wav", ".mp4", ".esl", ".ses", ".dat", ".bin":
+		return true
+	default:
+		return false
+	}
+}
+
+// cloneEditorReader 复用已验证的只读包索引，独立保存可变文档与读取缓存
+// 入参: reader 已加载当前文档的阅读器
+// 返回: *Reader 不拥有输入文件的独立阅读器
+func cloneEditorReader(reader *Reader) *Reader {
+	next := *reader
+	reader.cloneMutableState(&next)
+	next.closer = nil
+	next.encHold = nil
+	next.ofd = cloneEditorData(reader.ofd)
+	doc := *reader.doc
+	pages := doc.Pages.Page
+	doc.Pages.Page = nil
+	doc = cloneEditorData(doc)
+	doc.Pages.Page = slices.Clone(pages)
+	next.doc = &doc
+	next.files = maps.Clone(reader.files)
+	next.pageReady = maps.Clone(reader.pageReady)
+	next.fileNames = maps.Clone(reader.fileNames)
+	return &next
+}
+
+// cloneEditorMap 复制对外可变缓存值，避免快照之间共享嵌套切片或指针
+// 入参: values 原缓存
+// 返回: map[string]T 独立缓存
+func cloneEditorMap[T any](values map[string]T) map[string]T {
+	result := maps.Clone(values)
+	for key, value := range result {
+		result[key] = cloneEditorData(value)
+	}
+	return result
+}
+
+// editorXMLMaxID 按内容识别OFD结构并读取最大标识，跳过二进制及非OFD内容
+// 入参: input 包内文件流
+// 返回: uint64 最大标识, error 错误信息
+func editorXMLMaxID(input io.Reader) (uint64, error) {
+	buffer := bufio.NewReader(input)
+	if found, err := editorXMLPrefix(buffer); err != nil || !found {
+		return 0, err
+	}
+	decoder := xml.NewDecoder(buffer)
+	maximum, started := uint64(0), false
+	for {
+		token, err := decoder.Token()
+		var syntax *xml.SyntaxError
+		if err == io.EOF || !started && errors.As(err, &syntax) {
+			return maximum, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		node, ok := token.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		if !started {
+			if !isOFDMaxIDRoot([]byte(node.Name.Local)) {
+				return 0, nil
+			}
+			started = true
+		}
+		for _, attr := range node.Attr {
+			if attr.Name.Space == "" && attr.Name.Local == "ID" {
+				id, err := strconv.ParseUint(strings.Trim(attr.Value, " \t\r\n"), 10, 32)
+				if err == nil {
+					maximum = max(maximum, id)
+				}
+			}
+		}
+	}
+}
+
+// isDefaultRGBColorSpace 判断颜色空间是否为可直接用于新建RGB对象的8位无配置RGB空间
+// 入参: space 颜色空间定义
+// 返回: bool 是否为默认8位RGB空间
+func isDefaultRGBColorSpace(space *ColorSpace) bool {
+	return space != nil && space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0
+}
+
+// isOFDMaxIDRoot 判断根元素本地名是否属于需要扫描标识的OFD结构文件
+// 入参: local 根元素本地名称字节
+// 返回: bool 是否属于OFD结构根元素
+func isOFDMaxIDRoot(local []byte) bool {
+	switch string(local) {
+	case "OFD", "Document", "Page", "Res", "PageAnnot", "Annotations", "Attachments", "CustomTags":
+		return true
+	default:
+		return false
+	}
+}
+
+// isFastXMLSpace 判断字节是否为XML标准空白字符
+// 入参: b 待判字节
+// 返回: bool 是否为XML空白
+func isFastXMLSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
+}
+
+// parseFastUint32 无分配解析ST_ID允许的十进制无符号32位整数
+// 入参: data 原始属性值字节
+// 返回: uint64 解析值, bool 是否有效
+func parseFastUint32(data []byte) (uint64, bool) {
+	start, end := 0, len(data)
+	for start < end && isFastXMLSpace(data[start]) {
+		start++
+	}
+	for end > start && isFastXMLSpace(data[end-1]) {
+		end--
+	}
+	if start >= end {
+		return 0, false
+	}
+	var value uint64
+	for i := start; i < end; i++ {
+		ch := data[i]
+		if ch < '0' || ch > '9' {
+			return 0, false
+		}
+		value = value*10 + uint64(ch-'0')
+		if value > maxUnitID {
+			return 0, false
+		}
+	}
+	return value, true
+}
+
+// parseFastXMLDeclEncoding 检查XML声明中的编码属性是否兼容UTF-8字节扫描
+// 入参: decl XML声明主体内容
+// 返回: bool 是否允许继续UTF-8快速扫描
+func parseFastXMLDeclEncoding(decl []byte) bool {
+	lower := bytes.ToLower(decl)
+	pos := bytes.Index(lower, []byte("encoding"))
+	if pos < 0 {
+		return true
+	}
+	i := pos + len("encoding")
+	for i < len(decl) && isFastXMLSpace(decl[i]) {
+		i++
+	}
+	if i >= len(decl) || decl[i] != '=' {
+		return false
+	}
+	i++
+	for i < len(decl) && isFastXMLSpace(decl[i]) {
+		i++
+	}
+	if i >= len(decl) || (decl[i] != '"' && decl[i] != '\'') {
+		return false
+	}
+	quote := decl[i]
+	i++
+	end := bytes.IndexByte(decl[i:], quote)
+	if end < 0 {
+		return false
+	}
+	enc := strings.TrimSpace(string(decl[i : i+end]))
+	return strings.EqualFold(enc, "utf-8") || strings.EqualFold(enc, "utf8")
+}
+
+// scanFastOFDXMLMaxID 对标准UTF-8编码OFD XML执行字节级ID快扫，遇复杂或异常语法回退标准解码器
+// 入参: data 完整文件字节
+// 返回: uint64 最大标识, bool 是否完成快速扫描，为false时需回退xml.Decoder
+func scanFastOFDXMLMaxID(data []byte) (uint64, bool) {
+	n := len(data)
+	i := 0
+	if n >= 3 && data[0] == 0xef && data[1] == 0xbb && data[2] == 0xbf {
+		i = 3
+	}
+	for i < n && isFastXMLSpace(data[i]) {
+		i++
+	}
+	if i >= n || data[i] != '<' {
+		return 0, true
+	}
+	if i+5 < n && data[i+1] == '?' && data[i+2] == 'x' && data[i+3] == 'm' && data[i+4] == 'l' && (isFastXMLSpace(data[i+5]) || data[i+5] == '?') {
+		end := bytes.Index(data[i+5:], []byte("?>"))
+		if end < 0 {
+			return 0, false
+		}
+		if !parseFastXMLDeclEncoding(data[i+5 : i+5+end]) {
+			return 0, false
+		}
+		i += 5 + end + 2
+		for i < n && isFastXMLSpace(data[i]) {
+			i++
+		}
+		if i >= n || data[i] != '<' {
+			return 0, false
+		}
+	}
+	var stack [][]byte
+	var maximum uint64
+	started := false
+	for i < n {
+		rel := bytes.IndexByte(data[i:], '<')
+		if rel < 0 {
+			break
+		}
+		i += rel
+		if i+1 >= n {
+			return 0, false
+		}
+		next := data[i+1]
+		if next == '!' || next == '?' {
+			return 0, false
+		}
+		if next == '/' {
+			i += 2
+			nameStart := i
+			for i < n && !isFastXMLSpace(data[i]) && data[i] != '>' {
+				if data[i] == '<' || data[i] == '/' {
+					return 0, false
+				}
+				i++
+			}
+			name := data[nameStart:i]
+			for i < n && isFastXMLSpace(data[i]) {
+				i++
+			}
+			if i >= n || data[i] != '>' || len(stack) == 0 || !bytes.Equal(stack[len(stack)-1], name) {
+				return 0, false
+			}
+			stack = stack[:len(stack)-1]
+			i++
+			if len(stack) == 0 {
+				for i < n && isFastXMLSpace(data[i]) {
+					i++
+				}
+				if i != n {
+					return 0, false
+				}
+				return maximum, true
+			}
+			continue
+		}
+		i++
+		nameStart := i
+		for i < n && !isFastXMLSpace(data[i]) && data[i] != '>' && data[i] != '/' {
+			ch := data[i]
+			if ch == '<' || ch == '=' || ch == '"' || ch == '\'' {
+				return 0, false
+			}
+			i++
+		}
+		fullName := data[nameStart:i]
+		if len(fullName) == 0 {
+			return 0, false
+		}
+		if !started {
+			local := fullName
+			if colon := bytes.IndexByte(fullName, ':'); colon >= 0 {
+				if colon == 0 || colon == len(fullName)-1 || bytes.IndexByte(fullName[colon+1:], ':') >= 0 {
+					return 0, false
+				}
+				local = fullName[colon+1:]
+			}
+			if !isOFDMaxIDRoot(local) {
+				return 0, true
+			}
+			started = true
+		}
+		selfClosing := false
+		for {
+			hadSpace := false
+			for i < n && isFastXMLSpace(data[i]) {
+				hadSpace = true
+				i++
+			}
+			if i >= n {
+				return 0, false
+			}
+			if data[i] == '>' {
+				i++
+				break
+			}
+			if data[i] == '/' {
+				if i+1 >= n || data[i+1] != '>' {
+					return 0, false
+				}
+				selfClosing = true
+				i += 2
+				break
+			}
+			if !hadSpace {
+				return 0, false
+			}
+			attrStart := i
+			for i < n && !isFastXMLSpace(data[i]) && data[i] != '=' {
+				ch := data[i]
+				if ch == '<' || ch == '>' || ch == '/' || ch == '"' || ch == '\'' {
+					return 0, false
+				}
+				i++
+			}
+			attrName := data[attrStart:i]
+			if len(attrName) == 0 {
+				return 0, false
+			}
+			for i < n && isFastXMLSpace(data[i]) {
+				i++
+			}
+			if i >= n || data[i] != '=' {
+				return 0, false
+			}
+			i++
+			for i < n && isFastXMLSpace(data[i]) {
+				i++
+			}
+			if i >= n || (data[i] != '"' && data[i] != '\'') {
+				return 0, false
+			}
+			quote := data[i]
+			i++
+			valEnd := bytes.IndexByte(data[i:], quote)
+			if valEnd < 0 {
+				return 0, false
+			}
+			val := data[i : i+valEnd]
+			if bytes.IndexByte(val, '<') >= 0 {
+				return 0, false
+			}
+			if len(attrName) == 2 && attrName[0] == 'I' && attrName[1] == 'D' {
+				if bytes.IndexByte(val, '&') >= 0 {
+					return 0, false
+				}
+				if id, ok := parseFastUint32(val); ok && id > maximum {
+					maximum = id
+				}
+			}
+			i += valEnd + 1
+		}
+		if !selfClosing {
+			stack = append(stack, fullName)
+		} else if len(stack) == 0 {
+			for i < n && isFastXMLSpace(data[i]) {
+				i++
+			}
+			if i != n {
+				return 0, false
+			}
+			return maximum, true
+		}
+	}
+	return 0, false
+}
+
+// sourcePageUntouched 按写时复制切片头快速判断已加载页面是否保持初始未改状态
+// 入参: page 当前页面内容, source 原始页面记录
+// 返回: bool 是否完全未改动
+func sourcePageUntouched(page PageContent, source *editorSourcePage) bool {
+	if source == nil || source.original == nil || page.Area != source.original.Area {
+		return false
+	}
+	if len(page.Template) != len(source.initialTemplates) || len(page.Template) > 0 && &page.Template[0] != &source.initialTemplates[0] {
+		return false
+	}
+	if len(page.PageRes) != len(source.initialPageRes) || len(page.PageRes) > 0 && &page.PageRes[0] != &source.initialPageRes[0] {
+		return false
+	}
+	if len(page.Actions) != len(source.initialActions) || len(page.Actions) > 0 && &page.Actions[0] != &source.initialActions[0] {
+		return false
+	}
+	if len(page.Content.Layer) != len(source.initialLayers) || len(page.Content.Layer) > 0 && &page.Content.Layer[0] != &source.initialLayers[0] {
+		return false
+	}
+	return true
+}
+
+// editorPreservedObject 判断对象是否仅改变标识、几何和可独立写回的外观字段
+// 入参: before 原始快照, after 新快照
+// 返回: bool 是否保留原内容
+func editorPreservedObject(before, after GraphicObject) bool {
+	if before.Type != after.Type {
+		return false
+	}
+	before = cloneEditorData(before)
+	before.state = after.state
+	before.richText = after.richText
+	switch before.Type {
+	case "TextObject":
+		a, b := &before.TextObject, after.TextObject
+		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
+		a.Fill, a.Stroke, a.FillColor, a.StrokeColor, a.LineWidth = b.Fill, b.Stroke, b.FillColor, b.StrokeColor, b.LineWidth
+		a.LineWidthSet = b.LineWidthSet
+		a.MiterLimit, a.MiterLimitSet = b.MiterLimit, b.MiterLimitSet
+		a.DashOffset, a.DashPattern, a.Cap, a.Join = b.DashOffset, b.DashPattern, b.Cap, b.Join
+		a.DashPatternSet = b.DashPatternSet
+	case "PathObject":
+		a, b := &before.PathObject, after.PathObject
+		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
+		a.Fill, a.Stroke, a.FillColor, a.StrokeColor, a.LineWidth = b.Fill, b.Stroke, b.FillColor, b.StrokeColor, b.LineWidth
+		a.LineWidthSet = b.LineWidthSet
+		a.MiterLimit, a.MiterLimitSet = b.MiterLimit, b.MiterLimitSet
+		a.DashOffset, a.DashPattern, a.Cap, a.Join = b.DashOffset, b.DashPattern, b.Cap, b.Join
+		a.DashPatternSet = b.DashPatternSet
+	case "ImageObject":
+		a, b := &before.ImageObject, after.ImageObject
+		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
+	case "CompositeObject":
+		a, b := &before.CompositeObject, after.CompositeObject
+		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
+	default:
+		return false
+	}
+	a, b := *editorObjectClips(&before), *editorObjectClips(&after)
+	if a == nil {
+		*editorObjectClips(&before) = b
+	} else if b != nil && len(a.Clip) <= len(b.Clip) {
+		a.Clip = append(a.Clip, b.Clip[len(a.Clip):]...)
+		for i := range a.Clip {
+			if len(a.Clip[i].Area) == len(b.Clip[i].Area) {
+				for j := range a.Clip[i].Area {
+					a.Clip[i].Area[j].CTM = b.Clip[i].Area[j].CTM
+				}
+			}
+		}
+	}
+	return reflect.DeepEqual(before, after)
+}
+
+// editorContainerOrderable 判断容器的直接对象能否在保留页块的前提下排序
+// 入参: container 图层或页块
+// 返回: bool 是否可排序
+func editorContainerOrderable(container *editorXML) bool {
+	for _, child := range container.children {
+		if !editorXMLTransformable(child) {
+			return false
+		}
+	}
+	return true
+}
+
+// editorGeometry 获取基本对象的边界与变换
+// 入参: object 对象
+// 返回: string 边界, string 变换矩阵
+func editorGeometry(object GraphicObject) (string, string) {
+	switch object.Type {
+	case "TextObject":
+		return object.TextObject.Boundary, object.TextObject.CTM
+	case "PathObject":
+		return object.PathObject.Boundary, object.PathObject.CTM
+	case "ImageObject":
+		return object.ImageObject.Boundary, object.ImageObject.CTM
+	case "CompositeObject":
+		return object.CompositeObject.Boundary, object.CompositeObject.CTM
+	}
+	return "", ""
+}
+
+// editorObjectXML 编码可编辑对象，包含独立命名空间声明
+// 入参: object 对象
+// 返回: []byte XML片段, error 错误信息
+func editorObjectXML(object GraphicObject) ([]byte, error) {
+	data, err := encodeOFDXML(func(x *ofdXML) { x.object(object, true) })
+	return bytes.TrimPrefix(data, []byte(xml.Header)), err
+}
+
+// validateEditorGeometry 校验几何操作产生的数值，不重新排版或替换字体
+// 入参: object 变换后的对象
+// 返回: error 错误信息
+func validateEditorGeometry(object GraphicObject) error {
+	boundary, ctm := editorGeometry(object)
+	if _, err := creationBox(boundary); err != nil {
+		return err
+	}
+	if ctm != "" {
+		if _, err := creationNumbers(ctm, 6); err != nil {
+			return err
+		}
+	}
+	if clips := *editorObjectClips(&object); clips != nil {
+		for _, clip := range clips.Clip {
+			for _, area := range clip.Area {
+				if area.CTM != "" {
+					if _, err := creationNumbers(area.CTM, 6); err != nil {
+						return fmt.Errorf("invalid clip transform: %w", err)
+					}
+				}
+			}
+		}
+	}
+	var alpha *int
+	switch object.Type {
+	case "TextObject":
+		alpha = object.TextObject.Alpha
+	case "PathObject":
+		alpha = object.PathObject.Alpha
+	case "ImageObject":
+		alpha = object.ImageObject.Alpha
+	case "CompositeObject":
+		alpha = object.CompositeObject.Alpha
+	}
+	if alpha != nil && (*alpha < 0 || *alpha > 255) {
+		return fmt.Errorf("alpha must be between 0 and 255")
+	}
+	if object.Type == "TextObject" {
+		obj := object.TextObject
+		if !finite(obj.Size) || obj.Size <= 0 || !finite(obj.LineWidth) || obj.LineWidth < 0 {
+			return fmt.Errorf("invalid text geometry")
+		}
+		for _, code := range obj.TextCode {
+			for _, value := range []string{code.X, code.Y} {
+				if value != "" {
+					if _, err := creationNumbers(value, 1); err != nil {
+						return err
+					}
+				}
+			}
+			for _, value := range []string{code.DeltaX, code.DeltaY} {
+				if value != "" {
+					if err := creationDeltas(value); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// parsedHasResource 判断单个已解析资源文件是否包含指定类型与标识的资源定义
+// 入参: parsed 已解析资源文件, id 资源标识, kind 资源类型，空字符串匹配任意类型
+// 返回: bool 是否包含
+func parsedHasResource(parsed *parsedRes, id, kind string) bool {
+	if parsed == nil {
+		return false
+	}
+	switch kind {
+	case "DrawParam":
+		_, ok := parsed.drawParams.get(id)
+		return ok
+	case "CompositeGraphicUnit":
+		_, ok := parsed.composites.get(id)
+		return ok
+	case "ColorSpace":
+		_, ok := parsed.colorSpaces.get(id)
+		return ok
+	case "Font":
+		_, ok := parsed.fonts.get(id)
+		return ok
+	case "MultiMedia":
+		_, ok := parsed.medias.get(id)
+		return ok
+	default:
+		if _, ok := parsed.drawParams.get(id); ok {
+			return true
+		}
+		if _, ok := parsed.composites.get(id); ok {
+			return true
+		}
+		if _, ok := parsed.colorSpaces.get(id); ok {
+			return true
+		}
+		if _, ok := parsed.fonts.get(id); ok {
+			return true
+		}
+		_, ok := parsed.medias.get(id)
+		return ok
+	}
+}
+
 // Editor 打开当前文档进行保真编辑，不修改输入包，不以权限声明或签名限制编辑
 // 原权限和签名数据保留，修改受保护内容会使原签名失效，不重新签名
 // 页面按需解析，未修改条目直接保留；编辑器及其Reader快照使用期间不得关闭输入Reader
@@ -94,13 +746,13 @@ func (r *Reader) EditorContext(ctx context.Context) (*Editor, error) {
 	if r.pageReady != nil {
 		return nil, ErrIncompleteDocument
 	}
-	_, err := r.DocContext(ctx)
+	_, err := r.docContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	reader := cloneEditorReader(r)
 	doc := reader.doc
-	maximum := uint64(doc.CommonData.MaxUnitID)
+	maximum := doc.CommonData.MaxUnitID
 	info, err := reader.DocInfo()
 	if err != nil {
 		return nil, err
@@ -114,10 +766,10 @@ func (r *Reader) EditorContext(ctx context.Context) (*Editor, error) {
 	e.runtimeResources = r.resources
 	e.sourceFile = r.sourceFile
 	e.pdfDestinations = r.pdfDestinations.clone()
-	e.encryption = r.encryption
-	directory := cleanPackagePath(reader.RootDir)
-	e.source = &editorSource{reader: reader, document: doc, info: cloneEditorData(*info), fallbackDocID: e.Info.DocID, directory: directory, pages: make(map[string]*editorSourcePage, len(doc.Pages.Page)), origins: make(map[string]*editorObjectOrigin)}
+	directory := cleanPackagePath(reader.rootDir)
+	e.source = &editorSource{reader: reader, document: doc, info: cloneEditorData(*info), fallbackDocID: e.Info.DocID, directory: directory, pages: make(map[string]*editorSourcePage, len(doc.Pages.Page)), origins: make(map[string]*editorObjectOrigin), initialFiles: maps.Clone(reader.files)}
 	e.Info, e.maxID = cloneEditorData(*info), maximum
+	e.ownedReader, e.ownedOwner = reader, e
 	e.pages = make([]PageContent, len(doc.Pages.Page))
 	sourcePages := make([]editorSourcePage, len(doc.Pages.Page))
 	for i, page := range doc.Pages.Page {
@@ -134,6 +786,14 @@ func (r *Reader) EditorContext(ctx context.Context) (*Editor, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if r.encryption != nil {
+		e.encryption = cloneEncryptionState(r.encryption)
+		e.ownedReader.encryption = e.encryption
+	}
+	e.syncEncryptionHold()
+	if e.encryption != nil {
+		e.encryption.lease.release()
+	}
 	return e, nil
 }
 
@@ -141,11 +801,107 @@ func (r *Reader) EditorContext(ctx context.Context) (*Editor, error) {
 // 入参: index 页面索引
 // 返回: PageCapabilities 操作能力, error 错误信息
 func (e *Editor) PageCapabilities(index int) (PageCapabilities, error) {
+	return e.PageCapabilitiesContext(context.Background(), index)
+}
+
+// PageCapabilitiesContext 获取页面操作范围并响应取消，默认RGB或文档级颜色空间命中时常数时间返回
+// 入参: ctx 取消上下文, index 页面索引
+// 返回: PageCapabilities 操作能力, error 索引、读取或取消错误
+func (e *Editor) PageCapabilitiesContext(ctx context.Context, index int) (PageCapabilities, error) {
+	if err := ctx.Err(); err != nil {
+		return PageCapabilities{}, err
+	}
 	if index < 0 || index >= len(e.pages) {
 		return PageCapabilities{}, fmt.Errorf("page index %d out of range", index)
 	}
-	defer e.bindPageIndex(index)()
-	return PageCapabilities{Insert: e.sourceRGB(), Copy: true, Delete: true, Move: true, Resize: true}, nil
+	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
+		return PageCapabilities{Insert: true, Copy: true, Delete: true, Move: true, Resize: true}, nil
+	}
+	if e.pageNoLocalRes(index) {
+		if insert, resolved := e.docDefaultRGB(); resolved {
+			return PageCapabilities{Insert: insert, Copy: true, Delete: true, Move: true, Resize: true}, nil
+		}
+	}
+	restore, err := e.bindPageIndexContext(ctx, index)
+	if err != nil {
+		return PageCapabilities{}, err
+	}
+	defer restore()
+	insert, err := e.sourceRGBContext(ctx)
+	if err != nil {
+		return PageCapabilities{}, err
+	}
+	return PageCapabilities{Insert: insert, Copy: true, Delete: true, Move: true, Resize: true}, nil
+}
+
+// PageCapabilitiesBatch 批量获取页面操作范围
+// 入参: indexes 页面索引列表
+// 返回: []PageCapabilities 对应页面的操作能力列表, error 索引或读取错误
+func (e *Editor) PageCapabilitiesBatch(indexes []int) ([]PageCapabilities, error) {
+	return e.PageCapabilitiesBatchContext(context.Background(), indexes)
+}
+
+// PageCapabilitiesBatchContext 批量获取页面操作范围并响应取消，默认无DefaultCS时直接批量返回
+// 入参: ctx 取消上下文, indexes 页面索引列表
+// 返回: []PageCapabilities 对应页面的操作能力列表, error 索引、读取或取消错误
+func (e *Editor) PageCapabilitiesBatchContext(ctx context.Context, indexes []int) ([]PageCapabilities, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(indexes) == 0 {
+		return nil, nil
+	}
+	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
+		capability := PageCapabilities{Insert: true, Copy: true, Delete: true, Move: true, Resize: true}
+		result := make([]PageCapabilities, len(indexes))
+		for i, index := range indexes {
+			if i&4095 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
+			if index < 0 || index >= len(e.pages) {
+				return nil, fmt.Errorf("page index %d out of range", index)
+			}
+			result[i] = capability
+		}
+		return result, ctx.Err()
+	}
+	for i, index := range indexes {
+		if i&4095 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		if index < 0 || index >= len(e.pages) {
+			return nil, fmt.Errorf("page index %d out of range", index)
+		}
+	}
+	if e.source != nil && len(indexes) >= 32 {
+		refs := make([]Page, 0, len(indexes))
+		for _, index := range indexes {
+			if len(e.pages[index].pageResources) > 0 {
+				continue
+			}
+			if source := e.source.pages[e.pages[index].ID]; source != nil && source.original == nil {
+				refs = append(refs, source.ref)
+			}
+		}
+		if len(refs) >= 32 {
+			if err := e.source.reader.preloadPageHeadersContext(ctx, refs); err != nil {
+				return nil, err
+			}
+		}
+	}
+	result := make([]PageCapabilities, len(indexes))
+	for i, index := range indexes {
+		capability, err := e.PageCapabilitiesContext(ctx, index)
+		if err != nil {
+			return nil, err
+		}
+		result[i] = capability
+	}
+	return result, ctx.Err()
 }
 
 // ObjectCapabilities 获取对象可执行的操作，不支持的内容保持原文，不强制转换
@@ -186,54 +942,94 @@ func (e *Editor) FontData(id string) ([]byte, error) {
 	return sfnt.Write(), nil
 }
 
-// editorSource 保留输入包及按需加载的原始页面
-type editorSource struct {
-	reader              *Reader
-	document            *Document
-	info                DocInfo
-	fallbackDocID       string
-	directory           string
-	fromNew             bool
-	pages               map[string]*editorSourcePage
-	origins             map[string]*editorObjectOrigin
-	idsReady            bool
-	pageResLoaded       bool
-	pageResList         []*parsedRes
-	annotationStates    map[string]map[string]editorCompositeState
-	annotationPages     map[string]bool
-	retiredAttachments  map[string]bool
-	removedAttachments  map[string]bool
-	structureObjects    map[string]map[string]bool
-	structureStarts     map[int]map[string]int
-	attachmentIDs       map[string]bool
-	richTextTagPath     string
-	richTextTagIndex    int
-	richTextTagKnown    bool
-	customTagCount      int
-	customTagCountReady bool
+// close 释放复用的解压器资源
+func (s *editorMaxIDScanner) close() {
+	if s.flate != nil {
+		_ = s.flate.Close()
+		s.flate = nil
+	}
 }
 
-// editorObjectOrigin 保留原对象的XML语义，供复制和局部更新复用
-type editorObjectOrigin struct {
-	editor   *Editor
-	document editorDocumentIdentity
-	page     *editorSourcePage
-	data     []byte
-	node     *editorXML
-	object   GraphicObject
-	reason   error
-}
-
-// editorSourcePage 保存页面原文、解析快照及图层和页块内的对象位置
-type editorSourcePage struct {
-	ref            Page
-	data           []byte
-	root           *editorXML
-	original       *PageContent
-	initialLayers  []Layer
-	initialActions []Action
-	nodes          map[string]*editorXML
-	repaired       bool
+// scan 扫描单个包内条目的最大标识，标准UTF-8 XML走字节快扫并自动回退标准解码器
+// 入参: reader 来源阅读器, name 包内路径, progress 进度回调，并行工作协程传nil
+// 返回: uint64 最大标识, error 读取或解析错误
+func (s *editorMaxIDScanner) scan(reader *Reader, name string, progress editorProgress) (uint64, error) {
+	clean := cleanPackagePath(name)
+	if data, ok := reader.files[clean]; ok {
+		if id, fast := scanFastOFDXMLMaxID(data); fast {
+			return id, nil
+		}
+		return editorXMLMaxID(bytes.NewReader(data))
+	}
+	limit := reader.entryLimit()
+	if zf, ok := reader.packageFile(clean); ok && (zf.Method == zip.Deflate || zf.Method == zip.Store) && zf.UncompressedSize64 <= editorMaxIDFastLimit && (limit <= 0 || zf.UncompressedSize64 <= uint64(limit)) {
+		if raw, openErr := zf.OpenRaw(); openErr == nil {
+			var src io.Reader = raw
+			if zf.Method == zip.Deflate {
+				if s.flate == nil {
+					s.flate = flate.NewReader(raw)
+				} else {
+					_ = s.flate.(flate.Resetter).Reset(raw, nil)
+				}
+				src = s.flate
+			}
+			if s.buf.Cap() > 1<<20 {
+				s.buf = bytes.Buffer{}
+			} else {
+				s.buf.Reset()
+			}
+			maxRead := int64(editorMaxIDFastLimit)
+			if limit > 0 && limit < maxRead {
+				maxRead = limit
+			}
+			n, copyErr := io.Copy(&s.buf, io.LimitReader(src, maxRead+1))
+			if copyErr == nil && n <= maxRead {
+				data := s.buf.Bytes()
+				if id, fast := scanFastOFDXMLMaxID(data); fast {
+					return id, nil
+				}
+				return editorXMLMaxID(bytes.NewReader(data))
+			}
+			if limit > 0 && n > limit {
+				return 0, fmt.Errorf("package entry %s (%d bytes): %w", clean, limit, ErrEntryTooLarge)
+			}
+		}
+	}
+	input, err := reader.openFile(clean)
+	if err != nil {
+		return 0, err
+	}
+	defer input.Close()
+	var stream io.Reader = input
+	if src := reader.encryptedSource(); src != nil && src.has(clean) {
+		if sz, ok := src.size(clean); ok && sz <= editorMaxIDFastLimit && (limit <= 0 || sz <= uint64(limit)) {
+			if s.buf.Cap() > 1<<20 {
+				s.buf = bytes.Buffer{}
+			} else {
+				s.buf.Reset()
+			}
+			maxRead := int64(editorMaxIDFastLimit)
+			if limit > 0 && limit < maxRead {
+				maxRead = limit
+			}
+			n, copyErr := io.Copy(&s.buf, io.LimitReader(input, maxRead+1))
+			if copyErr != nil {
+				return 0, copyErr
+			}
+			if n <= maxRead {
+				data := s.buf.Bytes()
+				if id, fast := scanFastOFDXMLMaxID(data); fast {
+					return id, nil
+				}
+				return editorXMLMaxID(bytes.NewReader(data))
+			}
+			if limit > 0 && n > limit {
+				return 0, fmt.Errorf("package entry %s (%d bytes): %w", clean, limit, ErrEntryTooLarge)
+			}
+			stream = io.MultiReader(bytes.NewReader(s.buf.Bytes()), input)
+		}
+	}
+	return editorXMLMaxID(&editorProgressReader{Reader: stream, progress: progress, stage: "ids"})
 }
 
 // editError 将操作受限原因转为错误，保留可供调用方识别的缺字诊断
@@ -281,47 +1077,172 @@ func (e *Editor) sourceMaxID(progress editorProgress) (uint64, error) {
 		return e.maxID, nil
 	}
 	reader := e.source.reader
-	names := make(map[string]bool)
+	maximum := e.maxID
+	enc := reader.encryptedSource()
+	cachedArchiveMax, archiveCached := reader.maxIDCache.get(reader.archiveID, enc)
+	if archiveCached {
+		maximum = max(maximum, cachedArchiveMax)
+		var scanner editorMaxIDScanner
+		defer scanner.close()
+		for name := range reader.files {
+			if err := progress.report("ids", 0, 0); err != nil {
+				return 0, err
+			}
+			if strings.HasSuffix(name, "/") || isNonXMLPackageFile(name) {
+				continue
+			}
+			id, err := scanner.scan(reader, name, progress)
+			if err != nil {
+				return 0, fmt.Errorf("scan IDs in %s: %w", name, err)
+			}
+			maximum = max(maximum, id)
+		}
+		return maximum, nil
+	}
+	names := make(map[string]bool, len(reader.fileIndex)+len(reader.files))
 	for name := range reader.fileIndex {
 		names[name] = true
 	}
 	for name := range reader.files {
 		names[name] = true
 	}
-	maximum := e.maxID
-	for name := range names {
-		if err := progress.report("ids", 0, 0); err != nil {
-			return 0, err
+	if enc != nil {
+		for _, name := range enc.names() {
+			names[name] = true
 		}
+	}
+	pending := make([]string, 0, len(names))
+	for name := range names {
 		if strings.HasSuffix(name, "/") || isNonXMLPackageFile(name) {
 			continue
 		}
-		input, err := reader.openFile(name)
-		if err != nil {
+		pending = append(pending, name)
+	}
+	cacheableArchive := reader.archiveID != 0 || enc != nil
+	if cacheableArchive {
+		for name := range reader.files {
+			clean := cleanPackagePath(name)
+			if _, inZip := reader.fileIndex[clean]; inZip || enc.has(clean) {
+				cacheableArchive = false
+				break
+			}
+		}
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if e.runtimeResources != nil && e.runtimeResources.options.Parallelism > 0 && e.runtimeResources.options.Parallelism < workers {
+		workers = e.runtimeResources.options.Parallelism
+	}
+	archiveMax := uint64(0)
+	if workers <= 1 || len(pending) < 32 {
+		var scanner editorMaxIDScanner
+		defer scanner.close()
+		for _, name := range pending {
+			if err := progress.report("ids", 0, 0); err != nil {
+				return 0, err
+			}
+			id, err := scanner.scan(reader, name, progress)
+			if err != nil {
+				return 0, fmt.Errorf("scan IDs in %s: %w", name, err)
+			}
+			maximum = max(maximum, id)
+			if cacheableArchive {
+				if _, inFiles := reader.files[cleanPackagePath(name)]; !inFiles {
+					archiveMax = max(archiveMax, id)
+				}
+			}
+		}
+	} else {
+		if err := progress.report("ids", 0, 0); err != nil {
 			return 0, err
 		}
-		id, err := editorXMLMaxID(&editorProgressReader{Reader: input, progress: progress, stage: "ids"})
-		input.Close()
-		if err != nil {
-			return 0, fmt.Errorf("scan IDs in %s: %w", name, err)
+		if workers > len(pending)/16 {
+			workers = max(2, len(pending)/16)
 		}
-		maximum = max(maximum, id)
+		const chunkSize = 32
+		totalChunks := (len(pending) + chunkSize - 1) / chunkSize
+		results := make(chan editorMaxIDChunkResult, workers*2)
+		var next atomic.Int64
+		var canceled atomic.Bool
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for range workers {
+			go func() {
+				defer wg.Done()
+				var scanner editorMaxIDScanner
+				defer scanner.close()
+				for {
+					if canceled.Load() {
+						return
+					}
+					start := int(next.Add(chunkSize) - chunkSize)
+					if start >= len(pending) {
+						return
+					}
+					end := min(start+chunkSize, len(pending))
+					var chunkMax, chunkArchMax uint64
+					var chunkErr error
+					for idx := start; idx < end; idx++ {
+						if canceled.Load() {
+							return
+						}
+						name := pending[idx]
+						id, err := scanner.scan(reader, name, nil)
+						if err != nil {
+							chunkErr = fmt.Errorf("scan IDs in %s: %w", name, err)
+							break
+						}
+						chunkMax = max(chunkMax, id)
+						if cacheableArchive {
+							if _, inFiles := reader.files[cleanPackagePath(name)]; !inFiles {
+								chunkArchMax = max(chunkArchMax, id)
+							}
+						}
+					}
+					results <- editorMaxIDChunkResult{maxID: chunkMax, archiveMax: chunkArchMax, err: chunkErr}
+					if chunkErr != nil {
+						return
+					}
+				}
+			}()
+		}
+		go func() {
+			wg.Wait()
+			close(results)
+		}()
+		var firstErr error
+		received := 0
+		for res := range results {
+			received++
+			if firstErr == nil {
+				if res.err != nil {
+					firstErr = res.err
+					canceled.Store(true)
+				} else {
+					maximum = max(maximum, res.maxID)
+					archiveMax = max(archiveMax, res.archiveMax)
+					if received < totalChunks {
+						if err := progress.report("ids", 0, 0); err != nil {
+							firstErr = err
+							canceled.Store(true)
+						}
+					}
+				}
+			}
+		}
+		if firstErr != nil {
+			return 0, firstErr
+		}
+		if err := progress.report("ids", 0, 0); err != nil {
+			return 0, err
+		}
+	}
+	if cacheableArchive {
+		if reader.maxIDCache == nil {
+			reader.maxIDCache = &archiveMaxIDCache{}
+		}
+		reader.maxIDCache.put(reader.archiveID, enc, archiveMax)
 	}
 	return maximum, nil
-}
-
-// isNonXMLPackageFile 按扩展名识别明显为二进制媒体、字体或签章数据的非XML条目
-// 入参: name 包内文件路径
-// 返回: bool 是否应跳过XML标识扫描
-func isNonXMLPackageFile(name string) bool {
-	switch strings.ToLower(path.Ext(name)) {
-	case ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".jb2", ".jbig2", ".jp2", ".jpx", ".gif", ".webp",
-		".ttf", ".otf", ".ttc", ".otc", ".cff", ".woff", ".woff2", ".icc", ".icm",
-		".mp3", ".wav", ".mp4", ".esl", ".ses", ".dat", ".bin":
-		return true
-	default:
-		return false
-	}
 }
 
 // originalPage 判断索引是否指向原文档页面
@@ -331,14 +1252,82 @@ func (e *Editor) originalPage(index int) bool {
 	return e.source != nil && index >= 0 && index < len(e.pages) && e.source.pages[e.pages[index].ID] != nil
 }
 
+// pageNoLocalRes 基于已加载页或缓存页头判断目标页是否确定无页面级PageRes声明
+// 入参: index 页面索引
+// 返回: bool 是否确定不存在页面级资源
+func (e *Editor) pageNoLocalRes(index int) bool {
+	if len(e.pages[index].pageResources) > 0 || len(e.pages[index].PageRes) > 0 {
+		return false
+	}
+	if e.source == nil {
+		return true
+	}
+	source := e.source.pages[e.pages[index].ID]
+	if source == nil {
+		return true
+	}
+	if source.original != nil {
+		return len(source.original.pageResources) == 0 && len(source.original.PageRes) == 0
+	}
+	reader := e.source.reader
+	name := reader.ResPath(source.ref.BaseLoc)
+	if hdr, ok := reader.pageHeaderCache[name]; ok {
+		return len(hdr.PageRes) == 0
+	}
+	fileData, inFiles := reader.files[name]
+	if hdr, ok := reader.pageHeaders.get(name, fileData, inFiles); ok {
+		return len(hdr.PageRes) == 0
+	}
+	return false
+}
+
+// docDefaultRGB 常数时间判定文档默认颜色空间是否已在文档级解析为8位RGB
+// 返回: bool 是否为8位RGB, bool 是否已在文档级确定
+func (e *Editor) docDefaultRGB() (bool, bool) {
+	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
+		return true, true
+	}
+	id := formatUnitID(e.source.document.CommonData.DefaultCS)
+	if space, ok := e.source.reader.resolveColorSpaceScoped(nil, id); ok {
+		return isDefaultRGBColorSpace(space), true
+	}
+	return false, false
+}
+
 // sourceRGB 判断新建RGB对象能否直接使用文档默认颜色空间
 // 返回: bool 是否为8位RGB文档
 func (e *Editor) sourceRGB() bool {
 	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
 		return true
 	}
-	space, _ := e.sourceColorSpace(formatUnitID(uint64(e.source.document.CommonData.DefaultCS)))
-	return space != nil && space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0
+	space, _ := e.sourceColorSpace(formatUnitID(e.source.document.CommonData.DefaultCS))
+	return isDefaultRGBColorSpace(space)
+}
+
+// sourceRGBContext 按当前作用域与文档页级资源判断默认颜色空间是否为8位RGB并响应取消
+// 入参: ctx 取消上下文
+// 返回: bool 是否为8位RGB文档, error 读取或取消错误
+func (e *Editor) sourceRGBContext(ctx context.Context) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
+		return true, nil
+	}
+	id := formatUnitID(e.source.document.CommonData.DefaultCS)
+	if space, ok := e.source.reader.resolveColorSpaceScoped(e.pageScope, id); ok {
+		return isDefaultRGBColorSpace(space), nil
+	}
+	list, err := e.ensureSourcePageResourcesContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, parsed := range list {
+		if space, ok := parsed.colorSpaces.get(id); ok {
+			return isDefaultRGBColorSpace(space), nil
+		}
+	}
+	return false, nil
 }
 
 // repairSourceObjectIDs 按实际节点区分重复对象，只修复没有引用歧义的编号
@@ -530,7 +1519,7 @@ func (e *Editor) loadSourcePageContext(ctx context.Context, index int) error {
 				if object.Type == "ImageObject" {
 					object.ImageObject.LineWidthSet = node.hasAttr("LineWidth") && object.ImageObject.LineWidth == 0
 					object.ImageObject.MiterLimitSet = node.hasAttr("MiterLimit") && object.ImageObject.MiterLimit == 0
-					object.ImageObject.dashPatternSet = node.hasAttr("DashPattern") && object.ImageObject.DashPattern == ""
+					object.ImageObject.DashPatternSet = node.hasAttr("DashPattern") && object.ImageObject.DashPattern == ""
 					layer.Objects[j] = object
 				}
 				origin := &editorObjectOrigin{page: source, data: data, node: node, object: object}
@@ -554,6 +1543,8 @@ func (e *Editor) loadSourcePageContext(ctx context.Context, index int) error {
 	copied := copyEditorPage(*page)
 	source.initialLayers = copied.Content.Layer
 	source.initialActions = copied.Actions
+	source.initialTemplates = copied.Template
+	source.initialPageRes = copied.PageRes
 	source.original = page
 	e.source.pages[source.ref.ID] = source
 	e.pages[index] = copied
@@ -598,7 +1589,7 @@ func (e *Editor) objectCapabilities(object GraphicObject, orderable map[*editorX
 		all.Order = editorContainerOrderable(node.parent)
 		orderable[node.parent] = all.Order
 	}
-	all.Ungroup = all.Order && e.compositeUngroupable(node) && (object.CompositeGraphicUnit.ResourceID != "" || len(object.CompositeGraphicUnit.Objects) != 0)
+	all.Ungroup = all.Order && e.compositeUngroupable(node) && object.CompositeObject.ResourceID != ""
 	all.Copy = editorXMLCopyable(node) && (origin.reason == nil || object.Type == "PathObject" && editReason(origin.reason) == EditUnsupportedColor)
 	if origin.reason != nil {
 		all.Update, all.Reflow, all.ReplaceFont, all.Paint = false, false, false, false
@@ -715,8 +1706,8 @@ func (v *editorValidation) prepareCopiedObject(id string, object GraphicObject) 
 		result.PathObject.ID = id
 	case "ImageObject":
 		result.ImageObject.ID = id
-	case "CompositeObject", "CompositeGraphicUnit":
-		result.CompositeGraphicUnit.ID = id
+	case "CompositeObject":
+		result.CompositeObject.ID = id
 	}
 	return result, nil
 }
@@ -987,26 +1978,49 @@ func (e *Editor) bindParsedScope(local []*parsedRes) func() {
 // 入参: index 页面索引
 // 返回: func() 恢复原作用域的函数
 func (e *Editor) bindPageIndex(index int) func() {
+	restore, _ := e.bindPageIndexContext(context.Background(), index)
+	return restore
+}
+
+// bindPageIndexContext 按页面索引绑定所属页面的局部资源作用域并响应取消
+// 入参: ctx 取消上下文, index 页面索引
+// 返回: func() 恢复原作用域的函数, error 取消错误
+func (e *Editor) bindPageIndexContext(ctx context.Context, index int) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return func() {}, err
+	}
 	if index < 0 || index >= len(e.pages) {
-		return func() {}
+		return func() {}, nil
 	}
 	if len(e.pages[index].pageResources) > 0 {
-		return e.bindParsedScope(e.pages[index].pageResources)
+		return e.bindParsedScope(e.pages[index].pageResources), nil
 	}
 	if e.originalPage(index) {
 		if source := e.source.pages[e.pages[index].ID]; source != nil {
 			if source.original != nil && len(source.original.pageResources) > 0 {
-				return e.bindParsedScope(source.original.pageResources)
+				return e.bindParsedScope(source.original.pageResources), nil
 			}
 			reader := e.source.reader
-			if header, err := reader.readPageHeaderContext(context.Background(), source.ref); err == nil {
-				if pageRes, resErr := reader.collectPageResourcesContext(context.Background(), reader.ResPath(source.ref.BaseLoc), &header); resErr == nil && len(pageRes) > 0 {
-					return e.bindParsedScope(pageRes)
+			header, err := reader.readPageHeaderContext(ctx, source.ref)
+			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return func() {}, ctxErr
 				}
+				return func() {}, nil
+			}
+			pageRes, resErr := reader.collectPageResourcesContext(ctx, reader.ResPath(source.ref.BaseLoc), &header)
+			if resErr != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return func() {}, ctxErr
+				}
+				return func() {}, nil
+			}
+			if len(pageRes) > 0 {
+				return e.bindParsedScope(pageRes), nil
 			}
 		}
 	}
-	return func() {}
+	return func() {}, nil
 }
 
 // ensureSourcePageResourcesContext 按需收集源文档全部模板页与页面头部的PageRes解析结果
@@ -1211,286 +2225,4 @@ func (e *Editor) sourceResourceFile(id, kind string) (string, bool) {
 	}
 	name, ok, _ := e.sourceResourceFileContext(ctx, id, kind)
 	return name, ok
-}
-
-// cloneEditorReader 复用已验证的只读包索引，独立保存可变文档与读取缓存
-// 入参: reader 已加载当前文档的阅读器
-// 返回: *Reader 不拥有输入文件的独立阅读器
-func cloneEditorReader(reader *Reader) *Reader {
-	next := *reader
-	reader.cloneMutableState(&next)
-	next.Closer = nil
-	next.OFD = cloneEditorData(reader.OFD)
-	doc := *reader.doc
-	pages := doc.Pages.Page
-	doc.Pages.Page = nil
-	doc = cloneEditorData(doc)
-	doc.Pages.Page = slices.Clone(pages)
-	next.doc = &doc
-	next.files = maps.Clone(reader.files)
-	next.pageReady = maps.Clone(reader.pageReady)
-	next.fileNames = maps.Clone(reader.fileNames)
-	return &next
-}
-
-// cloneEditorMap 复制对外可变缓存值，避免快照之间共享嵌套切片或指针
-// 入参: values 原缓存
-// 返回: map[string]T 独立缓存
-func cloneEditorMap[T any](values map[string]T) map[string]T {
-	result := maps.Clone(values)
-	for key, value := range result {
-		result[key] = cloneEditorData(value)
-	}
-	return result
-}
-
-// editorXMLMaxID 按内容识别OFD结构并读取最大标识，跳过二进制及非OFD内容
-// 入参: input 包内文件流
-// 返回: uint64 最大标识, error 错误信息
-func editorXMLMaxID(input io.Reader) (uint64, error) {
-	buffer := bufio.NewReader(input)
-	if found, err := editorXMLPrefix(buffer); err != nil || !found {
-		return 0, err
-	}
-	decoder := xml.NewDecoder(buffer)
-	maximum, started := uint64(0), false
-	for {
-		token, err := decoder.Token()
-		var syntax *xml.SyntaxError
-		if err == io.EOF || !started && errors.As(err, &syntax) {
-			return maximum, nil
-		}
-		if err != nil {
-			return 0, err
-		}
-		node, ok := token.(xml.StartElement)
-		if !ok {
-			continue
-		}
-		if !started {
-			switch node.Name.Local {
-			case "OFD", "Document", "Page", "Res", "PageAnnot", "Annotations", "Attachments", "CustomTags":
-			default:
-				return 0, nil
-			}
-			started = true
-		}
-		for _, attr := range node.Attr {
-			if attr.Name.Space == "" && attr.Name.Local == "ID" {
-				id, err := strconv.ParseUint(strings.Trim(attr.Value, " \t\r\n"), 10, 32)
-				if err == nil {
-					maximum = max(maximum, id)
-				}
-			}
-		}
-	}
-}
-
-// sourcePageUntouched 按写时复制切片头快速判断已加载页面是否保持初始未改状态
-// 入参: page 当前页面内容, source 原始页面记录
-// 返回: bool 是否完全未改动
-func sourcePageUntouched(page PageContent, source *editorSourcePage) bool {
-	if source == nil || source.original == nil || page.Area != source.original.Area {
-		return false
-	}
-	if len(page.Actions) != len(source.initialActions) || len(page.Actions) > 0 && &page.Actions[0] != &source.initialActions[0] {
-		return false
-	}
-	if len(page.Content.Layer) != len(source.initialLayers) || len(page.Content.Layer) > 0 && &page.Content.Layer[0] != &source.initialLayers[0] {
-		return false
-	}
-	return true
-}
-
-// editorPreservedObject 判断对象是否仅改变标识、几何和可独立写回的外观字段
-// 入参: before 原始快照, after 新快照
-// 返回: bool 是否保留原内容
-func editorPreservedObject(before, after GraphicObject) bool {
-	if before.Type != after.Type {
-		return false
-	}
-	before = cloneEditorData(before)
-	before.state = after.state
-	before.richText = after.richText
-	switch before.Type {
-	case "TextObject":
-		a, b := &before.TextObject, after.TextObject
-		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
-		a.Fill, a.Stroke, a.FillColor, a.StrokeColor, a.LineWidth = b.Fill, b.Stroke, b.FillColor, b.StrokeColor, b.LineWidth
-		a.LineWidthSet = b.LineWidthSet
-		a.MiterLimit, a.MiterLimitSet = b.MiterLimit, b.MiterLimitSet
-		a.DashOffset, a.DashPattern, a.Cap, a.Join = b.DashOffset, b.DashPattern, b.Cap, b.Join
-		a.dashPatternSet = b.dashPatternSet
-	case "PathObject":
-		a, b := &before.PathObject, after.PathObject
-		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
-		a.Fill, a.Stroke, a.FillColor, a.StrokeColor, a.LineWidth = b.Fill, b.Stroke, b.FillColor, b.StrokeColor, b.LineWidth
-		a.LineWidthSet = b.LineWidthSet
-		a.MiterLimit, a.MiterLimitSet = b.MiterLimit, b.MiterLimitSet
-		a.DashOffset, a.DashPattern, a.Cap, a.Join = b.DashOffset, b.DashPattern, b.Cap, b.Join
-		a.dashPatternSet = b.dashPatternSet
-	case "ImageObject":
-		a, b := &before.ImageObject, after.ImageObject
-		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
-	case "CompositeObject", "CompositeGraphicUnit":
-		a, b := &before.CompositeGraphicUnit, after.CompositeGraphicUnit
-		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
-	default:
-		return false
-	}
-	a, b := *editorObjectClips(&before), *editorObjectClips(&after)
-	if a == nil {
-		*editorObjectClips(&before) = b
-	} else if b != nil && len(a.Clip) <= len(b.Clip) {
-		a.Clip = append(a.Clip, b.Clip[len(a.Clip):]...)
-		for i := range a.Clip {
-			if len(a.Clip[i].Area) == len(b.Clip[i].Area) {
-				for j := range a.Clip[i].Area {
-					a.Clip[i].Area[j].CTM = b.Clip[i].Area[j].CTM
-				}
-			}
-		}
-	}
-	return reflect.DeepEqual(before, after)
-}
-
-// editorContainerOrderable 判断容器的直接对象能否在保留页块的前提下排序
-// 入参: container 图层或页块
-// 返回: bool 是否可排序
-func editorContainerOrderable(container *editorXML) bool {
-	for _, child := range container.children {
-		if !editorXMLTransformable(child) {
-			return false
-		}
-	}
-	return true
-}
-
-// editorGeometry 获取基本对象的边界与变换
-// 入参: object 对象
-// 返回: string 边界, string 变换矩阵
-func editorGeometry(object GraphicObject) (string, string) {
-	switch object.Type {
-	case "TextObject":
-		return object.TextObject.Boundary, object.TextObject.CTM
-	case "PathObject":
-		return object.PathObject.Boundary, object.PathObject.CTM
-	case "ImageObject":
-		return object.ImageObject.Boundary, object.ImageObject.CTM
-	case "CompositeObject", "CompositeGraphicUnit":
-		return object.CompositeGraphicUnit.Boundary, object.CompositeGraphicUnit.CTM
-	}
-	return "", ""
-}
-
-// editorObjectXML 编码可编辑对象，包含独立命名空间声明
-// 入参: object 对象
-// 返回: []byte XML片段, error 错误信息
-func editorObjectXML(object GraphicObject) ([]byte, error) {
-	data, err := encodeOFDXML(func(x *ofdXML) { x.object(object, true) })
-	return bytes.TrimPrefix(data, []byte(xml.Header)), err
-}
-
-// validateEditorGeometry 校验几何操作产生的数值，不重新排版或替换字体
-// 入参: object 变换后的对象
-// 返回: error 错误信息
-func validateEditorGeometry(object GraphicObject) error {
-	boundary, ctm := editorGeometry(object)
-	if _, err := creationBox(boundary); err != nil {
-		return err
-	}
-	if ctm != "" {
-		if _, err := creationNumbers(ctm, 6); err != nil {
-			return err
-		}
-	}
-	if clips := *editorObjectClips(&object); clips != nil {
-		for _, clip := range clips.Clip {
-			for _, area := range clip.Area {
-				if area.CTM != "" {
-					if _, err := creationNumbers(area.CTM, 6); err != nil {
-						return fmt.Errorf("invalid clip transform: %w", err)
-					}
-				}
-			}
-		}
-	}
-	var alpha *int
-	switch object.Type {
-	case "TextObject":
-		alpha = object.TextObject.Alpha
-	case "PathObject":
-		alpha = object.PathObject.Alpha
-	case "ImageObject":
-		alpha = object.ImageObject.Alpha
-	case "CompositeObject", "CompositeGraphicUnit":
-		alpha = object.CompositeGraphicUnit.Alpha
-	}
-	if alpha != nil && (*alpha < 0 || *alpha > 255) {
-		return fmt.Errorf("alpha must be between 0 and 255")
-	}
-	if object.Type == "TextObject" {
-		obj := object.TextObject
-		if !finite(obj.Size) || obj.Size <= 0 || !finite(obj.LineWidth) || obj.LineWidth < 0 {
-			return fmt.Errorf("invalid text geometry")
-		}
-		for _, code := range obj.TextCode {
-			for _, value := range []string{code.X, code.Y} {
-				if value != "" {
-					if _, err := creationNumbers(value, 1); err != nil {
-						return err
-					}
-				}
-			}
-			for _, value := range []string{code.DeltaX, code.DeltaY} {
-				if value != "" {
-					if err := creationDeltas(value); err != nil {
-						return err
-					}
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// parsedHasResource 判断单个已解析资源文件是否包含指定类型与标识的资源定义
-// 入参: parsed 已解析资源文件, id 资源标识, kind 资源类型，空字符串匹配任意类型
-// 返回: bool 是否包含
-func parsedHasResource(parsed *parsedRes, id, kind string) bool {
-	if parsed == nil {
-		return false
-	}
-	switch kind {
-	case "DrawParam":
-		_, ok := parsed.drawParams.get(id)
-		return ok
-	case "CompositeGraphicUnit":
-		_, ok := parsed.composites.get(id)
-		return ok
-	case "ColorSpace":
-		_, ok := parsed.colorSpaces.get(id)
-		return ok
-	case "Font":
-		_, ok := parsed.fonts.get(id)
-		return ok
-	case "MultiMedia":
-		_, ok := parsed.medias.get(id)
-		return ok
-	default:
-		if _, ok := parsed.drawParams.get(id); ok {
-			return true
-		}
-		if _, ok := parsed.composites.get(id); ok {
-			return true
-		}
-		if _, ok := parsed.colorSpaces.get(id); ok {
-			return true
-		}
-		if _, ok := parsed.fonts.get(id); ok {
-			return true
-		}
-		_, ok := parsed.medias.get(id)
-		return ok
-	}
 }

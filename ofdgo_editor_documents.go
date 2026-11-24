@@ -27,6 +27,16 @@ import (
 	"strings"
 )
 
+// editorDocumentIdentity 标记编辑状态所属的文档和版本，不持有页面或资源数据
+type editorDocumentIdentity struct {
+	root    string
+	id      string
+	version string
+	fresh   bool
+	single  bool
+	fromNew bool
+}
+
 // DocumentCount 获取编辑包内的文档数量，新建编辑器包含一个当前文档
 // 返回: int 文档数量
 func (e *Editor) DocumentCount() int {
@@ -69,10 +79,12 @@ func (e *Editor) SelectDocumentContext(ctx context.Context, index int) error {
 	if err != nil {
 		return err
 	}
+	defer reader.Close()
 	target, err := reader.DocumentContext(ctx, index)
 	if err != nil {
 		return err
 	}
+	defer target.Close()
 	before := e.transactionSnapshot()
 	next := *e
 	if err := next.adoptDocumentReader(ctx, target, retiredTags); err != nil {
@@ -96,7 +108,7 @@ func (e *Editor) DocumentInfo(index int) (DocInfo, error) {
 	if index == e.DocumentIndex() {
 		return cloneEditorData(e.Info), nil
 	}
-	info := cloneEditorData(e.source.reader.OFD.DocBody[index].DocInfo)
+	info := cloneEditorData(e.source.reader.ofd.DocBody[index].DocInfo)
 	if info.CustomDatas != nil {
 		for i := range info.CustomDatas.CustomData {
 			info.CustomDatas.CustomData[i].sourceIndex = i + 1
@@ -133,7 +145,7 @@ func (e *Editor) SetDocumentInfoContext(ctx context.Context, index int, info Doc
 		e.SetInfo(info)
 		return nil
 	}
-	return e.editDocumentsContext(ctx, func(reader *Reader, data []byte, _ *editorXML) (int, error) {
+	return e.editDocumentsWithVersion(ctx, true, func(reader *Reader, data []byte, _ *editorXML) (int, error) {
 		updated, err := editorUpdateInfoXML(data, NewEditor().Info.DocID, index, before, info)
 		if err != nil {
 			return 0, err
@@ -166,7 +178,7 @@ func (e *Editor) AddDocumentContext(ctx context.Context, title string, width, he
 	if _, err := created.AddPage(width, height); err != nil {
 		return 0, err
 	}
-	err := e.editDocumentsContext(ctx, func(reader *Reader, data []byte, root *editorXML) (int, error) {
+	err := e.editDocumentsWithVersion(ctx, false, func(reader *Reader, data []byte, root *editorXML) (int, error) {
 		occupied := make(map[string]bool)
 		for name := range reader.fileNames {
 			if err := ctx.Err(); err != nil {
@@ -190,6 +202,7 @@ func (e *Editor) AddDocumentContext(ctx context.Context, title string, width, he
 		if err != nil {
 			return 0, err
 		}
+		defer createdReader.Close()
 		for name, content := range createdReader.files {
 			if err := ctx.Err(); err != nil {
 				return 0, err
@@ -269,7 +282,7 @@ func (e *Editor) MoveDocumentContext(ctx context.Context, from, to int) error {
 	if from == to {
 		return nil
 	}
-	return e.editDocumentsContext(ctx, func(reader *Reader, data []byte, root *editorXML) (int, error) {
+	return e.editDocumentsWithVersion(ctx, true, func(reader *Reader, data []byte, root *editorXML) (int, error) {
 		nodes := make([]*editorXML, 0, reader.DocumentCount())
 		bodies := make([][]byte, 0, reader.DocumentCount())
 		for _, body := range root.children {
@@ -329,27 +342,13 @@ func (e *Editor) DeleteDocumentContext(ctx context.Context, index int) error {
 	if e.DocumentCount() == 1 {
 		return fmt.Errorf("package must contain at least one document")
 	}
-	return e.editDocumentsContext(ctx, func(reader *Reader, data []byte, root *editorXML) (int, error) {
+	return e.editDocumentsWithVersion(ctx, index != e.DocumentIndex(), func(reader *Reader, data []byte, root *editorXML) (int, error) {
 		removed, err := reader.documentFiles(ctx, index)
 		if err != nil {
 			return 0, err
 		}
-		directory := path.Dir(cleanPackagePath(reader.OFD.DocBody[index].DocRoot))
-		if directory != "." && !slices.ContainsFunc(reader.OFD.DocBody, func(body DocBody) bool {
-			name := cleanPackagePath(body.DocRoot)
-			return name != cleanPackagePath(reader.OFD.DocBody[index].DocRoot) && strings.HasPrefix(name, directory+"/")
-		}) {
-			for name := range reader.fileNames {
-				if err := ctx.Err(); err != nil {
-					return 0, err
-				}
-				if strings.HasPrefix(name, directory+"/") {
-					removed[name] = true
-				}
-			}
-		}
 		var others []int
-		for other := range reader.OFD.DocBody {
+		for other := range reader.ofd.DocBody {
 			if other != index {
 				others = append(others, other)
 			}
@@ -357,6 +356,57 @@ func (e *Editor) DeleteDocumentContext(ctx context.Context, index int) error {
 		kept, err := reader.documentFiles(ctx, others...)
 		if err != nil {
 			return 0, err
+		}
+		signedKept, err := reader.signatureReferenceFiles(ctx, index)
+		if err != nil {
+			if ctx.Err() != nil {
+				return 0, ctx.Err()
+			}
+			return 0, err
+		}
+		maps.Copy(kept, signedKept)
+		directory := path.Dir(cleanPackagePath(reader.ofd.DocBody[index].DocRoot))
+		sharedDir := false
+		if directory != "." {
+			prefix := directory + "/"
+			for otherIdx, body := range reader.ofd.DocBody {
+				if otherIdx == index {
+					continue
+				}
+				if name := cleanPackagePath(body.DocRoot); name != "" && strings.HasPrefix(name, prefix) {
+					sharedDir = true
+					break
+				}
+				if body.Versions != nil {
+					for _, ver := range body.Versions.Version {
+						if vloc := cleanPackagePath(resolveResourcePath("OFD.xml", "", ver.BaseLoc)); vloc != "" && strings.HasPrefix(vloc, prefix) {
+							sharedDir = true
+							break
+						}
+					}
+				}
+				if sharedDir {
+					break
+				}
+			}
+			if !sharedDir {
+				for name := range kept {
+					if strings.HasPrefix(name, prefix) {
+						sharedDir = true
+						break
+					}
+				}
+			}
+			if !sharedDir {
+				for name := range reader.fileNames {
+					if err := ctx.Err(); err != nil {
+						return 0, err
+					}
+					if strings.HasPrefix(name, prefix) {
+						removed[name] = true
+					}
+				}
+			}
 		}
 		for name := range kept {
 			if err := ctx.Err(); err != nil {
@@ -373,10 +423,10 @@ func (e *Editor) DeleteDocumentContext(ctx context.Context, index int) error {
 				delete(reader.files, name)
 			}
 		}
-		if reader.Zip != nil {
-			reader.Zip = &zip.Reader{Comment: reader.Zip.Comment, File: slices.DeleteFunc(slices.Clone(reader.Zip.File), func(file *zip.File) bool {
-				return removed[cleanPackagePath(file.Name)]
-			})}
+		if reader.zip != nil {
+			pruneReaderZip(reader, func(file *zip.File) bool {
+				return !removed[cleanPackagePath(file.Name)]
+			})
 		}
 		if src := reader.encryptedSource(); src != nil {
 			reader.setEncryptedSource(src.omit(removed))
@@ -391,16 +441,6 @@ func (e *Editor) DeleteDocumentContext(ctx context.Context, index int) error {
 		}
 		return selected, nil
 	})
-}
-
-// editorDocumentIdentity 标记编辑状态所属的文档和版本，不持有页面或资源数据
-type editorDocumentIdentity struct {
-	root    string
-	id      string
-	version string
-	fresh   bool
-	single  bool
-	fromNew bool
 }
 
 // matches 判断两个编辑状态是否属于同一文档版本，允许新文档首次建立包结构
@@ -420,7 +460,7 @@ func (identity editorDocumentIdentity) matches(other editorDocumentIdentity) boo
 	return identity.root == other.root && identity.id == other.id && identity.version == other.version
 }
 
-// editDocumentsContext 在独立快照中修改文档入口，确认未取消后提交完整状态
+// editDocumentsContext 在独立快照中修改文档入口，仅在目标文档切换时清空历史版本选择
 // 入参: ctx 取消上下文, edit 修改包快照并返回新的当前文档索引
 // 返回: error 修改或取消错误
 func (e *Editor) editDocumentsContext(ctx context.Context, edit func(*Reader, []byte, *editorXML) (int, error)) error {
@@ -428,20 +468,65 @@ func (e *Editor) editDocumentsContext(ctx context.Context, edit func(*Reader, []
 	if err != nil {
 		return err
 	}
-	return e.editDocumentSnapshotWithRetired(ctx, reader, retiredTags, edit)
+	defer reader.Close()
+	beforeCount := reader.DocumentCount()
+	beforeIndex := reader.DocumentIndex()
+	return e.editDocumentSnapshotWithRetired(ctx, reader, retiredTags, true, func(r *Reader, data []byte, root *editorXML) (int, error) {
+		var beforeRaw []byte
+		if beforeBody := root.childAt("DocBody", beforeIndex); beforeBody != nil {
+			beforeRaw = data[beforeBody.start:beforeBody.end]
+		}
+		index, editErr := edit(r, data, root)
+		if editErr != nil {
+			return 0, editErr
+		}
+		if ofdData, ok := r.files["OFD.xml"]; ok {
+			updatedRoot, parseErr := parseEditorXMLContext(ctx, ofdData)
+			if parseErr != nil {
+				return 0, parseErr
+			}
+			afterCount := 0
+			for _, child := range updatedRoot.children {
+				if child.matchesOFD("DocBody") {
+					afterCount++
+				}
+			}
+			if afterCount > beforeCount {
+				r.selectedVersion = nil
+			} else if afterCount < beforeCount {
+				afterBody := updatedRoot.childAt("DocBody", index)
+				if afterBody == nil || !bytes.Equal(beforeRaw, ofdData[afterBody.start:afterBody.end]) {
+					r.selectedVersion = nil
+				}
+			}
+		}
+		return index, nil
+	})
 }
 
-// editDocumentSnapshot 修改已有独立快照的文档入口，成功后提交并记录撤销历史
+// editDocumentsWithVersion 在独立快照中修改文档入口并显式控制是否保留当前版本选择
+// 入参: ctx 取消上下文, keepVersion 是否保留已选历史版本, edit 修改包快照并返回新的当前文档索引
+// 返回: error 修改或取消错误
+func (e *Editor) editDocumentsWithVersion(ctx context.Context, keepVersion bool, edit func(*Reader, []byte, *editorXML) (int, error)) error {
+	reader, retiredTags, err := e.snapshotReader(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	return e.editDocumentSnapshotWithRetired(ctx, reader, retiredTags, keepVersion, edit)
+}
+
+// editDocumentSnapshot 修改已有独立快照的文档入口，保留已选版本并在成功后提交撤销历史
 // 入参: ctx 取消上下文, reader 包含当前编辑内容的独立快照, edit 修改快照并返回当前文档索引
 // 返回: error 修改或取消错误
 func (e *Editor) editDocumentSnapshot(ctx context.Context, reader *Reader, edit func(*Reader, []byte, *editorXML) (int, error)) error {
-	return e.editDocumentSnapshotWithRetired(ctx, reader, nil, edit)
+	return e.editDocumentSnapshotWithRetired(ctx, reader, nil, true, edit)
 }
 
-// editDocumentSnapshotWithRetired 修改已有独立快照的文档入口并记录淘汰标引路径
-// 入参: ctx 取消上下文, reader 包含当前编辑内容的独立快照, retiredTags 已淘汰的旧标引路径, edit 修改快照并返回当前文档索引
+// editDocumentSnapshotWithRetired 修改已有独立快照的文档入口，按调用方指定保留或清空历史版本选择
+// 入参: ctx 取消上下文, reader 包含当前编辑内容的独立快照, retiredTags 已淘汰的旧标引路径, keepVersion 是否保留已选历史版本, edit 修改快照并返回当前文档索引
 // 返回: error 修改或取消错误
-func (e *Editor) editDocumentSnapshotWithRetired(ctx context.Context, reader *Reader, retiredTags map[string]bool, edit func(*Reader, []byte, *editorXML) (int, error)) error {
+func (e *Editor) editDocumentSnapshotWithRetired(ctx context.Context, reader *Reader, retiredTags map[string]bool, keepVersion bool, edit func(*Reader, []byte, *editorXML) (int, error)) error {
 	data, err := reader.readFileViewContext(ctx, "OFD.xml")
 	if err != nil {
 		return err
@@ -451,7 +536,6 @@ func (e *Editor) editDocumentSnapshotWithRetired(ctx context.Context, reader *Re
 		return err
 	}
 	reader.files = maps.Clone(reader.files)
-	previous := reader.OFD.DocBody[reader.documentIndex]
 	index, err := edit(reader, data, root)
 	if err != nil {
 		return err
@@ -461,14 +545,13 @@ func (e *Editor) editDocumentSnapshotWithRetired(ctx context.Context, reader *Re
 	}
 	before := e.transactionSnapshot()
 	reader.documentIndex, reader.doc = index, nil
+	if !keepVersion {
+		reader.selectedVersion = nil
+	}
 	if err := reader.initRootContext(ctx); err != nil {
 		return err
 	}
-	current := reader.OFD.DocBody[index]
-	if previous.DocRoot != current.DocRoot || previous.DocInfo.DocID != current.DocInfo.DocID {
-		reader.selectedVersion = nil
-	}
-	if _, err := reader.DocContext(ctx); err != nil {
+	if _, err := reader.docContext(ctx); err != nil {
 		return err
 	}
 	next := *e
@@ -487,7 +570,7 @@ func (e *Editor) editDocumentSnapshotWithRetired(ctx context.Context, reader *Re
 // 入参: ctx 取消上下文, reader 不拥有输入文件的独立阅读器, retiredTags 已淘汰的旧标引路径
 // 返回: error 编辑器初始化错误
 func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader, retiredTags map[string]bool) error {
-	if reader.Zip != nil && reader.sourceFile == nil {
+	if reader.zip != nil && reader.sourceFile == nil {
 		reader.sourceFile = e.sourceFile
 	}
 	version, err := reader.DocumentVersionID()
@@ -498,11 +581,19 @@ func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader, retire
 	if err != nil {
 		return err
 	}
-	sameDoc := e.source != nil && e.documentRoot() == reader.documentRoot && current == version && e.Info.DocID == reader.OFD.DocBody[reader.documentIndex].DocInfo.DocID
+	targetDocID := ""
+	if reader.ofd != nil && reader.documentIndex >= 0 && reader.documentIndex < len(reader.ofd.DocBody) {
+		targetDocID = reader.ofd.DocBody[reader.documentIndex].DocInfo.DocID
+	}
+	sameDoc := e.source != nil && e.documentRoot() == reader.documentRoot && current == version && e.Info.DocID != "" && e.Info.DocID == targetDocID
 	next, err := reader.EditorContext(ctx)
 	if err != nil {
 		return err
 	}
+	nextHold := next.encHold
+	defer func() {
+		nextHold.release()
+	}()
 	var retired map[string]bool
 	if e.source != nil && len(e.source.retiredAttachments) != 0 {
 		retired = maps.Clone(e.source.retiredAttachments)
@@ -549,11 +640,13 @@ func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader, retire
 	next.revision, next.serial = e.revision, e.serial
 	next.OnWriteProgress, next.output = e.OnWriteProgress, e.output
 	next.encryption = e.encryption
+	next.encHold = e.encHold
 	next.saveTarget, next.sourceFile = e.saveTarget, e.sourceFile
 	next.backends, next.fontDirs, next.fontFS = e.backends, e.fontDirs, e.fontFS
 	next.SetResources(e.runtimeResources)
 	next.validatedPaths = e.validatedPaths
 	*e = *next
+	e.syncEncryptionHold()
 	return nil
 }
 

@@ -18,13 +18,114 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"image/color"
 	"math"
+	"reflect"
 
 	"github.com/tdewolff/canvas"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"golang.org/x/image/draw"
 )
+
+// transparentEdgeResult 记录单页内复用的透明补边图像及边距宽度
+type transparentEdgeResult struct {
+	img image.Image
+	pad int
+}
+
+// isOpaqueEncodedImage 判断惰性编码图像是否不含透明通道与额外色彩转换，避免SVG输出触发像素解码
+// 入参: img 图像对象
+// 返回: bool 是否为可直接输出的不透明编码图像
+func isOpaqueEncodedImage(img image.Image) bool {
+	encoded, ok := img.(*EncodedImage)
+	if !ok {
+		return false
+	}
+	switch encoded.ColorModel() {
+	case color.YCbCrModel, color.GrayModel, color.Gray16Model, color.RGBAModel, color.RGBA64Model:
+		return true
+	default:
+		return false
+	}
+}
+
+// isDirectSVGEncodedImage 判断惰性编码图像是否无需色彩空间转换即可直接由浏览器SVG渲染
+// 入参: img 图像对象
+// 返回: bool 是否可零解码直出至SVG
+func isDirectSVGEncodedImage(img image.Image) bool {
+	encoded, ok := img.(*EncodedImage)
+	if !ok {
+		return false
+	}
+	switch encoded.ColorModel().(type) {
+	case color.Palette:
+		return true
+	}
+	switch encoded.ColorModel() {
+	case color.YCbCrModel, color.GrayModel, color.Gray16Model, color.RGBAModel, color.RGBA64Model, color.NRGBAModel:
+		return true
+	default:
+		return false
+	}
+}
+
+// isAxisAlignedCanvasMatrix 判断仿射变换矩阵是否严格轴对齐且非退化
+// 入参: m 变换矩阵
+// 返回: bool 是否轴对齐
+func isAxisAlignedCanvasMatrix(m canvas.Matrix) bool {
+	return m[0][0] != 0 && m[1][1] != 0 && math.Abs(m[0][1]) <= 1e-9*math.Abs(m[0][0]) && math.Abs(m[1][0]) <= 1e-9*math.Abs(m[1][1])
+}
+
+// isPointerImage 判断图像实现是否为可安全按身份比较的指针类型
+// 入参: img 图像对象
+// 返回: bool 是否为指针图像
+func isPointerImage(img image.Image) bool {
+	return img != nil && reflect.ValueOf(img).Kind() == reflect.Pointer
+}
+
+// cachedTransparentEdge 按源图像指针在单页内缓存透明补边结果，避免重复全图扫描
+// 入参: ctx 取消上下文, cache 页内补边缓存指针, img 源图像
+// 返回: image.Image 补边后图像, int 补边像素数, error 解码或取消错误
+func cachedTransparentEdge(ctx context.Context, cache *map[image.Image]transparentEdgeResult, img image.Image) (image.Image, int, error) {
+	cacheable := cache != nil && isPointerImage(img)
+	if cacheable && *cache != nil {
+		if entry, ok := (*cache)[img]; ok {
+			return entry.img, entry.pad, nil
+		}
+	}
+	unwrapped := unwrapEncodedImage(img)
+	padded, pad, err := baseimage.WithTransparentEdge(ctx, unwrapped)
+	if err != nil {
+		return nil, 0, err
+	}
+	if padded == unwrapped {
+		padded = img
+	} else {
+		padded = wrapEncodedImage(padded)
+	}
+	if cacheable {
+		if *cache == nil {
+			*cache = make(map[image.Image]transparentEdgeResult)
+		}
+		(*cache)[img] = transparentEdgeResult{img: padded, pad: pad}
+	}
+	return padded, pad, nil
+}
+
+// imageClipContains 判断裁剪是否完整包含变换后的图像，避免重复削弱边缘覆盖率
+// 入参: img 图片, clipPath 裁剪路径, m 图片到页面变换
+// 返回: bool 是否完整包含
+func imageClipContains(img image.Image, clipPath *canvas.Path, m canvas.Matrix) bool {
+	b := img.Bounds()
+	outline := canvas.Rectangle(float64(b.Dx()), float64(b.Dy())).Transform(m)
+	if rect, ok := rectangularPath(clipPath); ok {
+		return rect.Contains(outline.FastBounds())
+	}
+	if geometryConvexContains(*geometryFromCanvasPath(clipPath), *geometryFromCanvasPath(outline)) {
+		return true
+	}
+	return clipPath.Contains(outline)
+}
 
 // renderImage 渲染图片，图像像素受Boundary裁剪而边框豁免Boundary裁剪
 // 入参: ctx 画布上下文, obj 图片对象, pageH 页面高度, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM, parentClip 父级裁剪路径
@@ -40,47 +141,78 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		return
 	}
 	box, _ := ParseBox(obj.Boundary)
-	compiler, isCompiler := ctx.Renderer.(*canvasPageCompiler)
 	hasBorder := obj.Border != nil
 	if hasBorder {
 		if border := imageBorderObject(obj, box); border.LineWidth == 0 {
 			hasBorder = false
 		}
 	}
-	useGroup := isCompiler && hasBorder && obj.Alpha != nil && clampColor(*obj.Alpha) < 255
+	useGroup := canCanvasTransparencyGroup(ctx.Renderer) && hasBorder && obj.Alpha != nil && clampColor(*obj.Alpha) < 255
 	imgAlpha := obj.Alpha
 	borderObj := obj
 	if useGroup {
-		compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupBegin, GroupAlpha: uint8(clampColor(*obj.Alpha))})
-		defer func() {
-			compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupEnd})
-		}()
-		imgAlpha = nil
-		borderObj.Alpha = nil
+		if endGroup, ok := beginCanvasTransparencyGroup(ctx.Renderer, uint8(clampColor(*obj.Alpha))); ok {
+			defer endGroup()
+			imgAlpha = nil
+			borderObj.Alpha = nil
+		}
 	}
 	var img image.Image
-	if pdfOutput, isPDF := ctx.Renderer.(*pdfRenderer); isPDF {
+	pdfOutput, isPDF := ctx.Renderer.(*pdfRenderer)
+	if isPDF {
 		if raw := pdfOutput.rawImageResource(r, obj); raw != nil {
 			img = raw
 		}
 	}
+	var effectKey imageEffectKey
+	hasEffectKey := false
+	if img == nil && !isPDF && r.decodeImages && obj.ImageMask == "" && r.pageContext != nil && r.reader != nil {
+		if pf, ok := r.pageContext.Value(pageImagePrefetchKey{}).(*pageImagePrefetch); ok && pf != nil && len(pf.byPath) > 0 {
+			primary := obj.ResourceID
+			if obj.Substitution != "" && !sameResourceID(obj.Substitution, obj.ResourceID) && (r.printing || r.dpi >= 300) {
+				primary = obj.Substitution
+			}
+			if resolved, ok := r.reader.resolveResPathScoped(r.pageResources, primary); ok {
+				cleanPath := cleanPackagePath(r.reader.ResPath(resolved))
+				if entry, hit := pf.byPath[cleanPath]; hit {
+					effAlpha := uint8(255)
+					if imgAlpha != nil {
+						effAlpha = uint8(clampColor(*imgAlpha))
+					}
+					if effAlpha == 255 {
+						img = entry.raw
+					} else {
+						ak := pagePrefetchedAlphaKey{path: cleanPath, alpha: effAlpha}
+						if cached, ok := pf.byAlpha[ak]; ok {
+							img = cached
+						} else {
+							applied, err := imageWithEffects(r.pageContext, entry.raw, nil, imgAlpha)
+							if err != nil {
+								r.renderError = err
+								return
+							}
+							if pf.byAlpha == nil {
+								pf.byAlpha = make(map[pagePrefetchedAlphaKey]image.Image)
+							}
+							pf.byAlpha[ak] = applied
+							img = applied
+						}
+					}
+				}
+			}
+		}
+	}
 	if img == nil {
 		var err error
-		img, err = r.imageObjectResource(obj)
+		img, effectKey, hasEffectKey, err = r.imageObjectWithEffects(obj, imgAlpha)
 		if err != nil {
 			r.renderError = err
 			return
 		}
-		mask, err := r.imageObjectMask(obj, img)
-		if err != nil {
-			r.renderError = err
-			return
-		}
-		img, err = imageWithEffects(r.pageContext, img, mask, imgAlpha)
-		if err != nil {
-			r.renderError = err
-			return
-		}
+	}
+	if isPDF && hasEffectKey {
+		pdfOutput.imageKey = effectKey
+		defer func() { pdfOutput.imageKey = nil }()
 	}
 	imgBounds := img.Bounds()
 	imgW, imgH := float64(imgBounds.Dx()), float64(imgBounds.Dy())
@@ -110,7 +242,7 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		}
 	}
 	clipPath := r.intersectCachedClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
-	r.drawClippedImage(ctx, img, clipPath, m)
+	r.drawClippedImageInterpolate(ctx, img, clipPath, m, obj.interpolate)
 	if r.renderError != nil {
 		return
 	}
@@ -119,32 +251,54 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	}
 }
 
-// drawClippedImage 共用图像及签章的几何裁剪，编译和PDF输出保留原图及独立裁剪
+// drawClippedImage 共用图像及签章的几何裁剪，编译、SVG和PDF输出保留原图及独立裁剪
 // 入参: ctx 画布上下文, img 原图, clipPath 页面裁剪，可为空, m 像素到画布的变换
 func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPath *canvas.Path, m canvas.Matrix) {
+	r.drawClippedImageInterpolate(ctx, img, clipPath, m, nil)
+}
+
+// drawClippedImageInterpolate 透传图像插值开关并执行几何裁剪与渲染输出
+// 入参: ctx 画布上下文, img 原图, clipPath 页面裁剪，可为空, m 像素到画布的变换, interpolate 可选插值开关
+func (r *Renderer) drawClippedImageInterpolate(ctx *canvas.Context, img image.Image, clipPath *canvas.Path, m canvas.Matrix, interpolate *bool) {
 	imgW, imgH := float64(img.Bounds().Dx()), float64(img.Bounds().Dy())
 	imageClip := clipPath
 	compiler, compiled := ctx.Renderer.(*canvasPageCompiler)
 	pdfOutput, pdf := ctx.Renderer.(*pdfRenderer)
-	if pdf && imageClip != nil && imageClip.Empty() {
+	svgOutput, isSVG := ctx.Renderer.(*svgResourceRenderer)
+	if (pdf || isSVG) && imageClip != nil && imageClip.Empty() {
 		return
 	}
-	if (compiled || pdf) && imageClip != nil && imageClipContains(img, imageClip, m) {
+	if (compiled || pdf || isSVG) && imageClip != nil && imageClipContains(img, imageClip, m) {
 		imageClip = nil
 	}
-	if !compiled && !pdf {
+	if !compiled && !pdf && !isSVG {
 		v := ctx.CoordSystemView().Mul(ctx.View())
 		dpi := 96 * max(1, math.Hypot(v[0][0], v[1][0]), math.Hypot(v[0][1], v[1][1]))
-		img = r.imageWithClip(img, clipPath, m, dpi)
+		img = r.imageWithClip(img, clipPath, m, dpi, interpolate)
 	}
 	if r.renderError != nil {
 		return
 	}
 	m = m.Scale(imgW/float64(img.Bounds().Dx()), imgH/float64(img.Bounds().Dy()))
-	if _, pdf := ctx.Renderer.(*pdfRenderer); !pdf {
+	total := ctx.CoordSystemView().Mul(ctx.View()).Mul(m)
+	pxPerMM := r.dpi / 25.4
+	pixelMatrix := [6]float64{total[0][0] * pxPerMM, total[1][0] * pxPerMM, total[0][1] * pxPerMM, total[1][1] * pxPerMM, 0, 0}
+	nearestAxis := compiled && isAxisAlignedCanvasMatrix(total) && baseimage.UseNearestNeighbor(img.Bounds(), pixelMatrix, interpolate)
+	skipTransparentEdge := pdf || nearestAxis || isSVG && (isOpaqueEncodedImage(img) || isAxisAlignedCanvasMatrix(total) && isDirectSVGEncodedImage(img))
+	if !skipTransparentEdge {
+		work := r.pageContext
+		if work == nil {
+			work = r.outputContext()
+		}
+		var edgeCache *map[image.Image]transparentEdgeResult
+		if isSVG {
+			edgeCache = &svgOutput.transparentEdges
+		} else if r.transparentEdges != nil {
+			edgeCache = &r.transparentEdges
+		}
 		var pad int
 		var err error
-		img, pad, err = baseimage.WithTransparentEdge(r.pageContext, img)
+		img, pad, err = cachedTransparentEdge(work, edgeCache, img)
 		if err != nil {
 			r.renderError = err
 			return
@@ -155,11 +309,25 @@ func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPa
 			m[1][2] -= m[1][0]*p + m[1][1]*p
 		}
 	}
+	if compiled {
+		compiler.imageInterpolate = interpolate
+		defer func() { compiler.imageInterpolate = nil }()
+	}
 	if pdf {
+		pdfOutput.imageInterpolate = interpolate
 		if imageClip != nil {
 			pdfOutput.imageClip = imageClip.Copy().Transform(ctx.CoordSystemView().Mul(ctx.View()))
 		}
-		defer func() { pdfOutput.imageClip = nil }()
+		defer func() {
+			pdfOutput.imageClip = nil
+			pdfOutput.imageInterpolate = nil
+		}()
+	}
+	if isSVG {
+		if imageClip != nil {
+			svgOutput.imageClip = imageClip.Copy().Transform(ctx.CoordSystemView().Mul(ctx.View()))
+		}
+		defer func() { svgOutput.imageClip = nil }()
 	}
 	ctx.RenderImage(img, ctx.CoordSystemView().Mul(ctx.View()).Mul(m))
 	if compiled && imageClip != nil && compiler.err == nil {
@@ -197,19 +365,19 @@ func (r *Renderer) renderImageBorder(ctx *canvas.Context, obj ImageObject, box B
 		}
 		borderClip = r.intersectCachedClipPath(parentClip, canvasClip)
 	}
-	origin, _ := renderObjectMatrix(obj.Boundary, IdentityMatrix, RenderState{Parent: parentCTM, BoundaryInCTM: boundaryInCTM})
+	origin, _ := renderObjectMatrix(obj.Boundary, IdentityMatrix(), RenderState{Parent: parentCTM, BoundaryInCTM: boundaryInCTM})
 	border.Boundary = ""
 	r.renderPath(ctx, border, pageH, nil, &origin, true, borderClip)
 }
 
 // imageWithClip 应用图片裁剪区域，保留原图采样精度
 // 低分辨率图片按最低精度细化蒙版，细化后的像素上限16Mi，不降低原图分辨率
-// 入参: img 图片对象, clipPath 裁剪路径, m 图片变换矩阵, dpi 最低蒙版分辨率，0保留原图精度
+// 入参: img 图片对象, clipPath 裁剪路径, m 图片变换矩阵, dpi 最低蒙版分辨率，0保留原图精度, interpolate 可选插值开关
 // 返回: image.Image 裁剪后的图片对象
-func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canvas.Matrix, dpi float64) image.Image {
+func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canvas.Matrix, dpi float64, interpolate *bool) image.Image {
 	work := r.pageContext
 	if work == nil {
-		work = context.Background()
+		work = r.outputContext()
 	}
 	if err := work.Err(); err != nil {
 		r.renderError = err
@@ -227,7 +395,7 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		return img
 	}
 	original := img
-	source, err := baseimage.PixelDataContext(r.pageContext, img)
+	source, err := baseimage.PixelDataContext(work, img)
 	if err != nil {
 		r.renderError = err
 		return img
@@ -243,7 +411,11 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		} else {
 			resized = image.NewNRGBA(image.Rect(0, 0, nw, nh))
 		}
-		draw.CatmullRom.Scale(resized, resized.Bounds(), img, bounds, draw.Src, nil)
+		if interpolate != nil && !*interpolate || interpolate == nil && w <= 8 && h <= 8 && scale >= 4 {
+			draw.NearestNeighbor.Scale(resized, resized.Bounds(), img, bounds, draw.Src, nil)
+		} else {
+			draw.CatmullRom.Scale(resized, resized.Bounds(), img, bounds, draw.Src, nil)
+		}
 		img = resized
 		m = m.Scale(float64(w)/float64(nw), float64(h)/float64(nh))
 		bounds, w, h = resized.Bounds(), nw, nh
@@ -267,7 +439,7 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		r.renderError = fmt.Errorf("image clip raster: %w", ErrBackendUnavailable)
 		return img
 	}
-	result, err := raster.Render(compiler.page)
+	result, err := raster.Render(work, compiler.page)
 	if cancelErr := work.Err(); cancelErr != nil {
 		err = cancelErr
 	}
@@ -428,19 +600,4 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		return img
 	}
 	return out
-}
-
-// imageClipContains 判断裁剪是否完整包含变换后的图像，避免重复削弱边缘覆盖率
-// 入参: img 图片, clipPath 裁剪路径, m 图片到页面变换
-// 返回: bool 是否完整包含
-func imageClipContains(img image.Image, clipPath *canvas.Path, m canvas.Matrix) bool {
-	b := img.Bounds()
-	outline := canvas.Rectangle(float64(b.Dx()), float64(b.Dy())).Transform(m)
-	if rect, ok := rectangularPath(clipPath); ok {
-		return rect.Contains(outline.FastBounds())
-	}
-	if basegeom.ConvexContains(basegeom.Path(*geometryFromCanvasPath(clipPath)), basegeom.Path(*geometryFromCanvasPath(outline))) {
-		return true
-	}
-	return clipPath.Contains(outline)
 }

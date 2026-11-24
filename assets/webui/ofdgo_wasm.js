@@ -1,100 +1,61 @@
 importScripts("./wasm_exec.js");
 
 const engines = new Map();
-let resolveRuntime;
-let rejectRuntime;
+const runtime = {};
+const runtimeReady = new Promise((resolve, reject) => { runtime.resolve = resolve; runtime.reject = reject; });
 let fontSequence = 0;
 let engineMemory = null;
-const runtimeReady = new Promise((resolve, reject) => { resolveRuntime = resolve; rejectRuntime = reject; });
-runtimeReady.catch(() => {});
+
+function zeroBuffer(value) {
+	if (ArrayBuffer.isView(value)) new Uint8Array(value.buffer, value.byteOffset, value.byteLength).fill(0);
+}
+
+function yieldDone(channel, signal, done, err, before) {
+	const deliver = (message, aborted) => {
+		try { done(message, aborted); } catch {}
+	};
+	try {
+		channel.port1.onmessage = () => {
+			try {
+				before?.();
+				deliver(err?.message || "", !!signal?.aborted);
+			} catch (callbackErr) {
+				deliver(callbackErr?.message || err?.message || "操作失败", !!signal?.aborted);
+			}
+		};
+		channel.port2.postMessage(null);
+	} catch (postErr) {
+		deliver(postErr?.message || err?.message || "操作失败", !!signal?.aborted);
+	}
+}
 
 function requestFont(engine, id, signal, name, done) {
 	const fontRequests = engine.fontRequests;
-	if (signal.aborted) { done(null, "", true); return; }
-	const request = ++fontSequence;
-	const cancel = () => {
+	let settled = false;
+	const finish = (bytes, error, aborted) => {
+		if (settled) return;
+		settled = true;
+		signal?.removeEventListener("abort", cancel);
 		fontRequests.delete(request);
-		done(null, "", true);
+		try { done(bytes, error, aborted); } catch {}
 	};
-	signal.addEventListener("abort", cancel, { once: true });
-	fontRequests.set(request, result => {
-		signal.removeEventListener("abort", cancel);
-		done(result.bytes, result.error || "", signal.aborted);
-	});
-	self.postMessage({ engineID: engine.id, id, type: "font", request, name });
+	const cancel = () => finish(null, "", true);
+	const request = ++fontSequence;
+	if (signal?.aborted) { finish(null, "", true); return; }
+	try {
+		signal?.addEventListener("abort", cancel, { once: true });
+		fontRequests.set(request, result => {
+			try {
+				finish(result?.bytes ?? null, result?.error || "", !!signal?.aborted);
+			} catch (err) {
+				finish(null, err?.message || "字体加载失败", !!signal?.aborted);
+			}
+		});
+		self.postMessage({ engineID: engine.id, id, type: "font", request, name });
+	} catch (err) {
+		finish(null, err?.message || "字体请求失败", !!signal?.aborted);
+	}
 }
-self.onmessage = ({ data }) => {
-	if (data.type === "module") {
-		if (data.error) exitWASM(new Error(data.error));
-		else loadWASM(data.module).catch(exitWASM);
-		return;
-	}
-	const engineID = data.engineID;
-	if (typeof engineID !== "string" || !engineID) {
-		self.postMessage({ engineID, id: data.id, ok: false, error: "missing engine ID" });
-		return;
-	}
-	if (data.type === "open") {
-		if (engines.has(engineID)) {
-			self.postMessage({ engineID, type: "exit", error: "engine already exists" });
-			return;
-		}
-		const engine = { id: engineID, operations: new Map(), fontRequests: new Map(), active: new Set(), closed: false };
-		engines.set(engineID, engine);
-		engine.pending = runtimeReady.then(async () => {
-			if (engine.closed) return;
-			const opened = JSON.parse(globalThis.ofdgoEngineOpen(engineID));
-			if (!opened.ok) throw new Error(opened.error);
-			const backends = JSON.parse(await globalThis.ofdgoEngineCall(engineID, "ofdgoRenderBackends", null));
-			if (!backends.ok) throw new Error(backends.error);
-			if (!engine.closed) self.postMessage({ engineID, type: "ready", backends: backends.data, memory: engineMemory.buffer.byteLength });
-		}).catch(error => {
-			engine.closed = true;
-			self.postMessage({ engineID, type: "exit", error: error.message });
-		});
-		return;
-	}
-	const engine = engines.get(engineID);
-	if (!engine && data.type === "close") {
-		self.postMessage({ engineID, type: "closed" });
-		return;
-	}
-	if (!engine || engine.closed && data.type !== "close") {
-		self.postMessage({ engineID, id: data.id, ok: false, error: "unknown or closed engine" });
-		return;
-	}
-	if (data.type === "close") {
-		engine.closed = true;
-		for (const operation of engine.operations.values()) operation.abort();
-		engine.pending.then(async () => {
-			await Promise.all([...engine.active]);
-			await runtimeReady;
-			globalThis.ofdgoEngineClose(engineID);
-			engines.delete(engineID);
-			self.postMessage({ engineID, type: "closed" });
-		}).catch(() => engines.delete(engineID));
-		return;
-	}
-	if (data.type === "font") {
-		engine.fontRequests.get(data.request)?.(data);
-		engine.fontRequests.delete(data.request);
-		return;
-	}
-	if (data.type === "cancel") {
-		engine.operations.get(data.id)?.abort();
-		return;
-	}
-	engine.operations.set(data.id, new AbortController());
-	engine.pending = engine.pending.then(() => {
-		const operation = (data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" ? handleBatchMessage(engine, data) : handleMessage(engine, data)).catch(error => {
-			engine.operations.delete(data.id);
-			self.postMessage({ engineID, id: data.id, ok: false, error: error.message });
-		});
-		engine.active.add(operation);
-		operation.finally(() => engine.active.delete(operation));
-		if (data.name !== "ofdgoSaveSnapshot") return operation;
-	});
-};
 
 async function availableOutput(directory, base, format) {
 	for (let suffix = 0; ; suffix++) {
@@ -114,10 +75,7 @@ async function handleBatchMessage(engine, { id, name, args }) {
 	const postMessage = (data, transfer) => self.postMessage({ ...data, engineID: engine.id }, transfer);
 	const signal = operations.get(id).signal;
 	const channel = new MessageChannel();
-	const finish = (done, err) => {
-		channel.port1.onmessage = () => done(err?.message || "", signal.aborted);
-		channel.port2.postMessage(null);
-	};
+	const finish = (done, err) => yieldDone(channel, signal, done, err);
 	const reader = new FileReaderSync();
 	const read = file => (offset, size) => new Uint8Array(reader.readAsArrayBuffer(file.slice(offset, offset + size)));
 	let output = null;
@@ -130,10 +88,14 @@ async function handleBatchMessage(engine, { id, name, args }) {
 	let size = 0;
 	let credentials = null;
 	const write = (bytes, done) => {
-		if (signal.aborted) return finish(done);
-		size += bytes.byteLength;
-		if (output) output.write(bytes).then(() => finish(done), err => finish(done, err));
-		else { chunks.push(new Blob([bytes])); finish(done); }
+		try {
+			if (signal.aborted) return finish(done);
+			size += bytes.byteLength;
+			if (output) Promise.resolve().then(() => output.write(bytes)).then(() => finish(done), err => finish(done, err));
+			else { chunks.push(new Blob([bytes])); finish(done); }
+		} catch (err) {
+			finish(done, err);
+		}
 	};
 	try {
 		signal.throwIfAborted();
@@ -141,8 +103,8 @@ async function handleBatchMessage(engine, { id, name, args }) {
 		if (name === "ofdgoConvertFile") {
 			const [file, options, fonts, destination] = args;
 			credentials = options.credentials;
-			const formats = JSON.parse(await globalThis.ofdgoEngineCall(engine.id, "ofdgoOutputFormats", null)).data;
-			const format = formats.find(item => item.value === options.format);
+			engine.outputFormats ||= JSON.parse(await globalThis.ofdgoEngineCall(engine.id, "ofdgoOutputFormats", null)).data;
+			const format = engine.outputFormats.find(item => item.value === options.format);
 			if (!format) throw new Error("不支持此格式");
 			root = destination;
 			const base = options.base.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/g, "") || "document";
@@ -180,17 +142,20 @@ async function handleBatchMessage(engine, { id, name, args }) {
 			};
 			payload = await globalThis.ofdgoEngineCall(engine.id, "ofdgoConvertFile", done => finish(done), read(file), file.size, options, write,
 				(phase, completed, total, done) => {
-					postMessage({ id, type: "conversion", phase, completed, total, memory: engineMemory.buffer.byteLength });
+					try { postMessage({ id, type: "conversion", phase, completed, total, memory: engineMemory.buffer.byteLength }); } catch {}
 					finish(done);
 				},
-				(action, pageName, done) => boundary(action, pageName).then(() => finish(done), err => finish(done, err)),
+				(action, pageName, done) => Promise.resolve().then(() => boundary(action, pageName)).then(() => finish(done), err => finish(done, err)),
 				done => finish(done), fonts, (name, done) => requestFont(engine, id, signal, name, done));
 		} else {
 			const [entries, handle, compression] = args;
 			if (handle) output = await handle.createWritable();
 			payload = await globalThis.ofdgoEngineCall(engine.id, "ofdgoPackFiles", done => finish(done), entries.map(entry => ({ name: entry.name, size: entry.file.size })),
 				index => read(entries[index].file), write,
-				(completed, total, done) => { postMessage({ id, type: "conversion", phase: "pack", completed, total, memory: engineMemory.buffer.byteLength }); finish(done); },
+				(completed, total, done) => {
+					try { postMessage({ id, type: "conversion", phase: "pack", completed, total, memory: engineMemory.buffer.byteLength }); } catch {}
+					finish(done);
+				},
 				done => finish(done), compression);
 		}
 		signal.throwIfAborted();
@@ -219,9 +184,9 @@ async function handleBatchMessage(engine, { id, name, args }) {
 		}
 		postMessage({ id, ok: false, error: message, code: err.code, canceled: signal.aborted, memory: engineMemory.buffer.byteLength });
 	} finally {
-		credentials?.password?.fill(0);
-		credentials?.key?.fill(0);
-		credentials?.keyPassword?.fill(0);
+		zeroBuffer(credentials?.password);
+		zeroBuffer(credentials?.key);
+		zeroBuffer(credentials?.keyPassword);
 		channel.port1.close();
 		channel.port2.close();
 		operations.delete(id);
@@ -235,6 +200,11 @@ async function handleMessage(engine, { id, name, args }) {
 	let saveStamp;
 	let channel;
 	const signal = operations.get(id)?.signal;
+	if (signal?.aborted) {
+		operations.delete(id);
+		postMessage({ id, ok: false, error: "操作已取消", canceled: true });
+		return;
+	}
 	const cancellable = ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF", "ofdgoPagesText", "ofdgoResources", "ofdgoPrepareSave", "ofdgoSaveSnapshot", "ofdgoImportDocuments", "ofdgoImportImages", "ofdgoExportImages", "ofdgoOpenPDF", "ofdgoExportPage", "ofdgoExportDocument", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion", "ofdgoSaveDocument", "ofdgoSaveSigned", "ofdgoImportPages", "ofdgoProcessFonts"].includes(name);
 	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages" || name === "ofdgoImportDocuments";
 	const converting = name === "ofdgoOpenPDF";
@@ -257,10 +227,7 @@ async function handleMessage(engine, { id, name, args }) {
 		if (name === "ofdgoDetectFormat") {
 			const file = args[0], reader = new FileReaderSync();
 			channel = new MessageChannel();
-			args = [(offset, size) => new Uint8Array(reader.readAsArrayBuffer(file.slice(offset, offset + size))), file.size, done => {
-				channel.port1.onmessage = () => done("", false);
-				channel.port2.postMessage(null);
-			}];
+			args = [(offset, size) => new Uint8Array(reader.readAsArrayBuffer(file.slice(offset, offset + size))), file.size, done => yieldDone(channel, signal, done)];
 		}
 		if (name === "ofdgoChangeAttachment" && (args[0] === "add" || args[0] === "replace")) {
 			const files = args[3], reader = new FileReaderSync();
@@ -272,7 +239,7 @@ async function handleMessage(engine, { id, name, args }) {
 		if (name === "ofdgoChangeResource" && (args[0] === "add" || args[0] === "replace")) {
 			args[4] = new Uint8Array(new FileReaderSync().readAsArrayBuffer(args[4]));
 		}
-		if (["ofdgoImagePageSize", "ofdgoImagePreview"].includes(name) && args[0] instanceof Blob) args[0] = new Uint8Array(new FileReaderSync().readAsArrayBuffer(args[0]));
+		if (name === "ofdgoImagePreview" && args[0] instanceof Blob) args[0] = new Uint8Array(new FileReaderSync().readAsArrayBuffer(args[0]));
 		if (name === "ofdgoImportImages") {
 			const files = args[0], reader = new FileReaderSync();
 			args[0] = files.map(file => file.name);
@@ -285,24 +252,20 @@ async function handleMessage(engine, { id, name, args }) {
 		let size = 0;
 		if (cancellable) {
 			channel = new MessageChannel();
-			const finish = (done, err, commit = false) => {
-				channel.port1.onmessage = () => {
-					if (commit && !signal.aborted && !err) operations.delete(id);
-					done(err?.message || "", signal.aborted);
-				};
-				channel.port2.postMessage(null);
-			};
+			const finish = (done, err, commit = false) => yieldDone(channel, signal, done, err, () => {
+				if (commit && !signal?.aborted && !err) operations.delete(id);
+			});
 			if (resources) {
 				args.push(done => finish(done));
 			} else if (importing || converting) {
 				args.push((phase, completed, total, done) => {
-					postMessage({ id, type: importing ? "import" : "conversion", phase, completed, total });
+					try { postMessage({ id, type: importing ? "import" : "conversion", phase, completed, total }); } catch {}
 					finish(done, null, importing && phase === "commit");
 				});
 				if (converting) args.push((name, done) => requestFont(engine, id, signal, name, done));
 			} else if (processingFonts) {
 				args.push((phase, completed, total, done) => {
-					postMessage({ id, type: "fonts", phase, completed, total });
+					try { postMessage({ id, type: "fonts", phase, completed, total }); } catch {}
 					finish(done);
 				});
 			} else {
@@ -315,33 +278,37 @@ async function handleMessage(engine, { id, name, args }) {
 				if (file) output = await file.createWritable();
 				signal.throwIfAborted();
 				args.push((bytes, done) => {
-					if (signal.aborted) {
-						finish(done);
-						return;
-					}
-					size += bytes.length;
-					if (output) {
-						output.write(bytes).then(() => finish(done), (err) => finish(done, err));
-					} else {
-						chunks.push(new Blob([bytes]));
-						finish(done);
+					try {
+						if (signal.aborted) {
+							finish(done);
+							return;
+						}
+						size += bytes.length;
+						if (output) {
+							Promise.resolve().then(() => output.write(bytes)).then(() => finish(done), (err) => finish(done, err));
+						} else {
+							chunks.push(new Blob([bytes]));
+							finish(done);
+						}
+					} catch (err) {
+						finish(done, err);
 					}
 				});
 				if (name === "ofdgoExportDocument") {
 					args.push((completed, total, done) => {
-						postMessage({ id, type: "export", stage: "pages", completed, total });
+						try { postMessage({ id, type: "export", stage: "pages", completed, total }); } catch {}
 						finish(done);
 					});
 				} else if (name === "ofdgoExportVersion") {
 					args.push((phase, completed, total, done) => {
-						postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
+						try { postMessage({ id, type: "export", stage: "prepare", phase, completed, total }); } catch {}
 						finish(done);
 					}, compression || {mode: 0}, done => finish(done));
 				} else if (name === "ofdgoPrintPDF") {
 					args.push(done => finish(done));
 				} else if (saving) {
 					args.push((phase, completed, total, done) => {
-						postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
+						try { postMessage({ id, type: "export", stage: "prepare", phase, completed, total }); } catch {}
 						finish(done);
 					});
 					if (compression || name === "ofdgoSaveSnapshot") args.push(indices, compression || {mode: 0}, done => finish(done));
@@ -353,22 +320,20 @@ async function handleMessage(engine, { id, name, args }) {
 		if ((engine.pdf || engine.pdfSource && name === "ofdgoSaveDocument") && name !== "ofdgoOpenPDF") {
 			channel ||= new MessageChannel();
 			const context = await globalThis.ofdgoEngineCall(engine.id, "ofdgoPDFContext", null, (phase, completed, total, done) => {
-				postMessage({id, type: "conversion", phase, completed, total});
-				channel.port1.onmessage = () => done("", signal.aborted);
-				channel.port2.postMessage(null);
+				try { postMessage({id, type: "conversion", phase, completed, total}); } catch {}
+				yieldDone(channel, signal, done);
 			}, (name, done) => requestFont(engine, id, signal, name, done));
 			engine.pdf = JSON.parse(context).data === true;
 		}
 		const started = name === "ofdgoOpen" || name === "ofdgoRenderPage" ? performance.now() : null;
 		const payload = await globalThis.ofdgoEngineCall(engine.id, name, done => {
 			channel ||= new MessageChannel();
-			channel.port1.onmessage = () => done("", signal.aborted);
-			channel.port2.postMessage(null);
+			yieldDone(channel, signal, done);
 		}, ...args);
 		signal?.throwIfAborted();
 		const result = typeof payload === "string" ? JSON.parse(payload) : payload;
 		if (result.ok && name === "ofdgoOpenPDF") engine.pdf = engine.pdfSource = true;
-		if (result.ok && (name === "ofdgoOpen" || name === "ofdgoCreateDocument")) engine.pdf = engine.pdfSource = false;
+		if (result.ok && (name === "ofdgoOpen" || name === "ofdgoCreateDocument" || name === "ofdgoImportImages" && Number(args[2]) < 0)) engine.pdf = engine.pdfSource = false;
 		if (result.ok && name === "ofdgoLoadPDF" && result.data.done) engine.pdf = false;
 		if (started !== null && result.ok) result.elapsed = performance.now() - started;
 		if (cancellable && !importing && !converting && !processingFonts && !resources && result.ok) {
@@ -400,9 +365,9 @@ async function handleMessage(engine, { id, name, args }) {
 		}
 		postMessage(result);
 	} finally {
-		password?.fill(0);
-		key?.fill(0);
-		keyPassword?.fill(0);
+		zeroBuffer(password);
+		zeroBuffer(key);
+		zeroBuffer(keyPassword);
 		channel?.port1.close();
 		channel?.port2.close();
 		operations.delete(id);
@@ -410,7 +375,7 @@ async function handleMessage(engine, { id, name, args }) {
 }
 
 function exitWASM(err) {
-	rejectRuntime(err || new Error("引擎运行中断"));
+	runtime.reject(err || new Error("引擎运行中断"));
 	self.postMessage({ type: "exit", error: err?.message || "引擎运行中断" });
 	self.close();
 }
@@ -422,8 +387,82 @@ async function loadWASM(module) {
 	self.postMessage({ type: "progress", phase: "start", text: "正在启动引擎", percent: 58 });
 	go.run(instance).then(exitWASM, exitWASM);
 	if (!go.exited) {
-		resolveRuntime();
+		runtime.resolve();
 	}
 }
 
+runtimeReady.catch(() => {});
+self.onmessage = ({ data }) => {
+	if (data.type === "module") {
+		if (data.error) exitWASM(new Error(data.error));
+		else loadWASM(data.module).catch(exitWASM);
+		return;
+	}
+	const engineID = data.engineID;
+	if (typeof engineID !== "string" || !engineID) {
+		self.postMessage({ engineID, id: data.id, ok: false, error: "missing engine ID" });
+		return;
+	}
+	if (data.type === "open") {
+		if (engines.has(engineID)) {
+			self.postMessage({ engineID, type: "exit", error: "engine already exists" });
+			return;
+		}
+		const engine = { id: engineID, operations: new Map(), fontRequests: new Map(), active: new Set(), closed: false, outputFormats: null };
+		engines.set(engineID, engine);
+		engine.pending = runtimeReady.then(async () => {
+			if (engine.closed) return;
+			const opened = JSON.parse(globalThis.ofdgoEngineOpen(engineID));
+			if (!opened.ok) throw new Error(opened.error);
+			const backends = JSON.parse(await globalThis.ofdgoEngineCall(engineID, "ofdgoRenderBackends", null));
+			if (!backends.ok) throw new Error(backends.error);
+			if (!engine.closed) self.postMessage({ engineID, type: "ready", backends: backends.data, memory: engineMemory.buffer.byteLength });
+		}).catch(error => {
+			engine.closed = true;
+			self.postMessage({ engineID, type: "exit", error: error.message });
+		});
+		return;
+	}
+	const engine = engines.get(engineID);
+	if (!engine && data.type === "close") {
+		self.postMessage({ engineID, type: "closed" });
+		return;
+	}
+	if (!engine || engine.closed && data.type !== "close") {
+		self.postMessage({ engineID, id: data.id, ok: false, error: "unknown or closed engine" });
+		return;
+	}
+	if (data.type === "close") {
+		engine.closed = true;
+		for (const operation of engine.operations.values()) operation.abort();
+		engine.pending.catch(() => {}).then(async () => {
+			await Promise.allSettled([...engine.active]);
+			await runtimeReady;
+			globalThis.ofdgoEngineClose(engineID);
+		}).catch(() => {}).finally(() => {
+			engines.delete(engineID);
+			self.postMessage({ engineID, type: "closed" });
+		});
+		return;
+	}
+	if (data.type === "font") {
+		engine.fontRequests.get(data.request)?.(data);
+		engine.fontRequests.delete(data.request);
+		return;
+	}
+	if (data.type === "cancel") {
+		engine.operations.get(data.id)?.abort();
+		return;
+	}
+	engine.operations.set(data.id, new AbortController());
+	engine.pending = engine.pending.then(() => {
+		const operation = (data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" ? handleBatchMessage(engine, data) : handleMessage(engine, data)).catch(error => {
+			engine.operations.delete(data.id);
+			self.postMessage({ engineID, id: data.id, ok: false, error: error.message });
+		});
+		engine.active.add(operation);
+		operation.finally(() => engine.active.delete(operation));
+		if (data.name !== "ofdgoSaveSnapshot") return operation;
+	});
+};
 self.postMessage({ type: "module" });

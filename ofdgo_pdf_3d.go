@@ -18,44 +18,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"image"
 	"maps"
 	"math"
 	"strings"
 
+	basethreed "github.com/xiaoqidun/ofdgo/internal/base/threed"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
 // pdfModelAttachmentLimit 限制单次转换保留的共享模型索引数量
 const pdfModelAttachmentLimit = 1024
-
-// PDFThreeDRenderOptions 控制PDF三维视口的静态绘制，不改变注解激活状态
-// 缓存与实例上限为0时采用U3DRenderOptions的默认值
-// ResolveTexture按原始URL提供外部纹理，空值不访问外部资源
-// Nodes按名称替换PDF视图中的节点状态，可指定动作轨道与采样时间，不改变原始注解
-// Time以秒指定模型动画的采样时刻，零值为初始时刻
-type PDFThreeDRenderOptions struct {
-	Width, Height  int
-	MaxMemoryBytes int64
-	MaxInstances   int
-	ResolveTexture U3DTextureResolver
-	Nodes          []U3DNodeState
-	Time           float64
-}
-
-// RenderPDFThreeD 按PDF相机、投影、背景与灯光绘制指定时刻的3DB区域，不执行脚本
-// 返回图像不含3DB以外的注解背景，未支持的视图效果返回明确错误
-// 每次从传入场景建立独立节点状态，不继承此前绘制的运行时状态
-// 入参: ctx 取消上下文, model 解码后的U3D模型, source PDF三维参数, options 输出与资源限制
-// 返回: *image.RGBA 不透明图像, error 参数、能力、预算或取消错误
-func RenderPDFThreeD(ctx context.Context, model *U3DModel, source pdfgo.ThreeD, options PDFThreeDRenderOptions) (*image.RGBA, error) {
-	return codecpdf.RenderThreeD(ctx, model, source, codecpdf.ThreeDRenderOptions{
-		Width: options.Width, Height: options.Height,
-		MaxMemoryBytes: options.MaxMemoryBytes, MaxInstances: options.MaxInstances,
-		ResolveTexture: options.ResolveTexture, Nodes: options.Nodes, Time: options.Time,
-	})
-}
 
 // pdfThreeDMarkupState 复用同页批注的宿主解析及模型校验，不保留模型解码缓冲
 type pdfThreeDMarkupState struct {
@@ -74,7 +47,7 @@ func (p *pdfImporter) threeDAnnotation(ctx context.Context, page *pdfgo.Page, an
 	var data []byte
 	id := p.modelAttachments[source.Stream]
 	if id == "" {
-		data, err = source.Stream.DecodeContext(ctx)
+		data, err = p.reader.DecodeStreamContext(ctx, source.Stream)
 		if err != nil {
 			return p.interactiveAppearanceFallback(ctx, page, annotation, "model", err)
 		}
@@ -90,15 +63,14 @@ func (p *pdfImporter) threeDAnnotation(ctx context.Context, page *pdfgo.Page, an
 		}
 	}
 	action := Action{Event: "CLICK", GotoA: &GotoA{AttachID: id}}
+	appearance, err := p.reader.ReadAnnotationAppearance(annotation)
+	if err != nil {
+		return p.interactiveAppearanceFallback(ctx, page, annotation, "appearance", err)
+	}
+	hasAppearance := appearance != nil
 	var paint func(*pdfImporter) error
+	hasStaticView := false
 	if source.ActivationPolicy.Activation != "XA" {
-		appearance, err := p.reader.ReadAnnotationAppearance(annotation)
-		if err != nil {
-			return p.interactiveAppearanceFallback(ctx, page, annotation, "appearance", err)
-		}
-		if appearance == nil {
-			return fmt.Errorf("missing PDF 3D normal appearance")
-		}
 		if data == nil {
 			data, err = p.editor.source.reader.AttachmentData(id)
 			if err != nil {
@@ -113,15 +85,29 @@ func (p *pdfImporter) threeDAnnotation(ctx context.Context, page *pdfgo.Page, an
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return err
 			}
-			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF 3D rendering unavailable; normal appearance retained: " + err.Error()})
+			if hasAppearance {
+				p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF 3D rendering unavailable; normal appearance retained: " + err.Error()})
+			} else {
+				p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF 3D rendering unavailable; normal appearance missing: " + err.Error()})
+			}
+		} else {
+			hasStaticView = paint != nil
 		}
+	}
+	if !hasStaticView && !hasAppearance {
+		if err := p.recoverPDFObject(ctx, "Annotation.Appearance", annotation.Dictionary, fmt.Errorf("missing PDF 3D normal appearance")); err != nil {
+			return err
+		}
+		paint = func(*pdfImporter) error { return nil }
 	}
 	if err := p.paintedAnnotation(ctx, page, annotation, paint, action); err != nil {
 		return err
 	}
-	message := "PDF 3D appearance and original model retained; advanced interaction not transferred to OFD"
-	if paint != nil {
+	message := "PDF 3D original model retained; normal appearance missing and interactive rendering not transferred to OFD"
+	if hasStaticView {
 		message = "PDF 3D static view and original model retained; interactive rendering not transferred to OFD"
+	} else if hasAppearance {
+		message = "PDF 3D appearance and original model retained; advanced interaction not transferred to OFD"
 	}
 	p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: message})
 	return nil
@@ -164,23 +150,32 @@ func (p *pdfImporter) threeDPainter(ctx context.Context, page *pdfgo.Page, sourc
 		if source.Format != "U3D" {
 			return nil, &pdfgo.UnsupportedError{Feature: "3D model format " + string(source.Format)}
 		}
-		model, err := DecodeU3D(ctx, data, U3DOptions{})
+		model, err := basethreed.DecodeU3D(ctx, data, basethreed.U3DOptions{})
 		if err != nil {
 			return nil, err
 		}
 		widthMM := width * math.Hypot(p.matrix[0], p.matrix[1])
 		heightMM := height * math.Hypot(p.matrix[2], p.matrix[3])
+		const pdfMaxThreeDPixels = 64 << 20
 		w, h := math.Ceil(widthMM*p.rasterDPI/25.4), math.Ceil(heightMM*p.rasterDPI/25.4)
 		if !finite(w) || !finite(h) || w <= 0 || h <= 0 || w > 1<<30 || h > 1<<30 {
 			return nil, fmt.Errorf("invalid PDF 3D raster dimensions")
 		}
-		options := PDFThreeDRenderOptions{Width: int(w), Height: int(h)}
+		if w*h > pdfMaxThreeDPixels {
+			if p.warning == nil {
+				return nil, fmt.Errorf("PDF 3D raster pixels exceed limit")
+			}
+			scale := math.Sqrt(pdfMaxThreeDPixels / (w * h))
+			w, h = math.Max(1, math.Floor(w*scale)), math.Max(1, math.Floor(h*scale))
+			p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: fmt.Sprintf("oversized PDF 3D raster scaled to %dx%d", int(w), int(h))})
+		}
+		options := codecpdf.ThreeDRenderOptions{Width: int(w), Height: int(h)}
 		if p.resolveFile != nil {
 			options.ResolveTexture = func(ctx context.Context, address string) ([]byte, error) {
 				return p.resolveFile(ctx, pdfgo.FileSpecification{Name: address, FileSystem: "URL"})
 			}
 		}
-		img, err := RenderPDFThreeD(ctx, model, source, options)
+		img, err := codecpdf.RenderThreeD(ctx, model, source, options)
 		if err != nil {
 			return nil, err
 		}
@@ -214,7 +209,7 @@ func (p *pdfImporter) threeDMarkupAnnotation(ctx context.Context, annotation pdf
 		var err error
 		source, err = p.reader.ReadThreeDContext(ctx, markup.Annotation)
 		if err != nil {
-			return annotation, err
+			return annotation, p.recoverPDFObject(ctx, "Annotation.ExData", annotation.Dictionary["ExData"], err)
 		}
 		if markup.Annotation.Reference != (pdfgo.Reference{}) {
 			if state.sources == nil {
@@ -227,9 +222,9 @@ func (p *pdfImporter) threeDMarkupAnnotation(ctx context.Context, annotation pdf
 		sum, ok := state.sums[source.Stream]
 		if !ok {
 			var err error
-			sum, err = pdfgo.ThreeDArtworkChecksum(ctx, source.Stream)
+			sum, err = p.reader.ThreeDArtworkChecksum(ctx, source.Stream)
 			if err != nil {
-				return annotation, err
+				return annotation, p.recoverPDFObject(ctx, "Annotation.ExData", annotation.Dictionary["ExData"], err)
 			}
 			if state.sums == nil {
 				state.sums = make(map[*pdfgo.Stream][16]byte)
@@ -244,7 +239,7 @@ func (p *pdfImporter) threeDMarkupAnnotation(ctx context.Context, annotation pdf
 	if !visible {
 		flags, err := p.reader.ReadAnnotationFlags(annotation)
 		if err != nil {
-			return annotation, err
+			return annotation, p.recoverPDFObject(ctx, "Annotation.F", annotation.Dictionary["F"], err)
 		}
 		annotation.Dictionary = maps.Clone(annotation.Dictionary)
 		annotation.Dictionary["F"] = pdfgo.Integer(flags | 2)

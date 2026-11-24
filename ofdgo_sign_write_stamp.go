@@ -24,88 +24,11 @@ import (
 	"strconv"
 )
 
-// SignatureStampCapabilities 返回签章外观的编辑能力，不以签名有效性限制编辑
-// 共享历史签名无法独立改写时保留原入口，避免改变其他版本
-// 入参: page 页面索引, path 签名及外观标识
-// 返回: ObjectCapabilities 移动缩放及删除能力, error 外观或读取错误
-func (e *Editor) SignatureStampCapabilities(page int, path ObjectPath) (ObjectCapabilities, error) {
-	if _, err := e.signatureStamp(page, path); err != nil {
-		return ObjectCapabilities{}, err
-	}
-	reader, err := e.reader(nil)
-	if err != nil {
-		return ObjectCapabilities{}, err
-	}
-	defer reader.Close()
-	doc, err := reader.Doc()
-	if err != nil {
-		return ObjectCapabilities{}, err
-	}
-	if err := reader.signatureStampVersionDependency(context.Background(), reader.ResPath(doc.Signatures)); err != nil {
-		if !errors.Is(err, ErrSignatureDependency) {
-			return ObjectCapabilities{}, err
-		}
-		return ObjectCapabilities{Reason: err.Error(), ReasonCode: EditUnsupportedObject}, nil
-	}
-	return ObjectCapabilities{Transform: true, Delete: true, Stretch: true}, nil
-}
-
-// SignaturePageStamps 生成所选页面相同毫米坐标的印章位置并检查页内范围
-// 入参: pages 从1开始且不重复的页码, box 完整印章区域
-// 返回: []SignatureStamp 可传入签署选项的位置, error 错误信息
-func (r *Reader) SignaturePageStamps(pages []int, box Box) ([]SignatureStamp, error) {
-	if r == nil || len(pages) == 0 || !signatureWriteBoxValid(box) {
-		return nil, fmt.Errorf("invalid page stamp parameters")
-	}
-	doc, err := r.Doc()
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[int]bool)
-	stamps := make([]SignatureStamp, 0, len(pages))
-	for _, page := range pages {
-		if page < 1 || page > len(doc.Pages.Page) || seen[page] {
-			return nil, fmt.Errorf("invalid stamp page: %d", page)
-		}
-		seen[page] = true
-		stamps = append(stamps, SignatureStamp{PageRef: doc.Pages.Page[page-1].ID, Boundary: signatureWriteBox(box)})
-	}
-	return signatureWriteStamps(r, stamps, true)
-}
-
-// SignatureSeamStamps 生成页面右侧的等宽骑缝印章位置
-// 页码从1开始，按传入顺序分割同一印章；box.X为右侧内缩，Y为顶部偏移，W/H为完整印章尺寸
-// 入参: pages 至少两页且不重复, box 印章参数，单位毫米
-// 返回: []SignatureStamp 可传入签署选项的位置, error 错误信息
-func (r *Reader) SignatureSeamStamps(pages []int, box Box) ([]SignatureStamp, error) {
-	if r == nil || len(pages) < 2 || !signatureWriteBoxValid(box) || box.X < 0 || box.Y < 0 {
-		return nil, fmt.Errorf("invalid seam stamp parameters")
-	}
-	doc, err := r.Doc()
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[int]bool)
-	stamps := make([]SignatureStamp, 0, len(pages))
-	width := box.W / float64(len(pages))
-	for i, page := range pages {
-		if page < 1 || page > len(doc.Pages.Page) || seen[page] {
-			return nil, fmt.Errorf("invalid seam stamp page: %d", page)
-		}
-		seen[page] = true
-		area, err := r.PageArea(doc.Pages.Page[page-1])
-		if err != nil {
-			return nil, err
-		}
-		physical, err := parsePageAreaBox(area)
-		if err != nil {
-			return nil, err
-		}
-		clip := Box{X: float64(i) * width, W: width, H: box.H}
-		boundary := Box{X: physical.X + physical.W - box.X - width - clip.X, Y: physical.Y + box.Y, W: box.W, H: box.H}
-		stamps = append(stamps, SignatureStamp{PageRef: doc.Pages.Page[page-1].ID, Boundary: signatureWriteBox(boundary), Clip: signatureWriteBox(clip)})
-	}
-	return signatureWriteStamps(r, stamps, true)
+// SignatureStampCapability 描述页面中单个签章外观及其编辑能力
+type SignatureStampCapability struct {
+	Stamp        Stamp
+	Path         ObjectPath
+	Capabilities ObjectCapabilities
 }
 
 // signatureStampEdit 保存同一签名描述中的外观修改，原签名值及扩展原样保留
@@ -115,11 +38,238 @@ type signatureStampEdit struct {
 	patches []editorXMLPatch
 }
 
+// signatureWriteStamps 复用Reader定位并检查外观几何参数
+// 入参: r 阅读器, stamps 位置
+// 返回: []SignatureStamp 独立位置列表, error 错误信息
+func signatureWriteStamps(r *Reader, stamps []SignatureStamp) ([]SignatureStamp, error) {
+	positions, err := r.SignatureStampPositions(stamps)
+	if err != nil {
+		return nil, err
+	}
+	doc, err := r.docInternal()
+	if err != nil {
+		return nil, err
+	}
+	result := append([]SignatureStamp(nil), stamps...)
+	if len(result) != 0 {
+		pages := make(map[string]bool)
+		for _, page := range doc.Pages.Page {
+			id := editorResourceID(page.ID)
+			if id == "" || pages[id] {
+				return nil, fmt.Errorf("ambiguous stamp page ID: %s", page.ID)
+			}
+			pages[id] = true
+		}
+	}
+	ids := make(map[string]bool)
+	for _, stamp := range stamps {
+		if stamp.ID == "" {
+			continue
+		}
+		if !ofdXMLIDValid(stamp.ID) || ids[stamp.ID] {
+			return nil, fmt.Errorf("invalid or duplicate stamp ID: %s", stamp.ID)
+		}
+		ids[stamp.ID] = true
+	}
+	for i, position := range positions {
+		result[i].PageRef = doc.Pages.Page[position.Page-1].ID
+		box := position.Box
+		if !signatureWriteBoxValid(box) {
+			return nil, fmt.Errorf("invalid stamp boundary")
+		}
+		visible := box
+		if clip := position.ClipBox; clip != nil {
+			if !signatureWriteBoxValid(*clip) || clip.X < 0 || clip.Y < 0 || clip.X+clip.W > box.W+1e-9 || clip.Y+clip.H > box.H+1e-9 {
+				return nil, fmt.Errorf("invalid stamp clip")
+			}
+			visible = Box{X: box.X + clip.X, Y: box.Y + clip.Y, W: clip.W, H: clip.H}
+		}
+		area, err := r.PageArea(doc.Pages.Page[position.Page-1])
+		if err != nil {
+			return nil, err
+		}
+		page, err := parsePageAreaBox(area)
+		if err != nil {
+			return nil, err
+		}
+		if visible.X < page.X-1e-9 || visible.Y < page.Y-1e-9 || visible.X+visible.W > page.X+page.W+1e-9 || visible.Y+visible.H > page.Y+page.H+1e-9 {
+			return nil, fmt.Errorf("stamp is outside page %d", position.Page)
+		}
+	}
+	return result, nil
+}
+
+// signatureWriteBoxValid 判断印章区域是否有限且尺寸为正
+// 入参: box 区域
+// 返回: bool 是否有效
+func signatureWriteBoxValid(box Box) bool {
+	for _, value := range []float64{box.X, box.Y, box.W, box.H} {
+		if math.IsInf(value, 0) || math.IsNaN(value) {
+			return false
+		}
+	}
+	return box.W > 0 && box.H > 0
+}
+
+// signatureWriteBox 编码印章区域
+// 入参: box 区域
+// 返回: string 区域文本
+func signatureWriteBox(box Box) string {
+	return strconv.FormatFloat(box.X, 'f', -1, 64) + " " + strconv.FormatFloat(box.Y, 'f', -1, 64) + " " + strconv.FormatFloat(box.W, 'f', -1, 64) + " " + strconv.FormatFloat(box.H, 'f', -1, 64)
+}
+
+// SignatureStampCapabilities 返回签章外观的编辑能力，不以签名有效性限制编辑
+// 共享历史签名无法独立改写时保留原入口，避免改变其他版本
+// 入参: page 页面索引, path 签名及外观标识
+// 返回: ObjectCapabilities 移动缩放及删除能力, error 外观或读取错误
+func (e *Editor) SignatureStampCapabilities(page int, path ObjectPath) (ObjectCapabilities, error) {
+	if page < 0 || page >= len(e.pages) {
+		return ObjectCapabilities{}, fmt.Errorf("page index %d out of range", page)
+	}
+	if e.source == nil || e.source.pages[e.pages[page].ID] == nil {
+		return ObjectCapabilities{}, fmt.Errorf("signature appearance not found: %s/%s", path.Signature, path.ID)
+	}
+	reader := e.source.reader
+	doc, err := reader.Doc()
+	if err != nil {
+		return ObjectCapabilities{}, err
+	}
+	if doc.Signatures == "" {
+		return ObjectCapabilities{}, fmt.Errorf("signature appearance not found: %s/%s", path.Signature, path.ID)
+	}
+	stamps, err := reader.PageStamps(e.pages[page].ID)
+	if err != nil {
+		return ObjectCapabilities{}, err
+	}
+	found := false
+	for _, stamp := range stamps {
+		if stamp.ID == path.ID && stamp.SignatureID == path.Signature {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return ObjectCapabilities{}, fmt.Errorf("signature appearance not found: %s/%s", path.Signature, path.ID)
+	}
+	return reader.signatureStampCapabilities(context.Background(), doc)
+}
+
+// PageSignatureStampCapabilities 批量返回指定页面全部签章外观及其编辑能力，复用单次只读快照
+// 入参: page 零基页面索引
+// 返回: []SignatureStampCapability 页面签章外观及能力清单, error 页面或读取错误
+func (e *Editor) PageSignatureStampCapabilities(page int) ([]SignatureStampCapability, error) {
+	if page < 0 || page >= len(e.pages) {
+		return nil, fmt.Errorf("page index %d out of range", page)
+	}
+	if e.source == nil || e.source.pages[e.pages[page].ID] == nil {
+		return []SignatureStampCapability{}, nil
+	}
+	reader := e.source.reader
+	doc, err := reader.Doc()
+	if err != nil {
+		return nil, err
+	}
+	if doc.Signatures == "" {
+		return []SignatureStampCapability{}, nil
+	}
+	stamps, err := reader.PageStamps(e.pages[page].ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(stamps) == 0 {
+		return []SignatureStampCapability{}, nil
+	}
+	capability, err := reader.signatureStampCapabilities(context.Background(), doc)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]SignatureStampCapability, len(stamps))
+	for i, stamp := range stamps {
+		result[i] = SignatureStampCapability{
+			Stamp:        stamp,
+			Path:         ObjectPath{ID: stamp.ID, Signature: stamp.SignatureID},
+			Capabilities: capability,
+		}
+	}
+	return result, nil
+}
+
+// SignaturePageStamps 生成所选页面相同毫米坐标的印章位置并检查页内范围
+// 入参: pages 从0开始且不重复的页码, box 完整印章区域
+// 返回: []SignatureStamp 可传入签署选项的位置, error 错误信息
+func (r *Reader) SignaturePageStamps(pages []int, box Box) ([]SignatureStamp, error) {
+	if r == nil || len(pages) == 0 || !signatureWriteBoxValid(box) {
+		return nil, fmt.Errorf("invalid page stamp parameters")
+	}
+	doc, err := r.docInternal()
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[int]bool)
+	stamps := make([]SignatureStamp, 0, len(pages))
+	for _, page := range pages {
+		if page < 0 || page >= len(doc.Pages.Page) || seen[page] {
+			return nil, fmt.Errorf("invalid stamp page: %d", page)
+		}
+		seen[page] = true
+		stamps = append(stamps, SignatureStamp{PageRef: doc.Pages.Page[page].ID, Boundary: signatureWriteBox(box)})
+	}
+	return signatureWriteStamps(r, stamps)
+}
+
+// SignatureSeamStamps 生成页面右侧的等宽骑缝印章位置
+// 页码从0开始，按传入顺序分割同一印章；box.X为右侧内缩，Y为顶部偏移，W/H为完整印章尺寸
+// 入参: pages 至少两页且不重复, box 印章参数，单位毫米
+// 返回: []SignatureStamp 可传入签署选项的位置, error 错误信息
+func (r *Reader) SignatureSeamStamps(pages []int, box Box) ([]SignatureStamp, error) {
+	if r == nil || len(pages) < 2 || !signatureWriteBoxValid(box) || box.X < 0 || box.Y < 0 {
+		return nil, fmt.Errorf("invalid seam stamp parameters")
+	}
+	doc, err := r.docInternal()
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[int]bool)
+	stamps := make([]SignatureStamp, 0, len(pages))
+	width := box.W / float64(len(pages))
+	for i, page := range pages {
+		if page < 0 || page >= len(doc.Pages.Page) || seen[page] {
+			return nil, fmt.Errorf("invalid seam stamp page: %d", page)
+		}
+		seen[page] = true
+		area, err := r.PageArea(doc.Pages.Page[page])
+		if err != nil {
+			return nil, err
+		}
+		physical, err := parsePageAreaBox(area)
+		if err != nil {
+			return nil, err
+		}
+		clip := Box{X: float64(i) * width, W: width, H: box.H}
+		boundary := Box{X: physical.X + physical.W - box.X - width - clip.X, Y: physical.Y + box.Y, W: box.W, H: box.H}
+		stamps = append(stamps, SignatureStamp{PageRef: doc.Pages.Page[page].ID, Boundary: signatureWriteBox(boundary), Clip: signatureWriteBox(clip)})
+	}
+	return signatureWriteStamps(r, stamps)
+}
+
+// signatureStampCapabilities 按文档签章版本依赖返回统一的签章外观编辑能力
+// 入参: ctx 取消上下文, doc 当前文档结构
+// 返回: ObjectCapabilities 移动缩放及删除能力, error 读取错误
+func (r *Reader) signatureStampCapabilities(ctx context.Context, doc *Document) (ObjectCapabilities, error) {
+	if err := r.signatureStampVersionDependency(ctx, r.ResPath(doc.Signatures)); err != nil {
+		if !errors.Is(err, ErrSignatureDependency) {
+			return ObjectCapabilities{}, err
+		}
+		return ObjectCapabilities{Reason: err.Error(), ReasonCode: EditUnsupportedObject}, nil
+	}
+	return ObjectCapabilities{Transform: true, Delete: true, Stretch: true}, nil
+}
+
 // signatureStampVersionDependency 判断文档级签名是否被其他历史入口共用，不改写版本语义
 // 入参: ctx 取消上下文, name 签名列表路径
 // 返回: error 历史依赖或读取错误
 func (r *Reader) signatureStampVersionDependency(ctx context.Context, name string) error {
-	if r.versionInfo != nil && r.OFD.DocBody[r.documentIndex].DocRoot != "" {
+	if r.versionInfo != nil && r.ofd.DocBody[r.documentIndex].DocRoot != "" {
 		return fmt.Errorf("%w: signature appearance is shared with the main document", ErrSignatureDependency)
 	}
 	versions, err := r.DocumentVersionsContext(ctx)
@@ -209,7 +359,14 @@ func (r *Reader) signatureStampChanges(ctx context.Context, name string, changes
 		if err != nil {
 			return nil, err
 		}
-		node := ofd.childAt("DocBody", r.documentIndex).child("Signatures")
+		body := ofd.childAt("DocBody", r.documentIndex)
+		if body == nil {
+			return nil, fmt.Errorf("missing document body")
+		}
+		node := body.child("Signatures")
+		if node == nil {
+			return nil, fmt.Errorf("missing document signatures entry")
+		}
 		parts["OFD.xml"] = editorPatchXML(entry, []editorXMLPatch{editorXMLContent(entry, node, editorFontXMLText("/"+target))})
 	}
 	parts[target] = editorPatchXML(data, patches)
@@ -220,19 +377,21 @@ func (r *Reader) signatureStampChanges(ctx context.Context, name string, changes
 // 入参: page 页面索引, path 签名及外观标识
 // 返回: Stamp 当前外观, error 页面、签名或读取错误
 func (e *Editor) signatureStamp(page int, path ObjectPath) (Stamp, error) {
-	reader, err := e.reader(nil)
-	if err != nil {
-		return Stamp{}, err
+	if page < 0 || page >= len(e.pages) {
+		return Stamp{}, fmt.Errorf("page index %d out of range", page)
 	}
-	defer reader.Close()
+	if e.source == nil || e.source.pages[e.pages[page].ID] == nil {
+		return Stamp{}, fmt.Errorf("signature appearance not found: %s/%s", path.Signature, path.ID)
+	}
+	reader := e.source.reader
 	doc, err := reader.Doc()
 	if err != nil {
 		return Stamp{}, err
 	}
-	if page < 0 || page >= len(doc.Pages.Page) {
-		return Stamp{}, fmt.Errorf("page index %d out of range", page)
+	if doc.Signatures == "" {
+		return Stamp{}, fmt.Errorf("signature appearance not found: %s/%s", path.Signature, path.ID)
 	}
-	stamps, err := reader.PageStamps(doc.Pages.Page[page].ID)
+	stamps, err := reader.PageStamps(e.pages[page].ID)
 	if err != nil {
 		return Stamp{}, err
 	}
@@ -245,19 +404,24 @@ func (e *Editor) signatureStamp(page int, path ObjectPath) (Stamp, error) {
 }
 
 // changeSignatureStamps 原子修改或移除签章外观，保留签名值，由验签反映修改后的真实状态
-// 入参: page 页面索引, paths 签章路径, matrix 平移或正向缩放，nil删除外观
-// 返回: error 路径、变换、读取或提交错误
-func (e *Editor) changeSignatureStamps(page int, paths []ObjectPath, matrix *Matrix) error {
+// 入参: ctx 取消上下文, page 页面索引, paths 签章外观路径列表, matrix 变换矩阵
+// 返回: error 修改或提交错误
+func (e *Editor) changeSignatureStamps(ctx context.Context, page int, paths []ObjectPath, matrix *Matrix) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if matrix != nil && (matrix.b != 0 || matrix.c != 0 || matrix.a <= 0 || matrix.d <= 0) {
 		return fmt.Errorf("signature appearances support translation and positive scaling")
 	}
-	ctx := context.Background()
-	reader, err := e.reader(nil)
+	reader, err := e.readerContext(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer reader.Close()
-	doc, err := reader.Doc()
+	doc, err := reader.docContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -265,7 +429,7 @@ func (e *Editor) changeSignatureStamps(page int, paths []ObjectPath, matrix *Mat
 		return fmt.Errorf("page index %d out of range", page)
 	}
 	listName := reader.ResPath(doc.Signatures)
-	data, err := reader.readFile(listName)
+	data, err := reader.readFileViewContext(ctx, listName)
 	if err != nil {
 		return err
 	}
@@ -274,7 +438,16 @@ func (e *Editor) changeSignatureStamps(page int, paths []ObjectPath, matrix *Mat
 		return err
 	}
 	files := make(map[string]*signatureStampEdit)
+	seen := make(map[[2]string]bool, len(paths))
 	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		key := [2]string{path.Signature, path.ID}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		index := slices.IndexFunc(list.List, func(signature Signature) bool { return signature.ID == path.Signature })
 		if index < 0 {
 			return fmt.Errorf("signature not found: %s", path.Signature)
@@ -282,11 +455,11 @@ func (e *Editor) changeSignatureStamps(page int, paths []ObjectPath, matrix *Mat
 		name := signatureRefPath(listName, list.List[index].BaseLoc)
 		file := files[path.Signature]
 		if file == nil {
-			data, err := reader.readFile(name)
+			data, err := reader.readFileViewContext(ctx, name)
 			if err != nil {
 				return err
 			}
-			root, err := parseEditorXML(data)
+			root, err := parseEditorXMLContext(ctx, data)
 			if err != nil {
 				return err
 			}
@@ -319,7 +492,7 @@ func (e *Editor) changeSignatureStamps(page int, paths []ObjectPath, matrix *Mat
 		if !signatureWriteBoxValid(box) {
 			return fmt.Errorf("invalid signature appearance boundary")
 		}
-		if *matrix == IdentityMatrix {
+		if *matrix == IdentityMatrix() {
 			continue
 		}
 		patch, err := editorXMLAttributePatch(file.data, target, "Boundary", signatureWriteBox(box))
@@ -363,83 +536,4 @@ func (e *Editor) changeSignatureStamps(page int, paths []ObjectPath, matrix *Mat
 		return err
 	}
 	return e.commitResourceSnapshot(ctx, reader)
-}
-
-// signatureWriteStamps 复用Reader定位并检查外观几何参数
-// 入参: r 阅读器, stamps 位置, seal 是否电子印章
-// 返回: []SignatureStamp 独立位置列表, error 错误信息
-func signatureWriteStamps(r *Reader, stamps []SignatureStamp, seal bool) ([]SignatureStamp, error) {
-	positions, err := r.SignatureStampPositions(stamps)
-	if err != nil {
-		return nil, err
-	}
-	doc, err := r.Doc()
-	if err != nil {
-		return nil, err
-	}
-	result := append([]SignatureStamp(nil), stamps...)
-	if len(result) != 0 {
-		pages := make(map[string]bool)
-		for _, page := range doc.Pages.Page {
-			id := editorResourceID(page.ID)
-			if id == "" || pages[id] {
-				return nil, fmt.Errorf("ambiguous stamp page ID: %s", page.ID)
-			}
-			pages[id] = true
-		}
-	}
-	ids := make(map[string]bool)
-	for _, stamp := range stamps {
-		if stamp.ID == "" {
-			continue
-		}
-		if !ofdXMLIDValid(stamp.ID) || ids[stamp.ID] {
-			return nil, fmt.Errorf("invalid or duplicate stamp ID: %s", stamp.ID)
-		}
-		ids[stamp.ID] = true
-	}
-	for _, position := range positions {
-		box := position.Box
-		if !signatureWriteBoxValid(box) {
-			return nil, fmt.Errorf("invalid stamp boundary")
-		}
-		visible := box
-		if clip := position.ClipBox; clip != nil {
-			if !signatureWriteBoxValid(*clip) || clip.X < 0 || clip.Y < 0 || clip.X+clip.W > box.W+1e-9 || clip.Y+clip.H > box.H+1e-9 {
-				return nil, fmt.Errorf("invalid stamp clip")
-			}
-			visible = Box{X: box.X + clip.X, Y: box.Y + clip.Y, W: clip.W, H: clip.H}
-		}
-		area, err := r.PageArea(doc.Pages.Page[position.Page-1])
-		if err != nil {
-			return nil, err
-		}
-		page, err := parsePageAreaBox(area)
-		if err != nil {
-			return nil, err
-		}
-		if visible.X < page.X-1e-9 || visible.Y < page.Y-1e-9 || visible.X+visible.W > page.X+page.W+1e-9 || visible.Y+visible.H > page.Y+page.H+1e-9 {
-			return nil, fmt.Errorf("stamp is outside page %d", position.Page)
-		}
-	}
-	return result, nil
-}
-
-// signatureWriteBoxValid 判断印章区域是否有限且尺寸为正
-// 入参: box 区域
-// 返回: bool 是否有效
-func signatureWriteBoxValid(box Box) bool {
-	for _, value := range []float64{box.X, box.Y, box.W, box.H} {
-		if math.IsInf(value, 0) || math.IsNaN(value) {
-			return false
-		}
-	}
-	return box.W > 0 && box.H > 0
-}
-
-// signatureWriteBox 编码印章区域
-// 入参: box 区域
-// 返回: string 区域文本
-func signatureWriteBox(box Box) string {
-	return strconv.FormatFloat(box.X, 'f', -1, 64) + " " + strconv.FormatFloat(box.Y, 'f', -1, 64) + " " + strconv.FormatFloat(box.W, 'f', -1, 64) + " " + strconv.FormatFloat(box.H, 'f', -1, 64)
 }

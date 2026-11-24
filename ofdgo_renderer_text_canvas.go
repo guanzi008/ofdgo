@@ -27,15 +27,37 @@ import (
 // ptPerMM 为毫米转换为排版点的比例
 const ptPerMM = 72.0 / 25.4
 
+// intersectCanvasRect 计算两个画布矩形的交集并判断是否有正面积或有效范围
+// 入参: a 矩形一, b 矩形二
+// 返回: canvas.Rect 交集矩形, bool 是否相交
+func intersectCanvasRect(a, b canvas.Rect) (canvas.Rect, bool) {
+	r := canvas.Rect{
+		X0: math.Max(a.X0, b.X0),
+		Y0: math.Max(a.Y0, b.Y0),
+		X1: math.Min(a.X1, b.X1),
+		Y1: math.Min(a.Y1, b.Y1),
+	}
+	if r.X1 < r.X0 || r.Y1 < r.Y0 || (r.X1 == r.X0 && r.Y1 == r.Y0) {
+		return canvas.Rect{}, false
+	}
+	return r, true
+}
+
 // renderText 渲染文本
 // 入参: ctx 画布上下文, obj 文本对象, pageH 页面高度, defaults 默认绘制参数, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM, parentClip 父级裁剪路径
 func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64, defaults *DrawParam, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
+	if r.pageContext != nil {
+		if err := r.pageContext.Err(); err != nil {
+			r.renderError = err
+			return
+		}
+	}
 	if obj.Visible != nil && !*obj.Visible {
 		return
 	}
 	shouldFill := obj.Fill == nil || *obj.Fill
 	shouldStroke := obj.Stroke != nil && *obj.Stroke
-	if !shouldFill && !shouldStroke {
+	if !shouldFill && !shouldStroke && r.pageText == nil && !r.textOnly {
 		return
 	}
 	ctx.Push()
@@ -65,9 +87,6 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	clipPath := r.intersectCachedClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
 	dp := r.drawParamDefaults(obj.DrawParam, defaults)
 	sizeMM := obj.Size
-	if sizeMM == 0 && dp != nil && dp.Size > 0 {
-		sizeMM = dp.Size
-	}
 	if sizeMM == 0 {
 		sizeMM = 3.5
 	}
@@ -83,81 +102,84 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		sizeMM *= scale
 	}
 	sizePt := sizeMM * ptPerMM
-	compiler, isCompiler := ctx.Renderer.(*canvasPageCompiler)
 	objAlpha := fillAlphaByte(obj.Alpha)
-	useGroup := isCompiler && !r.textOnly && shouldFill && shouldStroke && objAlpha < 255
+	useGroup := canCanvasTransparencyGroup(ctx.Renderer) && !r.textOnly && shouldFill && shouldStroke && objAlpha < 255
 	styleAlpha := obj.Alpha
 	if useGroup {
 		styleAlpha = nil
 	}
-	fillColor := colorWithAlpha(canvas.Black, styleAlpha)
-	var fillPaint any = fillColor
+	var fillColor color.Color
+	var fillPaint any
 	var fillPattern *PatternPaint
-	var fillColorNode *FillColor
-	if defaults != nil {
-		fillColorNode = defaults.FillColor
-	}
-	if dp != nil && dp.FillColor != nil {
-		fillColorNode = dp.FillColor
-	}
-	if obj.FillColor != nil {
-		fillColorNode = obj.FillColor
-	}
-	if fillColorNode != nil {
-		fillColorNode = withFillAlpha(fillColorNode, styleAlpha)
-		fillColor = r.parseFillColor(fillColorNode)
-		fillPaint = r.parseFillPaint(fillColorNode, bx, by, pageH)
-		fillPattern = parsePatternPaint(fillColorNode)
-	}
-	if fillPaint == nil {
-		fillPaint = fillColor
-	}
-	transformShdPaint(fillPaint, parentCTM, bx, by, pageH, boundaryInCTM)
-	fillPaint, shadingClip, fillView := resolveShdPaint(ctx, fillPaint)
-	fillClip := r.intersectCachedClipPath(clipPath, shadingClip)
+	var fillClip *canvas.Path
+	var fillView canvas.Matrix
 	var strokeStyle pathStyle
 	var localStrokeWidth, localDashOffset float64
 	var localDashPattern []float64
-	strokeClip := clipPath
-	strokeView := canvas.Identity
-	if shouldStroke {
-		strokeStyle = r.newPathStyle(defaults, bx, by, pageH, styleAlpha)
-		if dp != nil {
-			strokeStyle.applyDrawParam(r, dp, bx, by, pageH, styleAlpha)
+	var strokeClip *canvas.Path
+	var strokeView canvas.Matrix
+	resolveTextPaints := func(alpha *int) {
+		fillColor = colorWithAlpha(canvas.Black, alpha)
+		fillPaint = fillColor
+		fillPattern = nil
+		var fillColorNode *FillColor
+		if defaults != nil {
+			fillColorNode = defaults.FillColor
 		}
-		strokeObject := obj.pathStyle()
-		strokeObject.FillColor = nil
-		strokeObject.Alpha = styleAlpha
-		strokeStyle.applyPathObject(r, strokeObject, bx, by, pageH)
-		if strokeStyle.strokePaint == nil {
-			strokeStyle.strokePaint = canvas.Transparent
+		if dp != nil && dp.FillColor != nil {
+			fillColorNode = dp.FillColor
 		}
-		localStrokeWidth = strokeStyle.lineWidth
-		localDashOffset = strokeStyle.dashOffset
-		localDashPattern = slices.Clone(strokeStyle.dashPattern)
-		strokeStyle.scale(ctm)
-		strokeStyle.lineWidth = r.deviceLineWidth(strokeStyle.lineWidth)
-		transformShdPaint(strokeStyle.strokePaint, parentCTM, bx, by, pageH, boundaryInCTM)
-		strokeStyle.strokePaint, shadingClip, strokeView = resolveShdPaint(ctx, strokeStyle.strokePaint)
-		strokeClip = r.intersectCachedClipPath(strokeClip, shadingClip)
+		if obj.FillColor != nil {
+			fillColorNode = obj.FillColor
+		}
+		if fillColorNode != nil {
+			fillColorNode = withFillAlpha(fillColorNode, alpha)
+			fillColor = r.parseFillColor(fillColorNode)
+			fillPaint = r.parseFillPaint(fillColorNode, bx, by, pageH)
+			fillPattern = parsePatternPaint(fillColorNode)
+		}
+		if fillPaint == nil {
+			fillPaint = fillColor
+		}
+		transformShdPaint(fillPaint, parentCTM, bx, by, pageH, boundaryInCTM)
+		var shadingClip *canvas.Path
+		fillPaint, shadingClip, fillView = resolveShdPaint(ctx, fillPaint)
+		fillClip = r.intersectCachedClipPath(clipPath, shadingClip)
+		strokeStyle = pathStyle{}
+		localStrokeWidth, localDashOffset = 0, 0
+		localDashPattern = nil
+		strokeClip = clipPath
+		strokeView = canvas.Identity
+		if shouldStroke {
+			strokeStyle = r.newPathStyle(defaults, bx, by, pageH, alpha)
+			if dp != nil {
+				strokeStyle.applyDrawParam(r, dp, bx, by, pageH, alpha)
+			}
+			strokeObject := obj.pathStyle()
+			strokeObject.FillColor = nil
+			strokeObject.Alpha = alpha
+			strokeStyle.applyPathObject(r, strokeObject, bx, by, pageH)
+			if strokeStyle.strokePaint == nil {
+				strokeStyle.strokePaint = canvas.Transparent
+			}
+			localStrokeWidth = strokeStyle.lineWidth
+			localDashOffset = strokeStyle.dashOffset
+			localDashPattern = slices.Clone(strokeStyle.dashPattern)
+			strokeStyle.scale(ctm)
+			strokeStyle.lineWidth = r.deviceLineWidth(strokeStyle.lineWidth)
+			transformShdPaint(strokeStyle.strokePaint, parentCTM, bx, by, pageH, boundaryInCTM)
+			strokeStyle.strokePaint, shadingClip, strokeView = resolveShdPaint(ctx, strokeStyle.strokePaint)
+			strokeClip = r.intersectCachedClipPath(strokeClip, shadingClip)
+		}
 	}
+	resolveTextPaints(styleAlpha)
 	fontStyle := canvas.FontRegular
-	weight := obj.Weight
-	if weight == 0 && !obj.WeightSet && dp != nil && (dp.Weight > 0 || dp.WeightSet) {
-		weight = dp.Weight
-	}
-	syntheticBold := weight >= 700
+	syntheticBold := obj.Weight >= 700
 	italic := obj.Italic
-	if !obj.ItalicSet && !italic && dp != nil && dp.Italic {
-		italic = true
-	}
 	if italic {
 		fontStyle |= canvas.FontItalic
 	}
 	fontID := r.textObjectFontID(obj)
-	if fontID == "" && dp != nil && dp.Font != "" {
-		fontID = dp.Font
-	}
 	embeddedFont := false
 	if of := r.fontDefinition(fontID); of != nil {
 		embeddedFont = of.FontFile != ""
@@ -180,7 +202,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		textRun = r.pageText.addRun(effectiveObj)
 	}
 	if ff == nil {
-		if textRun != nil && !r.textContentOnly {
+		if textRun != nil {
 			box, _ := ParseBox(obj.Boundary)
 			boundaryCTM := TranslationMatrix(box.X, box.Y)
 			if parentCTM != nil {
@@ -205,6 +227,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if face.FauxBold != 0 && sfntTablesBold(face.Font.Tables) {
 		face.FauxBold = 0
 	}
+	if face.FauxItalic != 0 && sfntTablesItalic(face.Font.Tables) {
+		face.FauxItalic = 0
+	}
 	recoverBaseline := len(obj.TextCode) > 0 && obj.TextCode[0].Y == ""
 	var metrics canvas.FontMetrics
 	if textRun != nil || recoverBaseline {
@@ -222,38 +247,254 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			textRun.Boxes = make([]Box, len([]rune(text)))
 		}
 	}
+	var runRunes []rune
+	if textRun != nil {
+		runRunes = []rune(textRun.Text)
+	}
+	glyphTransforms := r.textObjectGlyphTransforms(fontID, obj)
 	if r.textOnly && r.textContentOnly {
+		if textRun != nil && (clipPath == nil || !clipPath.Empty()) {
+			var clipRect canvas.Rect
+			hasRectClip := false
+			if clipPath != nil {
+				clipRect, hasRectClip = rectangularPath(clipPath)
+			}
+			codePos := 0
+			textPos := 0
+			lines := newTextLineScanner(effectiveObj)
+			for _, tc := range obj.TextCode {
+				if r.pageContext != nil {
+					if err := r.pageContext.Err(); err != nil {
+						r.renderError = err
+						ctx.Pop()
+						return
+					}
+				}
+				if lines.next(tc) {
+					textPos++
+				}
+				runes := textCodeRunes(tc.Value)
+				var glyphs []textGlyph
+				var spans [][2]int
+				if tc.Index != "" {
+					glyphs = r.parseIndexGlyphs(tc.Index, fontID)
+					spans = indexGlyphSpans(len(glyphs))
+				} else {
+					glyphs = textCodeGlyphs(runes, glyphTransforms, codePos)
+					spans = textGlyphSpans(runes, glyphTransforms, codePos)
+				}
+				positioner := NewTextPositioner(tc, obj.ReadDirection)
+				for i, glyph := range glyphs {
+					if i&31 == 0 && r.pageContext != nil {
+						if err := r.pageContext.Err(); err != nil {
+							r.renderError = err
+							ctx.Pop()
+							return
+						}
+					}
+					if tc.Index != "" && glyph.Text == "" && len(runes) == len(glyphs) {
+						glyph.Text = string(runes[i])
+					}
+					pos := positioner.Next()
+					if i >= len(spans) {
+						continue
+					}
+					cx, cy := pos.X, pos.Y
+					var canvasX, canvasY float64
+					if boundaryInCTM && parentCTM != nil {
+						tx, ty := localCTM.Transform(cx, cy)
+						tx, ty = parentCTM.Transform(tx+bx, ty+by)
+						canvasX, canvasY = tx, pageH-ty
+					} else {
+						tx, ty := ctm.Transform(cx, cy)
+						canvasX, canvasY = tx+bx, pageH-(ty+by)
+					}
+					glyphWidth := textGlyphWidth(face, glyph)
+					m := canvas.Identity.Translate(canvasX, canvasY)
+					if useTextMatrix {
+						m = m.Mul(glyphMatrix)
+					}
+					gm := m.Scale(hScale, 1)
+					bounds := canvas.Rect{Y0: -metrics.Descent, X1: glyphWidth, Y1: metrics.Ascent}
+					rect := bounds.Transform(gm)
+					if !hasRectClip || rect.Overlaps(clipRect) {
+						box := Box{X: rect.X0, Y: pageH - rect.Y1, W: rect.X1 - rect.X0, H: rect.Y1 - rect.Y0}
+						for j := spans[i][0]; j < spans[i][1]; j++ {
+							textRun.Boxes[textPos+j] = unionTextBox(textRun.Boxes[textPos+j], box)
+						}
+					}
+					start, end := textPos+spans[i][0], textPos+spans[i][1]
+					textRun.addSpan(start, end, bounds, gm, clipPath, pageH)
+					if i+1 == len(spans) || spans[i+1] != spans[i] {
+						textRun.mergeLastSpan(runRunes, start, end)
+					}
+				}
+				codePos += len(runes)
+				if tc.Index == "" {
+					textPos += len(runes)
+				} else {
+					textPos++
+				}
+			}
+		}
 		ctx.Pop()
 		return
 	}
-	glyphTransforms := r.textObjectGlyphTransforms(fontID, obj)
+	nonUniformStroke := shouldStroke && !matrixIsSimilarity(ctm)
 	_, shadedFill := fillPaint.(canvas.Gradient)
+	_, shadedStroke := strokeStyle.strokePaint.(canvas.Gradient)
+	fillRGBA, solidFill := pdfSolidColor(fillPaint)
+	strokeRGBA, solidStroke := pdfSolidColor(strokeStyle.strokePaint)
+	hasVisibleStroke := shouldStroke && strokeStyle.lineWidth > 0 && strokeRGBA.A > 0
 	pdfOutput, _ := ctx.Renderer.(*pdfRenderer)
 	var pdfBoldColor color.RGBA
 	pdfFauxBold := false
 	fauxBoldOK := face.FauxBold == 0
-	if !fauxBoldOK && face.FauxBold > 0 && (!useTextMatrix || glyphMatrix.IsSimilarity()) && hScale == 1 {
+	if !fauxBoldOK && face.FauxBold > 0 && !shouldStroke && (!useTextMatrix || glyphMatrix.IsSimilarity()) && hScale == 1 {
 		if c, ok := pdfOpaqueSolidColor(fillPaint); ok {
 			pdfBoldColor = c
 			pdfFauxBold = true
 			fauxBoldOK = true
 		}
 	}
-	pdfText := pdfOutput != nil && !r.textOnly && shouldFill && !shouldStroke && fillPattern == nil && !shadedFill && fauxBoldOK
+	var pdfTextStyle *codecpdf.TextStrokeStyle
+	pdfTextEligible := false
+	if pdfOutput != nil && !r.textOnly && (shouldFill || shouldStroke) {
+		if shouldFill && !shouldStroke {
+			pdfTextEligible = fillPattern == nil && !shadedFill && fauxBoldOK
+		} else if shouldStroke && !nonUniformStroke && !shadedStroke && strokeStyle.strokePattern == nil && solidStroke && face.FauxBold == 0 {
+			if shouldFill {
+				if fillPattern == nil && !shadedFill && solidFill {
+					pdfTextEligible = true
+					if hasVisibleStroke {
+						pdfTextStyle = &codecpdf.TextStrokeStyle{
+							RenderMode:  2,
+							FillAlpha:   fillRGBA.A,
+							HasFill:     true,
+							StrokeColor: strokeRGBA,
+							LineWidth:   strokeStyle.lineWidth,
+							LineCap:     strokeStyle.lineCap,
+							LineJoin:    strokeStyle.lineJoin,
+							DashOffset:  strokeStyle.dashOffset,
+							Dashes:      strokeStyle.dashPattern,
+						}
+					}
+				}
+			} else {
+				pdfTextEligible = true
+				if hasVisibleStroke {
+					pdfTextStyle = &codecpdf.TextStrokeStyle{
+						RenderMode:  1,
+						StrokeColor: strokeRGBA,
+						LineWidth:   strokeStyle.lineWidth,
+						LineCap:     strokeStyle.lineCap,
+						LineJoin:    strokeStyle.lineJoin,
+						DashOffset:  strokeStyle.dashOffset,
+						Dashes:      strokeStyle.dashPattern,
+					}
+				} else {
+					pdfTextStyle = &codecpdf.TextStrokeStyle{RenderMode: 3}
+				}
+			}
+		}
+	}
+	if useGroup {
+		if endGroup, ok := beginCanvasTransparencyGroup(ctx.Renderer, objAlpha); ok {
+			defer endGroup()
+			if pdfOutput != nil {
+				defer pdfOutput.finishTextObject()
+			}
+		} else {
+			styleAlpha = obj.Alpha
+			resolveTextPaints(styleAlpha)
+			face = ff.Face(sizePt, fillPaint, fontStyle, canvas.FontNormal)
+			face.Hinting = 0
+			if face.FauxBold != 0 && sfntTablesBold(face.Font.Tables) {
+				face.FauxBold = 0
+			}
+			if face.FauxItalic != 0 && sfntTablesItalic(face.Font.Tables) {
+				face.FauxItalic = 0
+			}
+			_, shadedFill = fillPaint.(canvas.Gradient)
+			_, shadedStroke = strokeStyle.strokePaint.(canvas.Gradient)
+			fillRGBA, solidFill = pdfSolidColor(fillPaint)
+			strokeRGBA, solidStroke = pdfSolidColor(strokeStyle.strokePaint)
+			hasVisibleStroke = shouldStroke && strokeStyle.lineWidth > 0 && strokeRGBA.A > 0
+			pdfBoldColor = color.RGBA{}
+			pdfFauxBold = false
+			fauxBoldOK = face.FauxBold == 0
+			if !fauxBoldOK && face.FauxBold > 0 && !shouldStroke && (!useTextMatrix || glyphMatrix.IsSimilarity()) && hScale == 1 {
+				if c, ok := pdfOpaqueSolidColor(fillPaint); ok {
+					pdfBoldColor = c
+					pdfFauxBold = true
+					fauxBoldOK = true
+				}
+			}
+			pdfTextStyle = nil
+			pdfTextEligible = false
+			if pdfOutput != nil && !r.textOnly && (shouldFill || shouldStroke) {
+				if shouldFill && !shouldStroke {
+					pdfTextEligible = fillPattern == nil && !shadedFill && fauxBoldOK
+				} else if shouldStroke && !nonUniformStroke && !shadedStroke && strokeStyle.strokePattern == nil && solidStroke && face.FauxBold == 0 {
+					if shouldFill {
+						if fillPattern == nil && !shadedFill && solidFill {
+							pdfTextEligible = true
+							if hasVisibleStroke {
+								pdfTextStyle = &codecpdf.TextStrokeStyle{
+									RenderMode:  2,
+									FillAlpha:   fillRGBA.A,
+									HasFill:     true,
+									StrokeColor: strokeRGBA,
+									LineWidth:   strokeStyle.lineWidth,
+									LineCap:     strokeStyle.lineCap,
+									LineJoin:    strokeStyle.lineJoin,
+									DashOffset:  strokeStyle.dashOffset,
+									Dashes:      strokeStyle.dashPattern,
+								}
+							}
+						}
+					} else {
+						pdfTextEligible = true
+						if hasVisibleStroke {
+							pdfTextStyle = &codecpdf.TextStrokeStyle{
+								RenderMode:  1,
+								StrokeColor: strokeRGBA,
+								LineWidth:   strokeStyle.lineWidth,
+								LineCap:     strokeStyle.lineCap,
+								LineJoin:    strokeStyle.lineJoin,
+								DashOffset:  strokeStyle.dashOffset,
+								Dashes:      strokeStyle.dashPattern,
+							}
+						} else {
+							pdfTextStyle = &codecpdf.TextStrokeStyle{RenderMode: 3}
+						}
+					}
+				}
+			}
+		}
+	}
+	pdfText := pdfTextEligible
 	if pdfText {
 		view := canvas.Identity
 		if useTextMatrix {
 			view = glyphMatrix
 		}
-		pdfText = r.pdfTextSupported(obj, fontID, face, glyphTransforms, fillClip, pageH, objectCTM, view)
+		stroked := pdfTextStyle != nil && (pdfTextStyle.RenderMode == 1 || pdfTextStyle.RenderMode == 2) || pdfFauxBold
+		pdfText = r.pdfTextSupported(obj, fontID, face, glyphTransforms, fillClip, pageH, objectCTM, view, stroked)
 	}
 	if pdfText {
 		if len(pdfOutput.text) == 0 {
 			pdfOutput.text = append(pdfOutput.text, codecpdf.TextPage{})
 		}
 		firstBT := pdfOutput.text[len(pdfOutput.text)-1].Count
-		defer pdfOutput.preserveText(firstBT, r.pdfActualText(effectiveObj, fontID, face))
-		if pdfFauxBold {
+		if r.pdfTextNeedsActualText(pdfOutput, effectiveObj, fontID, face, glyphTransforms) {
+			defer pdfOutput.preserveText(firstBT, r.pdfActualText(effectiveObj, fontID, face))
+		}
+		if pdfTextStyle != nil {
+			pdfOutput.content.IsolateNextText()
+			style := *pdfTextStyle
+			defer pdfOutput.preserveTextStyle(firstBT, style)
+		} else if pdfFauxBold {
 			boldScale := 1.0
 			if useTextMatrix {
 				boldScale = math.Sqrt(math.Abs(glyphMatrix.Det()))
@@ -262,13 +503,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			defer pdfOutput.preserveFauxBold(firstBT, boldWidth, pdfBoldColor)
 		}
 	}
-	if useGroup {
-		compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupBegin, GroupAlpha: objAlpha})
-		defer func() {
-			compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupEnd})
-		}()
+	textFillPaint := fillPaint
+	if pdfText && !shouldFill && shouldStroke {
+		textFillPaint = strokeStyle.strokePaint
 	}
-	nonUniformStroke := shouldStroke && !matrixIsSimilarity(ctm)
 	codePos := 0
 	textPos := 0
 	var lines textLineScanner
@@ -282,7 +520,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		if len(batch) == 0 {
 			return
 		}
-		ctx.SetFill(fillPaint)
+		ctx.SetFill(textFillPaint)
 		ctx.SetStrokeColor(canvas.Transparent)
 		text, err := pdfOutput.glyphsText(face, batch, hScale)
 		batch = batch[:0]
@@ -310,7 +548,20 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			ctx.DrawText(batchCanvasX, batchCanvasY, text)
 		}
 	}
+	var clipRect canvas.Rect
+	hasRectClip := false
+	if clipPath != nil {
+		clipRect, hasRectClip = rectangularPath(clipPath)
+	}
+	visibleInClip := clipPath == nil
 	for _, tc := range obj.TextCode {
+		if r.pageContext != nil {
+			if err := r.pageContext.Err(); err != nil {
+				r.renderError = err
+				ctx.Pop()
+				return
+			}
+		}
 		if textRun != nil && lines.next(tc) {
 			textPos++
 		}
@@ -333,7 +584,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		positioned := textCodePositioned(tc, positioner.xs, positioner.ys) || obj.ReadDirection != 0
 		drawAsPath := embeddedFont || face.FauxBold > 0 || positioned || fillClip != nil || shadedFill || fillPattern != nil || shouldStroke
 		for i, glyph := range glyphs {
-			if i%64 == 0 && r.pageContext != nil {
+			if i&31 == 0 && r.pageContext != nil {
 				if err := r.pageContext.Err(); err != nil {
 					r.renderError = err
 					ctx.Pop()
@@ -347,7 +598,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			drawAsGlyphPath := drawAsPath || glyph.GlyphID >= 0
 			if !drawAsGlyphPath {
 				for _, char := range str {
-					if face.Font.GlyphIndex(char) == 0 {
+					if r.canvasGlyphIndex(face.Font, char) == 0 {
 						drawAsGlyphPath = true
 						break
 					}
@@ -355,8 +606,12 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			}
 			var glyphPath *canvas.Path
 			var glyphWidth float64
+			var glyphBounds canvas.Rect
+			hasGlyphCached := false
 			if drawAsGlyphPath && !pdfText {
-				glyphPath, glyphWidth = r.cachedTextGlyphPath(face, glyph)
+				cached := r.cachedTextGlyph(face, glyph)
+				glyphPath, glyphWidth, glyphBounds = cached.path, cached.width, cached.bounds
+				hasGlyphCached = true
 			} else {
 				glyphWidth = textGlyphWidth(face, glyph)
 			}
@@ -373,30 +628,50 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			}
 			if textRun != nil {
 				if i < len(spans) {
-					if glyphPath == nil {
-						glyphPath, _ = r.cachedTextGlyphPath(face, glyph)
+					if !hasGlyphCached {
+						cached := r.cachedTextGlyph(face, glyph)
+						glyphPath, glyphBounds = cached.path, cached.bounds
 					}
 					scaleX := hScale
 					m := canvas.Identity.Translate(canvasX, canvasY)
 					if useTextMatrix {
 						m = m.Mul(glyphMatrix)
 					}
-					path := glyphPath.Copy().Transform(m.Scale(scaleX, 1))
-					box := textPathBox(r.applyCachedClipPath(path, clipPath), pageH)
+					gm := m.Scale(scaleX, 1)
+					hasGlyphOutline := !glyphPath.Empty()
+					var box Box
+					if hasGlyphOutline {
+						rect := glyphBounds.Transform(gm)
+						if !hasRectClip || rect.Overlaps(clipRect) {
+							if isAxisAlignedCanvasMatrix(gm) && (clipPath == nil || hasRectClip && clipRect.Contains(rect)) {
+								box = Box{X: rect.X0, Y: pageH - rect.Y1, W: rect.X1 - rect.X0, H: rect.Y1 - rect.Y0}
+							} else {
+								path := glyphPath.Copy().Transform(gm)
+								box = textPathBox(r.applyCachedClipPath(path, clipPath), pageH)
+							}
+						}
+					}
 					for j := spans[i][0]; j < spans[i][1]; j++ {
 						textRun.Boxes[textPos+j] = unionTextBox(textRun.Boxes[textPos+j], box)
 					}
 					bounds := canvas.Rect{Y0: -metrics.Descent, X1: glyphWidth, Y1: metrics.Ascent}
-					if !glyphPath.Empty() {
-						bounds = bounds.Add(glyphPath.Bounds())
+					if hasGlyphOutline {
+						bounds = bounds.Add(glyphBounds)
 					}
-					textRun.addSpan(textPos+spans[i][0], textPos+spans[i][1], bounds, m.Scale(scaleX, 1), clipPath, pageH)
+					start, end := textPos+spans[i][0], textPos+spans[i][1]
+					textRun.addSpan(start, end, bounds, gm, clipPath, pageH)
+					if i+1 == len(spans) || spans[i+1] != spans[i] {
+						textRun.mergeLastSpan(runRunes, start, end)
+					}
 				}
-				if r.textOnly {
+				if r.textOnly || !shouldFill && !shouldStroke {
 					continue
 				}
 			}
-			if shouldStroke {
+			if !shouldFill && !shouldStroke {
+				continue
+			}
+			if shouldStroke && !pdfText {
 				scaleX := hScale
 				transform := canvas.Identity.Translate(canvasX, canvasY)
 				if useTextMatrix {
@@ -404,11 +679,19 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				}
 				path := glyphPath.Copy().Transform(transform.Scale(scaleX, 1))
 				if shouldFill && fillPattern != nil {
-					r.renderPattern(ctx, fillPattern, pageH, applyClipPath(path.Copy(), fillClip), patternOrigin)
+					clippedFill := applyClipPath(path.Copy(), fillClip)
+					if !clippedFill.Empty() {
+						visibleInClip = true
+					}
+					r.renderPattern(ctx, fillPattern, pageH, clippedFill, patternOrigin)
 				} else if shouldFill && fillPaint != nil {
+					clippedFill := applyClipPath(path.Copy(), fillClip)
+					if !clippedFill.Empty() {
+						visibleInClip = true
+					}
 					ctx.SetFill(fillPaint)
 					ctx.SetStrokeColor(canvas.Transparent)
-					r.drawShdPath(ctx, applyClipPath(path.Copy(), fillClip), fillView)
+					r.drawShdPath(ctx, clippedFill, fillView)
 				}
 				if nonUniformStroke {
 					localTransform := canvas.Identity.Rotate(-float64(obj.CharDirection)).Scale(scaleX, 1)
@@ -420,6 +703,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					path = r.strokeDashedCanvasPath(path, strokeStyle.lineWidth, strokeStyle.lineCap, strokeStyle.lineJoin, strokeStyle.dashOffset, strokeStyle.dashPattern, false)
 					path = r.applyCachedClipPath(path, strokeClip)
 				}
+				if !path.Empty() {
+					visibleInClip = true
+				}
 				if strokeStyle.strokePattern != nil {
 					r.renderPattern(ctx, strokeStyle.strokePattern, pageH, path, patternOrigin)
 				} else {
@@ -429,9 +715,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				}
 				continue
 			}
-			if fillPaint != nil || fillPattern != nil {
+			if pdfText || fillPaint != nil || fillPattern != nil {
 				if pdfText && obj.CharDirection == 0 && face.MmPerEm > 0 && hScale != 0 {
-					if gid, ok := pdfSingleGlyphID(face, glyph); ok {
+					if gid, ok := r.pdfSingleGlyphID(face, glyph); ok {
 						canJoin := len(batch) == 0
 						if !canJoin && math.Abs(cy-batchY) <= 1e-9 {
 							unitScale := hScale * face.MmPerEm
@@ -465,7 +751,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 						return
 					}
 				}
-				ctx.SetFill(fillPaint)
+				ctx.SetFill(textFillPaint)
 				ctx.SetStrokeColor(canvas.Transparent)
 				glyphClip := fillClip
 				if pdfText {
@@ -480,10 +766,11 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 						if rect.Contains(glyphPath.Copy().Transform(transform.Scale(hScale, 1)).Bounds()) {
 							available := true
 							for _, char := range str {
-								available = available && face.Font.GlyphIndex(char) != 0
+								available = available && r.canvasGlyphIndex(face.Font, char) != 0
 							}
 							if available {
 								glyphClip, drawAsGlyphPath = nil, false
+								visibleInClip = true
 							}
 						}
 					}
@@ -495,6 +782,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 						textTransform = textTransform.Mul(glyphMatrix)
 					}
 					glyphPath = r.applyCachedClipPath(glyphPath.Copy().Transform(textTransform.Scale(scaleX, 1)), glyphClip)
+					if !glyphPath.Empty() {
+						visibleInClip = true
+					}
 					if fillPattern != nil {
 						r.renderPattern(ctx, fillPattern, pageH, glyphPath, patternOrigin)
 					} else {
@@ -577,6 +867,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				textPos++
 			}
 		}
+	}
+	if pdfOutput != nil && !r.textOnly && !pdfText && (shouldFill || shouldStroke) && r.renderError == nil && (clipPath == nil || !clipPath.Empty() && visibleInClip) {
+		r.emitPDFInvisibleText(ctx, pdfOutput, effectiveObj, fontID, face, glyphTransforms, pageH, bx, by, ctm, localCTM, parentCTM, boundaryInCTM, hScale, useTextMatrix, glyphMatrix, clipPath)
 	}
 	ctx.Pop()
 }

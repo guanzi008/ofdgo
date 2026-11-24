@@ -40,6 +40,19 @@ type CompositeSelection struct {
 	richText   map[int]*richTextSnapshot
 }
 
+// compositeContainers 获取直接内容容器，序号不随绘制成员增删变化
+// 入参: node 父节点
+// 返回: []*editorXML 内容容器与页块
+func compositeContainers(node *editorXML) []*editorXML {
+	var result []*editorXML
+	for _, child := range node.children {
+		if (child.name.Local == "Content" || child.name.Local == "PageBlock") && classifyOFDNamespace(child.name.Space) != ofdXMLUnknown {
+			result = append(result, child)
+		}
+	}
+	return result
+}
+
 // PasteCompositeSelection 将内部对象快照粘贴到页面顶层，保持嵌套结构、源继承外观和裁剪
 // 入参: page 目标页, selection 当前编辑器内捕获的快照, dx 页面横向位移, dy 页面纵向位移
 // 返回: []string 新对象标识, error 错误信息
@@ -167,8 +180,8 @@ func (e *Editor) PasteCompositeObjects(page int, path ObjectPath, selection *Com
 				}
 				container = containers[index]
 			}
-			box, _ := ParseBox(owner.object.CompositeGraphicUnit.Boundary)
-			parent := owner.parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(NewMatrix(owner.object.CompositeGraphicUnit.CTM))
+			box, _ := ParseBox(owner.object.CompositeObject.Boundary)
+			parent := owner.parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(NewMatrix(owner.object.CompositeObject.CTM))
 			nodes := make([]*editorCompositeNode, len(selection.nodes))
 			for i, node := range selection.nodes {
 				copy := *node
@@ -306,8 +319,8 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 				object.PathObject.Visible = &visible
 			case "ImageObject":
 				object.ImageObject.Visible = &visible
-			case "CompositeObject", "CompositeGraphicUnit":
-				object.CompositeGraphicUnit.Visible = &visible
+			case "CompositeObject":
+				object.CompositeObject.Visible = &visible
 			}
 		}
 		if err := copy.update(object); err != nil {
@@ -331,7 +344,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 			wrapped.defaults, wrapped.drawParams = copy.defaults, copy.drawParams
 			copy = wrapped
 		}
-		copy.parent, copy.boundaryInCTM = IdentityMatrix, true
+		copy.parent, copy.boundaryInCTM = IdentityMatrix(), true
 		if err := e.transformCompositeMember(renderer, copy, source.parent); err != nil {
 			return err
 		}
@@ -353,7 +366,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 			}
 		}
 		if copy.object.Type == "CompositeObject" || copy.object.Type == "CompositeGraphicUnit" {
-			if err := copy.convertCoordinates(IdentityMatrix, false); err != nil {
+			if err := copy.convertCoordinates(IdentityMatrix(), false); err != nil {
 				return err
 			}
 		}
@@ -367,9 +380,9 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 			object.TextObject.layout = object.state.layout
 		}
 		copy.object.TextObject.layout = object.TextObject.layout
-		if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
-			object.CompositeGraphicUnit.states = maps.Clone(copy.states)
-			copy.object.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
+		if object.Type == "CompositeObject" {
+			object.CompositeObject.states = maps.Clone(copy.states)
+			copy.object.CompositeObject.states = object.CompositeObject.states
 		}
 		object.origin = &editorObjectOrigin{editor: e, document: e.documentIdentity(), page: selection.source, data: copy.data, node: copy.node, object: copy.object}
 		object.richText = selection.richText[i]
@@ -531,17 +544,4 @@ func (n *editorCompositeNode) loadedScope(path []int) *editorCompositeNode {
 		n = nodes[index]
 	}
 	return n
-}
-
-// compositeContainers 获取直接内容容器，序号不随绘制成员增删变化
-// 入参: node 父节点
-// 返回: []*editorXML 内容容器与页块
-func compositeContainers(node *editorXML) []*editorXML {
-	var result []*editorXML
-	for _, child := range node.children {
-		if (child.name.Local == "Content" || child.name.Local == "PageBlock") && classifyOFDNamespace(child.name.Space) != ofdXMLUnknown {
-			result = append(result, child)
-		}
-	}
-	return result
 }

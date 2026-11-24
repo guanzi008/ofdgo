@@ -40,6 +40,7 @@ type TIFFLayout struct {
 	auxiliary     bool
 	Samples       uint32
 	depth         uint32
+	lowDepth      bool
 	fillOrder     uint32
 	compression   uint32
 	predictor     uint32
@@ -48,6 +49,19 @@ type TIFFLayout struct {
 	profileSize   uint32
 	t4, t6        uint32
 	Transparency  *TIFFLayout
+}
+
+// tiffDirectoryInput 只替换解码视图中的首目录偏移，不复制或改写原始资源
+type tiffDirectoryInput struct {
+	reader    *bytes.Reader
+	directory [4]byte
+	ctx       context.Context
+}
+
+// orientedTIFFImage 按方向映射像素坐标，复用原图数据与颜色精度
+type orientedTIFFImage struct {
+	source image.Image
+	TIFFLayout
 }
 
 // ReadTIFFLayoutContext 扫描目录链并选择主图，读取期间响应取消
@@ -118,29 +132,11 @@ func ReadTIFFLayoutContext(ctx context.Context, input io.Reader) (TIFFLayout, er
 	return result, nil
 }
 
-// DisplaySize 返回同时保留主图和透明蒙版分辨率的显示尺寸
-// 返回: image.Point 保留高分辨率蒙版边缘的像素宽高
-func (l TIFFLayout) DisplaySize() image.Point {
-	size := l.size()
-	if l.Transparency != nil {
-		mask := l.Transparency.size()
-		size.X, size.Y = max(size.X, mask.X), max(size.Y, mask.Y)
-	}
-	return size
-}
-
 // IsTIFF 识别标准TIFF字节序与版本标识
 // 入参: data 文件头或完整编码
 // 返回: bool 是否为TIFF 6.0编码
 func IsTIFF(data []byte) bool {
 	return len(data) >= 4 && (string(data[:4]) == "II\x2a\x00" || string(data[:4]) == "MM\x00\x2a")
-}
-
-// tiffDirectoryInput 只替换解码视图中的首目录偏移，不复制或改写原始资源
-type tiffDirectoryInput struct {
-	reader    *bytes.Reader
-	directory [4]byte
-	ctx       context.Context
 }
 
 // newTIFFDirectoryInput 创建以指定目录作为主图的只读解码视图
@@ -154,120 +150,6 @@ func newTIFFDirectoryInput(data []byte, offset uint32) *tiffDirectoryInput {
 	}
 	order.PutUint32(input.directory[:], offset)
 	return input
-}
-
-// Read 读取图像编码并覆盖首目录指针
-// 入参: data 接收缓冲
-// 返回: int 读取字节数, error 读取错误
-func (r *tiffDirectoryInput) Read(data []byte) (int, error) {
-	if r.ctx != nil {
-		if err := r.ctx.Err(); err != nil {
-			return 0, err
-		}
-	}
-	offset := r.reader.Size() - int64(r.reader.Len())
-	n, err := r.reader.Read(data)
-	r.patch(data[:n], offset)
-	return n, err
-}
-
-// ReadAt 随机读取图像编码并覆盖首目录指针
-// 入参: data 接收缓冲, offset 文件偏移
-// 返回: int 读取字节数, error 读取错误
-func (r *tiffDirectoryInput) ReadAt(data []byte, offset int64) (int, error) {
-	if r.ctx != nil {
-		if err := r.ctx.Err(); err != nil {
-			return 0, err
-		}
-	}
-	n, err := r.reader.ReadAt(data, offset)
-	r.patch(data[:n], offset)
-	return n, err
-}
-
-// patch 替换读取片段中与首目录指针重叠的部分
-// 入参: data 读取结果, offset 文件偏移
-func (r *tiffDirectoryInput) patch(data []byte, offset int64) {
-	for i := range r.directory {
-		at := int64(4+i) - offset
-		if at >= 0 && at < int64(len(data)) {
-			data[at] = r.directory[i]
-		}
-	}
-}
-
-// orientedTIFFImage 按方向映射像素坐标，复用原图数据与颜色精度
-type orientedTIFFImage struct {
-	source image.Image
-	TIFFLayout
-}
-
-// Bounds 返回从零开始的显示区域
-// 返回: image.Rectangle 显示区域
-func (s *orientedTIFFImage) Bounds() image.Rectangle {
-	return image.Rectangle{Max: s.size()}
-}
-
-// ColorModel 返回原始颜色模型
-// 返回: color.Model 颜色模型
-func (s *orientedTIFFImage) ColorModel() color.Model { return s.source.ColorModel() }
-
-// At 返回原图颜色，不重新采样或量化
-// 入参: x 横向显示坐标, y 纵向显示坐标
-// 返回: color.Color 像素颜色，区域外透明
-func (s *orientedTIFFImage) At(x, y int) color.Color {
-	p, ok := s.sourcePoint(x, y)
-	if !ok {
-		return color.NRGBA64{}
-	}
-	return s.source.At(p.X, p.Y)
-}
-
-// NRGBA64At 读取非预乘十六位颜色，保留透明像素中的原始颜色
-// 入参: x 横向显示坐标, y 纵向显示坐标
-// 返回: color.NRGBA64 像素颜色
-func (s *orientedTIFFImage) NRGBA64At(x, y int) color.NRGBA64 {
-	p, ok := s.sourcePoint(x, y)
-	if !ok {
-		return color.NRGBA64{}
-	}
-	return NRGBA64At(s.source, p.X, p.Y)
-}
-
-// RGBA64At 返回预乘十六位像素，保留原始颜色精度
-// 入参: x 横向显示坐标, y 纵向显示坐标
-// 返回: color.RGBA64 像素颜色
-func (s *orientedTIFFImage) RGBA64At(x, y int) color.RGBA64 {
-	r, g, b, a := s.At(x, y).RGBA()
-	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
-}
-
-// sourcePoint 将显示坐标映射为存储坐标
-// 入参: x 横向显示坐标, y 纵向显示坐标
-// 返回: image.Point 原始坐标, bool 是否位于显示区域内
-func (s *orientedTIFFImage) sourcePoint(x, y int) (image.Point, bool) {
-	if !image.Pt(x, y).In(s.Bounds()) {
-		return image.Point{}, false
-	}
-	w, h := s.Width, s.Height
-	switch s.Orientation {
-	case 2:
-		x = w - 1 - x
-	case 3:
-		x, y = w-1-x, h-1-y
-	case 4:
-		y = h - 1 - y
-	case 5:
-		x, y = y, x
-	case 6:
-		x, y = y, h-1-x
-	case 7:
-		x, y = w-1-y, h-1-x
-	case 8:
-		x, y = w-1-y, x
-	}
-	b := s.source.Bounds()
-	return image.Pt(b.Min.X+x, b.Min.Y+y), true
 }
 
 // readTIFFLayout 选择主图及其蒙版，允许缩略图并拒绝循环和多个主图
@@ -307,7 +189,7 @@ func readTIFFDirectory(ctx context.Context, input io.Reader, order binary.ByteOr
 	}
 	count := int(order.Uint16(header[:2]))
 	result.Orientation, result.Offset, result.Samples, result.fillOrder = 1, uint32(offset), 1, 1
-	result.depth = 1
+	result.depth, result.lowDepth = 1, true
 	result.compression = 1
 	result.predictor = 1
 	var entry [12]byte
@@ -315,6 +197,9 @@ func readTIFFDirectory(ctx context.Context, input io.Reader, order binary.ByteOr
 	var subfile, legacy uint32
 	var hasSubfile bool
 	var invalidMaskDepth bool
+	var bitsOffset int64
+	var bitsCount uint32
+	var hasMultiBits bool
 	for i := range count {
 		if err := ctx.Err(); err != nil {
 			return result, position, err
@@ -339,8 +224,16 @@ func readTIFFDirectory(ctx context.Context, input io.Reader, order binary.ByteOr
 		}
 		if tag == 258 {
 			invalidMaskDepth = kind != 3 || number != 1
-			if !invalidMaskDepth {
-				result.depth = uint32(order.Uint16(entry[8:10]))
+			if kind == 3 {
+				if number == 1 {
+					result.depth = uint32(order.Uint16(entry[8:10]))
+					result.lowDepth = result.depth < 8
+				} else if number == 2 {
+					d0, d1 := uint32(order.Uint16(entry[8:10])), uint32(order.Uint16(entry[10:12]))
+					result.depth, result.lowDepth = max(d0, d1), min(d0, d1) < 8
+				} else if number > 2 {
+					bitsOffset, bitsCount, hasMultiBits = int64(order.Uint32(entry[8:12])), number, true
+				}
 			}
 		}
 		if tag != 254 && tag != 255 && tag != 256 && tag != 257 && tag != 259 && tag != 262 && tag != 266 && tag != 274 && tag != 277 && tag != 284 && tag != 292 && tag != 293 && tag != 317 && tag != 322 && tag != 323 {
@@ -417,10 +310,213 @@ func readTIFFDirectory(ctx context.Context, input io.Reader, order binary.ByteOr
 	if (result.TileWidth == 0) != (result.TileHeight == 0) || result.TileWidth%16 != 0 || result.TileHeight%16 != 0 {
 		return result, position, fmt.Errorf("invalid TIFF tile dimensions")
 	}
+	end := offset + 6 + int64(count)*12
+	if hasMultiBits {
+		if bitsCount > 65535 || bitsOffset < 8 {
+			return result, end, fmt.Errorf("invalid TIFF bits per sample")
+		}
+		maxDepth, minDepth, ok, err := readTIFFBitsPerSample(ctx, input, order, bitsOffset, bitsCount, end)
+		if err != nil {
+			return result, end, err
+		}
+		if ok {
+			result.depth, result.lowDepth = maxDepth, minDepth < 8
+		} else {
+			result.depth, result.lowDepth = 16, false
+		}
+	}
 	if result.mask && (invalidMaskDepth || result.photometric != 4 || result.Samples != 1 || result.depth != 1) {
 		return result, position, fmt.Errorf("invalid TIFF transparency mask")
 	}
-	return result, offset + 6 + int64(count)*12, nil
+	return result, end, nil
+}
+
+// readTIFFBitsPerSample 读取多通道BitsPerSample数组的最大和最小位深，非随机流返回false保留流位置
+// 入参: ctx 取消上下文, input 输入流, order 字节序, offset 数组偏移, count 通道数, restore 恢复的流位置
+// 返回: uint32 最大位深, uint32 最小位深, bool 是否完成读取, error 读取或取消错误
+func readTIFFBitsPerSample(ctx context.Context, input io.Reader, order binary.ByteOrder, offset int64, count uint32, restore int64) (uint32, uint32, bool, error) {
+	var buf [512]byte
+	var maxDepth, minDepth uint32
+	if ra, ok := input.(io.ReaderAt); ok {
+		var read uint32
+		for read < count {
+			if err := ctx.Err(); err != nil {
+				return 0, 0, false, err
+			}
+			chunk := min(count-read, uint32(len(buf)/2))
+			slice := buf[:chunk*2]
+			var done int
+			for done < len(slice) {
+				n, err := ra.ReadAt(slice[done:], offset+int64(read)*2+int64(done))
+				done += n
+				if err != nil && (err != io.EOF || done < len(slice)) {
+					return 0, 0, false, err
+				}
+			}
+			for i := uint32(0); i < chunk; i++ {
+				d := uint32(order.Uint16(slice[i*2:]))
+				if read == 0 && i == 0 || d < minDepth {
+					minDepth = d
+				}
+				if d > maxDepth {
+					maxDepth = d
+				}
+			}
+			read += chunk
+		}
+		return maxDepth, minDepth, true, nil
+	}
+	seeker, ok := input.(io.Seeker)
+	if !ok {
+		return 0, 0, false, nil
+	}
+	if _, err := seeker.Seek(offset, io.SeekStart); err != nil {
+		return 0, 0, false, err
+	}
+	var read uint32
+	for read < count {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, false, err
+		}
+		chunk := min(count-read, uint32(len(buf)/2))
+		slice := buf[:chunk*2]
+		if _, err := io.ReadFull(input, slice); err != nil {
+			return 0, 0, false, err
+		}
+		for i := uint32(0); i < chunk; i++ {
+			d := uint32(order.Uint16(slice[i*2:]))
+			if read == 0 && i == 0 || d < minDepth {
+				minDepth = d
+			}
+			if d > maxDepth {
+				maxDepth = d
+			}
+		}
+		read += chunk
+	}
+	if _, err := seeker.Seek(restore, io.SeekStart); err != nil {
+		return 0, 0, false, err
+	}
+	return maxDepth, minDepth, true, nil
+}
+
+// DisplaySize 返回同时保留主图和透明蒙版分辨率的显示尺寸
+// 返回: image.Point 保留高分辨率蒙版边缘的像素宽高
+func (l TIFFLayout) DisplaySize() image.Point {
+	size := l.size()
+	if l.Transparency != nil {
+		mask := l.Transparency.size()
+		size.X, size.Y = max(size.X, mask.X), max(size.Y, mask.Y)
+	}
+	return size
+}
+
+// Read 读取图像编码并覆盖首目录指针
+// 入参: data 接收缓冲
+// 返回: int 读取字节数, error 读取错误
+func (r *tiffDirectoryInput) Read(data []byte) (int, error) {
+	if r.ctx != nil {
+		if err := r.ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
+	offset := r.reader.Size() - int64(r.reader.Len())
+	n, err := r.reader.Read(data)
+	r.patch(data[:n], offset)
+	return n, err
+}
+
+// ReadAt 随机读取图像编码并覆盖首目录指针
+// 入参: data 接收缓冲, offset 文件偏移
+// 返回: int 读取字节数, error 读取错误
+func (r *tiffDirectoryInput) ReadAt(data []byte, offset int64) (int, error) {
+	if r.ctx != nil {
+		if err := r.ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
+	n, err := r.reader.ReadAt(data, offset)
+	r.patch(data[:n], offset)
+	return n, err
+}
+
+// patch 替换读取片段中与首目录指针重叠的部分
+// 入参: data 读取结果, offset 文件偏移
+func (r *tiffDirectoryInput) patch(data []byte, offset int64) {
+	for i := range r.directory {
+		at := int64(4+i) - offset
+		if at >= 0 && at < int64(len(data)) {
+			data[at] = r.directory[i]
+		}
+	}
+}
+
+// Bounds 返回从零开始的显示区域
+// 返回: image.Rectangle 显示区域
+func (s *orientedTIFFImage) Bounds() image.Rectangle {
+	return image.Rectangle{Max: s.size()}
+}
+
+// ColorModel 返回原始颜色模型
+// 返回: color.Model 颜色模型
+func (s *orientedTIFFImage) ColorModel() color.Model { return s.source.ColorModel() }
+
+// At 返回原图颜色，不重新采样或量化
+// 入参: x 横向显示坐标, y 纵向显示坐标
+// 返回: color.Color 像素颜色，区域外透明
+func (s *orientedTIFFImage) At(x, y int) color.Color {
+	p, ok := s.sourcePoint(x, y)
+	if !ok {
+		return color.NRGBA64{}
+	}
+	return s.source.At(p.X, p.Y)
+}
+
+// NRGBA64At 读取非预乘十六位颜色，保留透明像素中的原始颜色
+// 入参: x 横向显示坐标, y 纵向显示坐标
+// 返回: color.NRGBA64 像素颜色
+func (s *orientedTIFFImage) NRGBA64At(x, y int) color.NRGBA64 {
+	p, ok := s.sourcePoint(x, y)
+	if !ok {
+		return color.NRGBA64{}
+	}
+	return NRGBA64At(s.source, p.X, p.Y)
+}
+
+// RGBA64At 返回预乘十六位像素，保留原始颜色精度
+// 入参: x 横向显示坐标, y 纵向显示坐标
+// 返回: color.RGBA64 像素颜色
+func (s *orientedTIFFImage) RGBA64At(x, y int) color.RGBA64 {
+	r, g, b, a := s.At(x, y).RGBA()
+	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
+}
+
+// sourcePoint 将显示坐标映射为存储坐标
+// 入参: x 横向显示坐标, y 纵向显示坐标
+// 返回: image.Point 原始坐标, bool 是否位于显示区域内
+func (s *orientedTIFFImage) sourcePoint(x, y int) (image.Point, bool) {
+	if !image.Pt(x, y).In(s.Bounds()) {
+		return image.Point{}, false
+	}
+	w, h := s.Width, s.Height
+	switch s.Orientation {
+	case 2:
+		x = w - 1 - x
+	case 3:
+		x, y = w-1-x, h-1-y
+	case 4:
+		y = h - 1 - y
+	case 5:
+		x, y = y, x
+	case 6:
+		x, y = y, h-1-x
+	case 7:
+		x, y = w-1-y, h-1-x
+	case 8:
+		x, y = w-1-y, x
+	}
+	b := s.source.Bounds()
+	return image.Pt(b.Min.X+x, b.Min.Y+y), true
 }
 
 // size 返回应用方向后的显示尺寸

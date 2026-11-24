@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -24,129 +25,6 @@ import (
 	"maps"
 	"slices"
 )
-
-// compactPackageFonts 清理无引用字体，补齐多文档及历史版本的字体裁剪，不修改编辑器快照
-// 入参: ctx 取消上下文, parts 输出修改, removed 待删除条目, generated 本次编码的页面引用
-// 返回: error 读取、结构或取消错误
-func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
-	reader := e.source.reader
-	versioned := false
-	for _, body := range reader.OFD.DocBody {
-		versioned = versioned || body.versioned
-	}
-	if !versioned {
-		if reader.DocumentCount() <= 1 || e.backends.FontResources == nil || e.output != nil && e.output.options.Mode != CompressionUnchanged {
-			return nil
-		}
-	}
-	protected, err := reader.hasOutputSignatures(ctx)
-	if err != nil || protected {
-		return err
-	}
-	resources := e.runtimeResources
-	if resources == nil {
-		resources = reader.resources
-	}
-	view := &Reader{Zip: reader.Zip, encrypted: reader.encryptedSource(), sourceFile: reader.sourceFile, files: maps.Clone(reader.files), resources: resources}
-	if view.files == nil {
-		view.files = make(map[string][]byte)
-	}
-	maps.Copy(view.files, parts)
-	if err := view.initRootContext(ctx); err != nil {
-		return err
-	}
-	data, err := view.readFileViewContext(ctx, "OFD.xml")
-	if err != nil {
-		return err
-	}
-	root, err := parseEditorXMLContext(ctx, data)
-	if err != nil {
-		return err
-	}
-	candidates, seen := make(map[string]bool), make(map[string]bool)
-	for _, body := range root.children {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if !body.matchesOFD("DocBody") {
-			continue
-		}
-		versions, err := parseVersionEntries(ctx, body)
-		if err != nil {
-			return err
-		}
-		for _, entry := range versions {
-			version, err := view.readDocumentVersionContext(ctx, entry.ID, entry.Location)
-			if err != nil {
-				return fmt.Errorf("version %s: %w", entry.ID, err)
-			}
-			for _, file := range version.Files {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				name := file.Location
-				if seen[name] || removed[name] {
-					continue
-				}
-				seen[name] = true
-				candidate, err := view.fontCleanupCandidate(ctx, name)
-				if err != nil {
-					return err
-				}
-				if candidate {
-					candidates[name] = true
-				}
-			}
-		}
-	}
-	if err := pruneUnreferencedFiles(ctx, view, slices.Collect(maps.Keys(candidates))...); err != nil {
-		return err
-	}
-	if err := e.subsetPackageFonts(ctx, view, parts, removed, generated); err != nil {
-		return err
-	}
-	for name, data := range view.files {
-		if original, ok := reader.files[name]; !ok || !bytes.Equal(original, data) {
-			parts[name] = data
-		}
-	}
-	for name := range candidates {
-		if !view.fileNames[name] {
-			removed[name] = true
-			delete(parts, name)
-		}
-	}
-	return nil
-}
-
-// fontCleanupCandidate 检查字体目录与文件范围，仅将可识别字体交给引用清理流程
-// 入参: ctx 取消上下文, name 包内文件路径
-// 返回: bool 是否为候选字体, error 读取或取消错误
-func (r *Reader) fontCleanupCandidate(ctx context.Context, name string) (bool, error) {
-	input, err := r.openFile(name)
-	if err != nil {
-		return false, err
-	}
-	defer input.Close()
-	var size uint64
-	if data, ok := r.files[cleanPackagePath(name)]; ok {
-		size = uint64(len(data))
-	} else if file, ok := r.packageFile(name); ok {
-		size = file.UncompressedSize64
-	} else if src := r.encryptedSource(); src != nil {
-		if entrySize, ok := src.size(name); ok {
-			size = entrySize
-		}
-	}
-	candidate, err := fontCleanupDirectory(imageInput{ReadCloser: input, ctx: ctx}, size)
-	if err == io.EOF || err == io.ErrUnexpectedEOF {
-		err = nil
-	}
-	if canceled := ctx.Err(); canceled != nil {
-		return false, canceled
-	}
-	return candidate, err
-}
 
 // fontCleanupDirectory 检查SFNT表目录或字体集合索引，不读取字形数据
 // 入参: input 文件流, size 文件长度
@@ -208,10 +86,193 @@ func fontCleanupDirectory(input io.Reader, size uint64) (bool, error) {
 	return true, nil
 }
 
-// subsetPackageFonts 按文档作用域收集用字，复用引用缓存并跳过已裁剪收敛字体
-// 入参: ctx 取消上下文, view 独立输出快照, parts 前序输出改动, removed 待删除条目, generated 本次编码的页面引用
+// compactPackageFonts 清理无引用字体，补齐多文档及历史版本的字体裁剪，不修改编辑器快照
+// 入参: ctx 取消上下文, parts 输出修改, removed 待删除条目, generated 本次编码的页面引用
+// 返回: error 读取、结构或取消错误
+func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
+	reader := e.source.reader
+	versioned := reader.packageVersioned()
+	if !versioned {
+		if reader.DocumentCount() <= 1 || e.backends.FontResources == nil || e.output != nil && e.output.options.Mode != CompressionUnchanged {
+			return nil
+		}
+	}
+	protectedDocs, protectedFiles, protected, err := e.outputProtection(ctx, reader)
+	if err != nil || protected {
+		return err
+	}
+	if versioned {
+		preserved, err := reader.versionPreservedFiles(ctx)
+		if err != nil {
+			return err
+		}
+		if len(preserved) != 0 {
+			merged := maps.Clone(protectedFiles)
+			if merged == nil {
+				merged = make(map[string]bool, len(preserved))
+			}
+			for name := range preserved {
+				merged[cleanPackagePath(name)] = true
+			}
+			protectedFiles = merged
+		}
+	}
+	resources := e.runtimeResources
+	if resources == nil {
+		resources = reader.resources
+	}
+	view := &Reader{zip: reader.zip, encrypted: reader.encryptedSource(), sourceFile: reader.sourceFile, files: maps.Clone(reader.files), documentIndex: reader.documentIndex, selectedVersion: cloneEditorData(reader.selectedVersion), resources: resources}
+	if view.files == nil {
+		view.files = make(map[string][]byte)
+	}
+	if len(removed) != 0 {
+		for name := range view.files {
+			if removed[cleanPackagePath(name)] {
+				delete(view.files, name)
+			}
+		}
+		if view.zip != nil {
+			pruneReaderZip(view, func(file *zip.File) bool { return !removed[cleanPackagePath(file.Name)] })
+		}
+		if src := view.encryptedSource(); src != nil {
+			view.setEncryptedSource(src.omit(removed))
+		}
+	}
+	var stagedRaw map[string][]byte
+	for name, data := range parts {
+		if data != nil {
+			view.files[name] = data
+			continue
+		}
+		if staged := generated[name].staged; staged != nil {
+			input := imageInput{ReadCloser: staged.open(), ctx: ctx}
+			raw, readErr := io.ReadAll(input)
+			_ = input.Close()
+			if readErr != nil {
+				return readErr
+			}
+			view.files[name] = raw
+			if stagedRaw == nil {
+				stagedRaw = make(map[string][]byte)
+			}
+			stagedRaw[name] = raw
+		}
+	}
+	if err := view.initRootContext(ctx); err != nil {
+		return err
+	}
+	data, err := view.readFileViewContext(ctx, "OFD.xml")
+	if err != nil {
+		return err
+	}
+	root, err := parseEditorXMLContext(ctx, data)
+	if err != nil {
+		return err
+	}
+	candidates, seen := make(map[string]bool), make(map[string]bool)
+	docIndex := 0
+	for _, body := range root.children {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !body.matchesOFD("DocBody") {
+			continue
+		}
+		currentDoc := docIndex
+		docIndex++
+		if protectedDocs[currentDoc] {
+			continue
+		}
+		versions, err := parseVersionEntries(ctx, body)
+		if err != nil {
+			return err
+		}
+		for _, entry := range versions {
+			version, err := view.readDocumentVersionContext(ctx, entry.ID, entry.Location)
+			if err != nil {
+				return fmt.Errorf("version %s: %w", entry.ID, err)
+			}
+			for _, file := range version.Files {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				name := file.Location
+				if seen[name] || removed[name] || protectedFiles[cleanPackagePath(name)] {
+					continue
+				}
+				seen[name] = true
+				candidate, err := view.fontCleanupCandidate(ctx, name)
+				if err != nil {
+					return err
+				}
+				if candidate {
+					candidates[name] = true
+				}
+			}
+		}
+	}
+	if err := pruneUnreferencedFiles(ctx, view, slices.Collect(maps.Keys(candidates))...); err != nil {
+		return err
+	}
+	if err := e.subsetPackageFonts(ctx, view, parts, removed, generated, protectedFiles); err != nil {
+		return err
+	}
+	for name, data := range view.files {
+		if protectedFiles[cleanPackagePath(name)] {
+			continue
+		}
+		if raw, wasStaged := stagedRaw[name]; wasStaged && bytes.Equal(raw, data) {
+			continue
+		}
+		if original, ok := reader.files[name]; !ok || !bytes.Equal(original, data) {
+			parts[name] = data
+		}
+	}
+	for name := range candidates {
+		if protectedFiles[cleanPackagePath(name)] {
+			continue
+		}
+		if !view.fileNames[name] {
+			removed[name] = true
+			delete(parts, name)
+		}
+	}
+	return nil
+}
+
+// fontCleanupCandidate 检查字体目录与文件范围，仅将可识别字体交给引用清理流程
+// 入参: ctx 取消上下文, name 包内文件路径
+// 返回: bool 是否为候选字体, error 读取或取消错误
+func (r *Reader) fontCleanupCandidate(ctx context.Context, name string) (bool, error) {
+	input, err := r.openFile(name)
+	if err != nil {
+		return false, err
+	}
+	defer input.Close()
+	var size uint64
+	if data, ok := r.files[cleanPackagePath(name)]; ok {
+		size = uint64(len(data))
+	} else if file, ok := r.packageFile(name); ok {
+		size = file.UncompressedSize64
+	} else if src := r.encryptedSource(); src != nil {
+		if entrySize, ok := src.size(name); ok {
+			size = entrySize
+		}
+	}
+	candidate, err := fontCleanupDirectory(imageInput{ReadCloser: input, ctx: ctx}, size)
+	if err == io.EOF || err == io.ErrUnexpectedEOF {
+		err = nil
+	}
+	if canceled := ctx.Err(); canceled != nil {
+		return false, canceled
+	}
+	return candidate, err
+}
+
+// subsetPackageFonts 按文档作用域收集用字，复用引用缓存并跳过已裁剪收敛及受签章保护字体
+// 入参: ctx 取消上下文, view 独立输出快照, parts 前序输出改动, removed 待删除条目, generated 本次编码的页面引用, protectedFiles 受签章保护的文件路径
 // 返回: error 读取、裁剪或取消错误
-func (e *Editor) subsetPackageFonts(ctx context.Context, view *Reader, parts map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
+func (e *Editor) subsetPackageFonts(ctx context.Context, view *Reader, parts map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences, protectedFiles map[string]bool) error {
 	if e.backends.FontResources == nil {
 		return nil
 	}
@@ -270,26 +331,51 @@ func (e *Editor) subsetPackageFonts(ctx context.Context, view *Reader, parts map
 		}
 	}
 	var cache editorSourceFontCache
-	for index, name := range slices.Sorted(maps.Keys(usage)) {
+	orderedNames := slices.Sorted(maps.Keys(usage))
+	type packageFontEntry struct {
+		name  string
+		key   editorSourceFontKey
+		data  []byte
+		usage *editorFontUsage
+	}
+	entries := make([]packageFontEntry, 0, len(orderedNames))
+	tasks := make([]editorSourceFontTask, 0, len(orderedNames))
+	seenKeys := make(map[editorSourceFontKey]bool, len(orderedNames))
+	for index, name := range orderedNames {
 		if err := progress.report("fonts", index, len(usage)); err != nil {
 			return err
 		}
-		if usage[name].unsafe || len(usage[name].chars)+len(usage[name].glyphs) == 0 {
+		if usage[name].unsafe || protectedFiles[cleanPackagePath(name)] || len(usage[name].chars)+len(usage[name].glyphs) == 0 {
 			continue
 		}
 		data, err := read(name)
 		if err != nil {
 			return err
 		}
-		if converged[sha256.Sum256(data)] {
+		key, characters, glyphs := buildEditorSourceFontKey(data, usage[name])
+		if converged[key.source] {
 			continue
 		}
-		subset, err := cache.subset(ctx, e.backends.FontResources, data, usage[name])
+		entries = append(entries, packageFontEntry{name: name, key: key, data: data, usage: usage[name]})
+		if !seenKeys[key] {
+			seenKeys[key] = true
+			tasks = append(tasks, editorSourceFontTask{name: name, key: key, data: data, characters: characters, glyphs: glyphs})
+		}
+	}
+	taskErrs, err := cache.prepareBatch(ctx, e.backends.FontResources, tasks)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if taskErr := taskErrs[entry.key]; taskErr != nil {
+			return taskErr
+		}
+		subset, err := cache.subset(ctx, e.backends.FontResources, entry.data, entry.usage)
 		if err != nil {
 			return err
 		}
 		if subset != nil {
-			view.files[name] = subset
+			view.files[entry.name] = subset
 		}
 	}
 	if err := progress.report("fonts", len(usage), len(usage)); err != nil {

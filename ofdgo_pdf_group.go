@@ -20,9 +20,11 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"maps"
 	"math"
 	"reflect"
 
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
@@ -37,6 +39,133 @@ type pdfPaintRegion struct {
 	path   GeometryPath
 	intent pdfgo.Name
 	origin pdfObjectOrigin
+}
+
+// pdfOpaqueVisitor 验证组内没有透明混合，允许独立的已校准颜色保留为矢量
+// 入参: visitor 正式访问器，语义提示由正式遍历交付
+// 返回: pdfgo.Visitor 不透明性检查器
+func pdfOpaqueVisitor(visitor pdfgo.Visitor) pdfgo.Visitor {
+	check := func(s pdfgo.Style, fill, stroke bool) error {
+		if s.SoftMask != nil || fill && s.Fill.Alpha != 1 || stroke && s.Stroke.Alpha != 1 || s.BlendMode != "" && s.BlendMode != "Normal" && s.BlendMode != "Compatible" {
+			return &pdfgo.UnsupportedError{Feature: "non-sRGB transparent group content"}
+		}
+		return nil
+	}
+	v := pdfgo.Visitor{
+		Reference:       visitor.Reference,
+		OptionalContent: visitor.OptionalContent,
+		Halftones:       visitor.Halftones,
+		PostScript:      visitor.PostScript,
+		Path:            func(m pdfgo.PathMark) error { return check(m.Style, m.Fill, m.Stroke) },
+		Text: func(m pdfgo.TextMark) error {
+			return check(m.Style, m.Mode%4 == 0 || m.Mode%4 == 2, m.Mode%4 == 1 || m.Mode%4 == 2)
+		},
+		Image: func(m pdfgo.ImageMark) error {
+			masked, err := m.Image.HasMask()
+			if err != nil {
+				return err
+			}
+			if masked {
+				return &pdfgo.UnsupportedError{Feature: "non-sRGB masked group image"}
+			}
+			return check(m.Style, true, false)
+		},
+	}
+	if visitor.Warning != nil {
+		v.Warning = func(pdfgo.Diagnostic) {}
+	}
+	if visitor.MarkedContent != nil {
+		v.MarkedContent = func(pdfgo.MarkedContentMark) error { return nil }
+	}
+	v.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
+		if mark.Alpha != 1 || mark.SoftMask != nil || mark.BlendMode != "" && mark.BlendMode != "Normal" && mark.BlendMode != "Compatible" {
+			return &pdfgo.UnsupportedError{Feature: "non-sRGB nested transparent group"}
+		}
+		return walk(v)
+	}
+	return v
+}
+
+// pdfCompositeRegions 按正常混合计算互不重叠的区域，组透明度由调用方统一应用
+// 入参: geometry 几何后端, regions 按绘制顺序排列的区域
+// 返回: []pdfPaintRegion 合成区域, error 几何错误
+func pdfCompositeRegions(geometry GeometryBackend, regions []pdfPaintRegion) ([]pdfPaintRegion, error) {
+	var result []pdfPaintRegion
+	for _, source := range regions {
+		remaining := source.path
+		var next []pdfPaintRegion
+		for _, backdrop := range result {
+			outside, err := geometry.Combine(backdrop.path, source.path, GeometrySubtract)
+			if err != nil {
+				return nil, err
+			}
+			if len(outside) != 0 {
+				next = append(next, pdfPaintRegion{backdrop.paint, outside, backdrop.intent, backdrop.origin})
+			}
+			overlap, err := geometry.Combine(backdrop.path, source.path, GeometryIntersect)
+			if err != nil {
+				return nil, err
+			}
+			if len(overlap) != 0 {
+				paint := pdfgo.Paint{Alpha: source.paint.Alpha + backdrop.paint.Alpha*(1-source.paint.Alpha)}
+				for i := range paint.RGB {
+					paint.RGB[i] = (source.paint.RGB[i]*source.paint.Alpha + backdrop.paint.RGB[i]*backdrop.paint.Alpha*(1-source.paint.Alpha)) / paint.Alpha
+				}
+				origin := source.origin
+				if source.paint.Alpha != 1 {
+					origin = backdrop.origin.merge(origin)
+				}
+				next = append(next, pdfPaintRegion{paint, overlap, "", origin})
+			}
+			remaining, err = geometry.Combine(remaining, backdrop.path, GeometrySubtract)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if len(remaining) != 0 {
+			next = append(next, pdfPaintRegion{source.paint, remaining, source.intent, source.origin})
+		}
+		result = next
+	}
+	return result, nil
+}
+
+// pdfClippedVisitor 为图元及嵌套组附加裁剪，保留未提供的访问能力
+// 入参: visitor 图元访问器, clip 页面坐标裁剪
+// 返回: pdfgo.Visitor 裁剪访问器
+func pdfClippedVisitor(visitor pdfgo.Visitor, clip pdfgo.Path) pdfgo.Visitor {
+	result := visitor
+	if visitor.Path != nil {
+		result.Path = func(mark pdfgo.PathMark) error {
+			mark.Style.Clips = append(append([]pdfgo.Path(nil), mark.Style.Clips...), clip)
+			return visitor.Path(mark)
+		}
+	}
+	if visitor.Text != nil {
+		result.Text = func(mark pdfgo.TextMark) error {
+			mark.Style.Clips = append(append([]pdfgo.Path(nil), mark.Style.Clips...), clip)
+			return visitor.Text(mark)
+		}
+	}
+	if visitor.Image != nil {
+		result.Image = func(mark pdfgo.ImageMark) error {
+			mark.Style.Clips = append(append([]pdfgo.Path(nil), mark.Style.Clips...), clip)
+			return visitor.Image(mark)
+		}
+	}
+	if visitor.Group != nil {
+		result.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
+			return visitor.Group(mark, func(v pdfgo.Visitor) error { return walk(pdfClippedVisitor(v, clip)) })
+		}
+	}
+	return result
+}
+
+// pdfNumbersPathBox 编码PDF坐标矩形的闭合路径
+// 入参: box 矩形边界
+// 返回: string 紧缩路径
+func pdfNumbersPathBox(box pdfgo.Rectangle) string {
+	return "M " + pdfNumbers(box.XMin, box.YMin) + " L " + pdfNumbers(box.XMax, box.YMin) + " L " + pdfNumbers(box.XMax, box.YMax) + " L " + pdfNumbers(box.XMin, box.YMax) + " C"
 }
 
 // group 将单色图元的透明组转换为互不重叠的填充区域，保留矢量与组不透明度
@@ -80,50 +209,6 @@ func (p *pdfImporter) group(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error
 	return err
 }
 
-// pdfOpaqueVisitor 验证组内没有透明混合，允许独立的已校准颜色保留为矢量
-// 入参: visitor 正式访问器，语义提示由正式遍历交付
-// 返回: pdfgo.Visitor 不透明性检查器
-func pdfOpaqueVisitor(visitor pdfgo.Visitor) pdfgo.Visitor {
-	check := func(s pdfgo.Style, fill, stroke bool) error {
-		if s.SoftMask != nil || fill && s.Fill.Alpha != 1 || stroke && s.Stroke.Alpha != 1 || s.BlendMode != "" && s.BlendMode != "Normal" && s.BlendMode != "Compatible" {
-			return &pdfgo.UnsupportedError{Feature: "non-sRGB transparent group content"}
-		}
-		return nil
-	}
-	v := pdfgo.Visitor{
-		Reference:       visitor.Reference,
-		OptionalContent: visitor.OptionalContent,
-		Halftones:       visitor.Halftones,
-		Path:            func(m pdfgo.PathMark) error { return check(m.Style, m.Fill, m.Stroke) },
-		Text: func(m pdfgo.TextMark) error {
-			return check(m.Style, m.Mode%4 == 0 || m.Mode%4 == 2, m.Mode%4 == 1 || m.Mode%4 == 2)
-		},
-		Image: func(m pdfgo.ImageMark) error {
-			masked, err := m.Image.HasMask()
-			if err != nil {
-				return err
-			}
-			if masked {
-				return &pdfgo.UnsupportedError{Feature: "non-sRGB masked group image"}
-			}
-			return check(m.Style, true, false)
-		},
-	}
-	if visitor.Warning != nil {
-		v.Warning = func(pdfgo.Diagnostic) {}
-	}
-	if visitor.MarkedContent != nil {
-		v.MarkedContent = func(pdfgo.MarkedContentMark) error { return nil }
-	}
-	v.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
-		if mark.Alpha != 1 || mark.SoftMask != nil || mark.BlendMode != "" && mark.BlendMode != "Normal" && mark.BlendMode != "Compatible" {
-			return &pdfgo.UnsupportedError{Feature: "non-sRGB nested transparent group"}
-		}
-		return walk(v)
-	}
-	return v
-}
-
 // groupPaths 将正常混合的透明路径组分解为标准矢量区域
 // 入参: mark 组状态, walk 内容访问函数, visitor 页面访问器
 // 返回: error 无法矢量表达或几何错误
@@ -140,14 +225,28 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 	var clips []pdfgo.Path
 	opaque := true
 	scale := math.Hypot(p.matrix[0], p.matrix[1])
+	var pendingEvents []func() error
 	collect := pdfgo.Visitor{
 		Reference:       visitor.Reference,
 		OptionalContent: visitor.OptionalContent,
 		Halftones:       visitor.Halftones,
-		Warning:         visitor.Warning,
 		Text:            func(pdfgo.TextMark) error { return errPDFGroupRaster },
 		Image:           func(pdfgo.ImageMark) error { return errPDFGroupRaster },
 		Group:           func(pdfgo.GroupMark, func(pdfgo.Visitor) error) error { return errPDFGroupRaster },
+	}
+	if visitor.PostScript != nil {
+		collect.PostScript = func(mark pdfgo.PostScriptMark) error {
+			pendingEvents = append(pendingEvents, func() error { return visitor.PostScript(mark) })
+			return nil
+		}
+	}
+	if visitor.Warning != nil {
+		collect.Warning = func(warning pdfgo.Diagnostic) {
+			pendingEvents = append(pendingEvents, func() error {
+				visitor.Warning(warning)
+				return nil
+			})
+		}
 	}
 	collect.Path = func(path pdfgo.PathMark) error {
 		if err := p.ctx.Err(); err != nil {
@@ -156,7 +255,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 		if path.Style.SoftMask != nil || path.Style.BlendMode != "" && path.Style.BlendMode != "Normal" && path.Style.BlendMode != "Compatible" {
 			return &pdfgo.UnsupportedError{Feature: "masked or blended transparent group content"}
 		}
-		data, err := codecpdf.PathData(p.ctx, path.Path, p.matrix, Box{})
+		data, err := codecpdf.PathData(p.ctx, path.Path, p.matrix, basegeom.Box{})
 		if err != nil {
 			return err
 		}
@@ -206,7 +305,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 						return fmt.Errorf("invalid PDF stroke matrix")
 					}
 					local := pdfImporter{matrix: inverse}
-					data, err = codecpdf.PathData(p.ctx, path.Path, local.matrix, Box{})
+					data, err = codecpdf.PathData(p.ctx, path.Path, local.matrix, basegeom.Box{})
 					if err != nil {
 						return err
 					}
@@ -222,7 +321,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 				for i, dash := range path.Style.Dash {
 					dashes[i] = dash * strokeScale
 				}
-				outline, err = geometry.Stroke(strokeShape, StrokeOptions{Width: path.Style.LineWidth * strokeScale, Cap: []string{"Butt", "Round", "Square"}[path.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[path.Style.Join], MiterLimit: path.Style.MiterLimit, DashOffset: path.Style.DashPhase * strokeScale, Dashes: dashes, Tolerance: tolerance})
+				outline, err = geometry.Stroke(strokeShape, StrokeOptions{Width: path.Style.LineWidth * strokeScale, Cap: pdfLineCapName(path.Style.Cap), Join: pdfLineJoinName(path.Style.Join), MiterLimit: path.Style.MiterLimit, DashOffset: path.Style.DashPhase * strokeScale, Dashes: dashes, Tolerance: tolerance})
 				if err != nil {
 					return err
 				}
@@ -258,6 +357,11 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 	if err := p.ctx.Err(); err != nil {
 		return err
 	}
+	for _, replay := range pendingEvents {
+		if err := replay(); err != nil {
+			return err
+		}
+	}
 	if len(combined) != 0 {
 		regions = append(regions, pdfPaintRegion{*paint, combined, intent, origin})
 	}
@@ -270,6 +374,11 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 			return err
 		}
 	}
+	type emittedRegion struct {
+		object GraphicObject
+		origin pdfObjectOrigin
+	}
+	emitted := make([]emittedRegion, 0, len(regions))
 	var covered GeometryPath
 	for i := len(regions) - 1; i >= 0; i-- {
 		if err := p.ctx.Err(); err != nil {
@@ -318,7 +427,10 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 			return err
 		}
 		object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: data, Fill: &fill, Stroke: &stroke, FillColor: color, Clips: objectClips}
-		p.appendOriginObject(GraphicObject{Type: "PathObject", PathObject: object}, region.origin)
+		emitted = append(emitted, emittedRegion{object: GraphicObject{Type: "PathObject", PathObject: object}, origin: region.origin})
+	}
+	for i := len(emitted) - 1; i >= 0; i-- {
+		p.appendOriginObject(emitted[i].object, emitted[i].origin)
 		p.report.PathObjects++
 	}
 	return nil
@@ -352,7 +464,8 @@ func (p *pdfImporter) rasterGroup(mark pdfgo.GroupMark, walk func(pdfgo.Visitor)
 // visitor 绑定当前导入器的图元与透明组访问函数
 // 返回: pdfgo.Visitor 页面访问器
 func (p *pdfImporter) visitor() pdfgo.Visitor {
-	v := pdfgo.Visitor{Path: p.path, Text: p.text, Image: p.image, Warning: p.warning, Reference: p.referencePage, Halftones: p.halftones}
+	v := p.newBaseVisitor()
+	v.Path, v.Text, v.Image = p.path, p.text, p.image
 	v.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error { return p.group(mark, walk, v) }
 	return v
 }
@@ -384,6 +497,7 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 		return nil, box, err
 	}
 	editor := NewEditor()
+	defer editor.Close()
 	editor.SetResources(p.resources)
 	editor.SetRenderBackends(p.editor.Backends())
 	editor.SetFontDirs(p.editor.fontDirs...)
@@ -405,10 +519,35 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 	if p.clipPaths == nil {
 		p.clipPaths = resourceCache[[32]byte, pdfClipPath](p.resources, 8<<20)
 	}
-	local := pdfImporter{resources: p.resources, ctx: p.ctx, reader: p.reader, editor: editor, renderer: p.renderer, matrix: p.matrix, pageBox: p.pageBox, pageWidth: p.pageWidth, pageHeight: p.pageHeight, rasterDPI: p.rasterDPI, warning: p.warning, rasterWarned: true, fontIDs: map[*pdfgo.Font]string{}, fonts: p.fonts, fontPrograms: p.fontPrograms, symbolFonts: p.symbolFonts, clipPaths: p.clipPaths, textOrigins: p.textOrigins}
+	local := pdfImporter{
+		resources:        p.resources,
+		ctx:              p.ctx,
+		reader:           p.reader,
+		editor:           editor,
+		renderer:         p.renderer,
+		matrix:           p.matrix,
+		pageBox:          p.pageBox,
+		pageWidth:        p.pageWidth,
+		pageHeight:       p.pageHeight,
+		rasterDPI:        p.rasterDPI,
+		warning:          p.warning,
+		rasterWarned:     true,
+		compositeSpace:   p.compositeSpace,
+		resolveFile:      p.resolveFile,
+		resolveReference: p.resolveReference,
+		references:       p.references,
+		usedReferences:   p.usedReferences,
+		fontIDs:          map[*pdfgo.Font]string{},
+		fonts:            p.fonts,
+		fontPrograms:     p.fontPrograms,
+		symbolFonts:      p.symbolFonts,
+		clipPaths:        p.clipPaths,
+		textOrigins:      maps.Clone(p.textOrigins),
+	}
 	if err := build(&local); err != nil {
 		return nil, box, err
 	}
+	p.usedReferences = p.usedReferences || local.usedReferences
 	if err := p.ctx.Err(); err != nil {
 		return nil, box, err
 	}
@@ -424,8 +563,8 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 	}
 	defer reader.Close()
 	page := &editor.pages[0]
-	renderer := p.renderer.childRenderer(reader)
-	renderer.TransparentBackground = true
+	renderer := p.renderer.syncChildRenderer(reader)
+	renderer.transparentBackground = true
 	scene, err := renderer.CompilePageContext(p.ctx, page)
 	if canceled := p.ctx.Err(); canceled != nil {
 		return nil, box, canceled
@@ -511,13 +650,13 @@ func (p *pdfImporter) renderGroupSceneInto(source *RasterPage, box Box, target *
 	}
 	if target != nil {
 		if buffered, ok := backend.(RasterBufferBackend); ok {
-			if err := buffered.RenderInto(&scene, target); err != nil {
+			if err := buffered.RenderInto(p.ctx, &scene, target); err != nil {
 				return nil, err
 			}
 			return target, nil
 		}
 	}
-	return backend.Render(&scene)
+	return backend.Render(p.ctx, &scene)
 }
 
 // appendRasterGroup 保存局部合成结果并记录输出精度
@@ -529,7 +668,7 @@ func (p *pdfImporter) appendRasterGroup(img image.Image, box Box, opacity float6
 	optimized := false
 	if p.compression.Mode == CompressionLossy {
 		var err error
-		encoded, err = pdfgo.EncodeImageResource(p.ctx, img, p.compression)
+		encoded, err = pdfgo.EncodeImageResource(p.ctx, img, p.compression.pdfOptions())
 		if err != nil && !errors.Is(err, io.ErrShortBuffer) {
 			return err
 		}
@@ -564,81 +703,6 @@ func (p *pdfImporter) appendRasterGroup(img image.Image, box Box, opacity float6
 		p.rasterWarned = true
 	}
 	return nil
-}
-
-// pdfCompositeRegions 按正常混合计算互不重叠的区域，组透明度由调用方统一应用
-// 入参: geometry 几何后端, regions 按绘制顺序排列的区域
-// 返回: []pdfPaintRegion 合成区域, error 几何错误
-func pdfCompositeRegions(geometry GeometryBackend, regions []pdfPaintRegion) ([]pdfPaintRegion, error) {
-	var result []pdfPaintRegion
-	for _, source := range regions {
-		remaining := source.path
-		var next []pdfPaintRegion
-		for _, backdrop := range result {
-			outside, err := geometry.Combine(backdrop.path, source.path, GeometrySubtract)
-			if err != nil {
-				return nil, err
-			}
-			if len(outside) != 0 {
-				next = append(next, pdfPaintRegion{backdrop.paint, outside, backdrop.intent, backdrop.origin})
-			}
-			overlap, err := geometry.Combine(backdrop.path, source.path, GeometryIntersect)
-			if err != nil {
-				return nil, err
-			}
-			if len(overlap) != 0 {
-				paint := pdfgo.Paint{Alpha: source.paint.Alpha + backdrop.paint.Alpha*(1-source.paint.Alpha)}
-				for i := range paint.RGB {
-					paint.RGB[i] = (source.paint.RGB[i]*source.paint.Alpha + backdrop.paint.RGB[i]*backdrop.paint.Alpha*(1-source.paint.Alpha)) / paint.Alpha
-				}
-				origin := source.origin
-				if source.paint.Alpha != 1 {
-					origin = backdrop.origin.merge(origin)
-				}
-				next = append(next, pdfPaintRegion{paint, overlap, "", origin})
-			}
-			remaining, err = geometry.Combine(remaining, backdrop.path, GeometrySubtract)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if len(remaining) != 0 {
-			next = append(next, pdfPaintRegion{source.paint, remaining, source.intent, source.origin})
-		}
-		result = next
-	}
-	return result, nil
-}
-
-// pdfClippedVisitor 为图元及嵌套组附加裁剪，保留未提供的访问能力
-// 入参: visitor 图元访问器, clip 页面坐标裁剪
-// 返回: pdfgo.Visitor 裁剪访问器
-func pdfClippedVisitor(visitor pdfgo.Visitor, clip pdfgo.Path) pdfgo.Visitor {
-	result := visitor
-	if visitor.Path != nil {
-		result.Path = func(mark pdfgo.PathMark) error {
-			mark.Style.Clips = append(append([]pdfgo.Path(nil), mark.Style.Clips...), clip)
-			return visitor.Path(mark)
-		}
-	}
-	if visitor.Text != nil {
-		result.Text = func(mark pdfgo.TextMark) error {
-			mark.Style.Clips = append(append([]pdfgo.Path(nil), mark.Style.Clips...), clip)
-			return visitor.Text(mark)
-		}
-	}
-	if visitor.Image != nil {
-		result.Image = func(mark pdfgo.ImageMark) error {
-			mark.Style.Clips = append(append([]pdfgo.Path(nil), mark.Style.Clips...), clip)
-			return visitor.Image(mark)
-		}
-	}
-	if visitor.Group != nil {
-		result.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
-			return visitor.Group(mark, func(v pdfgo.Visitor) error { return walk(pdfClippedVisitor(v, clip)) })
-		}
-	}
-	return result
 }
 
 // maskClip 将二值亮度蒙版转换为标准矢量裁剪，不栅格化原图元
@@ -689,7 +753,10 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 		}
 	}
 	identity := pdfImporter{matrix: pdfgo.Identity()}
-	var visitor pdfgo.Visitor
+	visitor := p.newBaseVisitor()
+	visitor.PostScript = func(pdfgo.PostScriptMark) error {
+		return &pdfgo.UnsupportedError{Feature: "PostScript mask graphic"}
+	}
 	visitor.Text = func(pdfgo.TextMark) error {
 		return &pdfgo.UnsupportedError{Feature: "text mask graphic"}
 	}
@@ -714,7 +781,7 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 		if err != nil {
 			return err
 		}
-		data, err := codecpdf.PathData(p.ctx, mark.Path, identity.matrix, Box{})
+		data, err := codecpdf.PathData(p.ctx, mark.Path, identity.matrix, basegeom.Box{})
 		if err != nil {
 			return err
 		}
@@ -730,7 +797,7 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 			if len(clip.Text) != 0 {
 				return &pdfgo.UnsupportedError{Feature: "text-clipped binary mask"}
 			}
-			data, err := codecpdf.PathData(p.ctx, clip, identity.matrix, Box{})
+			data, err := codecpdf.PathData(p.ctx, clip, identity.matrix, basegeom.Box{})
 			if err != nil {
 				return err
 			}
@@ -781,13 +848,6 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 	}
 	p.maskClips[mask] = path
 	return path, nil
-}
-
-// pdfNumbersPathBox 编码PDF坐标矩形的闭合路径
-// 入参: box 矩形边界
-// 返回: string 紧缩路径
-func pdfNumbersPathBox(box pdfgo.Rectangle) string {
-	return "M " + pdfNumbers(box.XMin, box.YMin) + " L " + pdfNumbers(box.XMax, box.YMin) + " L " + pdfNumbers(box.XMax, box.YMax) + " L " + pdfNumbers(box.XMin, box.YMax) + " C"
 }
 
 // maskStyle 将独立图元的二值蒙版附加到裁剪链

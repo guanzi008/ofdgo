@@ -29,6 +29,91 @@ import (
 	"unicode/utf8"
 )
 
+// InvoiceDigest 计算原始导出数据的SHA256摘要
+// 入参: data 导出数据
+// 返回: string 小写十六进制摘要
+func InvoiceDigest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// invoiceReferenceEditability 一次计数并生成无共享引用的事实能力，字体和布局仍由事务预检
+// 入参: invoice 发票
+// 返回: []bool 与事实索引对应的编辑条件
+func invoiceReferenceEditability(invoice Invoice) []bool {
+	counts := make(map[string]int)
+	for _, fact := range invoice.Facts {
+		for _, ref := range fact.References {
+			for _, id := range ref.ObjectIDs {
+				counts[editorResourceID(ref.PageID)+"/"+editorResourceID(id)]++
+			}
+		}
+	}
+	result := make([]bool, len(invoice.Facts))
+	for i, fact := range invoice.Facts {
+		result[i] = len(fact.References) != 0
+		for _, ref := range fact.References {
+			result[i] = result[i] && editorResourceID(ref.PageID) != "" && len(ref.ObjectIDs) != 0
+			for _, id := range ref.ObjectIDs {
+				result[i] = result[i] && editorResourceID(id) != "" && counts[editorResourceID(ref.PageID)+"/"+editorResourceID(id)] == 1
+			}
+		}
+	}
+	return result
+}
+
+// invoiceReferenceDisplay 保留金额符号及已识别日期的显示格式，不改写引用结构
+// 入参: invoice 原发票, fact 原事实, value 新业务值
+// 返回: string 显示文字, error 值格式错误
+func invoiceReferenceDisplay(invoice Invoice, fact InvoiceFact, value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	binding, ok := invoiceNormalizedFactBinding(invoice, fact)
+	if !ok {
+		return value, nil
+	}
+	switch binding.Field {
+	case "amount", "taxAmount", "totalAmount":
+		old := strings.TrimSpace(fact.Value)
+		prefix := ""
+		for _, symbol := range []string{"¥", "￥"} {
+			if strings.HasPrefix(old, symbol) {
+				prefix = symbol
+			}
+		}
+		value = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(value), "¥￥"))
+		if invoiceDecimal(value) == nil {
+			return "", fmt.Errorf("invalid invoice amount")
+		}
+		return prefix + value, nil
+	case "date":
+		layouts := []string{"2006年01月02日", "2006-01-02", "20060102", "2006/01/02"}
+		for _, layout := range layouts {
+			if _, err := time.Parse(layout, fact.Value); err == nil {
+				for _, input := range layouts {
+					if date, err := time.Parse(input, value); err == nil {
+						return date.Format(layout), nil
+					}
+				}
+				return "", fmt.Errorf("invalid invoice date")
+			}
+		}
+		return "", fmt.Errorf("invoice date display format is unknown")
+	}
+	return value, nil
+}
+
+// invoiceNormalizedFactBinding 归一化标引命名空间并解析公共字段绑定
+// 入参: invoice 发票, fact 原始事实
+// 返回: InvoiceBinding 字段关联, bool 是否命中
+func invoiceNormalizedFactBinding(invoice Invoice, fact InvoiceFact) (InvoiceBinding, bool) {
+	if fact.Namespace == structureNamespaceEInvoice2016 || fact.Namespace == InvoiceStandardEDRM2019 {
+		fact.Namespace = invoice.Standard
+	}
+	return invoiceEDRMFactBinding(invoice, fact)
+}
+
 // ReadInvoice 读取当前文档及版本声明的发票，字段路径相对导出XML，标引按对象引用提取文本
 // 入参: ctx 取消上下文, source 精确来源
 // 返回: InvoiceReport 发票及诊断, error 来源或读取错误
@@ -121,14 +206,6 @@ func (e *Editor) DeleteInvoiceData(ctx context.Context, source InvoiceSource, ex
 	return err
 }
 
-// InvoiceDigest 计算原始导出数据的SHA256摘要
-// 入参: data 导出数据
-// 返回: string 小写十六进制摘要
-func InvoiceDigest(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
 // readInvoiceXML 在当前文档作用域解析业务载荷或对象引用标引
 // 入参: ctx 取消上下文, data 原始XML, source 来源
 // 返回: InvoiceReport 发票及诊断, error 读取错误
@@ -154,7 +231,7 @@ func (r *Reader) readInvoiceXML(ctx context.Context, data []byte, source Invoice
 	if !structureInvoiceReferences(structure) {
 		return report, nil
 	}
-	doc, err := r.DocContext(ctx)
+	doc, err := r.docContext(ctx)
 	if err != nil {
 		return report, err
 	}
@@ -199,11 +276,8 @@ func (r *Reader) readInvoiceXML(ctx context.Context, data []byte, source Invoice
 							id := editorResourceID(object.TextObject.ID)
 							texts[id] = append(texts[id], object.TextObject.Text())
 						}
-						if object.Type == "CompositeGraphicUnit" || object.Type == "CompositeObject" {
-							for child := range object.CompositeGraphicUnit.objects() {
-								collect(child)
-							}
-							if resID := object.CompositeGraphicUnit.ResourceID; resID != "" {
+						if object.Type == "CompositeObject" {
+							if resID := object.CompositeObject.ResourceID; resID != "" {
 								if unit, _ := r.resolveCompositeScoped(content.pageResources, resID); unit != nil && !visitedUnits[unit] {
 									visitedUnits[unit] = true
 									for child := range unit.objects() {
@@ -394,7 +468,7 @@ func (e *Editor) changeInvoiceSource(ctx context.Context, source InvoiceSource, 
 	for key, value := range isolated {
 		files[key] = value
 	}
-	view := &Reader{Zip: base.reader.Zip, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex, selectedVersion: base.reader.selectedVersion, resources: base.reader.resources}
+	view := base.reader.deriveView(files, base.reader.documentIndex, base.reader.selectedVersion)
 	if err := view.initRootContext(ctx); err != nil {
 		return InvoiceSource{}, err
 	}
@@ -591,7 +665,7 @@ func (e *Editor) importInvoiceReferences(ctx context.Context, data []byte, optio
 // 入参: ctx 取消上下文, invoice 解引用发票
 // 返回: []InvoiceBinding 事实关联, error 文档读取错误
 func (r *Reader) invoiceReferenceBindings(ctx context.Context, invoice Invoice) ([]InvoiceBinding, error) {
-	doc, err := r.DocContext(ctx)
+	doc, err := r.docContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -617,31 +691,6 @@ func (r *Reader) invoiceReferenceBindings(ctx context.Context, invoice Invoice) 
 		bindings = append(bindings, InvoiceBinding{Field: fmt.Sprintf("facts.%d", i), Item: -1, Page: page - 1, ObjectID: ref.ObjectIDs[0]})
 	}
 	return bindings, ctx.Err()
-}
-
-// invoiceReferenceEditability 一次计数并生成无共享引用的事实能力，字体和布局仍由事务预检
-// 入参: invoice 发票
-// 返回: []bool 与事实索引对应的编辑条件
-func invoiceReferenceEditability(invoice Invoice) []bool {
-	counts := make(map[string]int)
-	for _, fact := range invoice.Facts {
-		for _, ref := range fact.References {
-			for _, id := range ref.ObjectIDs {
-				counts[editorResourceID(ref.PageID)+"/"+editorResourceID(id)]++
-			}
-		}
-	}
-	result := make([]bool, len(invoice.Facts))
-	for i, fact := range invoice.Facts {
-		result[i] = len(fact.References) != 0
-		for _, ref := range fact.References {
-			result[i] = result[i] && editorResourceID(ref.PageID) != "" && len(ref.ObjectIDs) != 0
-			for _, id := range ref.ObjectIDs {
-				result[i] = result[i] && editorResourceID(id) != "" && counts[editorResourceID(ref.PageID)+"/"+editorResourceID(id)] == 1
-			}
-		}
-	}
-	return result
 }
 
 // editInvoiceReferences 原子修改引用目标并重新解引用校验，XML摘要外必须核对原文字
@@ -838,48 +887,6 @@ func (e *Editor) editInvoiceReferences(ctx context.Context, source InvoiceSource
 	return result, nil
 }
 
-// invoiceReferenceDisplay 保留金额符号及已识别日期的显示格式，不改写引用结构
-// 入参: invoice 原发票, fact 原事实, value 新业务值
-// 返回: string 显示文字, error 值格式错误
-func invoiceReferenceDisplay(invoice Invoice, fact InvoiceFact, value string) (string, error) {
-	if value == "" {
-		return "", nil
-	}
-	binding, ok := invoiceNormalizedFactBinding(invoice, fact)
-	if !ok {
-		return value, nil
-	}
-	switch binding.Field {
-	case "amount", "taxAmount", "totalAmount":
-		old := strings.TrimSpace(fact.Value)
-		prefix := ""
-		for _, symbol := range []string{"¥", "￥"} {
-			if strings.HasPrefix(old, symbol) {
-				prefix = symbol
-			}
-		}
-		value = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(value), "¥￥"))
-		if invoiceDecimal(value) == nil {
-			return "", fmt.Errorf("invalid invoice amount")
-		}
-		return prefix + value, nil
-	case "date":
-		layouts := []string{"2006年01月02日", "2006-01-02", "20060102", "2006/01/02"}
-		for _, layout := range layouts {
-			if _, err := time.Parse(layout, fact.Value); err == nil {
-				for _, input := range layouts {
-					if date, err := time.Parse(input, value); err == nil {
-						return date.Format(layout), nil
-					}
-				}
-				return "", fmt.Errorf("invalid invoice date")
-			}
-		}
-		return "", fmt.Errorf("invoice date display format is unknown")
-	}
-	return value, nil
-}
-
 // setInvoiceReferences 将已有摘要字段变化映射回唯一事实，原Facts作为图元旧值基线
 // 入参: ctx 取消上下文, source 来源, digest 标引摘要, index 发票索引, invoice 新业务值, synchronize 是否同步
 // 返回: InvoiceUpdateResult 同步结果, error 不可表达字段或提交错误
@@ -1000,14 +1007,4 @@ func (e *Editor) createInvoiceReferences(ctx context.Context, invoice Invoice, o
 		return InvoiceSource{}, err
 	}
 	return source, nil
-}
-
-// invoiceNormalizedFactBinding 归一化标引命名空间并解析公共字段绑定
-// 入参: invoice 发票, fact 原始事实
-// 返回: InvoiceBinding 字段关联, bool 是否命中
-func invoiceNormalizedFactBinding(invoice Invoice, fact InvoiceFact) (InvoiceBinding, bool) {
-	if fact.Namespace == structureNamespaceEInvoice2016 || fact.Namespace == InvoiceStandardEDRM2019 {
-		fact.Namespace = invoice.Standard
-	}
-	return invoiceEDRMFactBinding(invoice, fact)
 }

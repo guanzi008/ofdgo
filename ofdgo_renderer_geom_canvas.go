@@ -25,225 +25,97 @@ import (
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
-// canvasGeometryMu 保护底层路径运算的共享扫描线对象池
+// canvasGeometryMu 保护开启路径求交调试开关时的全局状态
 var canvasGeometryMu sync.Mutex
 
-// Curves 在输出边界转换椭圆弧，其他曲线保持原样
-// 入参: path 页面路径
-// 返回: GeometryPath 贝塞尔路径, error 路径错误
-func (CanvasBackend) Curves(path GeometryPath) (GeometryPath, error) {
-	p, err := geometryToCanvasPath(&path)
-	if err != nil {
-		return nil, err
-	}
-	return *geometryFromCanvasPath(p.ReplaceArcs()), nil
-}
-
-// Path 解析对象的标准紧缩路径并转换到页面坐标
-// 入参: object 路径对象
-// 返回: GeometryPath 页面路径, error 无效路径错误
-func (b CanvasBackend) Path(object PathObject) (GeometryPath, error) {
-	return objectGeometryPath(b, object)
-}
-
-// Region 解析动作区域并保持椭圆弧及退化变换的既有处理
-// 入参: region 动作区域, matrix 页面变换
-// 返回: GeometryPath 页面路径, error 解析错误
-func (CanvasBackend) Region(region *Region, matrix Matrix) (GeometryPath, error) {
-	p := actionRegionPath(region, matrix)
-	return *geometryFromCanvasPath(p.Transform(canvas.Matrix{{1, 0, 0}, {0, -1, 0}})), nil
-}
-
-// Bounds 计算曲线路径的精确范围
-// 入参: path 页面路径
-// 返回: Box 路径范围, error 无效路径错误
-func (CanvasBackend) Bounds(path GeometryPath) (Box, error) {
-	p, err := geometryToCanvasPath(&path)
-	if err != nil {
-		return Box{}, err
-	}
-	if p.Empty() {
-		return Box{}, nil
-	}
-	box := p.Bounds()
-	return Box{X: box.X0, Y: -box.Y1, W: box.W(), H: box.H()}, nil
-}
-
-// Transform 变换路径，保持曲线与椭圆弧，不修改源路径
-// 入参: path 页面路径, matrix 页面变换
-// 返回: GeometryPath 新路径, error 无效路径错误
-func (CanvasBackend) Transform(path GeometryPath, matrix Matrix) (GeometryPath, error) {
-	curves := true
-	for _, segment := range path {
-		if segment.Verb == GeometryArc {
-			curves = false
-			break
-		}
-	}
-	if curves {
-		return path.Transform(matrix)
-	}
-	p, err := geometryToCanvasPath(&path)
-	if err != nil {
-		return nil, err
-	}
-	m := matrix.Values()
-	for _, value := range m {
-		if !finite(value) {
-			return nil, fmt.Errorf("invalid geometry transform")
-		}
-	}
-	if basegeom.Equal(m[0]*m[3]-m[1]*m[2], 0) {
-		p = p.ReplaceArcs()
-	}
-	p = p.Transform(canvas.Matrix{{m[0], -m[2], m[4]}, {-m[1], m[3], -m[5]}})
-	return *geometryFromCanvasPath(p), nil
-}
-
-// Normalize 按填充规则整理自交区域
-// 入参: path 页面路径, evenOdd 是否采用奇偶规则
-// 返回: GeometryPath 非零填充路径, error 无效路径错误
-func (CanvasBackend) Normalize(path GeometryPath, evenOdd bool) (GeometryPath, error) {
-	p, err := geometryToCanvasPath(&path)
-	if err != nil {
-		return nil, err
-	}
-	rule := canvas.NonZero
-	if evenOdd {
-		rule = canvas.EvenOdd
-	}
-	p = settleCanvasPath(p, rule)
-	if p.Empty() {
-		return nil, nil
-	}
-	return *geometryFromCanvasPath(p), nil
-}
-
-// Combine 计算两个非零填充区域的布尔运算
-// 入参: left 左路径, right 右路径, operation 运算类型
-// 返回: GeometryPath 结果路径, error 运算错误
-func (CanvasBackend) Combine(left, right GeometryPath, operation GeometryOperation) (GeometryPath, error) {
-	a, err := geometryToCanvasPath(&left)
-	if err != nil {
-		return nil, err
-	}
-	b, err := geometryToCanvasPath(&right)
-	if err != nil {
-		return nil, err
-	}
-	var result *canvas.Path
-	switch operation {
-	case GeometryIntersect:
-		result = applyClipPath(a, b)
-	case GeometryUnion:
-		result = combineCanvasPaths(a, b, "or")
-	case GeometrySubtract:
-		result = combineCanvasPaths(a, b, "not")
-	case GeometryXor:
-		result = combineCanvasPaths(a, b, "xor")
-	default:
-		return nil, fmt.Errorf("unsupported geometry operation %d", operation)
-	}
-	if result.Empty() {
-		return nil, nil
-	}
-	return *geometryFromCanvasPath(result), nil
-}
-
-// Stroke 将绝对长度虚线与描边转换为填充区域，几何后端异常时使用本库非零描边
-// 入参: path 页面路径, options 描边样式
-// 返回: GeometryPath 描边区域, error 样式或路径错误
-func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (result GeometryPath, err error) {
-	if err := basegeom.ValidateStroke(options); err != nil {
-		return nil, err
-	}
-	if slices.Contains(options.Dashes, 0) {
-		return path.Stroke(options)
-	}
-	if options.Cap == "Round" {
-		if pointPath, found := canvasPointPath(path); found {
-			return pointPath.Stroke(options)
-		}
-	}
-	p, err := geometryToCanvasPath(&path)
-	if err != nil {
-		return nil, err
-	}
-	if p.Empty() && options.Cap == "Round" {
-		return path.Stroke(options)
-	}
-	tolerance := options.Tolerance
-	if tolerance == 0 {
-		tolerance = canvas.Tolerance
-	}
-	options.Tolerance = tolerance
-	defer func() {
-		if failure := recover(); failure != nil {
-			result, err = path.Stroke(options)
-			if err != nil {
-				err = fmt.Errorf("stroke fallback after %v: %w", failure, err)
-			}
-		}
-	}()
-	style := pathStyle{lineJoin: canvas.MiterJoin, lineCap: canvas.ButtCap, miterLimit: defaultMiterLimit}
-	style.applyLineJoin(options.Join, options.MiterLimit, options.MiterLimitSet)
-	style.lineCap = pathLineCap(options.Cap, style.lineCap)
-	p = p.Dash(options.DashOffset, options.Dashes...)
-	p = flattenCanvasPath(p, tolerance)
-	p = strokeCanvasPath(p, options.Width, style.lineCap, style.lineJoin, tolerance)
-	return *geometryFromCanvasPath(p), nil
-}
-
-// Clip 解析对象裁剪并与父裁剪相交，保留未裁剪与完全裁去的区别
-// 入参: r 渲染器, clips OFD裁剪, matrix 裁剪坐标到页面的变换, parent 父裁剪
-// 返回: *GeometryPath 页面裁剪, error 无效父路径错误
-func (CanvasBackend) Clip(r *Renderer, clips *Clips, matrix Matrix, parent *GeometryPath) (*GeometryPath, error) {
-	p, err := geometryToCanvasPath(parent)
-	if err != nil {
-		return nil, err
-	}
-	renderer := *r
-	renderer.renderError = nil
-	clip := renderer.buildClipPath(clips, 0, 0, 0, matrix)
-	if renderer.renderError != nil {
-		return nil, renderer.renderError
-	}
-	return geometryFromCanvasPath(r.intersectCachedClipPath(p, clip)), nil
-}
-
-// settleCanvasPath 在共享对象池保护下归整路径
+// settleCanvasPath 归整路径并在病态几何异常时折线降级保护
 // 入参: path 路径, rule 填充规则
 // 返回: *canvas.Path 归整路径
 func settleCanvasPath(path *canvas.Path, rule canvas.FillRule) *canvas.Path {
-	canvasGeometryMu.Lock()
-	defer canvasGeometryMu.Unlock()
-	return path.Settle(rule)
+	if canvas.DebugPathIntersection {
+		canvasGeometryMu.Lock()
+		defer canvasGeometryMu.Unlock()
+	}
+	if result, ok := trySettleCanvasPath(path, rule); ok {
+		return result
+	}
+	if result, ok := trySettleCanvasPath(path.Copy().Flatten(canvas.Tolerance), rule); ok {
+		return result
+	}
+	return path.Copy()
 }
 
-// combineCanvasPaths 在共享对象池保护下计算路径布尔运算
+// trySettleCanvasPath 尝试执行路径归整并捕获底层扫描线异常
+// 入参: path 路径, rule 填充规则
+// 返回: *canvas.Path 归整路径, bool 是否成功
+func trySettleCanvasPath(path *canvas.Path, rule canvas.FillRule) (result *canvas.Path, ok bool) {
+	defer func() {
+		if recover() != nil {
+			result, ok = nil, false
+		}
+	}()
+	return path.Settle(rule), true
+}
+
+// combineCanvasPaths 计算路径布尔运算并在病态几何异常时折线降级保护
 // 入参: left 左路径, right 右路径, operation 运算名称
 // 返回: *canvas.Path 运算结果
 func combineCanvasPaths(left, right *canvas.Path, operation string) *canvas.Path {
-	canvasGeometryMu.Lock()
-	defer canvasGeometryMu.Unlock()
+	if canvas.DebugPathIntersection {
+		canvasGeometryMu.Lock()
+		defer canvasGeometryMu.Unlock()
+	}
+	if result, ok := tryCombineCanvasPaths(left, right, operation); ok {
+		return result
+	}
+	if result, ok := tryCombineCanvasPaths(left.Copy().Flatten(canvas.Tolerance), right.Copy().Flatten(canvas.Tolerance), operation); ok {
+		return result
+	}
 	switch operation {
-	case "or":
-		return left.Or(right)
+	case "or", "xor":
+		return left.Copy().Append(right)
 	case "not":
-		return left.Not(right)
-	case "xor":
-		return left.Xor(right)
+		return left.Copy()
 	default:
-		return left.And(right)
+		if result, ok := intersectCanvasContours(left, right); ok {
+			return result
+		}
+		if result, ok := intersectCanvasContours(right, left); ok {
+			return result
+		}
+		return left.Copy()
 	}
 }
 
-// strokeCanvasPath 在共享对象池保护下生成描边轮廓
+// tryCombineCanvasPaths 尝试执行路径布尔运算并捕获底层扫描线异常
+// 入参: left 左路径, right 右路径, operation 运算名称
+// 返回: *canvas.Path 运算结果, bool 是否成功
+func tryCombineCanvasPaths(left, right *canvas.Path, operation string) (result *canvas.Path, ok bool) {
+	defer func() {
+		if recover() != nil {
+			result, ok = nil, false
+		}
+	}()
+	switch operation {
+	case "or":
+		return left.Or(right), true
+	case "not":
+		return left.Not(right), true
+	case "xor":
+		return left.Xor(right), true
+	default:
+		return left.And(right), true
+	}
+}
+
+// strokeCanvasPath 生成描边轮廓并在开启调试模式时加锁保护全局调试状态
 // 入参: path 路径, width 线宽, cap 端点, join 连接, tolerance 容差
 // 返回: *canvas.Path 描边轮廓
 func strokeCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner, tolerance float64) *canvas.Path {
-	canvasGeometryMu.Lock()
-	defer canvasGeometryMu.Unlock()
+	if canvas.DebugPathIntersection {
+		canvasGeometryMu.Lock()
+		defer canvasGeometryMu.Unlock()
+	}
 	return path.Stroke(width, cap, join, tolerance)
 }
 
@@ -311,7 +183,7 @@ func flattenCanvasPath(path *canvas.Path, tolerance float64) *canvas.Path {
 // 入参: geometry 几何后端
 // 返回: bool 是否采用原生描边
 func canvasNativeStroke(geometry GeometryBackend) bool {
-	_, ok := geometry.(CanvasBackend)
+	_, ok := geometry.(DefaultBackend)
 	return ok
 }
 
@@ -349,22 +221,22 @@ func canvasStrokePath(geometry GeometryBackend, path *canvas.Path, options Strok
 	return geometryToCanvasPath(&outline)
 }
 
-// canvasStrokeFillPath 为直接非零填充展开复杂描边，不将重叠轮廓交给区域运算
+// canvasStrokeFillPath 为直接非零填充展开描边轮廓，优先走无锁纯Go路径描边
 // 入参: geometry 几何后端, path Canvas路径, options 描边样式
 // 返回: *canvas.Path 描边轮廓, error 几何错误
 func canvasStrokeFillPath(geometry GeometryBackend, path *canvas.Path, options StrokeOptions) (*canvas.Path, error) {
-	if canvasNativeStroke(geometry) && !slices.Contains(options.Dashes, 0) {
+	if canvasNativeStroke(geometry) {
 		if options.Tolerance == 0 {
 			options.Tolerance = canvas.Tolerance
 		}
-		if err := basegeom.ValidateStroke(options); err != nil {
+		if err := validateStrokeOptions(options); err != nil {
 			return nil, err
 		}
-		if len(path.Dash(options.DashOffset, options.Dashes...).Data()) > 256 {
-			outline, err := geometryFromCanvasPath(path).Stroke(options)
-			if err != nil {
-				return canvasStrokePath(geometry, path, options)
-			}
+		source := *geometryFromCanvasPath(path)
+		if options.Cap == "Round" {
+			source, _ = canvasPointPath(source)
+		}
+		if outline, err := source.Stroke(options); err == nil {
 			return geometryToCanvasPath(&outline)
 		}
 	}
@@ -380,36 +252,6 @@ func canvasFillClip(clip *canvas.Path) bool {
 	}
 	_, ok := convexCanvasPolygon(clip)
 	return ok
-}
-
-// strokeCanvasPath 将文字和复杂画刷的描边交给配置的几何后端
-// 入参: path Canvas路径, width 线宽, cap 端点样式, join 转角样式
-// 返回: *canvas.Path 描边轮廓
-func (r *Renderer) strokeCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner) *canvas.Path {
-	return r.strokeDashedCanvasPath(path, width, cap, join, 0, nil, false)
-}
-
-// strokeDashedCanvasPath 通过公共几何后端展开虚线和端点样式，保留零长度绘制段
-// 入参: path 路径, width 线宽, cap 端点样式, join 转角样式, offset 虚线偏移, dashes 虚线间隔序列, fill 是否直接填充或凸窗口裁剪
-// 返回: *canvas.Path 描边填充轮廓
-func (r *Renderer) strokeDashedCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner, offset float64, dashes []float64, fill bool) *canvas.Path {
-	geometry, err := r.Geometry()
-	if err != nil {
-		r.renderError = err
-		return &canvas.Path{}
-	}
-	options := canvasStrokeOptions(width, cap, join, canvas.Tolerance)
-	options.DashOffset, options.Dashes = offset, dashes
-	stroke := canvasStrokePath
-	if fill {
-		stroke = canvasStrokeFillPath
-	}
-	result, err := stroke(geometry, path, options)
-	if err != nil {
-		r.renderError = err
-		return &canvas.Path{}
-	}
-	return result
 }
 
 // geometryToCanvasPath 将页面坐标路径转换为默认几何引擎的向上纵轴
@@ -641,4 +483,211 @@ func actionRegionPath(region *Region, matrix Matrix) *canvas.Path {
 		path = path.ReplaceArcs()
 	}
 	return path.Transform(actionCanvasMatrix(matrix))
+}
+
+// Curves 在输出边界转换椭圆弧，其他曲线保持原样
+// 入参: path 页面路径
+// 返回: GeometryPath 贝塞尔路径, error 路径错误
+func (DefaultBackend) Curves(path GeometryPath) (GeometryPath, error) {
+	p, err := geometryToCanvasPath(&path)
+	if err != nil {
+		return nil, err
+	}
+	return *geometryFromCanvasPath(p.ReplaceArcs()), nil
+}
+
+// Path 解析对象的标准紧缩路径并转换到页面坐标
+// 入参: object 路径对象
+// 返回: GeometryPath 页面路径, error 无效路径错误
+func (b DefaultBackend) Path(object PathObject) (GeometryPath, error) {
+	return objectGeometryPath(b, object)
+}
+
+// Region 解析动作区域并保持椭圆弧及退化变换的既有处理
+// 入参: region 动作区域, matrix 页面变换
+// 返回: GeometryPath 页面路径, error 解析错误
+func (DefaultBackend) Region(region *Region, matrix Matrix) (GeometryPath, error) {
+	p := actionRegionPath(region, matrix)
+	return *geometryFromCanvasPath(p.Transform(canvas.Matrix{{1, 0, 0}, {0, -1, 0}})), nil
+}
+
+// Bounds 计算曲线路径的精确范围
+// 入参: path 页面路径
+// 返回: Box 路径范围, error 无效路径错误
+func (DefaultBackend) Bounds(path GeometryPath) (Box, error) {
+	p, err := geometryToCanvasPath(&path)
+	if err != nil {
+		return Box{}, err
+	}
+	if p.Empty() {
+		return Box{}, nil
+	}
+	box := p.Bounds()
+	return Box{X: box.X0, Y: -box.Y1, W: box.W(), H: box.H()}, nil
+}
+
+// Transform 变换路径，保持曲线与椭圆弧，不修改源路径
+// 入参: path 页面路径, matrix 页面变换
+// 返回: GeometryPath 新路径, error 无效路径错误
+func (DefaultBackend) Transform(path GeometryPath, matrix Matrix) (GeometryPath, error) {
+	curves := true
+	for _, segment := range path {
+		if segment.Verb == GeometryArc {
+			curves = false
+			break
+		}
+	}
+	if curves {
+		return path.Transform(matrix)
+	}
+	p, err := geometryToCanvasPath(&path)
+	if err != nil {
+		return nil, err
+	}
+	m := matrix.Values()
+	for _, value := range m {
+		if !finite(value) {
+			return nil, fmt.Errorf("invalid geometry transform")
+		}
+	}
+	if basegeom.Equal(m[0]*m[3]-m[1]*m[2], 0) {
+		p = p.ReplaceArcs()
+	}
+	p = p.Transform(canvas.Matrix{{m[0], -m[2], m[4]}, {-m[1], m[3], -m[5]}})
+	return *geometryFromCanvasPath(p), nil
+}
+
+// Normalize 按填充规则整理自交区域
+// 入参: path 页面路径, evenOdd 是否采用奇偶规则
+// 返回: GeometryPath 非零填充路径, error 无效路径错误
+func (DefaultBackend) Normalize(path GeometryPath, evenOdd bool) (GeometryPath, error) {
+	p, err := geometryToCanvasPath(&path)
+	if err != nil {
+		return nil, err
+	}
+	rule := canvas.NonZero
+	if evenOdd {
+		rule = canvas.EvenOdd
+	}
+	p = settleCanvasPath(p, rule)
+	if p.Empty() {
+		return nil, nil
+	}
+	return *geometryFromCanvasPath(p), nil
+}
+
+// Combine 计算两个非零填充区域的布尔运算
+// 入参: left 左路径, right 右路径, operation 运算类型
+// 返回: GeometryPath 结果路径, error 运算错误
+func (DefaultBackend) Combine(left, right GeometryPath, operation GeometryOperation) (GeometryPath, error) {
+	a, err := geometryToCanvasPath(&left)
+	if err != nil {
+		return nil, err
+	}
+	b, err := geometryToCanvasPath(&right)
+	if err != nil {
+		return nil, err
+	}
+	var result *canvas.Path
+	switch operation {
+	case GeometryIntersect:
+		result = applyClipPath(a, b)
+	case GeometryUnion:
+		result = combineCanvasPaths(a, b, "or")
+	case GeometrySubtract:
+		result = combineCanvasPaths(a, b, "not")
+	case GeometryXor:
+		result = combineCanvasPaths(a, b, "xor")
+	default:
+		return nil, fmt.Errorf("unsupported geometry operation %d", operation)
+	}
+	if result.Empty() {
+		return nil, nil
+	}
+	return *geometryFromCanvasPath(result), nil
+}
+
+// Stroke 将绝对长度虚线与描边转换为填充区域，几何后端异常时使用本库非零描边
+// 入参: path 页面路径, options 描边样式
+// 返回: GeometryPath 描边区域, error 样式或路径错误
+func (DefaultBackend) Stroke(path GeometryPath, options StrokeOptions) (result GeometryPath, err error) {
+	if err := validateStrokeOptions(options); err != nil {
+		return nil, err
+	}
+	if slices.Contains(options.Dashes, 0) {
+		return path.Stroke(options)
+	}
+	if options.Cap == "Round" {
+		if pointPath, found := canvasPointPath(path); found {
+			return pointPath.Stroke(options)
+		}
+	}
+	p, err := geometryToCanvasPath(&path)
+	if err != nil {
+		return nil, err
+	}
+	if p.Empty() && options.Cap == "Round" {
+		return path.Stroke(options)
+	}
+	tolerance := options.Tolerance
+	if tolerance == 0 {
+		tolerance = canvas.Tolerance
+	}
+	options.Tolerance = tolerance
+	defer func() {
+		if failure := recover(); failure != nil {
+			result, err = path.Stroke(options)
+			if err != nil {
+				err = fmt.Errorf("stroke fallback after %v: %w", failure, err)
+			}
+		}
+	}()
+	style := pathStyle{lineJoin: canvas.MiterJoin, lineCap: canvas.ButtCap, miterLimit: defaultMiterLimit}
+	style.applyLineJoin(options.Join, options.MiterLimit, options.MiterLimitSet)
+	style.lineCap = pathLineCap(options.Cap, style.lineCap)
+	p = p.Dash(options.DashOffset, options.Dashes...)
+	p = flattenCanvasPath(p, tolerance)
+	p = strokeCanvasPath(p, options.Width, style.lineCap, style.lineJoin, tolerance)
+	return *geometryFromCanvasPath(p), nil
+}
+
+// Clip 解析对象裁剪并与父裁剪相交，保留未裁剪与完全裁去的区别
+// 入参: r 渲染器, clips OFD裁剪, matrix 裁剪坐标到页面的变换, parent 父裁剪
+// 返回: *GeometryPath 页面裁剪, error 无效父路径错误
+func (DefaultBackend) Clip(r *Renderer, clips *Clips, matrix Matrix, parent *GeometryPath) (*GeometryPath, error) {
+	p, err := geometryToCanvasPath(parent)
+	if err != nil {
+		return nil, err
+	}
+	prevErr := r.renderError
+	r.renderError = nil
+	defer func() { r.renderError = prevErr }()
+	clip := r.buildClipPath(clips, 0, 0, 0, matrix)
+	if r.renderError != nil {
+		return nil, r.renderError
+	}
+	return geometryFromCanvasPath(r.intersectCachedClipPath(p, clip)), nil
+}
+
+// strokeDashedCanvasPath 通过公共几何后端展开虚线和端点样式，保留零长度绘制段
+// 入参: path 路径, width 线宽, cap 端点样式, join 转角样式, offset 虚线偏移, dashes 虚线间隔序列, fill 是否直接填充或凸窗口裁剪
+// 返回: *canvas.Path 描边填充轮廓
+func (r *Renderer) strokeDashedCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner, offset float64, dashes []float64, fill bool) *canvas.Path {
+	geometry, err := r.Geometry()
+	if err != nil {
+		r.renderError = err
+		return &canvas.Path{}
+	}
+	options := canvasStrokeOptions(width, cap, join, canvas.Tolerance)
+	options.DashOffset, options.Dashes = offset, dashes
+	stroke := canvasStrokePath
+	if fill {
+		stroke = canvasStrokeFillPath
+	}
+	result, err := stroke(geometry, path, options)
+	if err != nil {
+		r.renderError = err
+		return &canvas.Path{}
+	}
+	return result
 }

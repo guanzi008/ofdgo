@@ -20,10 +20,59 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"slices"
+	"strings"
 )
 
 // svgNamespace 表示SVG预览文档命名空间
 const svgNamespace = "http://www.w3.org/2000/svg"
+
+// SVGPathMergeMode 定义SVG纯色填充路径合并策略
+type SVGPathMergeMode uint8
+
+const (
+	// SVGPathMergeAuto 仅同行紧邻合并并在安全小窗口内封顶
+	SVGPathMergeAuto SVGPathMergeMode = iota
+	// SVGPathMergeOff 完全禁用路径合并
+	SVGPathMergeOff
+	// SVGPathMergeFull 无窗口上限全量跨行合并
+	SVGPathMergeFull
+)
+
+// SVGPathMergeOptions 配置SVG纯色填充路径合并策略及安全窗口上限
+// Mode默认为SVGPathMergeAuto，MaxExtent(默认16毫米)、MaxOps(默认160)、MaxBytes(默认2048)仅在自动模式下生效
+type SVGPathMergeOptions struct {
+	Mode      SVGPathMergeMode
+	MaxExtent float64
+	MaxOps    int
+	MaxBytes  int
+}
+
+// normalize 规范化路径合并参数并保证同模式缓存键唯一
+// 返回: SVGPathMergeOptions 归一化后的合并选项
+func (o SVGPathMergeOptions) normalize() SVGPathMergeOptions {
+	switch o.Mode {
+	case SVGPathMergeOff, SVGPathMergeFull:
+		return SVGPathMergeOptions{Mode: o.Mode}
+	default:
+		out := SVGPathMergeOptions{
+			Mode:      SVGPathMergeAuto,
+			MaxExtent: o.MaxExtent,
+			MaxOps:    o.MaxOps,
+			MaxBytes:  o.MaxBytes,
+		}
+		if !finite(out.MaxExtent) || out.MaxExtent <= 0 {
+			out.MaxExtent = 16
+		}
+		if out.MaxOps <= 0 {
+			out.MaxOps = 160
+		}
+		if out.MaxBytes <= 0 {
+			out.MaxBytes = 2048
+		}
+		return out
+	}
+}
 
 // SVGFont SVG引用的字体资源，Name为CSS字体族标识，Data为只读字体数据
 type SVGFont struct {
@@ -47,18 +96,65 @@ type SVGResources struct {
 }
 
 // PreviewOptions 指定页面显示方式，光栅预览不提供SVG对象分组
+// KnownResources标识调用方已持有的资源以避免重复返回数据，IDPrefix指定SVG内部局部ID前缀
+// Precision指定纯矢量路径毫米坐标小数位数(非正数默认3位)，PathMerge覆盖单次渲染的路径合并策略
 type PreviewOptions struct {
-	Raster  bool
-	Objects bool
-	// KnownResources 标识调用方仍持有的资源，返回引用但不重复返回数据
+	Raster         bool
+	Objects        bool
 	KnownResources map[string]bool
+	IDPrefix       string
+	Precision      int
+	PathMerge      *SVGPathMergeOptions
+}
+
+// RenderStampToSVG 构造独立透明背景单页视图并将印章渲染为SVG
+// 入参: ctx 取消上下文，nil使用后台上下文, stamp 印章内容与尺寸, writer 输出流, options 可选渲染配置
+// 返回: error 渲染、写入或取消错误
+func RenderStampToSVG(ctx context.Context, stamp Stamp, writer io.Writer, options ...RendererOption) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if writer == nil {
+		return fmt.Errorf("missing output writer")
+	}
+	if !finite(stamp.Box.W) || !finite(stamp.Box.H) || stamp.Box.W <= 0 || stamp.Box.H <= 0 {
+		return fmt.Errorf("invalid stamp box dimensions")
+	}
+	if len(stamp.Data) == 0 {
+		return fmt.Errorf("empty stamp data")
+	}
+	preview := stamp
+	preview.Type = strings.ToLower(strings.TrimSpace(stamp.Type))
+	preview.Box = Box{W: stamp.Box.W, H: stamp.Box.H}
+	reader := &Reader{
+		stamps:           map[string][]Stamp{"1": {preview}},
+		sigIndexLoaded:   true,
+		pageStampsLoaded: map[string]bool{"1": true},
+	}
+	page := &PageContent{
+		ID:   "1",
+		Area: PageArea{PhysicalBox: fmt.Sprintf("0 0 %s %s", ofdNumber(preview.Box.W), ofdNumber(preview.Box.H))},
+	}
+	opts := append(slices.Clone(options), WithTransparentBackground(true))
+	renderer := NewRenderer(reader, opts...)
+	return renderer.RenderToSVGContext(ctx, page, writer)
 }
 
 // RenderToSVGWithFonts 渲染为SVG并返回页面引用的字体资源，不在SVG中嵌入字体
 // 入参: page 页面内容, writer 输出流
 // 返回: []SVGFont 字体资源，可按Name复用并按Weight、Style注册，error 错误信息
 func (r *Renderer) RenderToSVGWithFonts(page *PageContent, writer io.Writer) ([]SVGFont, error) {
-	resources, err := r.renderSVG(page, writer, SVGExternalFonts)
+	return r.RenderToSVGWithFontsContext(context.Background(), page, writer)
+}
+
+// RenderToSVGWithFontsContext 按取消上下文渲染为SVG并返回页面引用的字体资源
+// 入参: ctx 取消上下文，nil使用后台上下文, page 页面内容, writer 输出流
+// 返回: []SVGFont 字体资源, error 渲染、写入或取消错误
+func (r *Renderer) RenderToSVGWithFontsContext(ctx context.Context, page *PageContent, writer io.Writer) ([]SVGFont, error) {
+	resources, err := r.renderSVGContext(ctx, page, writer, SVGExternalFonts)
 	return resources.Fonts, err
 }
 
@@ -66,24 +162,54 @@ func (r *Renderer) RenderToSVGWithFonts(page *PageContent, writer io.Writer) ([]
 // 入参: page 页面内容, writer 输出流
 // 返回: SVGResources 可跨页面复用的资源, error 错误信息
 func (r *Renderer) RenderToSVGWithResources(page *PageContent, writer io.Writer) (SVGResources, error) {
-	return r.renderSVG(page, writer, SVGExternalResources)
+	return r.RenderToSVGWithResourcesContext(context.Background(), page, writer)
+}
+
+// RenderToSVGWithResourcesContext 按取消上下文渲染为SVG并分离字体和图片
+// 入参: ctx 取消上下文，nil使用后台上下文, page 页面内容, writer 输出流
+// 返回: SVGResources 可跨页面复用的资源, error 渲染、写入或取消错误
+func (r *Renderer) RenderToSVGWithResourcesContext(ctx context.Context, page *PageContent, writer io.Writer) (SVGResources, error) {
+	return r.renderSVGContext(ctx, page, writer, SVGExternalResources)
 }
 
 // RenderToSVGWithObjects 渲染SVG并为页面对象和注解添加data-ofd-object分组，注解标识使用annotation:前缀
 // 入参: page 页面内容, writer 输出流
 // 返回: SVGResources 字体和图片资源, error 错误信息
 func (r *Renderer) RenderToSVGWithObjects(page *PageContent, writer io.Writer) (SVGResources, error) {
-	return r.renderSVG(page, writer, SVGObjects)
+	return r.RenderToSVGWithObjectsContext(context.Background(), page, writer)
+}
+
+// RenderToSVGWithObjectsContext 按取消上下文渲染SVG并保留页面对象与注解分组
+// 入参: ctx 取消上下文，nil使用后台上下文, page 页面内容, writer 输出流
+// 返回: SVGResources 字体和图片资源, error 渲染、写入或取消错误
+func (r *Renderer) RenderToSVGWithObjectsContext(ctx context.Context, page *PageContent, writer io.Writer) (SVGResources, error) {
+	return r.renderSVGContext(ctx, page, writer, SVGObjects)
 }
 
 // RenderPreview 生成统一SVG容器及独立资源，原生程序与WebUI使用相同绘制入口
 // 入参: page 页面内容, writer 输出流, options 显示方式
 // 返回: SVGResources 需由调用方映射地址的资源, error 错误信息
-func (r *Renderer) RenderPreview(page *PageContent, writer io.Writer, options PreviewOptions) (resources SVGResources, err error) {
-	view := *r
-	view.knownSVGResources = options.KnownResources
-	r = &view
+func (r *Renderer) RenderPreview(page *PageContent, writer io.Writer, options PreviewOptions) (SVGResources, error) {
+	return r.RenderPreviewContext(context.Background(), page, writer, options)
+}
+
+// RenderPreviewContext 按取消上下文生成统一SVG容器及独立资源
+// 入参: ctx 取消上下文，nil使用后台上下文, page 页面内容, writer 输出流, options 显示方式
+// 返回: SVGResources 需由调用方映射地址的资源, error 错误信息
+func (r *Renderer) RenderPreviewContext(ctx context.Context, page *PageContent, writer io.Writer, options PreviewOptions) (resources SVGResources, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return SVGResources{}, err
+	}
+	prevCtx, prevKnown, prevPrefix, prevPrecision, prevPathMerge := r.pageContext, r.knownSVGResources, r.svgIDPrefix, r.svgPrecision, r.svgPathMerge
+	r.pageContext, r.knownSVGResources, r.svgIDPrefix, r.svgPrecision = ctx, options.KnownResources, options.IDPrefix, options.Precision
+	if options.PathMerge != nil {
+		r.svgPathMerge = options.PathMerge.normalize()
+	}
 	defer func() {
+		r.pageContext, r.knownSVGResources, r.svgIDPrefix, r.svgPrecision, r.svgPathMerge = prevCtx, prevKnown, prevPrefix, prevPrecision, prevPathMerge
 		for i := range resources.Fonts {
 			if options.KnownResources[resources.Fonts[i].Name] {
 				resources.Fonts[i].Data = nil
@@ -97,19 +223,22 @@ func (r *Renderer) RenderPreview(page *PageContent, writer io.Writer, options Pr
 	}()
 	if !options.Raster {
 		if options.Objects {
-			return r.RenderToSVGWithObjects(page, writer)
+			return r.RenderToSVGWithObjectsContext(ctx, page, writer)
 		}
-		return r.RenderToSVGWithResources(page, writer)
+		return r.RenderToSVGWithResourcesContext(ctx, page, writer)
 	}
 	if options.Objects {
 		return SVGResources{}, fmt.Errorf("raster preview does not provide SVG object groups")
 	}
-	box, err := r.GetPageBox(page)
+	box, err := r.GetPageBoxContext(ctx, page)
 	if err != nil {
 		return SVGResources{}, err
 	}
 	var pixels bytes.Buffer
-	if err := r.RenderToPNG(page, &pixels); err != nil {
+	if err := r.RenderToPNGContext(ctx, page, &pixels); err != nil {
+		return SVGResources{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return SVGResources{}, err
 	}
 	name := fmt.Sprintf("ofdgo-image-%x", sha256.Sum256(pixels.Bytes()))
@@ -125,23 +254,27 @@ func (r *Renderer) RenderPreview(page *PageContent, writer io.Writer, options Pr
 // 入参: ctx 取消上下文, id 字体资源标识, writer 输出流
 // 返回: error 字体、轮廓、取消或写入错误
 func (r *Renderer) RenderFontPreview(ctx context.Context, id string, writer io.Writer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	view := *r
-	view.pageContext = ctx
-	resolved, err := view.ResolveFont(id, true)
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
+	resolved, err := r.ResolveFont(id, true)
 	if err != nil {
 		return err
 	}
 	font := &PreparedFont{ResolvedFont: resolved}
-	if definition := view.fontDefinition(id); definition != nil && definition.FontFile != "" {
-		font, err = view.PrepareFont(id)
+	if definition := r.fontDefinition(id); definition != nil && definition.FontFile != "" {
+		font, err = r.PrepareFont(id)
 		if err != nil {
 			return err
 		}
 	}
-	metrics, err := view.preparedMetrics(font)
+	metrics, err := r.preparedMetrics(font)
 	if err != nil {
 		return err
 	}
@@ -187,17 +320,26 @@ func (r *Renderer) RenderFontPreview(ctx context.Context, id string, writer io.W
 	return err
 }
 
-// renderSVG 将SVG输出及对象分组交给指定后端
-// 入参: page 页面内容, writer 输出流, mode 资源封装方式
+// renderSVGContext 按取消上下文将SVG输出及对象分组交给指定后端
+// 入参: ctx 取消上下文, page 页面内容, writer 输出流, mode 资源封装方式
 // 返回: SVGResources 字体和图片资源, error 渲染、写入或取消错误
-func (r *Renderer) renderSVG(page *PageContent, writer io.Writer, mode SVGMode) (SVGResources, error) {
-	if err := r.Compression.Validate(); err != nil {
+func (r *Renderer) renderSVGContext(ctx context.Context, page *PageContent, writer io.Writer, mode SVGMode) (SVGResources, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return SVGResources{}, err
+	}
+	if err := r.compression.Validate(); err != nil {
 		return SVGResources{}, err
 	}
 	if r.backends.SVG == nil {
 		return SVGResources{}, fmt.Errorf("svg: %w", ErrBackendUnavailable)
 	}
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
 	var written int64
-	writer = convertWriter{ctx: r.outputContext(), writer: writer, count: &written}
-	return r.backends.SVG.RenderSVG(r, page, writer, mode)
+	writer = convertWriter{ctx: ctx, writer: writer, count: &written}
+	return r.backends.SVG.RenderSVG(ctx, r, page, writer, mode)
 }

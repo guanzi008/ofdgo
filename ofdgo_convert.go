@@ -18,12 +18,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -61,13 +62,18 @@ type ConvertProgress struct {
 // Fonts仅用于OFD输出，按字体处理全包引用，未处理原因通过报告返回
 // PageOutput仅用于逐页格式，同步调用export写出一页并自行处理提交或回滚；此时output可为nil
 // 未提供PageOutput时，逐页格式打包ZIP；所有回调返回错误均会停止转换
-// DocumentIndex指定多文档OFD的目标文档索引，从0开始；VersionID指定历史版本标识，空字符串使用默认入口
+// DocumentIndex指定多文档OFD的目标文档索引，从0开始；VersionID指定历史版本标识，空字符串按默认入口打开
+// PrimaryVersion显式打开目标文档主入口DocRoot，与VersionID互斥
+// ExtractDocument仅用于OFD输出，显式提取目标文档为独立单文档OFD并保留附件、书签、标引与元数据
+// 未设置ExtractDocument、VersionID、PrimaryVersion及选页时，OFD输出按整包写出
 type ConvertOptions struct {
 	Resources       *Resources
 	Input           string
 	Format          string
 	DocumentIndex   int
 	VersionID       string
+	PrimaryVersion  bool
+	ExtractDocument bool
 	Pages           []int
 	PageRange       string
 	SkipUnchanged   bool
@@ -113,6 +119,30 @@ type ConversionPool struct {
 	images  int
 	memory  int64
 }
+
+// convertPageTask 保存单页并发渲染结果与同步信号
+type convertPageTask struct {
+	index int
+	buf   bytes.Buffer
+	err   error
+	done  chan struct{}
+}
+
+// convertReader 将取消上下文传递到随机读取
+type convertReader struct {
+	ctx   context.Context
+	input io.ReaderAt
+}
+
+// convertWriter 将取消上下文传递到写入并统计实际字节数
+type convertWriter struct {
+	ctx    context.Context
+	writer io.Writer
+	count  *int64
+}
+
+// conversionPoolKey 标识单次转换使用的共享预算
+type conversionPoolKey struct{}
 
 // Convert 将PDF或OFD转换为指定格式，不关闭调用方的输入和输出
 // 原始模式完整OFD另存保持源字节；选页和跨格式输出重新生成文档，压缩仅作用于输出副本
@@ -168,6 +198,9 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 	if options.DocumentIndex < 0 {
 		return report, fmt.Errorf("document index %d out of range", options.DocumentIndex)
 	}
+	if options.PrimaryVersion && options.VersionID != "" {
+		return report, fmt.Errorf("conflicting version selections")
+	}
 	if options.Pages != nil && len(options.Pages) == 0 {
 		return report, fmt.Errorf("no pages selected")
 	}
@@ -212,24 +245,28 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 	if report.Input != "pdf" && report.Input != "ofd" {
 		return report, fmt.Errorf("unsupported input format")
 	}
-	selectedDoc := options.DocumentIndex != 0 || options.VersionID != ""
-	if options.SkipUnchanged && !selectedDoc && options.Fonts == FontKeep && options.Compression.Mode == CompressionUnchanged && report.Input == format && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
+	if report.Input == "pdf" && (options.DocumentIndex != 0 || options.VersionID != "" || options.PrimaryVersion) {
+		return report, fmt.Errorf("PDF input does not support document index or version selection")
+	}
+	extractDoc := report.Input == "ofd" && (options.ExtractDocument || options.VersionID != "" || options.PrimaryVersion)
+	skipUnchanged := options.SkipUnchanged && !extractDoc && options.Fonts == FontKeep && options.Compression.Mode == CompressionUnchanged && report.Input == format && options.Pages == nil && strings.TrimSpace(options.PageRange) == ""
+	if skipUnchanged && report.Input == "pdf" {
 		report.Unchanged = true
 		return report, nil
 	}
-	if output == nil && options.PageOutput == nil {
+	if !skipUnchanged && output == nil && options.PageOutput == nil {
 		return report, fmt.Errorf("missing output writer")
 	}
 	if report.Input == "pdf" && format == "pdf" && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
-		pdfReader, openErr := pdfgo.NewReaderWithOptions(operationInput, size, pdfgo.ReaderOptions{Password: options.PDF.Password, PasswordUTF8: options.PDF.PasswordUTF8})
+		pdfReader, openErr := pdfgo.NewReaderWithOptions(operationInput, size, pdfgo.ReaderOptions{Password: options.PDF.Password, PasswordUTF8: options.PDF.PasswordUTF8, Workers: conversionWorkers(ctx)})
 		if openErr != nil {
-			return report, openErr
+			return report, wrapPDFOpenError(openErr)
 		}
 		defer pdfReader.Close()
 		if pageErr := pdfReader.WalkPages(ctx, func(_ int, _ *pdfgo.Page) error { report.Pages++; return nil }); pageErr != nil {
 			return report, pageErr
 		}
-		result, optimizeErr := pdfReader.OptimizeTo(ctx, output, pdfgo.OptimizeOptions{Compression: options.Compression, Creator: ofdCreator, OnProgress: writeProgress})
+		result, optimizeErr := pdfReader.OptimizeTo(ctx, output, pdfgo.OptimizeOptions{Compression: options.Compression.pdfOptions(), Creator: ofdCreator, OnProgress: writeProgress})
 		report.Bytes, report.Unchanged = result.Bytes, result.Preserved
 		return report, optimizeErr
 	}
@@ -242,10 +279,9 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 		}
 		pdfOptions.RendererOptions = append(append([]RendererOption(nil), pdfOptions.RendererOptions...), options.RendererOptions...)
 		if options.Backends != nil {
-			pdfOptions.Backends = options.Backends
+			pdfOptions.RendererOptions = append(pdfOptions.RendererOptions, WithRenderBackends(*options.Backends))
 		}
 		options.RendererOptions = pdfOptions.RendererOptions
-		options.Backends = pdfOptions.Backends
 		pdfOptions.OnProgress = func(stage string, completed, total int) error {
 			if err := progress(stage, completed, total); err != nil {
 				return err
@@ -259,6 +295,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 		if err != nil {
 			return report, err
 		}
+		defer editor.Close()
 		count = editor.PageCount()
 	case "ofd":
 		readerOpts := slices.Clone(options.ReaderOptions)
@@ -267,6 +304,8 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 		}
 		if options.VersionID != "" {
 			readerOpts = append(readerOpts, WithVersion(options.VersionID))
+		} else if options.PrimaryVersion {
+			readerOpts = append(readerOpts, WithVersion(""))
 		}
 		reader, err = NewReader(operationInput, readerOpts...)
 		if err != nil {
@@ -291,7 +330,11 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 	report.Pages = len(indices)
 	writer := convertWriter{ctx: ctx, writer: output, count: &report.Bytes}
 	if format == "ofd" {
-		if !selectedDoc && options.Pages == nil && editor == nil && options.Fonts == FontKeep && options.Compression.Mode == CompressionUnchanged {
+		if !extractDoc && options.Pages == nil && editor == nil && options.Fonts == FontKeep && options.Compression.Mode == CompressionUnchanged {
+			if options.SkipUnchanged {
+				report.Unchanged = true
+				return report, nil
+			}
 			if err = progress("write", 0, 0); err != nil {
 				return report, err
 			}
@@ -300,25 +343,31 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 			return report, err
 		}
 		if editor == nil {
-			if options.VersionID != "" {
-				extracted, extractErr := reader.ExtractVersionContext(ctx, options.VersionID)
+			if extractDoc || options.Pages != nil {
+				extracted, extractErr := extractConvertDocument(ctx, reader, options)
 				if extractErr != nil {
 					return report, extractErr
 				}
-				editor, err = extracted.Editor()
+				defer extracted.Close()
+				editor, err = extracted.EditorContext(ctx)
 			} else {
-				editor, err = reader.Editor()
+				editor, err = reader.EditorContext(ctx)
 			}
 			if err != nil {
 				return report, err
 			}
+			defer editor.Close()
 		}
 		editor.OnWriteProgress = writeProgress
 		if options.Fonts != FontKeep {
 			if err = progress("fonts", 0, 0); err != nil {
 				return report, err
 			}
-			configuration := NewRenderer(&Reader{}, options.RendererOptions...)
+			fontResources := options.Resources
+			if fontResources == nil {
+				fontResources = editor.runtimeResources
+			}
+			configuration := NewRenderer(&Reader{resources: fontResources}, options.RendererOptions...)
 			if options.Backends != nil {
 				WithRenderBackends(*options.Backends)(configuration)
 			}
@@ -334,7 +383,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 			if err != nil {
 				return report, err
 			}
-			if !selectedDoc && report.Input == "ofd" && options.Pages == nil && options.Compression.Mode == CompressionUnchanged && !slices.ContainsFunc(report.Fonts, func(change FontChange) bool { return change.Changed }) {
+			if !extractDoc && report.Input == "ofd" && options.Pages == nil && options.Compression.Mode == CompressionUnchanged && !slices.ContainsFunc(report.Fonts, func(change FontChange) bool { return change.Changed }) {
 				if err = progress("write", 0, 0); err != nil {
 					return report, err
 				}
@@ -343,7 +392,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 				return report, err
 			}
 		}
-		if options.Pages == nil && (options.DocumentIndex == 0 || options.VersionID != "") {
+		if options.Pages == nil {
 			_, err = editor.WriteToWithOptions(ctx, writer, WriteOptions{Compression: options.Compression})
 		} else {
 			_, err = editor.WritePagesTo(ctx, writer, indices, WriteOptions{Compression: options.Compression})
@@ -361,8 +410,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 		defer reader.Close()
 	}
 	renderer := NewRenderer(reader, options.RendererOptions...)
-	renderer.Compression = options.Compression
-	renderer.OutputContext = ctx
+	renderer.SetCompression(options.Compression)
 	if options.Backends != nil {
 		WithRenderBackends(*options.Backends)(renderer)
 	}
@@ -371,11 +419,11 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 	}
 	switch format {
 	case "pdf":
-		err = renderer.RenderToMultiPagePDF(writer, indices...)
+		err = renderer.RenderToMultiPagePDFContext(ctx, writer, indices...)
 	case "txt":
-		err = renderer.RenderToMultiPageText(writer, indices...)
+		err = renderer.RenderToMultiPageTextContext(ctx, writer, indices...)
 	default:
-		err = convertPagedOutput(ctx, renderer, count, indices, format, writer, &report, options.PageOutput, progress)
+		err = convertPagedOutput(ctx, renderer, indices, format, writer, &report, options.PageOutput, progress)
 	}
 	return report, err
 }
@@ -426,10 +474,6 @@ func NewConversionPool(options ConversionPoolOptions) (*ConversionPool, error) {
 	return &ConversionPool{options: options, changed: make(chan struct{})}, nil
 }
 
-// Parallelism 返回同时运行的转换数量上限
-// 返回: int 并行上限
-func (p *ConversionPool) Parallelism() int { return p.options.Parallelism }
-
 // OutputFormats 返回独立的输出格式列表，不依赖WebUI或具体渲染后端
 // 返回: []OutputFormat 输出格式列表
 func OutputFormats() []OutputFormat {
@@ -467,7 +511,7 @@ func DetectFormat(input *Input) (string, error) {
 	}
 	archive, err := zip.NewReader(input, size)
 	if err == nil {
-		reader := &Reader{Zip: archive}
+		reader := &Reader{zip: archive}
 		if err := reader.indexPackage(); err != nil {
 			return "", err
 		}
@@ -485,19 +529,461 @@ func DetectFormat(input *Input) (string, error) {
 	return "", fmt.Errorf("unsupported input format")
 }
 
-// convertPageTask 保存单页并发渲染结果与同步信号
-type convertPageTask struct {
-	index int
-	buf   bytes.Buffer
-	err   error
-	done  chan struct{}
+// convertPagedOutput 按页序执行逐页图像或矢量导出，多页时使用ConversionPool与Reader.Fork多核并发渲染
+// 入参: ctx 取消上下文, renderer 渲染器, indices 导出页索引, format 输出格式, writer ZIP输出流, report 转换报告, pageOutput 逐页回调, progress 进度回调
+// 返回: error 导出或取消错误
+func convertPagedOutput(ctx context.Context, renderer *Renderer, indices []int, format string, writer io.Writer, report *ConvertReport, pageOutput func(int, func(io.Writer) error) error, progress func(string, int, int) error) error {
+	if pageOutput == nil {
+		report.Format = OutputFormat{Value: "zip", Label: "ZIP", Extension: "zip", MIME: "application/zip"}
+		return renderer.RenderToZIPContext(ctx, writer, format, indices...)
+	}
+	workers := min(len(indices), conversionWorkers(ctx))
+	if workers <= 1 {
+		for i, index := range indices {
+			if err := progress("export", i, len(indices)); err != nil {
+				return err
+			}
+			page, readErr := renderer.reader.PageContentByIndexContext(ctx, index)
+			if readErr != nil {
+				return readErr
+			}
+			if err := pageOutput(index, func(output io.Writer) error {
+				return renderer.RenderToContext(ctx, page, convertWriter{ctx: ctx, writer: output, count: &report.Bytes}, format)
+			}); err != nil {
+				return fmt.Errorf("export page %d: %w", index+1, err)
+			}
+		}
+		return progress("export", len(indices), len(indices))
+	}
+	if _, err := renderer.reader.docContext(ctx); err != nil {
+		return err
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	forked := make([]*Renderer, 0, workers)
+	defer func() {
+		for _, clone := range forked {
+			_ = clone.Close()
+		}
+	}()
+	for range workers {
+		clone, err := renderer.Fork(runCtx)
+		if err != nil {
+			return err
+		}
+		forked = append(forked, clone)
+	}
+	pool, _ := ctx.Value(conversionPoolKey{}).(*ConversionPool)
+	raster := report.Format.Raster
+	window := workers * 2
+	jobs := make(chan *convertPageTask, window)
+	inflight := make(chan *convertPageTask, window)
+	var wg sync.WaitGroup
+	for _, workerRenderer := range forked {
+		wg.Add(1)
+		go func(r *Renderer) {
+			defer wg.Done()
+			for task := range jobs {
+				if err := runCtx.Err(); err != nil {
+					task.err = err
+					close(task.done)
+					continue
+				}
+				page, readErr := r.reader.PageContentByIndexContext(runCtx, task.index)
+				if readErr != nil {
+					task.err = readErr
+					close(task.done)
+					continue
+				}
+				var estimated int64
+				acquired := false
+				if pool != nil && raster {
+					estimated = estimateRasterPageBytes(r, page)
+					if err := pool.acquire(runCtx, true, estimated); err != nil {
+						task.err = err
+						close(task.done)
+						continue
+					}
+					acquired = true
+				}
+				task.err = r.RenderToContext(runCtx, page, &task.buf, format)
+				if acquired {
+					pool.release(true, estimated)
+				}
+				close(task.done)
+			}
+		}(workerRenderer)
+	}
+	var producerWG sync.WaitGroup
+	producerWG.Add(1)
+	go func() {
+		defer producerWG.Done()
+		defer close(jobs)
+		defer close(inflight)
+		for _, index := range indices {
+			task := &convertPageTask{index: index, done: make(chan struct{})}
+			select {
+			case <-runCtx.Done():
+				return
+			case inflight <- task:
+			}
+			select {
+			case <-runCtx.Done():
+				task.err = runCtx.Err()
+				close(task.done)
+				return
+			case jobs <- task:
+			}
+		}
+	}()
+	finish := func() {
+		cancel()
+		producerWG.Wait()
+		wg.Wait()
+	}
+	for i := range indices {
+		if err := progress("export", i, len(indices)); err != nil {
+			finish()
+			return err
+		}
+		task, ok := <-inflight
+		if !ok {
+			finish()
+			return runCtx.Err()
+		}
+		select {
+		case <-task.done:
+		case <-ctx.Done():
+			finish()
+			return ctx.Err()
+		}
+		if task.err != nil {
+			finish()
+			return fmt.Errorf("export page %d: %w", task.index+1, task.err)
+		}
+		if err := pageOutput(task.index, func(output io.Writer) error {
+			_, copyErr := io.Copy(convertWriter{ctx: ctx, writer: output, count: &report.Bytes}, bytes.NewReader(task.buf.Bytes()))
+			return copyErr
+		}); err != nil {
+			finish()
+			return fmt.Errorf("export page %d: %w", task.index+1, err)
+		}
+		task.buf.Reset()
+	}
+	finish()
+	return progress("export", len(indices), len(indices))
 }
 
-// convertReader 将取消上下文传递到随机读取
-type convertReader struct {
-	ctx   context.Context
-	input io.ReaderAt
+// conversionWorkers 按当前文件数量分配内部计算任务
+// 入参: ctx 转换上下文
+// 返回: int 内部并行数
+func conversionWorkers(ctx context.Context) int {
+	p, _ := ctx.Value(conversionPoolKey{}).(*ConversionPool)
+	if p == nil {
+		return runtime.GOMAXPROCS(0)
+	}
+	p.mu.Lock()
+	active := p.active
+	p.mu.Unlock()
+	return max(1, p.parallelism()/max(1, active))
 }
+
+// estimateRasterPageBytes 按页面物理区域与渲染DPI估算单页RGBA光栅缓冲字节数
+// 入参: r 渲染器, page 页面内容
+// 返回: int64 估算字节数
+func estimateRasterPageBytes(r *Renderer, page *PageContent) int64 {
+	if r == nil || page == nil {
+		return 0
+	}
+	box, err := r.GetPageBox(page)
+	if err != nil {
+		return 0
+	}
+	w, h, err := (&RasterPage{Width: box.W, Height: box.H, DPI: r.dpi}).PixelSize()
+	if err != nil {
+		return 0
+	}
+	return int64(w) * int64(h) * 4
+}
+
+// extractConvertDocument 按转换选项抽取目标文档及指定版本为独立单文档阅读器
+// 保留附件、书签、标引、元数据及封面，移除其余文档与版本列表
+// 入参: ctx 取消上下文, reader 源包阅读器, options 转换选项
+// 返回: *Reader 独立单文档阅读器, error 读取、提取或取消错误
+func extractConvertDocument(ctx context.Context, reader *Reader, options ConvertOptions) (*Reader, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if options.VersionID != "" {
+		return reader.ExtractVersionContext(ctx, options.VersionID)
+	}
+	entry, err := reader.DocumentRootContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if reader.versionInfo != nil {
+		return reader.ExtractVersionContext(ctx, reader.versionInfo.ID)
+	}
+	files, err := reader.versionFileDependencies(ctx, entry, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	ofdData, err := reader.readFileViewContext(ctx, "OFD.xml")
+	if err != nil {
+		return nil, err
+	}
+	ofdRoot, err := parseEditorXMLContext(ctx, ofdData)
+	if err != nil {
+		return nil, err
+	}
+	body := ofdRoot.childAt("DocBody", reader.documentIndex)
+	if body == nil {
+		return nil, fmt.Errorf("document entry not found: %d", reader.documentIndex)
+	}
+	if info := body.child("DocInfo"); info != nil {
+		if cover := info.child("Cover"); cover != nil {
+			coverPath := cleanPackagePath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, cover)))
+			if validPackagePath(coverPath) && reader.fileNames[coverPath] {
+				files[coverPath] = true
+			}
+		}
+	}
+	var overrideFiles map[string][]byte
+	if sigNode := body.child("Signatures"); sigNode != nil {
+		sigPath := cleanPackagePath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, sigNode)))
+		if validPackagePath(sigPath) && reader.fileNames[sigPath] {
+			if reader.currentVersioned() {
+				filteredList, keptSigFiles, filterErr := filterPrimarySignatureFiles(ctx, reader, entry, sigPath)
+				if filterErr != nil {
+					return nil, filterErr
+				}
+				if len(keptSigFiles) != 0 {
+					files[sigPath] = true
+					maps.Copy(files, keptSigFiles)
+					if filteredList != nil {
+						overrideFiles = map[string][]byte{sigPath: filteredList}
+					}
+				}
+			} else if sigDeps, sigErr := reader.versionFileDependencies(ctx, sigPath, nil, nil); sigErr == nil {
+				maps.Copy(files, sigDeps)
+			} else if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+		}
+	}
+	root, err := reader.extractedVersionRoot(ctx, DocumentVersionInfo{DocRoot: entry}, files)
+	if err != nil {
+		return nil, err
+	}
+	next := &Reader{path: reader.path, sourceFile: reader.sourceFile, files: map[string][]byte{"OFD.xml": root}, encryption: reader.encryption, resources: reader.resources}
+	for name := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if name != "OFD.xml" {
+			if data, ok := reader.files[name]; ok {
+				next.files[name] = data
+			}
+		}
+	}
+	maps.Copy(next.files, overrideFiles)
+	if reader.zip != nil {
+		var kept []*zip.File
+		for _, file := range reader.zip.File {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			name := cleanPackagePath(file.Name)
+			if name != "OFD.xml" && files[name] && !file.FileInfo().IsDir() {
+				kept = append(kept, file)
+			}
+		}
+		next.zip = &zip.Reader{Comment: reader.zip.Comment, File: kept}
+		next.archiveID = nextReaderArchiveID.Add(1)
+		next.maxIDCache = &archiveMaxIDCache{}
+	}
+	if src := reader.encryptedSource(); src != nil {
+		keep := make(map[string]bool, len(files))
+		for name := range files {
+			if name != "OFD.xml" {
+				keep[name] = true
+			}
+		}
+		next.setEncryptedSource(src.filter(keep))
+	}
+	if err := next.initRootContext(ctx); err != nil {
+		return nil, err
+	}
+	if _, err := next.docStructureContext(ctx); err != nil {
+		return nil, err
+	}
+	next.bindEncryptionHold()
+	return next, nil
+}
+
+// filterPrimarySignatureFiles 过滤多版本文档主入口中仅归属历史版本的签章条目与文件
+// 入参: ctx 取消上下文, reader 源阅读器, entry 主入口文档路径, listPath 签名列表路径
+// 返回: []byte 过滤后的签名列表XML，未改动时为nil, map[string]bool 保留的签章文件集, error 读取或取消错误
+func filterPrimarySignatureFiles(ctx context.Context, reader *Reader, entry, listPath string) ([]byte, map[string]bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	cleanEntry := cleanPackagePath(entry)
+	cleanList := cleanPackagePath(listPath)
+	listData, err := reader.readFileViewContext(ctx, cleanList)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		return nil, nil, nil
+	}
+	listRoot, err := parseEditorXMLContext(ctx, listData)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		return nil, nil, nil
+	}
+	versionRoots := make(map[string]bool)
+	versionDeclaredFiles := make(map[string]bool)
+	if versions, verErr := reader.DocumentVersionsContext(ctx); verErr == nil {
+		for _, v := range versions {
+			if loc := cleanPackagePath(v.Location); validPackagePath(loc) {
+				versionRoots[loc] = true
+			}
+			vDocRoot := cleanPackagePath(v.DocRoot)
+			if validPackagePath(vDocRoot) && vDocRoot != cleanEntry {
+				versionRoots[vDocRoot] = true
+			}
+			for _, vf := range v.Files {
+				if clean := cleanPackagePath(vf.Location); validPackagePath(clean) {
+					versionDeclaredFiles[clean] = true
+				}
+			}
+		}
+	} else if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+	primaryPages := make(map[string]bool)
+	if docData, docErr := reader.readFileViewContext(ctx, cleanEntry); docErr == nil {
+		var doc documentPageList
+		if xml.Unmarshal(docData, &doc) == nil {
+			for _, page := range doc.Pages.Page {
+				if id := editorResourceID(page.ID); id != "" {
+					primaryPages[id] = true
+				}
+			}
+		}
+	} else if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+	keptFiles := make(map[string]bool)
+	var dropPatches []editorXMLPatch
+	keptCount := 0
+	for _, node := range listRoot.children {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		if !node.matchesOFD("Signature") {
+			continue
+		}
+		sigFilePath := cleanPackagePath(signatureRefPath(cleanList, node.attr("BaseLoc")))
+		if !validPackagePath(sigFilePath) || versionDeclaredFiles[sigFilePath] {
+			dropPatches = append(dropPatches, editorXMLPatch{start: node.start, end: node.end})
+			continue
+		}
+		sigData, readErr := reader.readFileViewContext(ctx, sigFilePath)
+		if readErr != nil {
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			keptCount++
+			if reader.fileNames[sigFilePath] {
+				keptFiles[sigFilePath] = true
+			}
+			continue
+		}
+		sigFile, parseErr := parseSignatureFile(sigData)
+		if parseErr != nil {
+			keptCount++
+			keptFiles[sigFilePath] = true
+			continue
+		}
+		ownValue := ""
+		if sigFile.SignedValue != "" {
+			if p := cleanPackagePath(signatureRefPath(sigFilePath, sigFile.SignedValue)); validPackagePath(p) {
+				ownValue = p
+			}
+		}
+		ownSeal := ""
+		if sigFile.SignedInfo.Seal.BaseLoc != "" {
+			if p := cleanPackagePath(signatureRefPath(sigFilePath, sigFile.SignedInfo.Seal.BaseLoc)); validPackagePath(p) {
+				ownSeal = p
+			}
+		}
+		hitsPrimaryRoot := false
+		hitsVersionRoot := false
+		for _, ref := range sigFile.SignedInfo.References.Reference {
+			refPath := cleanPackagePath(signatureRefPath(sigFilePath, ref.FileRef))
+			if !validPackagePath(refPath) || refPath == "OFD.xml" || refPath == cleanList || refPath == sigFilePath || refPath == ownValue || refPath == ownSeal {
+				continue
+			}
+			if refPath == cleanEntry {
+				hitsPrimaryRoot = true
+			}
+			if versionRoots[refPath] {
+				hitsVersionRoot = true
+			}
+		}
+		drop := false
+		if hitsVersionRoot && !hitsPrimaryRoot {
+			drop = true
+		} else if !hitsPrimaryRoot && len(sigFile.SignedInfo.StampAnnot) > 0 && len(primaryPages) > 0 {
+			matchedPage := false
+			for _, stamp := range sigFile.SignedInfo.StampAnnot {
+				if primaryPages[editorResourceID(stamp.PageRef)] {
+					matchedPage = true
+					break
+				}
+			}
+			if !matchedPage {
+				drop = true
+			}
+		}
+		if drop {
+			dropPatches = append(dropPatches, editorXMLPatch{start: node.start, end: node.end})
+			continue
+		}
+		keptCount++
+		keptFiles[sigFilePath] = true
+		if ownValue != "" && reader.fileNames[ownValue] {
+			keptFiles[ownValue] = true
+		}
+		if ownSeal != "" && reader.fileNames[ownSeal] {
+			keptFiles[ownSeal] = true
+		}
+	}
+	if keptCount == 0 {
+		return nil, nil, ctx.Err()
+	}
+	if len(dropPatches) == 0 {
+		return nil, keptFiles, ctx.Err()
+	}
+	return editorPatchXML(listData, dropPatches), keptFiles, ctx.Err()
+}
+
+// parallelism 返回有效的并发上限，零值配置回退到GOMAXPROCS
+// 返回: int 有效并发上限
+func (p *ConversionPool) parallelism() int {
+	if p != nil && p.options.Parallelism > 0 {
+		return p.options.Parallelism
+	}
+	return max(1, runtime.GOMAXPROCS(0))
+}
+
+// Parallelism 返回同时运行的转换数量上限
+// 返回: int 并行上限
+func (p *ConversionPool) Parallelism() int { return p.parallelism() }
 
 // ReadAt 读取前后响应取消，保留读取字节数和源错误
 // 入参: data 目标缓冲, offset 源偏移
@@ -511,13 +997,6 @@ func (r convertReader) ReadAt(data []byte, offset int64) (int, error) {
 		err = r.ctx.Err()
 	}
 	return n, err
-}
-
-// convertWriter 将取消上下文传递到写入并统计实际字节数
-type convertWriter struct {
-	ctx    context.Context
-	writer io.Writer
-	count  *int64
 }
 
 // Write 写入前后响应取消，保留写入及短写错误
@@ -556,189 +1035,6 @@ func (w convertWriter) WriteString(data string) (int, error) {
 	return n, err
 }
 
-// conversionPoolKey 标识单次转换使用的共享预算
-type conversionPoolKey struct{}
-
-// convertPagedOutput 按页序执行逐页图像或矢量导出，多页时使用ConversionPool与Reader.Fork多核并发渲染
-// 入参: ctx 取消上下文, renderer 渲染器, totalPages 文档总页数, indices 导出页索引, format 输出格式, writer ZIP输出流, report 转换报告, pageOutput 逐页回调, progress 进度回调
-// 返回: error 导出或取消错误
-func convertPagedOutput(ctx context.Context, renderer *Renderer, totalPages int, indices []int, format string, writer io.Writer, report *ConvertReport, pageOutput func(int, func(io.Writer) error) error, progress func(string, int, int) error) error {
-	workers := min(len(indices), conversionWorkers(ctx))
-	if workers <= 1 {
-		if pageOutput == nil {
-			report.Format = OutputFormat{Value: "zip", Label: "ZIP", Extension: "zip", MIME: "application/zip"}
-			return renderer.RenderToZIP(writer, format, indices...)
-		}
-		for i, index := range indices {
-			if err := progress("export", i, len(indices)); err != nil {
-				return err
-			}
-			page, readErr := renderer.Reader.PageContentByIndex(index)
-			if readErr != nil {
-				return readErr
-			}
-			if err := pageOutput(index, func(output io.Writer) error {
-				return renderer.RenderTo(page, convertWriter{ctx: ctx, writer: output, count: &report.Bytes}, format)
-			}); err != nil {
-				return fmt.Errorf("export page %d: %w", index+1, err)
-			}
-		}
-		return progress("export", len(indices), len(indices))
-	}
-	if _, err := renderer.Reader.DocContext(ctx); err != nil {
-		return err
-	}
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	forked := make([]*Renderer, 0, workers)
-	for range workers {
-		clone, err := renderer.Fork(runCtx)
-		if err != nil {
-			return err
-		}
-		forked = append(forked, clone)
-	}
-	pool, _ := ctx.Value(conversionPoolKey{}).(*ConversionPool)
-	raster := report.Format.Raster
-	window := workers * 2
-	jobs := make(chan *convertPageTask, window)
-	inflight := make(chan *convertPageTask, window)
-	var wg sync.WaitGroup
-	for _, workerRenderer := range forked {
-		wg.Add(1)
-		go func(r *Renderer) {
-			defer wg.Done()
-			for task := range jobs {
-				if err := runCtx.Err(); err != nil {
-					task.err = err
-					close(task.done)
-					continue
-				}
-				acquired := false
-				if pool != nil && raster {
-					if err := pool.acquire(runCtx, true, 0); err != nil {
-						task.err = err
-						close(task.done)
-						continue
-					}
-					acquired = true
-				}
-				page, readErr := r.Reader.PageContentByIndex(task.index)
-				if readErr != nil {
-					task.err = readErr
-				} else {
-					task.err = r.RenderTo(page, &task.buf, format)
-				}
-				if acquired {
-					pool.release(true, 0)
-				}
-				close(task.done)
-			}
-		}(workerRenderer)
-	}
-	var producerWG sync.WaitGroup
-	producerWG.Add(1)
-	go func() {
-		defer producerWG.Done()
-		defer close(jobs)
-		defer close(inflight)
-		for _, index := range indices {
-			task := &convertPageTask{index: index, done: make(chan struct{})}
-			select {
-			case <-runCtx.Done():
-				return
-			case inflight <- task:
-			}
-			select {
-			case <-runCtx.Done():
-				task.err = runCtx.Err()
-				close(task.done)
-				return
-			case jobs <- task:
-			}
-		}
-	}()
-	finish := func() {
-		cancel()
-		producerWG.Wait()
-		wg.Wait()
-	}
-	if pageOutput == nil {
-		report.Format = OutputFormat{Value: "zip", Label: "ZIP", Extension: "zip", MIME: "application/zip"}
-		archive := zip.NewWriter(writer)
-		configureArchive(archive, renderer.Compression)
-		method := zip.Deflate
-		if format == "png" || format == "jpg" {
-			method = zip.Store
-		}
-		width := len(strconv.Itoa(totalPages))
-		if err := progress("export", 0, len(indices)); err != nil {
-			finish()
-			return err
-		}
-		for i := range indices {
-			task, ok := <-inflight
-			if !ok {
-				finish()
-				return runCtx.Err()
-			}
-			<-task.done
-			if task.err != nil {
-				finish()
-				return fmt.Errorf("failed to export page %d: %w", task.index+1, task.err)
-			}
-			entry, err := archive.CreateHeader(&zip.FileHeader{
-				Name:   fmt.Sprintf("%0*d.%s", width, task.index+1, format),
-				Method: method,
-			})
-			if err != nil {
-				finish()
-				return err
-			}
-			if _, err := io.Copy(entry, bytes.NewReader(task.buf.Bytes())); err != nil {
-				finish()
-				return err
-			}
-			task.buf.Reset()
-			if err := progress("export", i+1, len(indices)); err != nil {
-				finish()
-				return err
-			}
-		}
-		finish()
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		return archive.Close()
-	}
-	for i := range indices {
-		if err := progress("export", i, len(indices)); err != nil {
-			finish()
-			return err
-		}
-		task, ok := <-inflight
-		if !ok {
-			finish()
-			return runCtx.Err()
-		}
-		<-task.done
-		if task.err != nil {
-			finish()
-			return fmt.Errorf("export page %d: %w", task.index+1, task.err)
-		}
-		if err := pageOutput(task.index, func(output io.Writer) error {
-			_, copyErr := io.Copy(convertWriter{ctx: ctx, writer: output, count: &report.Bytes}, bytes.NewReader(task.buf.Bytes()))
-			return copyErr
-		}); err != nil {
-			finish()
-			return fmt.Errorf("export page %d: %w", task.index+1, err)
-		}
-		task.buf.Reset()
-	}
-	finish()
-	return progress("export", len(indices), len(indices))
-}
-
 // memoryLimit 读取当前可分配的图像工作量预算
 // 返回: int64 可用字节数，负值表示未设置预算
 func (p *ConversionPool) memoryLimit() int64 {
@@ -770,10 +1066,11 @@ func (p *ConversionPool) acquire(ctx context.Context, image bool, size int64) er
 			return err
 		}
 		limit := p.memoryLimit()
+		parallelism := p.parallelism()
 		p.mu.Lock()
-		allowed := p.active < p.options.Parallelism && (p.active == 0 || limit != 0)
+		allowed := p.active < parallelism && (p.active == 0 || limit != 0)
 		if image {
-			allowed = p.images < p.options.Parallelism && (p.images == 0 || limit < 0 || size <= limit-p.memory)
+			allowed = p.images < parallelism && (p.images == 0 || limit < 0 || size <= limit-p.memory)
 		}
 		if allowed {
 			if image {
@@ -784,6 +1081,9 @@ func (p *ConversionPool) acquire(ctx context.Context, image bool, size int64) er
 			}
 			p.mu.Unlock()
 			return nil
+		}
+		if p.changed == nil {
+			p.changed = make(chan struct{})
 		}
 		changed := p.changed
 		p.mu.Unlock()
@@ -818,20 +1118,8 @@ func (p *ConversionPool) release(image bool, size int64) {
 	} else {
 		p.active--
 	}
-	close(p.changed)
-	p.changed = make(chan struct{})
-}
-
-// conversionWorkers 按当前文件数量分配内部计算任务
-// 入参: ctx 转换上下文
-// 返回: int 内部并行数
-func conversionWorkers(ctx context.Context) int {
-	p, _ := ctx.Value(conversionPoolKey{}).(*ConversionPool)
-	if p == nil {
-		return runtime.GOMAXPROCS(0)
+	if p.changed != nil {
+		close(p.changed)
 	}
-	p.mu.Lock()
-	active := p.active
-	p.mu.Unlock()
-	return max(1, p.options.Parallelism/max(1, active))
+	p.changed = make(chan struct{})
 }

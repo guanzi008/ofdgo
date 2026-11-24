@@ -41,402 +41,6 @@ type editorProfileReference struct {
 	id    string
 }
 
-// compressResourceParts 优化输出图片并合并相同资源文件，保留资源标识及各自属性
-// 入参: parts 输出改动, reader 原包，可为空, removed 已移除条目
-// 返回: error 读取或取消错误
-func (e *Editor) compressResourceParts(parts map[string][]byte, reader *Reader, removed map[string]bool) error {
-	if reader == nil && e.output != nil && e.output.options.Mode != CompressionUnchanged && !e.output.protected {
-		unused, err := e.compactResourceReferences(parts, nil, editorProgress(e.OnWriteProgress), nil, nil)
-		if err != nil {
-			return err
-		}
-		maps.Copy(removed, unused)
-	}
-	return e.compressResourceReferences(parts, reader, removed, nil)
-}
-
-// compressResourceReferences 优化资源，复用自产页面引用并流式读取暂存页面
-// 版本文件隔离当前入口，其他文档仅优化未受版本保护的资源；结果仅在本次写出内复用
-// 入参: parts 输出改动, reader 原包, removed 已移除条目, generated 本次自产页面及引用
-// 返回: error 读取或取消错误
-func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Reader, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
-	if e.output == nil || e.output.options.Mode == CompressionUnchanged || e.output.protected {
-		return nil
-	}
-	generated = e.generatedVectorReferences(parts, generated)
-	selected, scope, err := reader.versionResourceFiles(e.output.ctx, parts, generated)
-	if err != nil {
-		return err
-	}
-	names := make(map[string]bool)
-	if reader != nil {
-		for name := range reader.fileIndex {
-			names[name] = true
-		}
-		for name := range reader.files {
-			names[name] = true
-		}
-		if src := reader.encryptedSource(); src != nil {
-			for _, name := range src.names() {
-				names[name] = true
-			}
-		}
-	}
-	for name := range parts {
-		names[name] = true
-	}
-	read := func(name string) ([]byte, error) {
-		if err := e.output.ctx.Err(); err != nil {
-			return nil, err
-		}
-		if data, ok := parts[name]; ok {
-			return data, nil
-		}
-		return reader.readFileViewContext(e.output.ctx, name)
-	}
-	actual := make(map[string]string)
-	for _, name := range slices.Sorted(maps.Keys(names)) {
-		if err := e.output.ctx.Err(); err != nil {
-			return err
-		}
-		key := cleanPackagePath(name)
-		if removed[key] || strings.HasSuffix(name, "/") {
-			delete(names, name)
-			continue
-		}
-		if prior, ok := actual[key]; ok && prior != name {
-			return nil
-		}
-		actual[key] = name
-		if scope != nil && !scope[key] {
-			delete(names, name)
-			continue
-		}
-	}
-	collect := reader != nil && reader.DocumentCount() > 1 && e.backends.FontResources != nil
-	refs, resources, references, safe, err := e.scanOutputResources(e.output.ctx, reader, parts, generated, names, nil, collect)
-	if err != nil || !safe {
-		return err
-	}
-	if selected != nil && reader.DocumentCount() > 1 {
-		preserved, err := reader.versionPreservedFiles(e.output.ctx)
-		if err != nil {
-			return err
-		}
-		for name := range preserved {
-			if !selected[name] {
-				refs.files[name], refs.versions[name] = true, true
-			}
-		}
-	}
-	for name := range e.output.protectedFiles {
-		refs.files[name] = true
-	}
-	type resourceFile struct{ key, role string }
-	type resourceScope struct {
-		role     string
-		selected bool
-	}
-	type resourceSize struct {
-		role string
-		size uint64
-	}
-	files := make(map[resourceFile]bool)
-	for _, name := range resources {
-		data, err := read(name)
-		if err != nil {
-			return err
-		}
-		root, err := parseEditorXMLContext(e.output.ctx, data)
-		if err != nil {
-			return err
-		}
-		preserved := refs.versions[cleanPackagePath(name)] || e.output.protectedFiles[cleanPackagePath(name)]
-		for _, group := range root.children {
-			for _, node := range group.children {
-				if err := e.output.ctx.Err(); err != nil {
-					return err
-				}
-				field := ""
-				if group.name.Local == "Fonts" && node.name.Local == "Font" {
-					field = "FontFile"
-				}
-				if group.name.Local == "MultiMedias" && node.name.Local == "MultiMedia" {
-					field = "MediaFile"
-				}
-				if field == "" {
-					continue
-				}
-				file := node.child(field)
-				if file == nil {
-					continue
-				}
-				var value string
-				if err := xml.Unmarshal(data[file.start:file.end], &value); err != nil {
-					return err
-				}
-				key := editorResourceLocation(name, root.attr("BaseLoc"), value)
-				if selected != nil && !selected[cleanPackagePath(name)] && selected[key] {
-					continue
-				}
-				if preserved || field == "MediaFile" && node.attr("Type") != "Image" {
-					refs.files[key] = true
-					continue
-				}
-				if key != cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value)) {
-					return nil
-				}
-				if actual[key] != "" && !refs.files[key] {
-					files[resourceFile{key, field}] = true
-				}
-			}
-		}
-	}
-	var fontUsage map[string]*editorFontUsage
-	if references != nil {
-		fontUsage, err = reader.compressionFontUsage(e.output.ctx, refs.documents, resources, references, read)
-		if err != nil {
-			return err
-		}
-	}
-	aliases := make(map[string]string)
-	locations := maps.Clone(actual)
-	reserved := make(map[string]bool, len(actual))
-	for key := range actual {
-		reserved[key] = true
-	}
-	formats := make(map[string]string)
-	seen := make(map[resourceScope]map[[32]byte]string)
-	imageResults := make(map[outputImageKey][]byte)
-	imageDigests := make(map[outputImageKey][32]byte)
-	imageSources := make(map[string]outputImageSource)
-	ordered := slices.Sorted(maps.Keys(actual))
-	sizes := make(map[string]uint64, len(files))
-	largeCounts := make(map[resourceSize]int)
-	var imageKeys []string
-	for _, key := range ordered {
-		if err := e.output.ctx.Err(); err != nil {
-			return err
-		}
-		font, media := files[resourceFile{key, "FontFile"}], files[resourceFile{key, "MediaFile"}]
-		if refs.files[key] || font == media {
-			continue
-		}
-		size, err := outputResourceSize(reader, parts, actual[key])
-		if err != nil {
-			return err
-		}
-		sizes[key] = size
-		if size > outputOptimizationBufferLimit {
-			role := "MediaFile"
-			if font {
-				role = "FontFile"
-			}
-			largeCounts[resourceSize{role, size}]++
-		} else if media {
-			imageKeys = append(imageKeys, key)
-		}
-	}
-	load := func(key string) ([]byte, error) {
-		if sizes[key] > outputOptimizationBufferLimit {
-			return nil, nil
-		}
-		return read(actual[key])
-	}
-	if err := e.prepareOutputImages(imageKeys, load, imageResults, imageSources); err != nil {
-		return err
-	}
-	var fontCache editorSourceFontCache
-	var hashBuffer []byte
-	for _, key := range ordered {
-		if refs.files[key] || files[resourceFile{key, "FontFile"}] && files[resourceFile{key, "MediaFile"}] {
-			continue
-		}
-		for _, role := range []string{"FontFile", "MediaFile"} {
-			if !files[resourceFile{key, role}] {
-				continue
-			}
-			if err := editorProgress(e.OnWriteProgress).withContext(e.output.ctx).report("compress", e.output.completed, 0); err != nil {
-				return err
-			}
-			if size := sizes[key]; size > outputOptimizationBufferLimit && largeCounts[resourceSize{role, size}] < 2 {
-				continue
-			}
-			source, prefetched := imageSources[key]
-			usage := fontUsage[key]
-			subset := role == "FontFile" && usage != nil && !usage.unsafe && e.backends.FontResources != nil
-			var data []byte
-			optimizable := prefetched
-			if !prefetched {
-				var err error
-				if role == "MediaFile" || subset {
-					data, err = load(key)
-					if err != nil {
-						return err
-					}
-				}
-				optimizable = data != nil
-				if optimizable {
-					source.key.hash = sha256.Sum256(data)
-				} else {
-					if hashBuffer == nil {
-						hashBuffer = make([]byte, 32*1024)
-					}
-					source.key.hash, err = outputResourceDigest(e.output.ctx, reader, parts, actual[key], hashBuffer)
-					if err != nil {
-						return err
-					}
-				}
-			}
-			if optimizable && subset {
-				candidate, err := fontCache.subset(e.output.ctx, e.backends.FontResources, data, usage)
-				if err != nil {
-					return fmt.Errorf("subset font %s: %w", key, err)
-				}
-				if err := e.output.ctx.Err(); err != nil {
-					return err
-				}
-				if len(candidate) != 0 && len(candidate) < len(data) {
-					data = candidate
-					parts[actual[key]] = data
-					source.key.hash = sha256.Sum256(data)
-				}
-			}
-			if role == "MediaFile" && optimizable {
-				options, demand := e.outputImageOptions(key)
-				if !e.imageAlreadyOptimized(source.key.hash, options) {
-					cacheKey := outputImageKey{hash: source.key.hash, options: options, size: demand}
-					candidate, cached := imageResults[cacheKey]
-					var err error
-					if !cached {
-						candidate, err = optimizeOutputImage(e.output.ctx, outputImageJob{data: data, key: outputImageKey{options: options, size: demand}})
-						if err := e.output.ctx.Err(); err != nil {
-							return err
-						}
-						imageResults[cacheKey] = nil
-						if err == nil && len(candidate) < len(data) {
-							imageResults[cacheKey] = candidate
-						} else {
-							candidate = nil
-						}
-					}
-					if candidate != nil {
-						data = candidate
-						parts[actual[key]] = data
-						digest, ok := imageDigests[cacheKey]
-						if !ok {
-							digest = sha256.Sum256(data)
-							imageDigests[cacheKey] = digest
-						}
-						source.key.hash = digest
-					}
-					if data != nil {
-						source.format = outputImageFormat(data)
-					}
-					if source.format != "" {
-						formats[key] = source.format
-						suffix := ".png"
-						if source.format == "JPEG" {
-							suffix = ".jpg"
-						}
-						ext := path.Ext(actual[key])
-						if !strings.EqualFold(ext, suffix) && !(source.format == "JPEG" && strings.EqualFold(ext, ".jpeg")) {
-							if data == nil {
-								data, err = read(actual[key])
-								if err != nil {
-									return err
-								}
-							}
-							stem := strings.TrimSuffix(actual[key], ext)
-							name := stem + suffix
-							for n := 1; reserved[name]; n++ {
-								name = fmt.Sprintf("%s-%d%s", stem, n, suffix)
-							}
-							reserved[name] = true
-							locations[key] = name
-							parts[name] = data
-							delete(parts, actual[key])
-							removed[key] = true
-						}
-					}
-				}
-			}
-			scope := resourceScope{role, selected[key]}
-			if seen[scope] == nil {
-				seen[scope] = make(map[[32]byte]string)
-			}
-			hash := source.key.hash
-			if first, ok := seen[scope][hash]; ok {
-				aliases[key] = first
-				removed[key] = true
-				if locations[key] != actual[key] {
-					delete(parts, locations[key])
-				}
-			} else {
-				seen[scope][hash] = key
-			}
-		}
-	}
-	if len(aliases) == 0 && len(formats) == 0 {
-		return e.output.ctx.Err()
-	}
-	for _, name := range resources {
-		if refs.versions[cleanPackagePath(name)] || e.output.protectedFiles[cleanPackagePath(name)] {
-			continue
-		}
-		data, err := read(name)
-		if err != nil {
-			return err
-		}
-		root, err := parseEditorXMLContext(e.output.ctx, data)
-		if err != nil {
-			return err
-		}
-		var patches []editorXMLPatch
-		for _, group := range root.children {
-			for _, node := range group.children {
-				if err := e.output.ctx.Err(); err != nil {
-					return err
-				}
-				for _, field := range []string{"FontFile", "MediaFile"} {
-					file := node.child(field)
-					if file == nil {
-						continue
-					}
-					var value string
-					if err := xml.Unmarshal(data[file.start:file.end], &value); err != nil {
-						return err
-					}
-					key := editorResourceLocation(name, root.attr("BaseLoc"), value)
-					if selected != nil && !selected[cleanPackagePath(name)] && selected[key] {
-						continue
-					}
-					location := locations[key]
-					if first, ok := aliases[key]; ok {
-						location = locations[first]
-					}
-					if location != "" && location != actual[key] {
-						var escaped bytes.Buffer
-						xml.EscapeText(&escaped, []byte("/"+location))
-						patches = append(patches, editorXMLContent(data, file, escaped.Bytes()))
-					}
-					if field == "MediaFile" && formats[key] != "" && node.attr("Format") != formats[key] {
-						patch, err := editorXMLAttributePatch(data, node, "Format", formats[key])
-						if err != nil {
-							return err
-						}
-						patches = append(patches, patch)
-					}
-				}
-			}
-		}
-		if len(patches) > 0 {
-			parts[name] = editorPatchXML(data, patches)
-		}
-	}
-	return e.output.ctx.Err()
-}
-
 // outputResourceSize 获取资源的实际输出大小，优先使用本次改动及已加载数据
 // 入参: reader 原包，可为空, parts 输出改动, name 资源路径
 // 返回: uint64 未压缩字节数, error 文件不存在
@@ -490,25 +94,6 @@ func outputResourceDigest(ctx context.Context, reader *Reader, parts map[string]
 		return [32]byte{}, closeErr
 	}
 	return [32]byte(hash.Sum(nil)), ctx.Err()
-}
-
-// compressionFontUsage 按文档合并共享字体用字，版本编辑仅统计选中入口
-// 入参: ctx 取消上下文, documents 文档入口, resources 资源索引, references 各文件引用, read 输出文件读取方法
-// 返回: map[string]*editorFontUsage 各字体文件的用字，无法确定作用域时为空, error 读取或取消错误
-func (r *Reader) compressionFontUsage(ctx context.Context, documents map[string]bool, resources []string, references map[string]*editorResourceRefs, read func(string) ([]byte, error)) (map[string]*editorFontUsage, error) {
-	selected := ""
-	if r.OFD.DocBody[r.documentIndex].versioned {
-		var err error
-		selected, err = r.DocumentRootContext(ctx)
-		if err != nil {
-			return nil, err
-		}
-	}
-	scoped, err := resourceReferenceScopes(ctx, documents, resources, references, selected)
-	if err != nil || scoped == nil {
-		return nil, err
-	}
-	return resourceFontUsage(ctx, resources, scoped, read)
 }
 
 // resourceFontUsage 按已确认的文档作用域合并各字体文件的字符和字形引用
@@ -687,4 +272,520 @@ func compactResourceProfiles(ctx context.Context, reader *Reader, parts map[stri
 		delete(parts, name)
 	}
 	return nil
+}
+
+// compressResourceParts 优化输出图片并合并相同资源文件，保留资源标识及各自属性
+// 入参: parts 输出改动, reader 原包，可为空, removed 已移除条目
+// 返回: error 读取或取消错误
+func (e *Editor) compressResourceParts(parts map[string][]byte, reader *Reader, removed map[string]bool) error {
+	if reader == nil && e.output != nil && e.output.options.Mode != CompressionUnchanged && !e.output.protected {
+		unused, err := e.compactResourceReferences(parts, nil, editorProgress(e.OnWriteProgress), nil, nil)
+		if err != nil {
+			return err
+		}
+		maps.Copy(removed, unused)
+	}
+	return e.compressResourceReferences(parts, reader, removed, nil)
+}
+
+// compressResourceReferences 优化资源，复用自产页面引用并流式读取暂存页面
+// 版本文件隔离当前入口，其他文档仅优化未受版本保护的资源；结果仅在本次写出内复用
+// 入参: parts 输出改动, reader 原包, removed 已移除条目, generated 本次自产页面及引用
+// 返回: error 读取或取消错误
+func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Reader, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
+	if e.output == nil || e.output.options.Mode == CompressionUnchanged || e.output.protected {
+		return nil
+	}
+	generated = e.generatedVectorReferences(parts, generated)
+	selected, scope, err := reader.versionResourceFiles(e.output.ctx, parts, generated)
+	if err != nil {
+		return err
+	}
+	names := make(map[string]bool)
+	if reader != nil {
+		for name := range reader.fileIndex {
+			names[name] = true
+		}
+		for name := range reader.files {
+			names[name] = true
+		}
+		if src := reader.encryptedSource(); src != nil {
+			for _, name := range src.names() {
+				names[name] = true
+			}
+		}
+	}
+	for name := range parts {
+		names[name] = true
+	}
+	read := func(name string) ([]byte, error) {
+		if err := e.output.ctx.Err(); err != nil {
+			return nil, err
+		}
+		if data, ok := parts[name]; ok {
+			return data, nil
+		}
+		return reader.readFileViewContext(e.output.ctx, name)
+	}
+	actual := make(map[string]string)
+	for _, name := range slices.Sorted(maps.Keys(names)) {
+		if err := e.output.ctx.Err(); err != nil {
+			return err
+		}
+		key := cleanPackagePath(name)
+		if removed[key] || strings.HasSuffix(name, "/") {
+			delete(names, name)
+			continue
+		}
+		if prior, ok := actual[key]; ok && prior != name {
+			return nil
+		}
+		actual[key] = name
+		if scope != nil && !scope[key] {
+			delete(names, name)
+			continue
+		}
+	}
+	collect := reader != nil && reader.DocumentCount() > 1 && e.backends.FontResources != nil
+	refs, resources, references, safe, err := e.scanOutputResources(e.output.ctx, reader, parts, generated, names, nil, collect)
+	if err != nil || !safe {
+		return err
+	}
+	currentVersioned := reader != nil && reader.currentVersioned()
+	packageVersioned := reader != nil && reader.packageVersioned()
+	if packageVersioned {
+		preserved, err := reader.versionPreservedFiles(e.output.ctx)
+		if err != nil {
+			return err
+		}
+		for name := range preserved {
+			if !currentVersioned || !selected[name] {
+				refs.files[name], refs.versions[name] = true, true
+			}
+		}
+	}
+	for name := range e.output.protectedFiles {
+		refs.files[name] = true
+	}
+	type resourceFile struct{ key, role string }
+	type resourceScope struct {
+		role     string
+		selected bool
+	}
+	type resourceSize struct {
+		role string
+		size uint64
+	}
+	files := make(map[resourceFile]bool)
+	for _, name := range resources {
+		data, err := read(name)
+		if err != nil {
+			return err
+		}
+		root, err := parseEditorXMLContext(e.output.ctx, data)
+		if err != nil {
+			return err
+		}
+		preserved := refs.versions[cleanPackagePath(name)] || e.output.protectedFiles[cleanPackagePath(name)]
+		for _, group := range root.children {
+			for _, node := range group.children {
+				if err := e.output.ctx.Err(); err != nil {
+					return err
+				}
+				field := ""
+				if group.name.Local == "Fonts" && node.name.Local == "Font" {
+					field = "FontFile"
+				}
+				if group.name.Local == "MultiMedias" && node.name.Local == "MultiMedia" {
+					field = "MediaFile"
+				}
+				if field == "" {
+					continue
+				}
+				file := node.child(field)
+				if file == nil {
+					continue
+				}
+				var value string
+				if err := xml.Unmarshal(data[file.start:file.end], &value); err != nil {
+					return err
+				}
+				key := editorResourceLocation(name, root.attr("BaseLoc"), value)
+				if selected != nil && !selected[cleanPackagePath(name)] && selected[key] {
+					continue
+				}
+				if preserved || field == "MediaFile" && node.attr("Type") != "Image" {
+					refs.files[key] = true
+					continue
+				}
+				if key != cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value)) {
+					return nil
+				}
+				if actual[key] != "" && !refs.files[key] {
+					files[resourceFile{key, field}] = true
+				}
+			}
+		}
+	}
+	var fontUsage map[string]*editorFontUsage
+	if references != nil {
+		fontUsage, err = reader.compressionFontUsage(e.output.ctx, refs.documents, resources, references, read)
+		if err != nil {
+			return err
+		}
+	}
+	aliases := make(map[string]string)
+	locations := maps.Clone(actual)
+	reserved := make(map[string]bool, len(actual))
+	for key := range actual {
+		reserved[key] = true
+	}
+	formats := make(map[string]string)
+	seen := make(map[resourceScope]map[[32]byte]string)
+	imageResults := make(map[outputImageKey][]byte)
+	imageDigests := make(map[outputImageKey][32]byte)
+	imageSources := make(map[string]outputImageSource)
+	ordered := slices.Sorted(maps.Keys(actual))
+	sizes := make(map[string]uint64, len(files))
+	largeCounts := make(map[resourceSize]int)
+	var imageKeys []string
+	var fontKeys []string
+	for _, key := range ordered {
+		if err := e.output.ctx.Err(); err != nil {
+			return err
+		}
+		font, media := files[resourceFile{key, "FontFile"}], files[resourceFile{key, "MediaFile"}]
+		if refs.files[key] || font == media {
+			continue
+		}
+		size, err := outputResourceSize(reader, parts, actual[key])
+		if err != nil {
+			return err
+		}
+		sizes[key] = size
+		if size > outputOptimizationBufferLimit {
+			role := "MediaFile"
+			if font {
+				role = "FontFile"
+			}
+			largeCounts[resourceSize{role, size}]++
+		} else if media {
+			imageKeys = append(imageKeys, key)
+		} else if font && e.backends.FontResources != nil {
+			if usage := fontUsage[key]; usage != nil && !usage.unsafe && len(usage.chars)+len(usage.glyphs) > 0 {
+				fontKeys = append(fontKeys, key)
+			}
+		}
+	}
+	load := func(key string) ([]byte, error) {
+		if sizes[key] > outputOptimizationBufferLimit {
+			return nil, nil
+		}
+		return read(actual[key])
+	}
+	if err := e.prepareOutputImages(imageKeys, load, imageResults, imageSources); err != nil {
+		return err
+	}
+	var fontCache editorSourceFontCache
+	fontErrors, err := e.prepareOutputFonts(fontKeys, fontUsage, load, &fontCache)
+	if err != nil {
+		return err
+	}
+	var hashBuffer []byte
+	for _, key := range ordered {
+		if refs.files[key] || files[resourceFile{key, "FontFile"}] && files[resourceFile{key, "MediaFile"}] {
+			continue
+		}
+		for _, role := range []string{"FontFile", "MediaFile"} {
+			if !files[resourceFile{key, role}] {
+				continue
+			}
+			if err := editorProgress(e.OnWriteProgress).withContext(e.output.ctx).report("compress", e.output.completed, 0); err != nil {
+				return err
+			}
+			if size := sizes[key]; size > outputOptimizationBufferLimit && largeCounts[resourceSize{role, size}] < 2 {
+				continue
+			}
+			source, prefetched := imageSources[key]
+			usage := fontUsage[key]
+			subset := role == "FontFile" && usage != nil && !usage.unsafe && e.backends.FontResources != nil
+			var data []byte
+			optimizable := prefetched
+			if !prefetched {
+				var err error
+				if role == "MediaFile" || subset {
+					data, err = load(key)
+					if err != nil {
+						return err
+					}
+				}
+				optimizable = data != nil
+				if optimizable {
+					source.key.hash = sha256.Sum256(data)
+				} else {
+					if hashBuffer == nil {
+						hashBuffer = make([]byte, 32*1024)
+					}
+					source.key.hash, err = outputResourceDigest(e.output.ctx, reader, parts, actual[key], hashBuffer)
+					if err != nil {
+						return err
+					}
+				}
+			}
+			if optimizable && subset {
+				if fontErr := fontErrors[key]; fontErr != nil {
+					return fmt.Errorf("subset font %s: %w", key, fontErr)
+				}
+				candidate, err := fontCache.subset(e.output.ctx, e.backends.FontResources, data, usage)
+				if err != nil {
+					return fmt.Errorf("subset font %s: %w", key, err)
+				}
+				if err := e.output.ctx.Err(); err != nil {
+					return err
+				}
+				if len(candidate) != 0 && len(candidate) < len(data) {
+					data = candidate
+					parts[actual[key]] = data
+					source.key.hash = sha256.Sum256(data)
+				}
+			}
+			if role == "MediaFile" && optimizable {
+				options, demand := e.outputImageOptions(key)
+				if !e.imageAlreadyOptimized(source.key.hash, options) {
+					cacheKey := outputImageKey{hash: source.key.hash, options: options, size: demand}
+					candidate, cached := imageResults[cacheKey]
+					var err error
+					if !cached {
+						candidate, err = optimizeOutputImage(e.output.ctx, outputImageJob{data: data, key: outputImageKey{options: options, size: demand}})
+						if err := e.output.ctx.Err(); err != nil {
+							return err
+						}
+						imageResults[cacheKey] = nil
+						if err == nil && len(candidate) < len(data) {
+							imageResults[cacheKey] = candidate
+						} else {
+							candidate = nil
+						}
+					}
+					if candidate != nil {
+						data = candidate
+						parts[actual[key]] = data
+						digest, ok := imageDigests[cacheKey]
+						if !ok {
+							digest = sha256.Sum256(data)
+							imageDigests[cacheKey] = digest
+						}
+						source.key.hash = digest
+					}
+					if data != nil {
+						source.format = outputImageFormat(data)
+					}
+					if source.format != "" {
+						formats[key] = source.format
+						suffix := ".png"
+						if source.format == "JPEG" {
+							suffix = ".jpg"
+						}
+						ext := path.Ext(actual[key])
+						if !strings.EqualFold(ext, suffix) && !(source.format == "JPEG" && strings.EqualFold(ext, ".jpeg")) {
+							if data == nil {
+								data, err = read(actual[key])
+								if err != nil {
+									return err
+								}
+							}
+							stem := strings.TrimSuffix(actual[key], ext)
+							name := stem + suffix
+							for n := 1; reserved[name]; n++ {
+								name = fmt.Sprintf("%s-%d%s", stem, n, suffix)
+							}
+							reserved[name] = true
+							locations[key] = name
+							parts[name] = data
+							delete(parts, actual[key])
+							removed[key] = true
+						}
+					}
+				}
+			}
+			scope := resourceScope{role, selected[key]}
+			if seen[scope] == nil {
+				seen[scope] = make(map[[32]byte]string)
+			}
+			hash := source.key.hash
+			if first, ok := seen[scope][hash]; ok {
+				aliases[key] = first
+				removed[key] = true
+				if locations[key] != actual[key] {
+					delete(parts, locations[key])
+				}
+			} else {
+				seen[scope][hash] = key
+			}
+		}
+	}
+	if len(aliases) == 0 && len(formats) == 0 {
+		return e.output.ctx.Err()
+	}
+	for _, name := range resources {
+		if refs.versions[cleanPackagePath(name)] || e.output.protectedFiles[cleanPackagePath(name)] {
+			continue
+		}
+		data, err := read(name)
+		if err != nil {
+			return err
+		}
+		root, err := parseEditorXMLContext(e.output.ctx, data)
+		if err != nil {
+			return err
+		}
+		var patches []editorXMLPatch
+		for _, group := range root.children {
+			for _, node := range group.children {
+				if err := e.output.ctx.Err(); err != nil {
+					return err
+				}
+				for _, field := range []string{"FontFile", "MediaFile"} {
+					file := node.child(field)
+					if file == nil {
+						continue
+					}
+					var value string
+					if err := xml.Unmarshal(data[file.start:file.end], &value); err != nil {
+						return err
+					}
+					key := editorResourceLocation(name, root.attr("BaseLoc"), value)
+					if selected != nil && !selected[cleanPackagePath(name)] && selected[key] {
+						continue
+					}
+					location := locations[key]
+					if first, ok := aliases[key]; ok {
+						location = locations[first]
+					}
+					if location != "" && location != actual[key] {
+						var escaped bytes.Buffer
+						xml.EscapeText(&escaped, []byte("/"+location))
+						patches = append(patches, editorXMLContent(data, file, escaped.Bytes()))
+					}
+					if field == "MediaFile" && formats[key] != "" && node.attr("Format") != formats[key] {
+						patch, err := editorXMLAttributePatch(data, node, "Format", formats[key])
+						if err != nil {
+							return err
+						}
+						patches = append(patches, patch)
+					}
+				}
+			}
+		}
+		if len(patches) > 0 {
+			parts[name] = editorPatchXML(data, patches)
+		}
+	}
+	return e.output.ctx.Err()
+}
+
+// prepareOutputFonts 有界并发预裁剪独立字体并填充缓存，读取与错误归属保持确定顺序
+// 入参: keys 待裁剪字体路径, usages 用字表, load 串行读取方法, cache 字体裁剪缓存
+// 返回: map[string]error 各字体路径对应的裁剪错误, error 读取或取消错误
+func (e *Editor) prepareOutputFonts(keys []string, usages map[string]*editorFontUsage, load func(string) ([]byte, error), cache *editorSourceFontCache) (map[string]error, error) {
+	ctx := e.output.ctx
+	workers := conversionWorkers(ctx)
+	if len(keys) < 2 || workers <= 1 || e.backends.FontResources == nil {
+		return nil, ctx.Err()
+	}
+	batchLimit := int64(min(int64(workers)*(64<<20), int64(outputImageWorkingSetLimit)))
+	var errs map[string]error
+	seen := make(map[editorSourceFontKey]bool, len(keys))
+	var batch []editorSourceFontTask
+	batchOwners := make(map[editorSourceFontKey][]string)
+	var batchBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if len(batch) >= 2 {
+			taskErrs, err := cache.prepareBatch(ctx, e.backends.FontResources, batch)
+			if err != nil {
+				return err
+			}
+			for key, taskErr := range taskErrs {
+				if errs == nil {
+					errs = make(map[string]error)
+				}
+				for _, owner := range batchOwners[key] {
+					errs[owner] = taskErr
+				}
+			}
+		} else {
+			task := batch[0]
+			if _, err := cache.subset(ctx, e.backends.FontResources, task.data, usages[task.name]); err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return ctxErr
+				}
+				if errs == nil {
+					errs = make(map[string]error)
+				}
+				for _, owner := range batchOwners[task.key] {
+					errs[owner] = err
+				}
+			}
+		}
+		batch = batch[:0]
+		clear(batchOwners)
+		batchBytes = 0
+		return nil
+	}
+	for _, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		data, err := load(key)
+		if err != nil {
+			return nil, err
+		}
+		if len(data) == 0 {
+			continue
+		}
+		usage := usages[key]
+		cacheKey, characters, glyphs := buildEditorSourceFontKey(data, usage)
+		if _, cached := (*cache)[cacheKey]; cached {
+			continue
+		}
+		if seen[cacheKey] {
+			batchOwners[cacheKey] = append(batchOwners[cacheKey], key)
+			continue
+		}
+		if len(batch) > 0 && batchBytes+int64(len(data)) > batchLimit {
+			if err := flush(); err != nil {
+				return nil, err
+			}
+		}
+		seen[cacheKey] = true
+		batch = append(batch, editorSourceFontTask{name: key, key: cacheKey, data: data, characters: characters, glyphs: glyphs})
+		batchOwners[cacheKey] = append(batchOwners[cacheKey], key)
+		batchBytes += int64(len(data))
+	}
+	if err := flush(); err != nil {
+		return nil, err
+	}
+	return errs, ctx.Err()
+}
+
+// compressionFontUsage 按文档合并共享字体用字，版本编辑仅统计选中入口
+// 入参: ctx 取消上下文, documents 文档入口, resources 资源索引, references 各文件引用, read 输出文件读取方法
+// 返回: map[string]*editorFontUsage 各字体文件的用字，无法确定作用域时为空, error 读取或取消错误
+func (r *Reader) compressionFontUsage(ctx context.Context, documents map[string]bool, resources []string, references map[string]*editorResourceRefs, read func(string) ([]byte, error)) (map[string]*editorFontUsage, error) {
+	selected := ""
+	if r.currentVersioned() {
+		var err error
+		selected, err = r.DocumentRootContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	scoped, err := resourceReferenceScopes(ctx, documents, resources, references, selected)
+	if err != nil || scoped == nil {
+		return nil, err
+	}
+	return resourceFontUsage(ctx, resources, scoped, read)
 }

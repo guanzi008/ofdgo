@@ -24,7 +24,6 @@ import (
 	"hash/crc32"
 	"io"
 	"maps"
-	"path"
 	"reflect"
 	"slices"
 	"strings"
@@ -37,15 +36,35 @@ type editorStagedPage struct {
 	checksum uint32
 }
 
+// editorPageStager 复用单次保存的页面压缩器，不跨文档共享状态
+type editorPageStager struct {
+	compressor *flate.Writer
+	pooled     bool
+}
+
+// editorPageEncoding 同步统计编码字节及CRC，保留实际写入错误
+type editorPageEncoding struct {
+	writer   io.Writer
+	size     uint64
+	checksum uint32
+}
+
 // open 流式读取暂存页面，仅用于无法完整收集编码引用的分支
 // 返回: io.ReadCloser 页面解压流
 func (p *editorStagedPage) open() io.ReadCloser {
 	return flate.NewReader(bytes.NewReader(p.data))
 }
 
-// editorPageStager 复用单次保存的页面压缩器，不跨文档共享状态
-type editorPageStager struct {
-	compressor *flate.Writer
+// release 释放输出引用并按需归还对象池中的压缩器
+func (s *editorPageStager) release() {
+	if s.compressor == nil {
+		return
+	}
+	if s.pooled {
+		releaseOutputDeflater(s.compressor)
+	}
+	s.compressor = nil
+	s.pooled = false
 }
 
 // encode 边编码边压缩自产页面，同步收集引用及用字
@@ -54,14 +73,15 @@ type editorPageStager struct {
 func (s *editorPageStager) encode(editor *Editor, page PageContent, references *editorReferenceScan) (*editorStagedPage, error) {
 	var data bytes.Buffer
 	if s.compressor == nil {
-		level := flate.DefaultCompression
 		if editor.output != nil && editor.output.options.Mode != CompressionUnchanged {
-			level = flate.BestCompression
-		}
-		var err error
-		s.compressor, err = flate.NewWriter(&data, level)
-		if err != nil {
-			return nil, err
+			s.compressor = acquireOutputDeflater(&data)
+			s.pooled = true
+		} else {
+			var err error
+			s.compressor, err = flate.NewWriter(&data, flate.DefaultCompression)
+			if err != nil {
+				return nil, err
+			}
 		}
 	} else {
 		s.compressor.Reset(&data)
@@ -84,13 +104,6 @@ func (s *editorPageStager) encode(editor *Editor, page PageContent, references *
 	return &editorStagedPage{data: data.Bytes(), size: output.size, checksum: output.checksum}, nil
 }
 
-// editorPageEncoding 同步统计编码字节及CRC，保留实际写入错误
-type editorPageEncoding struct {
-	writer   io.Writer
-	size     uint64
-	checksum uint32
-}
-
 // Write 写入页面字节并统计实际接收的部分
 // 入参: data 未压缩编码数据
 // 返回: int 实际字节数, error 写入或短写错误
@@ -108,12 +121,21 @@ func (w *editorPageEncoding) Write(data []byte) (int, error) {
 // 入参: ctx 取消上下文, progress 进度回调, generated 本次页面及引用, stage 是否压缩暂存, syncText 是否同步普通文字标引
 // 返回: map[string][]byte 输出条目, map[string]bool 已淘汰的旧标引路径, error 编码错误
 func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, generated map[string]editorGeneratedReferences, stage, syncText bool) (map[string][]byte, map[string]bool, error) {
+	parts, retired, _, err := e.sourcePartsWithRemaps(ctx, progress, generated, stage, syncText)
+	return parts, retired, err
+}
+
+// sourcePartsWithRemaps 准备编辑或归档条目，同时返回多版本删页产生的签名路径替换映射
+// 入参: ctx 取消上下文, progress 进度回调, generated 本次页面及引用, stage 是否压缩暂存, syncText 是否同步普通文字标引
+// 返回: map[string][]byte 输出条目, map[string]bool 已淘汰路径, map[string]string 签名路径替换映射, error 编码错误
+func (e *Editor) sourcePartsWithRemaps(ctx context.Context, progress editorProgress, generated map[string]editorGeneratedReferences, stage, syncText bool) (map[string][]byte, map[string]bool, map[string]string, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	progress = progress.withContext(ctx)
 	parts := make(map[string][]byte)
 	var stager editorPageStager
+	defer stager.release()
 	source := e.source
 	reader := source.reader
 	pageRefs := make([]Page, len(e.pages))
@@ -121,7 +143,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 	originalCount := 0
 	for i, page := range e.pages {
 		if err := progress.report("pages", i, len(e.pages)); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		original := source.pages[page.ID]
 		if original != nil {
@@ -133,7 +155,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 			}
 			data, err := e.sourcePageXML(i, original)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			if original.repaired || !bytes.Equal(data, original.data) {
 				parts[reader.ResPath(original.ref.BaseLoc)] = data
@@ -151,7 +173,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 			if stage && generated != nil && !e.sourcePagePreserved(page) {
 				data, err := stager.encode(e, page, scan)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				parts[name] = nil
 				known := editorGeneratedReferences{staged: data}
@@ -160,19 +182,19 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 					known.objects = scan.graphicIDs
 				}
 				generated[name] = known
-				if (reader.DocumentCount() > 1 || reader.OFD.DocBody[reader.documentIndex].versioned) && !known.stagedLeaf(nil) || bound && known.objects == nil {
+				if (reader.DocumentCount() > 1 || reader.currentVersioned()) && !known.stagedLeaf(nil) || bound && known.objects == nil {
 					input := imageInput{ReadCloser: data.open(), ctx: ctx}
 					parts[name], err = io.ReadAll(input)
 					input.Close()
 					if err != nil {
-						return nil, nil, err
+						return nil, nil, nil, err
 					}
 					generated[name] = editorGeneratedReferences{data: parts[name], refs: known.refs, objects: known.objects}
 				}
 			} else {
 				data, err := e.sourcePageData(page, scan)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				parts[name] = data
 				if scan != nil && scan.safe && scan.seen && len(scan.stack) == 0 {
@@ -183,15 +205,15 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 		}
 	}
 	if err := progress.report("pages", len(e.pages), len(e.pages)); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	fonts, images, spaces, usedFiles, extraParts, err := e.usedResources(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for _, resource := range e.resources {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if resource.definition() != "" && usedFiles[resource.name] || resource.colorProfileUsed(spaces) {
 			parts[resource.name] = resource.data
@@ -206,11 +228,11 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 	if len(fonts)+len(images)+len(spaces) != 0 {
 		data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) { x.resources(fonts, images, spaces) })
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		resourcePath, added, err := mergePackageResources(ctx, reader, parts, source.document, source.directory, data)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if added {
 			resourceFiles = append(resourceFiles, resourcePath)
@@ -222,48 +244,61 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 		}
 	}
 	pagesChanged := !slices.Equal(pageRefs, source.document.Pages.Page)
-	if pagesChanged || len(resourceFiles) != 0 || e.maxID != uint64(source.document.CommonData.MaxUnitID) {
+	if pagesChanged || len(resourceFiles) != 0 || e.maxID != source.document.CommonData.MaxUnitID {
 		name := reader.documentRoot
 		data, err := reader.readFileViewContext(ctx, name)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		root, err := parseEditorXMLContext(ctx, data)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		common := root.child("CommonData")
 		if common == nil {
-			return nil, nil, fmt.Errorf("document has no CommonData")
+			return nil, nil, nil, fmt.Errorf("document has no CommonData")
 		}
 		var patches []editorXMLPatch
-		if e.maxID != uint64(source.document.CommonData.MaxUnitID) {
-			value := common.textXML("MaxUnitID", formatUnitID(e.maxID))
-			if maxID := common.child("MaxUnitID"); maxID != nil {
-				value = maxID.textXML("MaxUnitID", formatUnitID(e.maxID))
-				patches = append(patches, editorXMLPatch{maxID.start, maxID.end, value})
-			} else {
-				patches = append(patches, editorXMLPatch{common.open, common.open, value})
+		if common.open == common.end {
+			var inner []byte
+			if e.maxID != source.document.CommonData.MaxUnitID {
+				inner = append(inner, common.textXML("MaxUnitID", formatUnitID(e.maxID))...)
 			}
-		}
-		if len(resourceFiles) != 0 {
-			position := common.close
-			for _, child := range common.children {
-				if child.name.Local == "TemplatePage" || child.name.Local == "DefaultCS" {
-					position = child.start
-					break
+			for _, name := range resourceFiles {
+				inner = append(inner, common.textXML("DocumentRes", "/"+name)...)
+			}
+			if len(inner) != 0 {
+				patches = append(patches, editorXMLContent(data, common, inner))
+			}
+		} else {
+			if e.maxID != source.document.CommonData.MaxUnitID {
+				value := common.textXML("MaxUnitID", formatUnitID(e.maxID))
+				if maxID := common.child("MaxUnitID"); maxID != nil {
+					value = maxID.textXML("MaxUnitID", formatUnitID(e.maxID))
+					patches = append(patches, editorXMLPatch{maxID.start, maxID.end, value})
+				} else {
+					patches = append(patches, editorXMLPatch{common.open, common.open, value})
 				}
 			}
-			var references []byte
-			for _, name := range resourceFiles {
-				references = append(references, common.textXML("DocumentRes", "/"+name)...)
+			if len(resourceFiles) != 0 {
+				position := common.close
+				for _, child := range common.children {
+					if child.name.Local == "TemplatePage" || child.name.Local == "DefaultCS" {
+						position = child.start
+						break
+					}
+				}
+				var references []byte
+				for _, name := range resourceFiles {
+					references = append(references, common.textXML("DocumentRes", "/"+name)...)
+				}
+				patches = append(patches, editorXMLPatch{position, position, references})
 			}
-			patches = append(patches, editorXMLPatch{position, position, references})
 		}
 		if pagesChanged {
 			pages := root.child("Pages")
 			if pages == nil {
-				return nil, nil, fmt.Errorf("document has no Pages")
+				return nil, nil, nil, fmt.Errorf("document has no Pages")
 			}
 			originals := make(map[string]*editorXML, len(pages.children))
 			for _, child := range pages.children {
@@ -282,7 +317,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 				} else {
 					item, err := pages.containerXML("Page", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: page.ID}, {Name: xml.Name{Local: "BaseLoc"}, Value: page.BaseLoc}}, nil)
 					if err != nil {
-						return nil, nil, err
+						return nil, nil, nil, err
 					}
 					entries = append(entries, bytes.TrimPrefix(item, []byte(xml.Header)))
 				}
@@ -316,7 +351,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 	if !reflect.DeepEqual(e.Info, source.info) {
 		data, err := e.sourceInfoXML()
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		parts["OFD.xml"] = data
 	}
@@ -327,37 +362,39 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 			var err error
 			data, err = reader.readFileViewContext(ctx, name)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 		updated, err := e.withOutlines(data)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		parts[name] = updated
 	}
+	var remaps map[string]string
 	if originalCount != len(source.pages) || len(source.annotationPages) != 0 || len(e.removedPages) != 0 || len(source.removedAttachments) != 0 {
-		if err := e.pruneDocumentReferences(ctx, parts, generated); err != nil {
-			return nil, nil, err
+		remaps, err = e.pruneDocumentReferences(ctx, parts, generated)
+		if err != nil {
+			return nil, nil, nil, err
 		}
 	}
 	if err := e.pruneStructureReferences(ctx, parts, generated); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var retired map[string]bool
 	if syncText {
 		retired, err = e.syncSourceTextMetadata(ctx, parts)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 	retired, err = e.collectRetiredPages(ctx, keptSource, retired)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for name, data := range maps.Clone(parts) {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if file, ok := reader.packageFile(name); ok {
 			actual := cleanPackagePath(file.Name)
@@ -381,9 +418,9 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return parts, retired, nil
+	return parts, retired, remaps, nil
 }
 
 // collectRetiredPages 收集相对原包已删除页面、其页面资源及仅归属被删页的注解路径
@@ -809,6 +846,101 @@ func (e *Editor) sourcePagePreserved(page PageContent) bool {
 	return false
 }
 
+// outputProtection 惰性获取细粒度签章保护边界，仅在包内声明签章时构建并复用本次输出缓存
+// 入参: ctx 取消上下文, reader 原包阅读器
+// 返回: map[int]bool 受签名文档索引, map[string]bool 受保护文件路径, bool 是否整包受保护, error 取消错误
+func (e *Editor) outputProtection(ctx context.Context, reader *Reader) (map[int]bool, map[string]bool, bool, error) {
+	if reader == nil {
+		return nil, nil, false, ctx.Err()
+	}
+	if e.output != nil && (e.output.protectionReady || e.output.protected || len(e.output.protectedDocs) != 0) {
+		return e.output.protectedDocs, e.output.protectedFiles, e.output.protected, ctx.Err()
+	}
+	hasSig, err := reader.hasOutputSignatures(ctx)
+	if err != nil || !hasSig {
+		return nil, nil, false, err
+	}
+	protectedDocs, protectedFiles, protected, err := reader.outputSignatureProtection(ctx)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if e.output != nil {
+		e.output.protectedDocs = protectedDocs
+		e.output.protectedFiles = protectedFiles
+		e.output.protected = protected
+	}
+	return protectedDocs, protectedFiles, protected, ctx.Err()
+}
+
+// isolateCompressedChanges 将非版本多文档压缩对共享资源产生的改动与删除做写时复制隔离
+// 入参: ctx 取消上下文, reader 原包阅读器, beforeParts 压缩前条目, beforeRemoved 压缩前删除集, parts 当前输出条目, removed 当前删除集, generated 自产页面引用
+// 返回: error 读取、结构或取消错误
+func (e *Editor) isolateCompressedChanges(ctx context.Context, reader *Reader, beforeParts map[string][]byte, beforeRemoved map[string]bool, parts map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
+	deltaParts := make(map[string][]byte)
+	changedKeys := make(map[string]bool)
+	for name, data := range parts {
+		prev, existed := beforeParts[name]
+		if !existed || !sameByteSlice(prev, data) {
+			deltaParts[name] = data
+			changedKeys[name] = true
+		}
+	}
+	deltaRemoved := make(map[string]bool)
+	for name := range removed {
+		if !beforeRemoved[name] {
+			deltaRemoved[name] = true
+		}
+	}
+	if len(changedKeys) == 0 && len(deltaRemoved) == 0 {
+		return ctx.Err()
+	}
+	stagedPlaceholders := make(map[string]bool)
+	for name, data := range beforeParts {
+		if data == nil && generated[name].staged != nil && !changedKeys[name] {
+			deltaParts[name] = nil
+			stagedPlaceholders[name] = true
+		}
+	}
+	baseView := *reader
+	baseView.files = maps.Clone(reader.files)
+	if baseView.files == nil {
+		baseView.files = make(map[string][]byte, len(beforeParts))
+	}
+	for name, data := range beforeParts {
+		if data != nil {
+			baseView.files[name] = data
+		}
+	}
+	baseView.doc, baseView.documentRoot, baseView.versionInfo = nil, "", nil
+	if err := baseView.initRootContext(ctx); err != nil {
+		return err
+	}
+	originalDeltaRemoved := maps.Clone(deltaRemoved)
+	isolated, err := baseView.versionOutputChanges(ctx, deltaParts, deltaRemoved, generated)
+	if err != nil {
+		return err
+	}
+	for name := range changedKeys {
+		if prev, existed := beforeParts[name]; existed {
+			parts[name] = prev
+		} else {
+			delete(parts, name)
+		}
+	}
+	for name, data := range isolated {
+		if stagedPlaceholders[name] && data == nil {
+			continue
+		}
+		parts[name] = data
+	}
+	for name := range originalDeltaRemoved {
+		if !deltaRemoved[name] {
+			delete(removed, name)
+		}
+	}
+	return ctx.Err()
+}
+
 // writeSource 将未修改ZIP条目直接复制到新包，逐项写入改动，不持有原资源解压副本
 // 入参: writer 输出流, fonts 新增字体子集, progress 保存进度回调
 // 返回: int64 写入字节数, error 错误信息
@@ -818,7 +950,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		ctx = e.output.ctx
 	}
 	generated := make(map[string]editorGeneratedReferences)
-	parts, retiredParts, err := e.sourceParts(ctx, progress, generated, true, true)
+	parts, retiredParts, sigRemaps, err := e.sourcePartsWithRemaps(ctx, progress, generated, true, true)
 	if err != nil {
 		return 0, err
 	}
@@ -831,8 +963,8 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		}
 		maps.Copy(retired, retiredParts)
 	}
-	versioned := reader.OFD.DocBody[reader.documentIndex].versioned
-	if !versioned && reader.DocumentCount() > 1 {
+	currentVersioned := reader.currentVersioned()
+	if !currentVersioned && reader.DocumentCount() > 1 {
 		parts, err = reader.versionOutputChanges(ctx, parts, retired, generated)
 		if err != nil {
 			return 0, err
@@ -846,11 +978,11 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		removed = make(map[string]bool)
 	}
 	if len(retired) != 0 && (e.output == nil || !e.output.protected) {
-		protected, sigErr := reader.hasOutputSignatures(ctx)
+		protectedDocs, protectedFiles, protected, sigErr := e.outputProtection(ctx, reader)
 		if sigErr != nil {
 			return 0, sigErr
 		}
-		if !protected {
+		if !protected && !protectedDocs[reader.documentIndex] {
 			shared, shErr := reader.versionSharedFiles(ctx)
 			docRoot, rootErr := reader.DocumentRootContext(ctx)
 			var currentUsed map[string]bool
@@ -860,19 +992,30 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 			}
 			if shErr == nil && rootErr == nil && depErr == nil {
 				for itemPath := range retired {
-					if !currentUsed[itemPath] && parts[itemPath] == nil && (versioned || !shared[itemPath]) {
+					if !protectedFiles[itemPath] && !currentUsed[itemPath] && parts[itemPath] == nil && (currentVersioned || !shared[itemPath]) {
 						removed[itemPath] = true
 					}
 				}
 			}
 		}
 	}
+	isolateCompressed := !currentVersioned && reader.DocumentCount() > 1 && e.output != nil && e.output.options.Mode != CompressionUnchanged && !e.output.protected
+	var beforeParts map[string][]byte
+	var beforeRemoved map[string]bool
+	if isolateCompressed {
+		beforeParts = maps.Clone(parts)
+		beforeRemoved = maps.Clone(removed)
+	}
 	if err := e.compressResourceReferences(parts, reader, removed, generated); err != nil {
 		return 0, err
 	}
-	if versioned {
-		parts, err = reader.versionOutputChanges(ctx, parts, removed, generated)
+	if currentVersioned {
+		parts, err = reader.versionOutputChangesWithRemaps(ctx, parts, removed, generated, sigRemaps)
 		if err != nil {
+			return 0, err
+		}
+	} else if isolateCompressed {
+		if err := e.isolateCompressedChanges(ctx, reader, beforeParts, beforeRemoved, parts, removed, generated); err != nil {
 			return 0, err
 		}
 	}
@@ -884,10 +1027,14 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		if file, ok := reader.packageFile(name); ok {
 			name = cleanPackagePath(file.Name)
 		}
-		if e.output == nil || !e.output.protectedFiles[name] {
+		_, protectedFiles, protected, sigErr := e.outputProtection(ctx, reader)
+		if sigErr != nil {
+			return 0, sigErr
+		}
+		if !protected && !protectedFiles[name] {
 			data, ok := parts[name]
 			if !ok {
-				data, err = reader.readFile(name)
+				data, err = reader.readFileViewContext(ctx, name)
 				if err != nil {
 					return 0, err
 				}
@@ -917,13 +1064,22 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 	if e.output != nil && e.output.options.Mode != CompressionUnchanged {
 		configureArchive(archive, e.output.options)
 	}
-	if reader.Zip != nil {
-		_ = archive.SetComment(reader.Zip.Comment)
-		buffer := make([]byte, 32*1024)
-		for _, file := range reader.Zip.File {
+	pipeline := newZipParallelWriter(e, archive, ctx)
+	defer pipeline.close()
+	if reader.zip != nil {
+		_ = archive.SetComment(reader.zip.Comment)
+		var buffer []byte
+		if pipeline == nil {
+			buffer = make([]byte, 32*1024)
+		}
+		for _, file := range reader.zip.File {
 			if file.FileInfo().IsDir() {
 				header := file.FileHeader
-				if _, err := archive.CreateHeader(&header); err != nil {
+				if pipeline != nil {
+					if err := pipeline.submitDir(header); err != nil {
+						return output.count, err
+					}
+				} else if _, err := archive.CreateHeader(&header); err != nil {
 					return output.count, err
 				}
 				continue
@@ -935,13 +1091,25 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 			if data, ok := remaining[name]; ok {
 				header := file.FileHeader
 				if staged := generated[name].staged; data == nil && staged != nil {
-					if err := e.writeStagedPage(archive, header, staged); err != nil {
+					if pipeline != nil {
+						if err := pipeline.submitStaged(header, staged); err != nil {
+							return output.count, err
+						}
+					} else if err := e.writeStagedPage(archive, header, staged); err != nil {
+						return output.count, err
+					}
+				} else if pipeline != nil {
+					if err := pipeline.submitEntry(header, data); err != nil {
 						return output.count, err
 					}
 				} else if err := e.writeOutputEntry(archive, header, data); err != nil {
 					return output.count, err
 				}
 				delete(remaining, name)
+			} else if pipeline != nil {
+				if err := pipeline.submitFile(file); err != nil {
+					return output.count, err
+				}
 			} else if e.output != nil && e.output.options.Mode != CompressionUnchanged {
 				if err := e.writeOutputFile(archive, file, buffer); err != nil {
 					return output.count, err
@@ -962,7 +1130,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 			}
 		}
 	}
-	if reader.Zip == nil {
+	if reader.zip == nil {
 		if src := reader.encryptedSource(); src != nil {
 			buffer := make([]byte, 32*1024)
 			compress := e.output != nil && e.output.options.Mode != CompressionUnchanged
@@ -990,17 +1158,25 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 						if closeErr != nil {
 							return output.count, closeErr
 						}
-						if err := e.writeOutputEntry(archive, zip.FileHeader{Name: name, Method: zip.Deflate}, data); err != nil {
+						header := zip.FileHeader{Name: name, Method: zip.Deflate}
+						if pipeline != nil {
+							if err := pipeline.submitEntry(header, data); err != nil {
+								return output.count, err
+							}
+						} else if err := e.writeOutputEntry(archive, header, data); err != nil {
 							return output.count, err
 						}
 						continue
 					}
 				}
+				if pipeline != nil {
+					if err := pipeline.flush(); err != nil {
+						return output.count, err
+					}
+				}
 				method := uint16(zip.Store)
 				if compress {
-					switch strings.ToLower(path.Ext(name)) {
-					case ".jpg", ".jpeg", ".png", ".jp2", ".jb2", ".zip", ".pdf", ".ofd":
-					default:
+					if !isPrecompressedOutputExt(name) {
 						method = zip.Deflate
 					}
 				} else if strings.HasSuffix(strings.ToLower(name), ".xml") {
@@ -1034,12 +1210,26 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		}
 		header := zip.FileHeader{Name: name, Method: method}
 		if staged := generated[name].staged; remaining[name] == nil && staged != nil {
-			if err := e.writeStagedPage(archive, header, staged); err != nil {
+			if pipeline != nil {
+				if err := pipeline.submitStaged(header, staged); err != nil {
+					return output.count, err
+				}
+			} else if err := e.writeStagedPage(archive, header, staged); err != nil {
+				return output.count, err
+			}
+		} else if pipeline != nil {
+			if err := pipeline.submitEntry(header, remaining[name]); err != nil {
 				return output.count, err
 			}
 		} else if err := e.writeOutputEntry(archive, header, remaining[name]); err != nil {
 			return output.count, err
 		}
+	}
+	if pipeline != nil {
+		if err := pipeline.flush(); err != nil {
+			return output.count, err
+		}
+		pipeline.close()
 	}
 	err = archive.Close()
 	return output.count, err
@@ -1049,11 +1239,11 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 // 入参: ctx 取消上下文, progress 准备进度回调, syncText 是否同步普通文字标引
 // 返回: *Reader 阅读器, map[string]bool 已淘汰的旧标引路径, error 错误信息
 func (e *Editor) sourceReader(ctx context.Context, progress editorProgress, syncText bool) (*Reader, map[string]bool, error) {
-	parts, retired, err := e.sourceParts(ctx, progress, nil, false, syncText)
+	parts, retired, sigRemaps, err := e.sourcePartsWithRemaps(ctx, progress, nil, false, syncText)
 	if err != nil {
 		return nil, nil, err
 	}
-	parts, err = e.source.reader.versionOutputChanges(ctx, parts, retired, nil)
+	parts, err = e.source.reader.versionOutputChangesWithRemaps(ctx, parts, retired, nil, sigRemaps)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1084,7 +1274,7 @@ func (e *Editor) sourceReader(ctx context.Context, progress editorProgress, sync
 				delete(reader.pageHeaderCache, name)
 			}
 		}
-		if _, err := reader.DocContext(ctx); err != nil {
+		if _, err := reader.docContext(ctx); err != nil {
 			return nil, nil, err
 		}
 		return reader, nil, nil
@@ -1094,7 +1284,7 @@ func (e *Editor) sourceReader(ctx context.Context, progress editorProgress, sync
 		files = make(map[string][]byte)
 	}
 	maps.Copy(files, parts)
-	zipArchive := e.source.reader.Zip
+	zipArchive := e.source.reader.zip
 	var encSource *encryptedPackageSource
 	if src := e.source.reader.encryptedSource(); src != nil {
 		if syncText {
@@ -1110,11 +1300,11 @@ func (e *Editor) sourceReader(ctx context.Context, progress editorProgress, sync
 			encSource = src
 		}
 	}
-	reader := &Reader{Zip: zipArchive, encrypted: encSource, sourceFile: e.source.reader.sourceFile, files: files, encryption: e.encryption, documentIndex: e.source.reader.documentIndex, selectedVersion: e.source.reader.selectedVersion, pageContents: e.source.reader.pageContents, resources: e.runtimeResources}
+	reader := &Reader{zip: zipArchive, encrypted: encSource, sourceFile: e.source.reader.sourceFile, files: files, encryption: e.encryption, documentIndex: e.source.reader.documentIndex, selectedVersion: e.source.reader.selectedVersion, pageContents: e.source.reader.pageContents, resources: e.runtimeResources}
 	if err := reader.initRootContext(ctx); err != nil {
 		return nil, nil, err
 	}
-	if _, err := reader.DocContext(ctx); err != nil {
+	if _, err := reader.docContext(ctx); err != nil {
 		return nil, nil, err
 	}
 	for name, header := range e.source.reader.pageHeaderCache {
