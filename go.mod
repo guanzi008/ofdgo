@@ -42,4 +42,4 @@ require (
 	star-tex.org/x/tex v0.7.1 // indirect
 )
 
-replace github.com/xiaoqidun/guigo => github.com/guanzi008/guigo v0.0.0-20261124124525-3fc0006b0c36
+replace github.com/xiaoqidun/guigo => github.com/guanzi008/guigo v0.0.0-20261124125017-ef131eb104d5
